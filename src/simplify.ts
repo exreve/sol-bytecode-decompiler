@@ -6,6 +6,7 @@ import {
   evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize,
 } from './ir.ts';
 import { type VarFunc, pruneUnreachable } from './dataflow.ts';
+import type { Image } from './elf.ts';
 import { tailDuplicate, mergeBlocks, localConstProp, deadStores, globalConstProp, localCopyProp } from './cfgopt.ts';
 
 const bitlen = (v: bigint) => v.toString(2).length - (v === 0n ? 1 : 0);
@@ -167,7 +168,12 @@ export function simplifyExpr(e: Expr): Expr {
   switch (e.k) {
     case 'bin': return simp1({ ...e, a: simplifyExpr(e.a), b: simplifyExpr(e.b) });
     case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return simp1({ ...e, a: simplifyExpr(e.a) } as Expr);
-    case 'load': return { ...e, addr: simplifyExpr(e.addr) };
+    case 'load': {
+      const addr = simplifyExpr(e.addr);
+      // read-only program memory never changes and never faults: the load is a constant
+      if (addr.k === 'const' && foldImage) { const v = foldImage.readConst(addr.v, e.size); if (v !== undefined) return C(v); }
+      return { ...e, addr };
+    }
     case 'cmp': case 'land': case 'lor': return simp1({ ...e, a: simplifyExpr(e.a), b: simplifyExpr(e.b) } as Expr);
     case 'sel': return simp1({ ...e, c: simplifyExpr(e.c), a: simplifyExpr(e.a), b: simplifyExpr(e.b) });
     case 'call': return { ...e, args: e.args.map(simplifyExpr) };
@@ -256,6 +262,10 @@ function singleDef(f: VarFunc, sites: DefSite[][], v: number) {
 const isCheap = (e: Expr) => exprSize(e) <= 3 && isPure(e);
 
 /** Debug switch: SBPF_DISABLE=prop,inline,... turns passes off (bisecting miscompiles). */
+/** Program image used to fold loads from read-only memory (set per decompilation). */
+let foldImage: Image | null = null;
+export function setFoldImage(img: Image | null) { foldImage = img; }
+
 export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filter(Boolean));
 
 export function optimizeFunc(f: VarFunc) {

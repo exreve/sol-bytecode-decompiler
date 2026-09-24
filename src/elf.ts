@@ -216,6 +216,12 @@ export class Image {
     const o = Number(addr - r.vaddr);
     return r.bytes.subarray(o, o + len);
   }
+  /** Value of read-only program memory mapped by the runtime (.text/.rodata/.data.rel.ro/.eh_frame), else undefined. */
+  readConst(addr: bigint, size: number): bigint | undefined {
+    const r = this.region(addr, size);
+    if (!r || !/^\.(text|rodata|data\.rel\.ro|eh_frame)$/.test(r.name)) return undefined;
+    return this.read(addr, size);
+  }
   read(addr: bigint, size: number): bigint | undefined {
     const b = this.bytesAt(addr, size);
     if (!b) return undefined;

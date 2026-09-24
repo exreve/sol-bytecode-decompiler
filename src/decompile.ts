@@ -1,7 +1,7 @@
 // End-to-end pipeline: ELF -> functions -> IR -> variables -> simplified -> structured -> TypeScript.
 import { loadProgram, type Program, fnAddr } from './program.ts';
 import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
-import { optimizeFunc, stmtExprs, DISABLED } from './simplify.ts';
+import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
@@ -49,6 +49,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const p = loadProgram(bytes);
   inferSignatures(p);
   const sem = new Semantics(p, opts.idl);
+  setFoldImage(DISABLED.has('rofold') ? null : p.image);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
