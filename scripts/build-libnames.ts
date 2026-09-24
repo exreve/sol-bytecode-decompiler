@@ -17,7 +17,7 @@ for (const f of readdirSync(dir).filter(x => x.endsWith('.so'))) {
 		const fp = fingerprint(p, fn)
 		if (fp.insns < MIN_LIB_INSNS) continue
 		const n = demangle(sym)
-		if (/ref_(native|anchor)\b/.test(n) || n === 'process') continue // the reference program's own code
+		if (/ref_(native|anchor|anchor_rich)\b/.test(n) || n === 'process') continue // the reference program's own code
 		let m = names.get(fp.hash); if (!m) names.set(fp.hash, (m = new Map()))
 		m.set(n, (m.get(n) ?? 0) + 1)
 		nf++

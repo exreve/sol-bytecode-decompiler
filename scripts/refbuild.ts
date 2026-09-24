@@ -25,6 +25,11 @@ anc('v1.43', '0.30.1', 'ctx.bumps.vault', PINS)
 anc('v1.43', '0.31.1', 'ctx.bumps.vault', PINS)
 nat('v1.48', '2.2.1', '8.0.0', PINS)
 anc('v1.48', '0.31.1', 'ctx.bumps.vault', PINS)
+const rich = (tools: string, anchor: string, pins: [string, string][]) => matrix.push({ name: `anchorrich${anchor}-t${tools.slice(1)}`, template: 'anchor_rich', tools, rust: TOOLS[tools].rust, vars: { ANCHOR: anchor }, pins })
+rich('v1.41', '0.30.1', PINS141)
+rich('v1.43', '0.30.1', PINS)
+rich('v1.43', '0.31.1', PINS)
+rich('v1.48', '0.31.1', PINS)
 
 const filter = process.argv[2]
 const root = process.cwd()

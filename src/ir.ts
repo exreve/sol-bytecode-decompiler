@@ -165,7 +165,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
   walkExpr(e, x => {
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
-    else if (x.k === 'bin' && isDivOp(x.op) && !(x.b.k === 'const' && x.b.v !== 0n && !(x.op[0] === 's' && (x.b.v === M64 || BigInt.asIntN(32, x.b.v) === -1n)))) r.trap = true;
+    else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
   });
   return r;
 }
@@ -190,3 +190,14 @@ export function exprEq(a: Expr, b: Expr): boolean {
 }
 
 export const isDivOp = (op: BinOp) => op === 'udiv' || op === 'urem' || op === 'sdiv' || op === 'srem' || op === 'sdiv32' || op === 'srem32';
+
+/** Division that provably cannot trap: constant divisor, non-zero (in the operand width), not -1 for signed ops. */
+function safeDivisor(op: BinOp, b: Expr): boolean {
+  if (b.k !== 'const') return false;
+  const w32 = op === 'sdiv32' || op === 'srem32';
+  const v = w32 ? BigInt.asUintN(32, b.v) : b.v;
+  if (v === 0n) return false;
+  if (op === 'sdiv' || op === 'srem') return b.v !== M64;
+  if (w32) return v !== 0xffffffffn;
+  return true;
+}

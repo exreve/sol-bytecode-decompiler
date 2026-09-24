@@ -62,6 +62,7 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 		if (name === 'copy') { for (let o = 0n; o < a[2]; o += 8n) env.mem.store(W(a[0] + o), 8, env.mem.load(W(a[1] + o), 8)); return 0n }
 		if (name === 'copyr') { for (let o = a[2] - 8n; o >= 0n; o -= 8n) env.mem.store(W(a[0] + o), 8, env.mem.load(W(a[1] + o), 8)); return 0n }
 		switch (name) {
+			case 'shl': if (W(a[1]) > 63n) throw new EvalError('shift >= 64'); return W(a[0] << W(a[1]))
 			case 'sar': if (W(a[1]) > 63n) throw new EvalError('shift >= 64'); return W(BigInt.asIntN(64, a[0]) >> W(a[1]))
 			case 'sdiv': case 'srem': {
 				const x = BigInt.asIntN(64, a[0]), y = BigInt.asIntN(64, a[1])

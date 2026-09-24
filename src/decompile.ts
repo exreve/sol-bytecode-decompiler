@@ -104,7 +104,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   for (const pc of [...calledLib].sort((a, b) => a - b)) {
     const f = p.funcs.get(pc)!, info = libs.get(pc)!;
     const params = Array.from({ length: f.nparams }, (_, i) => `${'abcde'[i]}: u64`).concat(f.extraIn.map(r => `r${r}: u64`));
-    stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${info.hint ? ' ' + info.hint : ''}`);
+    let hint = info.hint;
+    if (!hint) {
+      // unnamed library code: say what it uses (named callees, syscalls)
+      const uses = new Set<string>();
+      for (const b of f.blocks) for (const st of b.stmts) if (st.k === 'call') {
+        if (st.t.k === 'sys') uses.add(sem.syscallName(st.t.name));
+        else if (st.t.k === 'fn') { const n = p.funcs.get(st.t.pc)?.name; if (n && !n.startsWith('fn_')) uses.add(n); }
+        else uses.add('callx');
+      }
+      if (uses.size) hint = 'uses ' + [...uses].slice(0, 4).join(', ') + (uses.size > 4 ? ', …' : '');
+    }
+    stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${hint ? ' ' + hint : ''}`);
   }
 
   // ---- phase 4: print ----

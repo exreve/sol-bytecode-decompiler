@@ -38,6 +38,7 @@ declare function st64(a: u64, ...v: u64[]): void
 declare function copy(dst: u64, src: u64, n: u64): void
 declare function copyr(dst: u64, src: u64, n: u64): void
 declare function sar(x: u64, n: u64): u64
+declare function shl(x: u64, n: u64): u64
 declare function sdiv(a: u64, b: u64): u64
 declare function srem(a: u64, b: u64): u64
 declare function trap(msg: string): never

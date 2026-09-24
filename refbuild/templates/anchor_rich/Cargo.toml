@@ -1,0 +1,25 @@
+[package]
+name = "ref_anchor_rich"
+version = "0.1.0"
+edition = "2021"
+rust-version = "{{RUST}}"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = []
+
+[dependencies]
+anchor-lang = { version = "={{ANCHOR}}", features = ["init-if-needed", "event-cpi"] }
+anchor-spl = { version = "={{ANCHOR}}", features = ["token", "token_2022", "token_2022_extensions", "associated_token", "metadata"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

@@ -3,7 +3,7 @@
 //  - `x as u8|u16|u32` truncates; `x as i8|i16|i32` truncates then sign-extends; `x as i64` = signed view
 //  - relational operators compare mathematically (so `(a as i64) < (b as i64)` is a signed compare)
 //  - ldN(addr) / stN(addr, v) read/write N-bit little-endian memory (may fault)
-import type { Expr, Stmt, CallTarget } from './ir.ts';
+import { type Expr, type Stmt, type CallTarget, type CmpOp, walkExpr } from './ir.ts';
 import type { Node } from './structure.ts';
 import type { VarFunc } from './dataflow.ts';
 import { maxBits } from './simplify.ts';
@@ -45,6 +45,7 @@ export class Printer {
   ctx: PrintCtx;
   addrDepth = 0;
   retTop: Expr | null = null;
+  shlCall = false; // render `x << n` as shl(x, n) (fallback against TS generic-syntax ambiguity)
   constructor(ctx: PrintCtx) { this.ctx = ctx; }
 
   /** true if printing `e` yields a signed (possibly negative) intermediate value */
@@ -61,7 +62,7 @@ export class Printer {
     return s.prec < prec ? `(${s.t})` : s.t;
   }
 
-  private expr0(e: Expr): { t: string; prec: number } {
+  expr0(e: Expr): { t: string; prec: number } {
     const hook = this.ctx.exprHook?.(e, (x, p) => this.expr(x, p));
     if (hook !== undefined) return { t: hook, prec: P.call };
     switch (e.k) {
@@ -84,6 +85,7 @@ export class Printer {
         if (op === 'add' && e.b.k === 'const' && BigInt.asIntN(64, e.b.v) < 0n && BigInt.asIntN(64, e.b.v) > -0x1_0000_0000n && !this.ctx.fnAddrName(e.b.v)) {
           return { t: `${this.u(e.a, P.add)} - ${fmtPos(-BigInt.asIntN(64, e.b.v))}`, prec: P.add };
         }
+        if (op === 'shl' && this.shlCall) return { t: `shl(${joinArgs([this.u(e.a, 0, false), this.u(this.shiftAmt(e.b), 0, false)])})`, prec: P.call };
         if (op === 'shl' || op === 'lshr') {
           const [o, p] = BIN[op];
           return { t: `${this.u(e.a, p, false)} ${o} ${this.u(this.shiftAmt(e.b), p + 1, false)}`, prec: p };
@@ -96,17 +98,30 @@ export class Printer {
         // left-assoc: right operand needs strictly higher precedence
         return { t: `${this.u(e.a, p, sOk)} ${o} ${this.u(e.b, p + 1, sOk)}`, prec: p };
       }
-      case 'neg': return { t: `-${this.u(e.a, P.unary + 1)}`, prec: P.unary };
+      case 'neg':
+        if (e.a.k === 'const') return this.expr0({ k: 'const', v: BigInt.asUintN(64, -e.a.v) });
+        { const t = this.u(e.a, P.unary + 1); return { t: /^[0-9]/.test(t) ? `-(${t})` : `-${t}`, prec: P.unary }; } // `-literal` would denote a signed literal
       case 'not': return { t: `~${this.u(e.a, P.unary + 1)}`, prec: P.unary };
       case 'ext': return { t: `${this.expr(e.a, P.unary)} as ${e.signed ? 'i' : 'u'}${e.bits}`, prec: P.as };
       case 'bswap': return { t: `bswap${e.bits}(${this.u(e.a, 0)})`, prec: P.call };
       case 'load': { this.addrDepth++; const a = this.u(e.addr, 0); this.addrDepth--; return { t: `ld${e.size * 8}(${a})`, prec: P.call }; }
       case 'cmp': {
         if (e.op === 'set') return { t: `(${this.u(e.a, P.band)} & ${this.u(e.b, P.band + 1)}) != 0`, prec: P.eq };
+        // print `<`/`<=` as `>`/`>=` with swapped operands (TS could read `a < b ... > (c)` as generics);
+        // operand order only changes evaluation order, which matters only for calls
+        let hasCall = false;
+        walkExpr(e, x => { if (x.k === 'call') hasCall = true; });
+        const SW: Record<string, CmpOp> = { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
+        if (SW[e.op] && !hasCall) return this.expr0({ k: 'cmp', op: SW[e.op], a: e.b, b: e.a });
         const signed = e.op[0] === 's';
         const o = CMPS[e.op];
         const p = o === '==' || o === '!=' ? P.eq : P.rel;
-        const side = (x: Expr, pp: number) => signed ? this.signedOperand(x) : this.u(x, pp, p === P.eq);
+        // shifts / comparisons as operands of a comparison could be misparsed by TS as generics
+        const risky = (x: Expr) => (x.k === 'bin' && (x.op === 'shl' || x.op === 'lshr')) || x.k === 'cmp';
+        const side = (x: Expr, pp: number) => {
+          const t = signed ? this.signedOperand(x) : this.u(x, pp, p === P.eq);
+          return risky(x) && !/^\(.*\)$/.test(t) ? `(${t})` : t;
+        };
         return { t: `${side(e.a, p)} ${o} ${side(e.b, p + 1)}`, prec: p };
       }
       case 'lnot': return { t: `!${this.expr(e.a, P.unary)}`, prec: P.unary };
@@ -119,6 +134,7 @@ export class Printer {
 
   /** Print an operand in an unsigned context: signed-typed intermediates are re-normalized. */
   u(e: Expr, prec: number, signedOk = true): string {
+    if (e.k === 'neg' && e.a.k === 'const') e = { k: 'const', v: BigInt.asUintN(64, -e.a.v) };
     if (!signedOk && Printer.signedTop(e)) return `(${this.expr(e, P.unary)} as u64)`;
     if (!signedOk && e.k === 'const' && BigInt.asIntN(64, e.v) < 0n && !this.ctx.fnAddrName(e.v)) return fmtPos(e.v);
     return this.expr(e, prec);
@@ -153,6 +169,12 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
   const I = (d: number) => indent + '\t'.repeat(d);
   if (hoisted.length) out.push(`${I(0)}let ${hoisted.map(v => pr.ctx.varName(v)).join(', ')}: u64`);
   const stmt = (s: Stmt, d: number) => {
+    const n0 = out.length;
+    stmt0(s, d);
+    const txt = out.slice(n0).join('\n');
+    if (/<<.*> \(/.test(txt)) { out.length = n0; pr.shlCall = true; stmt0(s, d); pr.shlCall = false; }
+  };
+  const stmt0 = (s: Stmt, d: number) => {
     switch (s.k) {
       case 'set': {
         const kw = decls.get(s);
