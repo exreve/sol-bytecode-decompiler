@@ -255,6 +255,9 @@ function singleDef(f: VarFunc, sites: DefSite[][], v: number) {
 
 const isCheap = (e: Expr) => exprSize(e) <= 3 && isPure(e);
 
+/** Debug switch: SBPF_DISABLE=prop,inline,... turns passes off (bisecting miscompiles). */
+export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filter(Boolean));
+
 export function optimizeFunc(f: VarFunc) {
   // simplify all expressions first
   for (let round = 0; round < 8; round++) {
@@ -264,15 +267,16 @@ export function optimizeFunc(f: VarFunc) {
       if (b.term.k === 'br') b.term.c = simplifyExpr(b.term.c);
       else if (b.term.k === 'ret' && b.term.e) b.term.e = simplifyExpr(b.term.e);
     }
-    changed = propagateGlobal(f) || changed;
-    changed = inlineLocal(f) || changed;
+    const off = (n: string) => DISABLED.has(n);
+    if (!off('prop')) changed = propagateGlobal(f) || changed;
+    if (!off('inline')) changed = inlineLocal(f) || changed;
     changed = dce(f) || changed;
-    changed = localConstProp(f) || changed;
-    changed = globalConstProp(f) || changed;
-    changed = localCopyProp(f) || changed;
+    if (!off('lconst')) changed = localConstProp(f) || changed;
+    if (!off('gconst')) changed = globalConstProp(f) || changed;
+    if (!off('copy')) changed = localCopyProp(f) || changed;
     if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; }
-    changed = deadStores(f) || changed;
-    if (round < 6 && tailDuplicate(f)) changed = true;
+    if (!off('dse')) changed = deadStores(f) || changed;
+    if (!off('taildup') && round < 6 && tailDuplicate(f)) changed = true;
     if (!changed) break;
   }
 }

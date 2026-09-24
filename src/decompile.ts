@@ -1,7 +1,7 @@
 // End-to-end pipeline: ELF -> functions -> IR -> variables -> simplified -> structured -> TypeScript.
 import { loadProgram, type Program, fnAddr } from './program.ts';
 import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
-import { optimizeFunc, stmtExprs } from './simplify.ts';
+import { optimizeFunc, stmtExprs, DISABLED } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
@@ -16,6 +16,7 @@ export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
   only?: Set<number>;    // restrict to these function entry pcs
   full?: boolean;        // decompile library functions too (default: typed stubs only)
+  exactMemory?: boolean; // no stack promotion / stack-arg elision (exact even for memory-unsafe executions)
 }
 
 export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
@@ -61,14 +62,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (isLib(f0.pc)) continue;
     const f = recoverVars(p, f0);
     optimizeFunc(f);
-    if (promoteStack(f)) optimizeFunc(f);
+    if (!opts.exactMemory && !DISABLED.has('promote') && promoteStack(f)) optimizeFunc(f);
     built.set(f.pc, { f, body: [], irreducible: false });
   }
 
   // ---- SBF stack-passed arguments become ordinary parameters ----
-  rewriteStackArgs(p, built);
+  if (!opts.exactMemory && !DISABLED.has('stackargs')) rewriteStackArgs(p, built);
   for (const bt of built.values()) {
-    compactStores(bt.f);
+    if (!DISABLED.has('compact')) compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
     bt.irreducible = st.irreducible;
@@ -144,6 +145,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
+    // entrypoint: annotate fields of the serialized input (first account + header)
+    const inputVar = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined;
+    if (opts.sugar !== false && inputVar !== undefined) {
+      const prev = ctx.exprHook;
+      ctx.exprHook = (e, pr) => {
+        if (e.k === 'load') {
+          const a = e.addr;
+          const off = a.k === 'var' && a.id === inputVar ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === inputVar && a.b.k === 'const' ? Number(a.b.v) : -1;
+          const fld = off >= 0 ? inputField(off, e.size) : undefined;
+          if (fld) return `ld${e.size * 8}(${pr(a, 0)} /* ${fld} */)`;
+        }
+        return prev?.(e, pr);
+      };
+    }
     // stack objects: frame addresses that escape (or are bases of copies) name an object; other
     // frame accesses are shown relative to the nearest object below them
     let frameDecl = '';
@@ -308,4 +323,18 @@ function stripUndef(ns: Node[]): Node[] {
     else out.push(n);
   }
   return out;
+}
+
+/** Field of the serialized program input at a fixed offset (only the first account has fixed offsets). */
+function inputField(off: number, size: number): string | undefined {
+  if (off === 0 && size === 8) return 'num_accounts';
+  const o = off - 8;
+  if (o < 0) return undefined;
+  const F: [number, number, string][] = [[0, 1, 'dup_marker(0xff=not dup)'], [1, 1, 'is_signer'], [2, 1, 'is_writable'], [3, 1, 'executable'], [4, 4, 'original_data_len'],
+    [8, 32, 'key'], [40, 32, 'owner'], [72, 8, 'lamports'], [80, 8, 'data_len']];
+  if (o === 0 && size === 2) return 'dup_marker|is_signer';
+  if (o === 0 && size === 4) return 'dup_marker|is_signer|is_writable|executable';
+  for (const [at, len, name] of F) if (o >= at && o + size <= at + len) return `acc0.${name}${len > 8 ? (o === at ? '' : `[${o - at}]`) : ''}`;
+  if (o >= 88 && o < 88 + 0x800) return `acc0.data[${o - 88}]`;
+  return undefined;
 }

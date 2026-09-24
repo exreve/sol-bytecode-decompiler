@@ -86,6 +86,12 @@ in rodata) are also hashed.
 
 ## Exactness and how it is verified
 
+Every transformation is an identity on the VM semantics — with one documented assumption in the
+default mode: stack slots of the current function are only accessed through frame-pointer-derived
+addresses (true for every memory-safe execution). Stack slots whose address never escapes become
+variables, and SBF stack-passed arguments become parameters. `--exact-memory` turns both off, making
+the output exact even for executions that corrupt their own stack frame through wild pointers.
+
 Every transformation is an identity on the VM semantics (agave `solana-sbpf` interpreter, including
 quirks such as SBPF v0 `add32/sub32/mul32` sign-extending their result). Traps (division by zero,
 memory faults) are never dropped or reordered across side effects.
@@ -95,6 +101,8 @@ memory faults) are never dropped or reordered across side effects.
 * `src/emu.ts` — independent reference interpreter written from `interpreter.rs`;
 * `test/evaluate.ts` — parses the emitted TypeScript text with the TypeScript compiler API and
   executes it with exactly the documented semantics;
+* the emulator tracks frame-pointer provenance; random trials that touch the current frame through a
+  non-frame pointer (memory-unsafe executions, outside the default model) are reported as skipped;
 * both run on the same random arguments and deterministic memory; calls are stubbed identically
   (results derived from arguments, writes through pointer arguments). The traces — calls with
   arguments, stores outside the frame, frame state at every call, return value, abort — must match.

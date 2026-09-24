@@ -11,12 +11,14 @@ if (!file) {
   -o out.ts   single file
   -o outdir/  project layout: index.ts, entrypoint.ts, ix/<name>.ts, shared.ts, lib.d.ts
   --full      also decompile recognized library functions
-  --raw       no Solana-specific comments/names`)
+  --raw       no Solana-specific comments/names
+  --exact-memory  keep every stack access in memory (exact even if the program writes its own stack
+              frame through wild pointers; default output assumes memory-safe execution)`)
 	process.exit(1)
 }
 const oi = args.indexOf('-o')
 const out = oi >= 0 ? args[oi + 1] : undefined
-const res = decompile(new Uint8Array(readFileSync(file)), { sugar: !args.includes('--raw'), full: args.includes('--full') })
+const res = decompile(new Uint8Array(readFileSync(file)), { sugar: !args.includes('--raw'), full: args.includes('--full'), exactMemory: args.includes('--exact-memory') })
 if (out && (out.endsWith('/') || (existsSync(out) && statSync(out).isDirectory()))) {
 	for (const [path, text] of renderProject(res)) {
 		mkdirSync(dirname(join(out, path)), { recursive: true })

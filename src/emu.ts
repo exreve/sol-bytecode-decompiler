@@ -9,6 +9,8 @@ export class Abort extends Error {}
 /** Value the test emulator leaves in call-clobbered registers; the evaluator maps `undef` to it. */
 export const UNDEF = 0xdeadbeef_deadbeefn
 export class StepLimit extends Error {}
+/** Access to the current frame through a pointer not derived from the frame pointer (memory-unsafe execution). */
+export class FrameAlias extends Error {}
 
 const M = (1n << 64n) - 1n
 const u64 = (v: bigint) => v & M
@@ -60,7 +62,7 @@ export class TestMem {
 
 export interface CallHook { (target: string, args: bigint[]): bigint }
 
-export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean }
+export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; alias?: boolean }
 
 /** Execute one function starting at `pc` with registers r1..r5 = args, r10 = fp. */
 export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem: TestMem, onCall: CallHook, maxSteps: number,
@@ -73,6 +75,11 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 	r[0] = extraIn[0] ?? 0n; r[6] = extraIn[1] ?? 0n; r[7] = extraIn[2] ?? 0n; r[8] = extraIn[3] ?? 0n; r[9] = extraIn[4] ?? 0n
 	r[10] = fp
 	const insns = p.insns
+	// provenance: which registers hold frame-pointer-derived values
+	const fr = new Array<boolean>(11).fill(false)
+	fr[10] = true
+	const flo = fp - 0x1000n, fhi = fp
+	const checkFrame = (base: number, addr: bigint) => { if (!fr[base] && addr >= flo && addr < fhi) throw new FrameAlias() }
 	const signExt = (x: bigint) => (sx ? u32(x) : u64(BigInt.asIntN(32, x)))
 	let steps = 0
 	const doCall = (t: string) => {
@@ -81,6 +88,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 		if (ns) a = [r[1], r[2], r[3], r[4], ...Array.from({ length: ns }, (_, k) => mem.load(u64(r[5] - 0x1000n + BigInt(8 * k)), 8)), ...argRegs(t).filter(i => i === 0 || i > 5).map(i => r[i])]
 		r[0] = u64(onCall(t, a))
 		for (let i = 1; i <= 5; i++) r[i] = UNDEF // clobbered
+		for (let i = 0; i <= 5; i++) fr[i] = false
 	}
 	try {
 		while (true) {
@@ -92,8 +100,16 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 			const immU = u64(imm)
 			let next = pc + 1
 			const D = r[dst], S = r[src]
-			const ld = (size: number) => { r[dst] = mem.load(u64(S + off), size) }
-			const st = (size: number, val: bigint) => { mem.store(u64(D + off), size, val) }
+			const ld = (size: number) => { checkFrame(src, u64(S + off)); r[dst] = mem.load(u64(S + off), size) }
+			const st = (size: number, val: bigint) => { checkFrame(dst, u64(D + off)); mem.store(u64(D + off), size, val) }
+			// provenance update (computed before the instruction executes)
+			const cls0 = ins.opc & 7, op0 = ins.opc & 0xf0
+			const alu64 = cls0 === 7 && !movMem, isReg = (ins.opc & 8) !== 0
+			let nfr: boolean | null = null
+			if (alu64 && op0 === 0xb0) nfr = isReg ? fr[src] : false                 // mov
+			else if (alu64 && (op0 === 0x00 || op0 === 0x10)) nfr = fr[dst] || (isReg && fr[src]) // add/sub
+			else if (ins.opc !== 0x05 && (ins.opc & 7) !== 5 && (ins.opc & 7) !== 2 && (ins.opc & 7) !== 3) nfr = false // other writes to dst
+			if (movMem && (ins.opc & 7) === 7 && (op0 === 0x20 || op0 === 0x30 || op0 === 0x80 || op0 === 0x90)) nfr = null // v2 stores
 			let handled = true
 			if (!movMem) {
 				switch (ins.opc) {
@@ -272,11 +288,13 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 					return { ret: r[0], steps }
 				} else throw new Abort(`invalid instruction 0x${ins.opc.toString(16)}`)
 			}
+			if (nfr !== null) fr[dst] = nfr
 			pc = next
 		}
 	} catch (e) {
 		if (e instanceof Abort) return { abort: e.message, steps }
 		if (e instanceof StepLimit) return { steps, limit: true }
+		if (e instanceof FrameAlias) return { steps, alias: true }
 		throw e
 	}
 }

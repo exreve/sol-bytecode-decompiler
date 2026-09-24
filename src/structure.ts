@@ -373,6 +373,7 @@ function dropLoopLabels(ns: Node[], refs: Map<string, number>): Node[] {
 
 export function cleanup(s: Structured, returnsValue: boolean): Node[] {
   let body = s.body;
+  if (process.env.SBPF_DISABLE?.includes('cleanup')) return body;
   const top: Cont = { breaks: new Set(), conts: new Set(), ret: !returnsValue };
   for (let i = 0; i < 12; i++) {
     const before = JSON.stringify(body, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));

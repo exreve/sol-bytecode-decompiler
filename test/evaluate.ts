@@ -56,7 +56,7 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 
 	const call = (name: string, a: bigint[]): bigint => {
 		const ld = /^ld(8|16|32|64)$/.exec(name)
-		if (ld) return env.mem.load(W(a[0]), Number(ld[1]) / 8)
+		if (ld) { const v = env.mem.load(W(a[0]), Number(ld[1]) / 8); if (process.env.SBPF_TRACE) console.log(`LD ${name} ${W(a[0]).toString(16)} = ${v.toString(16)}`); return v }
 		const st = /^st(8|16|32|64)$/.exec(name)
 		if (st) { const sz = Number(st[1]) / 8; for (let i = 1; i < a.length; i++) env.mem.store(W(a[0] + BigInt((i - 1) * sz)), sz, W(a[i])); return 0n }
 		if (name === 'copy') { for (let o = 0n; o < a[2]; o += 8n) env.mem.store(W(a[0] + o), 8, env.mem.load(W(a[1] + o), 8)); return 0n }

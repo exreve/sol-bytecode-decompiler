@@ -6,7 +6,7 @@ import { emulate, TestMem, Abort, StepLimit, UNDEF, type Event } from '../src/em
 import { fnAddr, loadProgram } from '../src/program.ts'
 import { parseFunctions, runFunction, EvalError } from './evaluate.ts'
 
-export interface EquivReport { funcs: number; trials: number; failures: { fn: string; seed: number; why: string }[]; errors: { fn: string; why: string }[] }
+export interface EquivReport { funcs: number; trials: number; skipped?: number; failures: { fn: string; seed: number; why: string }[]; errors: { fn: string; why: string }[] }
 
 function rng(seed: number) {
 	let x = BigInt(seed) * 0x9e3779b97f4a7c15n + 0x1234567n
@@ -41,13 +41,14 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 		const f = fo.f
 		for (let t = 0; t < trials; t++) {
 			const seed = t * 7919 + fo.pc
+			if (process.env.SBPF_TRACE) console.log('TRIAL', seed)
 			const R = rng(seed)
 			const pick = (): bigint => {
 				const k = Number(R() % 6n)
 				if (k === 0) return R() % 16n
 				if (k === 1) return 0x4_0000_0000n + (R() % 0x400n) * 8n
 				if (k === 2) return 0x3_0000_0000n + (R() % 0x400n) * 8n
-				if (k === 3) return 0x2_0000_0000n + (R() % 0x800n) * 8n
+				if (k === 3) return 0x2_0000_0000n + (R() % 0x100n) * 8n // caller frames: never inside the callee's own frame
 				if (k === 4) return R() % 0x10000n
 				return R()
 			}
@@ -90,6 +91,8 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				}
 			}
 			const a = run('emu') as any
+			// memory-unsafe execution (frame accessed through a non-frame pointer): outside the model, skip
+			if (a.alias) { report.skipped = (report.skipped ?? 0) + 1; continue }
 			// stores into promoted stack slots are variables in the output
 			if (f.argAreaElided) {
 				const lo = fp - 0x1000n, hi = fp - 0x1000n + 0x100n
@@ -187,7 +190,7 @@ if (import.meta.main) {
 	const txt = loadProgram(bytes).elf.text.addr
 	const only = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(x => (x.startsWith('fn_') ? (parseInt(x.slice(3), 16) - txt) / 8 : Number(x)))) : undefined
 	const r = checkProgram(new Uint8Array(readFileSync(file)), trials, maxFuncs, only, true, process.env.SEED ? Number(process.env.SEED) : undefined)
-	console.log(`${file}: ${r.funcs} functions, ${r.trials} trials, ${r.failures.length} failing functions, ${r.errors.length} errors, ${Date.now() - t0}ms`)
+	console.log(`${file}: ${r.funcs} functions, ${r.trials} trials (${r.skipped ?? 0} skipped: memory-unsafe), ${r.failures.length} failing functions, ${r.errors.length} errors, ${Date.now() - t0}ms`)
 	for (const e of r.errors.slice(0, 10)) console.log('ERROR', e.fn, e.why)
 	if (r.failures.length || r.errors.length) process.exitCode = 1
 }
