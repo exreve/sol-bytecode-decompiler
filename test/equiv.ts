@@ -14,7 +14,7 @@ function rng(seed: number) {
 }
 
 export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity, only?: Set<number>, verbose = false, dumpSeed?: number): EquivReport {
-	const res = decompile(bytes, { sugar: false, only })
+	const res = decompile(bytes, { sugar: false, only, full: true })
 	const p = res.program
 	const report: EquivReport = { funcs: 0, trials: 0, failures: [], errors: [] }
 	let decls

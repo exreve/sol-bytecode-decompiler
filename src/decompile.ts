@@ -7,8 +7,13 @@ import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
 import { Semantics } from './semantics.ts';
 import { promoteStack } from './stack.ts';
+import { classify, type LibInfo } from './library.ts';
 
-export interface Options { sugar?: boolean; only?: Set<number>; comments?: boolean }
+export interface Options {
+  sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
+  only?: Set<number>;    // restrict to these function entry pcs
+  full?: boolean;        // decompile library functions too (default: typed stubs only)
+}
 
 export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[] }
 export interface Result { program: Program; funcs: FuncOut[]; header: string; text: string }
@@ -27,12 +32,31 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   inferSignatures(p);
   const sem = new Semantics(p);
   const funcs: FuncOut[] = [];
+  const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
+  for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
+  const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
   for (const f of p.funcs.values()) fnByAddr.set(fnAddr(p, f.pc), f.name);
 
+  // library functions directly called from user code get a one-line declaration
+  const stubs: string[] = [];
+  const called = new Set<number>();
+  for (const f0 of p.funcs.values()) {
+    if (isLib(f0.pc)) continue;
+    for (const b of f0.blocks) for (const s of b.stmts) if (s.k === 'call' && s.t.k === 'fn' && isLib(s.t.pc)) called.add(s.t.pc);
+    // function pointers taken by user code
+    for (const b of f0.blocks) for (const s of b.stmts) if (s.k === 'set' && s.e.k === 'const') { const g = fnByAddr.get(s.e.v); if (g) for (const [pc, l] of libs) if (l.lib && p.funcs.get(pc)!.name === g) called.add(pc); }
+  }
+  for (const pc of [...called].sort((a, b) => a - b)) {
+    const f = p.funcs.get(pc)!, info = libs.get(pc)!;
+    const params = Array.from({ length: f.nparams }, (_, i) => `${'abcde'[i]}: u64`).concat(f.extraIn.map(r => `r${r}: u64`));
+    stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${info.hint ? ' ' + info.hint : ''}`);
+  }
+
   for (const f0 of p.funcs.values()) {
     if (opts.only && !opts.only.has(f0.pc)) continue;
+    if (isLib(f0.pc)) continue;
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (promoteStack(f)) optimizeFunc(f);
@@ -88,7 +112,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     lines.push('}');
     funcs.push({ pc: f.pc, name: f.name, text: lines.join('\n'), irreducible: st.irreducible, f, body, names });
   }
-  const header = sem.header();
+  const nlib = [...libs.values()].filter(l => l.lib).length;
+  const header = sem.header() + (nlib ? `// ${nlib} library functions recognized (not decompiled); ${stubs.length} referenced below\n${stubs.join('\n')}\n` : '');
   return { program: p, funcs, header, text: header + '\n' + funcs.map(f => f.text).join('\n\n') + '\n' };
 }
 

@@ -6,3 +6,4 @@ samples/*.so
 !samples/token.so
 !samples/ata.so
 out.*.ts
+corpus/
