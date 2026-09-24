@@ -1,7 +1,9 @@
 // Solana-specific knowledge used for naming and comments. Nothing here changes semantics:
 // it only chooses names and adds comments (or, with --sugar, equivalent compact renderings).
 import { createHash } from 'node:crypto'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { gunzipSync } from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 import type { Program, Func } from './program.ts'
@@ -245,18 +247,14 @@ export class Semantics {
 
 	/** Resolve remaining discriminator-looking constants by expanding the verb x noun vocabulary. */
 	resolveCandidates(values: Iterable<bigint>) {
-		const db = selectors()
-		const want = new Set<bigint>()
-		for (const v of values) if (!this.disc.has(v) && looksRandom(v)) want.add(v)
-		if (!db || !want.size) return
-		for (const verb of db.verbs) {
-			for (const n of ['', ...db.nouns]) {
-				const name = n ? `${verb}_${n}` : verb
-				for (const nm of [name, name + '_v2']) {
-					const h = sha8(`global:${nm}`)
-					if (want.has(h)) { this.disc.set(h, `ix:${nm}`); want.delete(h); if (!want.size) return }
-				}
-			}
+		const want: bigint[] = []
+		for (const v of values) if (!this.disc.has(v) && looksRandom(v)) want.push(v)
+		if (!want.length) return
+		const table = vocabTable()
+		if (!table) return
+		for (const v of want) {
+			const name = table.lookup(v)
+			if (name) this.disc.set(v, `ix:${name}`)
 		}
 	}
 
@@ -306,3 +304,41 @@ function looksRandom(v: bigint): boolean {
 }
 
 export function constsIn(e: Expr, out: Set<bigint>) { walkExpr(e, x => { if (x.k === 'const') out.add(x.v) }) }
+
+/** Expanded vocabulary ("<verb>[_<noun>][_v2]") as a sorted table of discriminators, cached on disk. */
+let vocab: { lookup: (v: bigint) => string | undefined } | null | undefined
+function vocabTable() {
+	if (vocab !== undefined) return vocab
+	const db = selectors()
+	if (!db) return (vocab = null)
+	const names: string[] = []
+	for (const verb of db.verbs) for (const n of ['', ...db.nouns]) { const nm = n ? `${verb}_${n}` : verb; names.push(nm, nm + '_v2') }
+	const key = createHash('sha1').update(names.length + ':' + db.verbs.join() + db.nouns.slice(0, 50).join()).digest('hex').slice(0, 12)
+	const dir = join(homedir(), '.cache', 'sbpf-decompiler')
+	const file = join(dir, `vocab-${key}.bin`)
+	let buf: Buffer
+	if (existsSync(file)) buf = readFileSync(file)
+	else {
+		// entries: u64 hash (LE) + u32 index into names, sorted by hash
+		const n = names.length
+		const hs = new BigUint64Array(n)
+		for (let i = 0; i < n; i++) hs[i] = sha8(`global:${names[i]}`)
+		const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => (hs[a] < hs[b] ? -1 : hs[a] > hs[b] ? 1 : 0))
+		buf = Buffer.alloc(n * 12)
+		idx.forEach((i, k) => { buf.writeBigUInt64LE(hs[i], k * 12); buf.writeUInt32LE(i, k * 12 + 8) })
+		try { mkdirSync(dir, { recursive: true }); writeFileSync(file, buf) } catch { /* cache is optional */ }
+	}
+	const count = buf.length / 12
+	vocab = {
+		lookup(v: bigint) {
+			let lo = 0, hi = count - 1
+			while (lo <= hi) {
+				const mid = (lo + hi) >> 1, h = buf.readBigUInt64LE(mid * 12)
+				if (h === v) return names[buf.readUInt32LE(mid * 12 + 8)]
+				if (h < v) lo = mid + 1; else hi = mid - 1
+			}
+			return undefined
+		},
+	}
+	return vocab
+}

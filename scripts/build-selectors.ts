@@ -94,7 +94,13 @@ mkdirSync('data', { recursive: true })
 const nounFreq = new Map<string, number>()
 for (const n of ins) { const w = n.split('_'); for (let k = 1; k < w.length; k++) { const x = w.slice(k).join('_'); nounFreq.set(x, (nounFreq.get(x) ?? 0) + 1) } }
 const accNouns = new Set([...accs].map(snake))
+// keep the runtime expansion around ~1M hashes: most frequent verbs / noun phrases
+const verbFreq = new Map<string, number>()
+for (const n of ins) { const v = n.split('_')[0]; verbFreq.set(v, (verbFreq.get(v) ?? 0) + 1) }
+const topVerbs = new Set([...verbs].sort((a, b) => (verbFreq.get(b) ?? 0) - (verbFreq.get(a) ?? 0)).slice(0, 300))
+for (const v of [...verbs]) if (!topVerbs.has(v)) verbs.delete(v)
 const vocabNouns = nounList.filter(n => (nounFreq.get(n) ?? 0) >= 2 || accNouns.has(n))
+	.sort((a, b) => (nounFreq.get(b) ?? 0) - (nounFreq.get(a) ?? 0)).slice(0, 3000)
 const buf = gzipSync(JSON.stringify({ names: out, verbs: [...verbs].sort(), nouns: vocabNouns.sort() }), { level: 9 })
 writeFileSync('data/selectors.json.gz', buf)
 console.log(`files ${files.length}, idls ${nIdl}, instructions ${ins.size}, accounts ${accs.size}, events ${evs.size}, names ${Object.keys(out).length}, vocab ${verbs.size} verbs x ${vocabNouns.length} nouns, gz ${buf.length} bytes`)
