@@ -3,6 +3,7 @@
 // Calls are not followed: they are reported to a hook (stubs) so a single function can be tested.
 import type { Program } from './program.ts'
 import { Image, MM_STACK_START } from './elf.ts'
+import { SYSCALL_BY_HASH } from './syscalls.ts'
 
 export class Abort extends Error {}
 /** Value the test emulator leaves in call-clobbered registers; the evaluator maps `undef` to it. */
@@ -65,7 +66,8 @@ export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?
 export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem: TestMem, onCall: CallHook, maxSteps: number,
 	argRegs: (t: string) => number[], extraIn: bigint[] = [], stackArgs: (t: string) => number = () => 0): EmuResult {
 	const v = p.version
-	const pqr = v >= 2, sx = v >= 2, swapSub = v >= 2, noNeg = v >= 2, noLddw = v >= 2, noLe = v >= 2, movMem = v >= 2, staticSys = v >= 3
+	const v2 = v === 2
+	const pqr = v2, sx = v2, swapSub = v2, noNeg = v2, noLddw = v2, noLe = v2, movMem = v2, staticSys = v >= 3, jmp32 = v >= 3
 	const r = new Array<bigint>(11).fill(0n)
 	for (let i = 0; i < 5; i++) r[i + 1] = args[i] ?? 0n
 	r[0] = extraIn[0] ?? 0n; r[6] = extraIn[1] ?? 0n; r[7] = extraIn[2] ?? 0n; r[8] = extraIn[3] ?? 0n; r[9] = extraIn[4] ?? 0n
@@ -239,14 +241,34 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 						default: t = i64(D) <= i64(b); break
 					}
 					if (t) next = pc + 1 + ins.off
+				} else if (jmp32 && cls === 6 && [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd].includes(code)) {
+					const bb = ins.opc & 8 ? S : immU
+					const x = u32(D), y = u32(bb), sx32 = i32(D), sy32 = i32(bb)
+					let t: boolean
+					switch (code) {
+						case 1: t = x === y; break
+						case 2: t = x > y; break
+						case 3: t = x >= y; break
+						case 4: t = (x & y) !== 0n; break
+						case 5: t = x !== y; break
+						case 6: t = sx32 > sy32; break
+						case 7: t = sx32 >= sy32; break
+						case 0xa: t = x < y; break
+						case 0xb: t = x <= y; break
+						case 0xc: t = sx32 < sy32; break
+						default: t = sx32 <= sy32; break
+					}
+					if (t) next = pc + 1 + ins.off
 				} else if (ins.opc === 0x85) {
-					doCall(callTargetName(p, pc, ins.imm))
+					if (staticSys) {
+						if (ins.src === 0) doCall(`sys:${SYSCALL_BY_HASH.get(ins.imm >>> 0)?.name ?? 'hash:' + (ins.imm >>> 0)}`)
+						else if (ins.src === 1) doCall(`fn:${pc + 1 + ins.imm}`)
+						else throw new Abort('invalid call')
+					} else doCall(callTargetName(p, pc, ins.imm))
 				} else if (ins.opc === 0x8d) {
-					const reg = v >= 2 ? src : ins.imm
+					const reg = v === 2 ? src : v >= 3 ? dst : ins.imm
 					doCall(`ptr:${r[reg].toString(16)}`)
-				} else if (ins.opc === 0x95 && staticSys) {
-					doCall(`sys:${ins.imm >>> 0}`)
-				} else if ((ins.opc === 0x95 && !staticSys) || (ins.opc === 0x9d && staticSys)) {
+				} else if (ins.opc === 0x95) {
 					return { ret: r[0], steps }
 				} else throw new Abort(`invalid instruction 0x${ins.opc.toString(16)}`)
 			}

@@ -232,7 +232,7 @@ export class Semantics {
 	}
 
 	strAt(ptr: bigint, len: bigint): string | undefined {
-		if (len < 1n || len > 512n || ptr < 0x1_0000_0000n || ptr >= 0x2_0000_0000n) return undefined
+		if (len < 1n || len > 512n || !this.p.image.region(ptr, Number(len))) return undefined
 		const b = this.p.image.bytesAt(ptr, Number(len))
 		if (!b) return undefined
 		const s = new TextDecoder('utf-8', { fatal: false }).decode(b)

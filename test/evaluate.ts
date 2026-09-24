@@ -97,6 +97,7 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 		if (ts.isParenthesizedExpression(e)) return ev(e.expression)
 		if (ts.isNumericLiteral(e)) return BigInt(e.getText())
 		if (e.kind === ts.SyntaxKind.TrueKeyword) return 1n
+		if (ts.isStringLiteral(e)) return 0n // only used as trap() message
 		if (ts.isIdentifier(e)) return lookup(e.text)
 		if (ts.isPrefixUnaryExpression(e)) {
 			// a negative numeric literal is a signed value (used as-is by relational operators)

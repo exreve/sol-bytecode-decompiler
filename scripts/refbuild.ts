@@ -11,18 +11,20 @@ interface Variant { name: string; template: string; tools: string; rust: string;
 const TOOLS: Record<string, { rust: string; docker: boolean }> = { 'v1.41': { rust: '1.75', docker: false }, 'v1.43': { rust: '1.79', docker: true }, 'v1.48': { rust: '1.84', docker: true } }
 const matrix: Variant[] = []
 const PINS141: [string, string][] = [['blake3', '1.5.5'], ['cc', '1.0.94']]
+// keep crates that need edition 2024 / newer cargo out of the graph
+const PINS: [string, string][] = [['blake3', '1.5.5'], ['cc', '1.1.31'], ['jobserver', '0.1.32']]
 const nat = (tools: string, sol: string, spl: string, pins: [string, string][] = []) => matrix.push({ name: `native-sol${sol}-t${tools.slice(1)}`, template: 'native', tools, rust: TOOLS[tools].rust, vars: { SOLANA: sol, SPL_TOKEN: spl }, pins })
 const anc = (tools: string, anchor: string, bump: string, pins: [string, string][] = []) => matrix.push({ name: `anchor${anchor}-t${tools.slice(1)}`, template: 'anchor', tools, rust: TOOLS[tools].rust, vars: { ANCHOR: anchor, BUMP: bump }, pins })
 for (const sol of ['1.16.27', '1.17.34', '1.18.26']) nat('v1.41', sol, '4.0.0', PINS141)
 anc('v1.41', '0.28.0', '*ctx.bumps.get("vault").unwrap()', PINS141)
 anc('v1.41', '0.29.0', 'ctx.bumps.vault', PINS141)
 anc('v1.41', '0.30.1', 'ctx.bumps.vault', PINS141)
-nat('v1.43', '1.18.26', '4.0.0', PINS141)
-nat('v1.43', '2.1.21', '7.0.0')
-anc('v1.43', '0.30.1', 'ctx.bumps.vault', PINS141)
-anc('v1.43', '0.31.1', 'ctx.bumps.vault')
-nat('v1.48', '2.2.1', '8.0.0')
-anc('v1.48', '0.31.1', 'ctx.bumps.vault')
+nat('v1.43', '1.18.26', '4.0.0', PINS)
+nat('v1.43', '2.1.21', '7.0.0', PINS)
+anc('v1.43', '0.30.1', 'ctx.bumps.vault', PINS)
+anc('v1.43', '0.31.1', 'ctx.bumps.vault', PINS)
+nat('v1.48', '2.2.1', '8.0.0', PINS)
+anc('v1.48', '0.31.1', 'ctx.bumps.vault', PINS)
 
 const filter = process.argv[2]
 const root = process.cwd()

@@ -114,7 +114,9 @@ export function parseElf(input: Uint8Array): Elf {
     return va;
   }
 
-  let text = sections.find(s => s.name === '.text');
+  let text = sections.find(s => s.name === '.text')
+    ?? sections.find(s => (s.flags & 4) && s.size) // SHF_EXECINSTR
+    ?? sections.find(s => s.type === 1 && s.size && entry >= s.addr && entry < s.addr + s.size);
   if (!text) {
     // stripped section headers: synthesize from the executable program header
     for (let i = 0; i < phnum; i++) {

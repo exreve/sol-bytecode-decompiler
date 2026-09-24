@@ -64,6 +64,13 @@ for (const f of files) {
 		for (const m of src.matchAll(/#\[event\]\s*(?:#\[[^\]]*\]\s*)*pub struct (\w+)/g)) evs.add(m[1])
 	}
 }
+// names harvested from GitHub (scripts/gh-anchor-names.ts)
+try {
+	const gh = JSON.parse(readFileSync('data-src/gh-names.json', 'utf8'))
+	for (const n of gh.instructions) ins.add(n)
+	for (const n of gh.accounts) accs.add(n)
+	for (const n of gh.events) evs.add(n)
+} catch { /* optional */ }
 // vocabulary expansion: verb + noun phrase
 const verbs = new Set<string>(), nouns = new Set<string>()
 for (const n of ins) {

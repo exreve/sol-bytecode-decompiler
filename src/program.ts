@@ -94,7 +94,9 @@ export class Lifter {
     const ins = this.p.insns[pc];
     const { opc, dst, src, off, imm } = ins;
     const v = this.v;
-    const pqr = v >= 2, sx = v >= 2, swapSub = v >= 2, noNeg = v >= 2, noLddw = v >= 2, noLe = v >= 2, movMem = v >= 2, staticSys = v >= 3;
+    // feature matrix of agave solana-sbpf (0.25): SIMD-0173/0174 features are V2-only; V3+ has static syscalls + JMP32
+    const v2 = v === 2;
+    const pqr = v2, sx = v2, swapSub = v2, noNeg = v2, noLddw = v2, noLe = v2, movMem = v2, staticSys = v >= 3, jmp32 = v >= 3;
     const d = R(dst), s = R(src);
     const immS = C(BigInt(imm));                 // imm as i64 as u64
     const immU32 = C(BigInt(imm >>> 0));         // imm as u32 as u64
@@ -219,25 +221,32 @@ export class Lifter {
     if (opc === 0x05) return { stmts: [], term: { k: 'jmp', to: pc + 1 + off } };
     const jc = JCC[opc >> 4];
     if ((opc & 0x07) === 0x05 && jc) return jmp(CMP(jc, d, (opc & 0x08) ? s : immS));
+    if (jmp32 && (opc & 0x07) === 0x06 && jc) {
+      const signed = jc[0] === 's' && jc !== 'set';
+      const w = (e: Expr) => X(signed, 32, e);
+      return jmp(CMP(jc, w(d), w((opc & 0x08) ? s : immS)));
+    }
     if (opc === 0x85) {
+      if (staticSys) {
+        if (ins.src === 0) {
+          const t = this.syscallByImm(imm);
+          return t ? this.call(pc, t) : trap(`unknown syscall 0x${(imm >>> 0).toString(16)}`);
+        }
+        const tp = pc + 1 + imm;
+        if (ins.src === 1 && tp >= 0 && tp < this.p.insns.length) return this.call(pc, { k: 'fn', pc: tp });
+        return bad();
+      }
       const t = this.callTarget(pc, imm);
       if (!t) return trap(`unresolved call imm=${imm} at pc ${pc}`);
       return this.call(pc, t);
     }
     if (opc === 0x8d) {
-      const reg = v >= 2 ? src : imm;
+      const reg = v === 2 ? src : v >= 3 ? dst : imm;
       if (reg < 0 || reg > 10) return bad();
       // target pc = (reg - text_vaddr) / 8, dispatched at runtime
       return this.call(pc, { k: 'ind', e: R(reg) });
     }
-    if (opc === 0x95) {
-      if (staticSys) {
-        const t = this.syscallByImm(imm);
-        return t ? this.call(pc, t) : trap(`unknown syscall 0x${(imm >>> 0).toString(16)}`);
-      }
-      return { stmts: [], term: { k: 'ret', e: R(0) } };
-    }
-    if (opc === 0x9d && staticSys) return { stmts: [], term: { k: 'ret', e: R(0) } };
+    if (opc === 0x95) return { stmts: [], term: { k: 'ret', e: R(0) } };
     return bad();
   }
 
@@ -273,7 +282,7 @@ export function loadProgram(bytes: Uint8Array): Program {
 /** True when `pc` begins an instruction (not the second slot of lddw). */
 function instructionStarts(p: Program): Uint8Array {
   const starts = new Uint8Array(p.insns.length);
-  const noLddw = p.version >= 2;
+  const noLddw = p.version === 2;
   for (let i = 0; i < p.insns.length; i++) {
     starts[i] = 1;
     if (p.insns[i].opc === 0x18 && !noLddw) i++;
@@ -292,11 +301,12 @@ function discover(p: Program) {
   const fnPtr = (v: bigint) => { if (v >= textLo && v < textHi && (v - textLo) % 8n === 0n) { const pc = Number((v - textLo) / 8n); add(pc); p.addressTaken.add(pc); } };
   for (const v of p.elf.dataPointers.values()) fnPtr(v);
   // call targets and code pointers loaded as constants
-  const noLddw = p.version >= 2;
+  const noLddw = p.version === 2;
   for (let i = 0; i < p.insns.length; i++) {
     if (!starts[i]) continue;
     const ins = p.insns[i];
     if (ins.opc === 0x85) {
+      if (p.version >= 3) { if (ins.src === 1) add(i + 1 + ins.imm); continue; }
       const t = lifter.callTarget(i, ins.imm);
       if (t?.k === 'fn') add(t.pc);
     } else if (ins.opc === 0x18 && !noLddw && p.insns[i + 1]) {
