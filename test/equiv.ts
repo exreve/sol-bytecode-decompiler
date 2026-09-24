@@ -51,7 +51,7 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				if (k === 4) return R() % 0x10000n
 				return R()
 			}
-			const args = f.isEntry ? [0x4_0000_0000n, 0n, 0n, 0n, 0n] : [pick(), pick(), pick(), pick(), pick()]
+			const args = f.isEntry ? [0x4_0000_0000n, 0n, 0n, 0n, 0n] : [pick(), pick(), pick(), pick(), f.stackArgs ? 0x2_0010_0000n + (R() % 0x100n) * 0x1000n : pick()]
 			const extra = f.isEntry ? [0n, 0n, 0n, 0n, 0n] : [pick(), pick(), pick(), pick(), pick()]
 			const fp = 0x2_0000_1000n + 0x2000n * BigInt(1 + (t % 5))
 			let cap = Infinity
@@ -76,10 +76,10 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				}
 				if (side === 'emu') {
 					const extraIn = [extra[0], extra[1], extra[2], extra[3], extra[4]]
-					const r = emulate(p, fo.pc, args, fp, mem, onCall, 20000, argRegs, extraIn)
+					const r = emulate(p, fo.pc, args, fp, mem, onCall, 20000, argRegs, extraIn, t => (t.startsWith('fn:') ? p.funcs.get(Number(t.slice(3)))?.stackArgs ?? 0 : 0))
 					return { ...r, events }
 				}
-				const pargs = args.slice(0, f.isEntry ? 1 : f.nparams)
+				const pargs = f.stackArgs ? [...args.slice(0, 4), ...Array.from({ length: f.stackArgs }, (_, k) => mem.load(args[4] - 0x1000n + BigInt(8 * k), 8))] : args.slice(0, f.isEntry ? 1 : f.nparams)
 				if (!f.isEntry) for (const r of f.extraIn) pargs.push(r === 0 ? extra[0] : extra[r - 5])
 				try {
 					const r = runFunction(decl, pargs, { mem, onCall, fp, fnAddr: fnAddrMap, fnTarget, sysTarget, maxSteps: 20000 })
@@ -91,6 +91,10 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 			}
 			const a = run('emu') as any
 			// stores into promoted stack slots are variables in the output
+			if (f.argAreaElided) {
+				const lo = fp - 0x1000n, hi = fp - 0x1000n + 0x100n
+				a.events = a.events.filter((e: Event) => !(e.k === 'store' && e.addr >= lo && e.addr < hi))
+			}
 			if (f.promoted?.length) {
 				const pro = new Set(f.promoted.map(x => `${BigInt.asUintN(64, fp + BigInt(x.off))}:${x.size}`))
 				a.events = a.events.filter((e: Event) => !(e.k === 'store' && pro.has(`${e.addr}:${e.size}`)))

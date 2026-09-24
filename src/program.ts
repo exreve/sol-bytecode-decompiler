@@ -18,6 +18,7 @@ export interface Func {
   extraIn: number[];       // other registers read before written (r0, r6..r9): passed implicitly
   returns: boolean;
   isEntry: boolean;
+  stackArgs?: number;      // arguments 5.. passed through the caller's frame (SBF convention), see stackargs.ts
 }
 
 export interface Program {

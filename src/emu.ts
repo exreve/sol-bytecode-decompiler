@@ -63,7 +63,7 @@ export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?
 
 /** Execute one function starting at `pc` with registers r1..r5 = args, r10 = fp. */
 export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem: TestMem, onCall: CallHook, maxSteps: number,
-	argRegs: (t: string) => number[], extraIn: bigint[] = []): EmuResult {
+	argRegs: (t: string) => number[], extraIn: bigint[] = [], stackArgs: (t: string) => number = () => 0): EmuResult {
 	const v = p.version
 	const pqr = v >= 2, sx = v >= 2, swapSub = v >= 2, noNeg = v >= 2, noLddw = v >= 2, noLe = v >= 2, movMem = v >= 2, staticSys = v >= 3
 	const r = new Array<bigint>(11).fill(0n)
@@ -74,7 +74,9 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 	const signExt = (x: bigint) => (sx ? u32(x) : u64(BigInt.asIntN(32, x)))
 	let steps = 0
 	const doCall = (t: string) => {
-		const a = argRegs(t).map(i => r[i])
+		let a = argRegs(t).map(i => r[i])
+		const ns = stackArgs(t)
+		if (ns) a = [r[1], r[2], r[3], r[4], ...Array.from({ length: ns }, (_, k) => mem.load(u64(r[5] - 0x1000n + BigInt(8 * k)), 8)), ...argRegs(t).filter(i => i === 0 || i > 5).map(i => r[i])]
 		r[0] = u64(onCall(t, a))
 		for (let i = 1; i <= 5; i++) r[i] = UNDEF // clobbered
 	}

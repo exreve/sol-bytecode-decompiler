@@ -248,6 +248,7 @@ export interface VarInfo {
 export interface VarFunc extends Func {
   vars: VarInfo[];
   promoted?: { off: number; size: number; v: number }[]; // stack slots turned into variables
+  argAreaElided?: boolean; // stores to the outgoing stack-argument area were turned into call arguments
 }
 
 class UF {

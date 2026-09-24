@@ -9,6 +9,7 @@ import { Semantics, constsIn } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
+import { rewriteStackArgs } from './stackargs.ts';
 import { classify, type LibInfo } from './library.ts';
 
 export interface Options {
@@ -46,6 +47,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
+  nameThunks(p);
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
@@ -60,9 +62,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (promoteStack(f)) optimizeFunc(f);
-    compactStores(f);
-    const st = structure(f);
-    built.set(f.pc, { f, body: cleanup(st, f.returns), irreducible: st.irreducible });
+    built.set(f.pc, { f, body: [], irreducible: false });
+  }
+
+  // ---- SBF stack-passed arguments become ordinary parameters ----
+  rewriteStackArgs(p, built);
+  for (const bt of built.values()) {
+    compactStores(bt.f);
+    const st = structure(bt.f);
+    bt.body = cleanup(st, bt.f.returns);
+    bt.irreducible = st.irreducible;
   }
 
   // ---- phase 3: resolve discriminator-looking constants against the selector vocabulary ----
@@ -120,7 +129,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // the VM starts the entrypoint with r1 = input, r10 = frame pointer and every other register zeroed
     const zeroInit = f.isEntry ? f.vars.filter(v => v.param >= 0 && v.param !== 1 && v.param !== 10 && used.has(v.id)) : [];
     for (const v of f.vars) {
-      if (v.param >= 0 && !zeroInit.includes(v)) names[v.id] = f.isEntry && v.param === 1 ? 'input' : paramName[v.param];
+      if (v.param >= 100) names[v.id] = `p${5 + v.param - 100}`;
+      else if (v.param >= 0 && !zeroInit.includes(v)) names[v.id] = f.isEntry && v.param === 1 ? 'input' : paramName[v.param];
       else if (v.reg === -1) names[v.id] = 'state';
     }
     for (const v of f.vars) if (names[v.id] === undefined && used.has(v.id)) names[v.id] = gen.next().value as string;
@@ -136,7 +146,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const params: string[] = [];
     if (f.isEntry) params.push('input: u64');
     else {
-      for (let r = 1; r <= f.nparams; r++) params.push(`${paramName[r]}: u64`);
+      for (let r = 1; r <= (f.stackArgs ? 4 : f.nparams); r++) params.push(`${paramName[r]}: u64`);
+      for (let k = 0; k < (f.stackArgs ?? 0); k++) params.push(`p${5 + k}: u64`);
       for (const r of f.extraIn) params.push(`${paramName[r]}: u64`);
     }
     const lines: string[] = [];
@@ -209,3 +220,22 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
 }
 
 function usesVar(e: Expr, v: number) { let u = false; walkExpr(e, x => { if (x.k === 'var' && x.id === v) u = true; }); return u; }
+
+/** Name thin wrappers around a single syscall (memcpy, memset, ...) after what they wrap. */
+function nameThunks(p: Program) {
+  const taken = new Set([...p.funcs.values()].map(f => f.name));
+  const WRAP: Record<string, string> = { sol_memcpy_: 'memcpy', sol_memmove_: 'memmove', sol_memset_: 'memset', sol_memcmp_: 'memcmp', abort: 'abort_', sol_panic_: 'panic_', sol_log_: 'log', sol_invoke_signed_rust: 'invoke_signed', sol_invoke_signed_c: 'invoke_signed_c', sol_try_find_program_address: 'find_program_address', sol_create_program_address: 'create_program_address', sol_sha256: 'sha256', sol_keccak256: 'keccak256', sol_log_data: 'log_data', sol_set_return_data: 'set_return_data', sol_get_return_data: 'get_return_data', sol_get_clock_sysvar: 'clock_get', sol_get_rent_sysvar: 'rent_get' };
+  for (const f of p.funcs.values()) {
+    if (!/^fn_[0-9a-f]+$/.test(f.name) || f.blocks.length > 2) continue;
+    let n = 0; for (const b of f.blocks) n += b.end - b.start + 1;
+    if (n > 8) continue;
+    const calls = f.blocks.flatMap(b => b.stmts.filter(s => s.k === 'call'));
+    if (calls.length !== 1 || calls[0].k !== 'call' || calls[0].t.k !== 'sys') continue;
+    const base = WRAP[calls[0].t.name];
+    if (!base) continue;
+    let name = base, k = 2;
+    while (taken.has(name)) name = `${base}${k++}`;
+    taken.add(name);
+    f.name = name;
+  }
+}
