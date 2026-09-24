@@ -157,9 +157,17 @@ export function renderProject(r: Result): Map<string, string> {
 	// self-contained per-instruction bundles: handler + all user code it reaches + the stubs it needs
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) {
-		const seen = new Set<number>([h.pc]), order = [h]
-		for (let i = 0; i < order.length; i++) for (const t of order[i].calls) { const g = byPc.get(t); if (g && !seen.has(t)) { seen.add(t); order.push(g) } }
-		const text = order.map(f => f.text).join('\n\n')
+		// breadth-first (closest helpers first) up to a size budget; the rest become declarations
+		const seen = new Set<number>([h.pc]), order = [h], decl: FuncOut[] = []
+		let size = h.text.length
+		for (let i = 0; i < order.length; i++) for (const t of order[i].calls) {
+			const g = byPc.get(t)
+			if (!g || seen.has(t)) continue
+			seen.add(t)
+			if (size + g.text.length <= 150_000) { order.push(g); size += g.text.length } else decl.push(g)
+		}
+		const sig = (f: FuncOut) => f.text.split('\n').find(l => l.startsWith('function '))!.replace(/^function /, 'declare function ').replace(/ \{$/, '')
+		const text = order.map(f => f.text).join('\n\n') + (decl.length ? `\n\n// not included (size budget), see ${[...new Set(decl.map(f => (home.get(f.name) ?? 'entrypoint') + '.ts'))].join(', ')}:\n` + decl.map(sig).join('\n') : '')
 		const used = new Set([...text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\(/g)].map(m => m[1]))
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls({ ...r, funcs: order })
