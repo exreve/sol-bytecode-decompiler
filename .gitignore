@@ -1,0 +1,8 @@
+node_modules/
+out/
+*.log
+samples/*.so
+!samples/memo.so
+!samples/token.so
+!samples/ata.so
+out.*.ts

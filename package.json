@@ -1,0 +1,23 @@
+{
+  "name": "sol-bytecode-decompiler",
+  "version": "0.1.0",
+  "description": "Solana sBPF bytecode decompiler emitting readable, semantically exact TypeScript",
+  "type": "module",
+  "bin": {
+    "sbpf-decompile": "src/cli.ts"
+  },
+  "scripts": {
+    "decompile": "node src/cli.ts",
+    "typecheck": "tsc -p .",
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=23.6"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "ts5": "npm:typescript@^5.9.3",
+    "typescript": "^7.0.2"
+  }
+}
