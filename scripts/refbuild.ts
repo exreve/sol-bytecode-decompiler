@@ -24,7 +24,7 @@ for (const v of matrix) {
 	if (filter && !v.name.includes(filter)) continue
 	const out = join(root, 'refbuild/out', v.name + '.so')
 	if (existsSync(out)) { console.log('skip (exists)', v.name); continue }
-	const wd = join('/tmp/claude-1000/rb', v.name)
+	const wd = join(homedir(), '.cache/sbf-rb', v.name)
 	rmSync(wd, { recursive: true, force: true })
 	cpSync(join(root, 'refbuild/templates', v.template), wd, { recursive: true })
 	for (const f of ['Cargo.toml', 'src/lib.rs']) {
@@ -42,6 +42,7 @@ for (const v of matrix) {
 		const rel = join(wd, 'target/sbf-solana-solana/release')
 		const so = readdirSync(rel).find(f => f.endsWith('.so'))!
 		cpSync(join(rel, so), out)
+		rmSync(join(wd, 'target'), { recursive: true, force: true })
 		console.log('built', v.name)
 	} catch (e: any) {
 		const msg = (e.stderr?.toString() ?? String(e)).split('\n').filter((l: string) => /^error/.test(l)).slice(0, 5).join('\n')

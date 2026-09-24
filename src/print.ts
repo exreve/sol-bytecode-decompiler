@@ -15,6 +15,7 @@ export interface PrintCtx {
   constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
   strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
+  frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
 }
@@ -76,6 +77,10 @@ export class Printer {
       case 'undef': return { t: 'undef', prec: P.prim };
       case 'bin': {
         const op = e.op;
+        if (op === 'add' && e.a.k === 'var' && e.b.k === 'const' && this.ctx.frameRef && this.ctx.varName(e.a.id) === 'fp') {
+          const r = this.ctx.frameRef(BigInt.asIntN(64, e.b.v));
+          if (r) return { t: r, prec: r.includes(' ') ? P.add : P.prim };
+        }
         if (op === 'add' && e.b.k === 'const' && BigInt.asIntN(64, e.b.v) < 0n && BigInt.asIntN(64, e.b.v) > -0x1_0000_0000n && !this.ctx.fnAddrName(e.b.v)) {
           return { t: `${this.u(e.a, P.add)} - ${fmtPos(-BigInt.asIntN(64, e.b.v))}`, prec: P.add };
         }

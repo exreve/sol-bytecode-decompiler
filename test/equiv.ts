@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs'
 import { decompile } from '../src/decompile.ts'
 import { emulate, TestMem, Abort, StepLimit, UNDEF, type Event } from '../src/emu.ts'
-import { fnAddr } from '../src/program.ts'
+import { fnAddr, loadProgram } from '../src/program.ts'
 import { parseFunctions, runFunction, EvalError } from './evaluate.ts'
 
 export interface EquivReport { funcs: number; trials: number; failures: { fn: string; seed: number; why: string }[]; errors: { fn: string; why: string }[] }
@@ -106,7 +106,7 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				console.log('DEC', b.ret?.toString(16), b.abort ?? '', b.err ?? ''); b.events.forEach((e: Event) => console.log('  ', fmtEv(e)))
 			}
 			report.trials++
-			const why = compare(a, b, f.returns)
+			const why = compare(a, b, f.returns, fp)
 			if (why) {
 				report.failures.push({ fn: fo.name, seed, why })
 				if (verbose) console.log(fo.name, seed, why)
@@ -131,8 +131,44 @@ const argsEq = (a: bigint[], b: bigint[], ind: boolean) => ind
 	? b.length <= a.length && b.every((v, i) => v === a[i]) && a.slice(b.length).every(v => v === UNDEF)
 	: a.length === b.length && a.every((v, i) => v === b[i])
 
-function compare(a: any, b: any, returns: boolean): string | null {
+/**
+ * Normalize an event trace: stores into the function's own frame between two barriers (calls or
+ * stores elsewhere) are folded into the byte-level frame state they produce, because stores to
+ * disjoint frame addresses commute.
+ */
+function normalize(events: Event[], lo: bigint, hi: bigint): Event[] {
+	const out: Event[] = []
+	let pending = new Map<bigint, number>()
+	const flush = () => {
+		for (const [addr, v] of [...pending].sort((x, y) => (x[0] < y[0] ? -1 : 1))) out.push({ k: 'store', addr, size: 1, v: BigInt(v) })
+		pending = new Map()
+	}
+	for (const e of events) {
+		if (e.k === 'store' && e.addr >= lo && e.addr + BigInt(e.size) <= hi) {
+			for (let i = 0; i < e.size; i++) pending.set(e.addr + BigInt(i), Number((e.v >> BigInt(8 * i)) & 0xffn))
+			continue
+		}
+		flush()
+		out.push(e)
+	}
+	flush()
+	return out
+}
+
+function compare(a: any, b: any, returns: boolean, fp?: bigint): string | null {
 	if (b.err) return `evaluator error: ${b.err}`
+	if (fp !== undefined) {
+		const lo = fp - 0x1000n, hi = fp
+		const isFrame = (e: Event) => e.k === 'store' && e.addr >= lo && e.addr + BigInt(e.size) <= hi
+		if (a.limit || b.limit) {
+			// partial trace: compare up to the last barrier both traces reached
+			const barriers = (ev: Event[]) => ev.reduce((n, e) => n + (isFrame(e) ? 0 : 1), 0)
+			const nb = Math.min(barriers(a.events), barriers(b.events))
+			// keep everything up to and including the nb-th barrier (frame stores after it may be incomplete)
+			const cut = (ev: Event[]) => { let k = 0; if (!nb) return []; for (let i = 0; i < ev.length; i++) if (!isFrame(ev[i]) && ++k === nb) return ev.slice(0, i + 1); return ev }
+			a = { ...a, events: normalize(cut(a.events), lo, hi) }; b = { ...b, events: normalize(cut(b.events), lo, hi) }
+		} else { a = { ...a, events: normalize(a.events, lo, hi) }; b = { ...b, events: normalize(b.events, lo, hi) } }
+	}
 	const n = Math.min(a.events.length, b.events.length)
 	for (let i = 0; i < n; i++) if (!evEq(a.events[i], b.events[i])) return `event #${i}: emu ${fmtEv(a.events[i])} vs dec ${fmtEv(b.events[i])}`
 	if (a.limit || b.limit) return null
@@ -147,7 +183,9 @@ if (import.meta.main) {
 	const trials = Number(process.argv[3] ?? 20)
 	const maxFuncs = Number(process.argv[4] ?? Infinity)
 	const t0 = Date.now()
-	const only = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(Number)) : undefined
+	const bytes = new Uint8Array(readFileSync(file))
+	const txt = loadProgram(bytes).elf.text.addr
+	const only = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(x => (x.startsWith('fn_') ? (parseInt(x.slice(3), 16) - txt) / 8 : Number(x)))) : undefined
 	const r = checkProgram(new Uint8Array(readFileSync(file)), trials, maxFuncs, only, true, process.env.SEED ? Number(process.env.SEED) : undefined)
 	console.log(`${file}: ${r.funcs} functions, ${r.trials} trials, ${r.failures.length} failing functions, ${r.errors.length} errors, ${Date.now() - t0}ms`)
 	for (const e of r.errors.slice(0, 10)) console.log('ERROR', e.fn, e.why)

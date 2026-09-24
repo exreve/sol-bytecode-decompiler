@@ -108,7 +108,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 
   // ---- phase 4: print ----
   const funcs: FuncOut[] = [];
-  for (const [pc, { f, body, irreducible }] of built) {
+  for (const [pc, bt] of built) {
+    const { f, irreducible } = bt;
+    // readable mode: `x = undef` (leftover register value) is shown by leaving x unassigned
+    const body = opts.sugar !== false ? stripUndef(bt.body) : bt.body;
     const names: string[] = [];
     const used = new Set<number>();
     const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') used.add(x.id); });
@@ -141,6 +144,32 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
+    // stack objects: frame addresses that escape (or are bases of copies) name an object; other
+    // frame accesses are shown relative to the nearest object below them
+    let frameDecl = '';
+    if (opts.sugar !== false) {
+      const fpv = f.vars.find(v => v.param === 10);
+      if (fpv) {
+        const { bases, all } = frameOffsets(f, fpv.id);
+        const sorted = [...bases].sort((a, b) => a - b);
+        const usedBases = new Set<number>();
+        const pick = (o: number): [number, number] => {
+          let b = o;
+          for (const x of sorted) { if (x <= o && o - x < 0x200) b = x; if (x > o) break; }
+          return [b, o - b];
+        };
+        for (const o of all) usedBases.add(pick(o)[0]);
+        const nm = (b: number) => `s${(-b).toString(16)}`;
+        ctx.frameRef = off => {
+          const o = Number(off);
+          if (o >= 0 || o < -0x2000) return undefined;
+          const [b, d] = pick(o);
+          return d ? `${nm(b)} + ${d < 10 ? d : '0x' + d.toString(16)}` : nm(b);
+        };
+        const list = [...usedBases].sort((a, b) => b - a);
+        if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
+      }
+    }
     const pr = new Printer(ctx);
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
@@ -156,6 +185,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (hdr) lines.push(`// ${hdr}`);
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
+    if (frameDecl) lines.push(frameDecl);
     if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]} = 0`).join(', ')}`);
     lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
     lines.push('}');
@@ -238,4 +268,44 @@ function nameThunks(p: Program) {
     taken.add(name);
     f.name = name;
   }
+}
+
+/** Frame offsets used in a function: `bases` = addresses that escape or start a copy/store run. */
+function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<number> } {
+  const bases = new Set<number>(), all = new Set<number>();
+  const off = (e: Expr): number | null => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const') ? Number(BigInt.asIntN(64, e.b.v)) : null;
+  const visit = (e: Expr, addr: boolean) => {
+    const o = off(e);
+    if (o !== null) { all.add(o); if (!addr) bases.add(o); return; }
+    switch (e.k) {
+      case 'bin': case 'cmp': case 'land': case 'lor': visit(e.a, false); visit(e.b, false); break;
+      case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, false); break;
+      case 'load': visit(e.addr, true); break;
+      case 'sel': visit(e.c, false); visit(e.a, false); visit(e.b, false); break;
+      case 'call': e.args.forEach(a => visit(a, false)); if (e.t.k === 'ind') visit(e.t.e, false); break;
+    }
+  };
+  for (const b of f.blocks) {
+    for (const s of b.stmts) {
+      if (s.k === 'store') { visit(s.addr, true); visit(s.v, false); }
+      else if (s.k === 'stores') { const o = off(s.addr); if (o !== null) { bases.add(o); all.add(o); } else visit(s.addr, true); s.vals.forEach(v => visit(v, false)); }
+      else if (s.k === 'copy') { for (const x of [s.dst, s.src]) { const o = off(x); if (o !== null) { bases.add(o); all.add(o); } else visit(x, false); } }
+      else stmtExprs(s).forEach(e => visit(e, false));
+    }
+    if (b.term.k === 'br') visit(b.term.c, false);
+    else if (b.term.k === 'ret' && b.term.e) visit(b.term.e, false);
+  }
+  return { bases, all };
+}
+
+function stripUndef(ns: Node[]): Node[] {
+  const out: Node[] = [];
+  for (const n of ns) {
+    if (n.k === 'stmt' && n.s.k === 'set' && n.s.e.k === 'undef') continue;
+    if (n.k === 'if') out.push({ ...n, then: stripUndef(n.then), else: stripUndef(n.else) });
+    else if (n.k === 'block' || n.k === 'loop') out.push({ ...n, body: stripUndef(n.body) } as Node);
+    else if (n.k === 'switch') out.push({ ...n, cases: n.cases.map(c => ({ ...c, body: stripUndef(c.body) })) });
+    else out.push(n);
+  }
+  return out;
 }

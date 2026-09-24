@@ -158,11 +158,17 @@ function elideArgArea(f: VarFunc) {
 	if (!fpv) return
 	const inArea = (o: number | null) => o !== null && o >= AREA && o < AREA + 0x100
 	let used = false, has = false
-	const scan = (e: Expr, isStoreAddr: boolean) => walkExpr(e, x => {
-		if (x === e && isStoreAddr) return
-		const o = fpOff(x, fpv.id)
-		if (o !== null && (o === 0 || inArea(o))) used = true
-	})
+	const scan = (e: Expr, _isStoreAddr: boolean): void => {
+		const o = fpOff(e, fpv.id)
+		if (o !== null) { if (o === 0 || inArea(o)) used = true; return }
+		switch (e.k) {
+			case 'bin': case 'cmp': case 'land': case 'lor': scan(e.a, false); scan(e.b, false); break
+			case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': scan(e.a, false); break
+			case 'load': scan(e.addr, false); break
+			case 'sel': scan(e.c, false); scan(e.a, false); scan(e.b, false); break
+			case 'call': e.args.forEach(a => scan(a, false)); if (e.t.k === 'ind') scan(e.t.e, false); break
+		}
+	}
 	for (const b of f.blocks) {
 		for (const s of b.stmts) {
 			if ((s.k === 'store' || s.k === 'stores') && inArea(fpOff(s.addr, fpv.id))) { has = true; if (s.k === 'store') scan(s.v, false); else s.vals.forEach(v => scan(v, false)); continue }
