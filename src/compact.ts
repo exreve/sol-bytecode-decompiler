@@ -74,9 +74,10 @@ function tryRun(ss: Store[], frame: boolean): Stmt | null {
 			const slo = srcs[0][1] - offs[0] + lo
 			const n = BigInt(ss.length * 8)
 			if (ascendingAsWritten) return { k: 'copy', dst: mk(base, lo), src: mk(sb, slo), n: ss.length * 8, pc: ss[0].pc }
-			// reordered: only when both are frame ranges that do not overlap
-			if (exprEq(sb, base) && (slo + n <= lo || lo + n <= slo)) return { k: 'copy', dst: mk(base, lo), src: mk(sb, slo), n: ss.length * 8, pc: ss[0].pc }
-			return null
+			if (order.every((v, i) => v === order.length - 1 - i)) return { k: 'copy', dst: mk(base, lo), src: mk(sb, slo), n: ss.length * 8, pc: ss[0].pc, rev: true }
+			// any other order: only frame-to-frame with disjoint ranges (no faults, no aliasing)
+			if (!exprEq(sb, base) || !(slo + n <= lo || lo + n <= slo)) return null
+			return { k: 'copy', dst: mk(base, lo), src: mk(sb, slo), n: ss.length * 8, pc: ss[0].pc }
 		}
 	}
 	if (!ss.every(s => pure(s.v))) return null

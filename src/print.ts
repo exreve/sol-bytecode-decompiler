@@ -168,7 +168,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
       }
       case 'eval': out.push(`${I(d)}void ${pr.u(s.e, P.unary)}`); break;
       case 'stores': { pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--; out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, ...s.vals.map(v => pr.u(v, P.assign))])})`); break; }
-      case 'copy': out.push(`${I(d)}copy(${joinArgs([pr.u(s.dst, P.assign), pr.u(s.src, P.assign), fmtConst(BigInt(s.n))])})`); break;
+      case 'copy': out.push(`${I(d)}copy${s.rev ? 'r' : ''}(${joinArgs([pr.u(s.dst, P.assign), pr.u(s.src, P.assign), fmtConst(BigInt(s.n))])})`); break;
       case 'trap': out.push(`${I(d)}trap(${JSON.stringify(s.msg)})`); break;
     }
   };

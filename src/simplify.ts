@@ -424,6 +424,7 @@ function dce(f: VarFunc): boolean {
     for (const b of f.blocks) {
       const out: Stmt[] = [];
       for (const s of b.stmts) {
+        if (s.k === 'set' && s.e.k === 'var' && s.e.id === s.dst) { any = true; continue; } // x = x
         if (s.k === 'set' && uses[s.dst] === 0) {
           const fx = hasSideEffectsOrMem(s.e);
           if (fx.load || fx.trap || fx.call) out.push({ k: 'eval', e: s.e, pc: s.pc });

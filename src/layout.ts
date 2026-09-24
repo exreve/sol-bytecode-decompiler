@@ -12,7 +12,7 @@ import { SYSCALLS } from './syscalls.ts'
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
 // x as u8|u16|u32: truncate | x as i8|i16|i32: truncate + sign-extend | (x as i64) < (y as i64): signed compare
 // ldN(addr) / stN(addr, v, ...): N-bit little-endian load/store (extra values go to addr+N, addr+2N, ...)
-// copy(dst, src, n): copy n bytes as ascending 8-byte words
+// copy(dst, src, n): copy n bytes as ascending 8-byte words (copyr: descending)
 // fp: frame pointer of the current function (stack locals at fp - k); undef: leftover register value; trap(): abort
 // "text" as a call argument = address of those rodata bytes (followed by their length)
 // memory map: 0x1_0000_0000 program/rodata, 0x2_0000_0000 stack, 0x3_0000_0000 heap, 0x4_0000_0000 input (serialized accounts + ix data)`
@@ -36,6 +36,7 @@ declare function st16(a: u64, ...v: u64[]): void
 declare function st32(a: u64, ...v: u64[]): void
 declare function st64(a: u64, ...v: u64[]): void
 declare function copy(dst: u64, src: u64, n: u64): void
+declare function copyr(dst: u64, src: u64, n: u64): void
 declare function sar(x: u64, n: u64): u64
 declare function sdiv(a: u64, b: u64): u64
 declare function srem(a: u64, b: u64): u64
