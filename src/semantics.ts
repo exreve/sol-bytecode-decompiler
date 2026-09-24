@@ -130,6 +130,7 @@ export class Semantics {
 	ixNames = new Map<number, string>()       // handler function pc -> instruction name (logs exactly one "Instruction: X")
 	processors = new Map<number, string[]>()  // function pc -> instruction names handled inline (native dispatchers)
 	ixLogs = new Map<number, string[]>()
+	logSites: { fpc: number; block: number; stmt: number; name: string }[] = []
 	anchor = false
 	constructor(p: Program) {
 		this.p = p
@@ -195,7 +196,11 @@ export class Semantics {
 				if (ptr === undefined || len === undefined || len > 200n) continue
 				const bytes = this.p.image.bytesAt(ptr, Number(len))
 				const m = bytes && /^Instruction: ([A-Za-z0-9_]+)$/.exec(Buffer.from(bytes).toString('latin1'))
-				if (m) { let l = this.ixLogs.get(f.pc); if (!l) this.ixLogs.set(f.pc, (l = [])); if (!l.includes(snake(m[1]))) l.push(snake(m[1])) }
+				if (m) {
+					let l = this.ixLogs.get(f.pc); if (!l) this.ixLogs.set(f.pc, (l = []))
+					if (!l.includes(snake(m[1]))) l.push(snake(m[1]))
+					this.logSites.push({ fpc: f.pc, block: b.id, stmt: b.stmts.indexOf(s), name: snake(m[1]) })
+				}
 			}
 		}
 	}
@@ -205,6 +210,33 @@ export class Semantics {
 			if (names.length === 1) this.ixNames.set(pc, names[0])
 			else this.processors.set(pc, names)
 		}
+		// in a processor, the first sizeable function called right after `log("Instruction: X")` handles X
+		const callers = new Map<number, Set<number>>()
+		for (const f of this.p.funcs.values()) for (const b of f.blocks) for (const s of b.stmts)
+			if (s.k === 'call' && s.t.k === 'fn') { let c = callers.get(s.t.pc); if (!c) callers.set(s.t.pc, (c = new Set())); c.add(f.pc) }
+		const found = new Map<number, string>()
+		const dup = new Set<number>()
+		for (const site of this.logSites) {
+			if (!this.processors.has(site.fpc)) continue
+			const f = this.p.funcs.get(site.fpc)!
+			let b = f.blocks[site.block], i = site.stmt + 1
+			for (let hops = 0; hops < 6 && b; hops++) {
+				let hit: number | undefined
+				for (; i < b.stmts.length; i++) {
+					const s = b.stmts[i]
+					if (s.k !== 'call' || s.t.k !== 'fn') continue
+					const g = this.p.funcs.get(s.t.pc)
+					let size = 0
+					if (g) for (const gb of g.blocks) size += gb.end - gb.start + 1
+					if (g && !g.noreturn && size >= 40 && callers.get(g.pc)?.size === 1) { hit = g.pc; break }
+				}
+				if (hit !== undefined) { if (found.has(hit) && found.get(hit) !== site.name) dup.add(hit); found.set(hit, site.name); break }
+				if (b.term.k !== 'jmp') break
+				b = f.blocks[b.term.to]; i = 0
+			}
+		}
+		const taken = new Set(this.ixNames.values())
+		for (const [pc, name] of found) if (!dup.has(pc) && !taken.has(name) && !this.ixNames.has(pc)) { this.ixNames.set(pc, name); taken.add(name) }
 	}
 
 	/** Resolve remaining discriminator-looking constants by expanding the verb x noun vocabulary. */
