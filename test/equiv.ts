@@ -86,6 +86,11 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				}
 			}
 			const a = run('emu') as any
+			// stores into promoted stack slots are variables in the output
+			if (f.promoted?.length) {
+				const pro = new Set(f.promoted.map(x => `${BigInt.asUintN(64, fp + BigInt(x.off))}:${x.size}`))
+				a.events = a.events.filter((e: Event) => !(e.k === 'store' && pro.has(`${e.addr}:${e.size}`)))
+			}
 			if (a.limit) cap = a.events.length + 1
 			const b = run('dec') as any
 			if (dumpSeed !== undefined && seed === dumpSeed) {

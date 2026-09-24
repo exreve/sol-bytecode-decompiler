@@ -247,6 +247,7 @@ export interface VarInfo {
 
 export interface VarFunc extends Func {
   vars: VarInfo[];
+  promoted?: { off: number; size: number; v: number }[]; // stack slots turned into variables
 }
 
 class UF {

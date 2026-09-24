@@ -6,6 +6,7 @@ import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
 import { Semantics } from './semantics.ts';
+import { promoteStack } from './stack.ts';
 
 export interface Options { sugar?: boolean; only?: Set<number>; comments?: boolean }
 
@@ -34,6 +35,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.only && !opts.only.has(f0.pc)) continue;
     const f = recoverVars(p, f0);
     optimizeFunc(f);
+    if (promoteStack(f)) optimizeFunc(f);
     const st = structure(f);
     const body = cleanup(st, f.returns);
     // ---- naming ----
