@@ -84,6 +84,11 @@ spl-token-2022 shows its own processor code; programs that merely depend on it g
 decompile time for unresolved discriminator-like constants. Program-local strings (type names found
 in rodata) are also hashed.
 
+```
+node src/selector.ts 0xc88775e1919ec6f8     # -> i:swap   (u64 as printed, or raw byte hex)
+node src/selector.ts open_position          # -> instruction / account / event discriminators
+```
+
 ## Exactness and how it is verified
 
 Every transformation is an identity on the VM semantics — with one documented assumption in the

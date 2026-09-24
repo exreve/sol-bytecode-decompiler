@@ -4,7 +4,8 @@
   "description": "Solana sBPF bytecode decompiler emitting readable, semantically exact TypeScript",
   "type": "module",
   "bin": {
-    "sbpf-decompile": "src/cli.ts"
+    "sbpf-decompile": "src/cli.ts",
+    "sbpf-selector": "src/selector.ts"
   },
   "scripts": {
     "decompile": "node src/cli.ts",
