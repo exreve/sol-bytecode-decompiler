@@ -90,6 +90,26 @@ const PROGRAM_ERRORS = ['', 'Custom(0)', 'InvalidArgument', 'InvalidInstructionD
 	'UnsupportedSysvar', 'IllegalOwner', 'MaxAccountsDataAllocationsExceeded', 'InvalidRealloc', 'MaxInstructionTraceLengthExceeded',
 	'BuiltinProgramsMustConsumeComputeUnits', 'InvalidAccountOwner', 'ArithmeticOverflow', 'Immutable', 'IncorrectAuthority']
 
+/** anchor_lang::error::ErrorCode */
+const ANCHOR_ERRORS: Record<number, string> = {
+	100: 'InstructionMissing', 101: 'InstructionFallbackNotFound', 102: 'InstructionDidNotDeserialize', 103: 'InstructionDidNotSerialize',
+	1000: 'IdlInstructionStub', 1001: 'IdlInstructionInvalidProgram', 1002: 'IdlAccountNotEmpty', 1500: 'EventInstructionStub',
+	2000: 'ConstraintMut', 2001: 'ConstraintHasOne', 2002: 'ConstraintSigner', 2003: 'ConstraintRaw', 2004: 'ConstraintOwner',
+	2005: 'ConstraintRentExempt', 2006: 'ConstraintSeeds', 2007: 'ConstraintExecutable', 2008: 'ConstraintState', 2009: 'ConstraintAssociated',
+	2010: 'ConstraintAssociatedInit', 2011: 'ConstraintClose', 2012: 'ConstraintAddress', 2013: 'ConstraintZero', 2014: 'ConstraintTokenMint',
+	2015: 'ConstraintTokenOwner', 2016: 'ConstraintMintMintAuthority', 2017: 'ConstraintMintFreezeAuthority', 2018: 'ConstraintMintDecimals',
+	2019: 'ConstraintSpace', 2020: 'ConstraintAccountIsNone', 2021: 'ConstraintTokenTokenProgram', 2022: 'ConstraintMintTokenProgram',
+	2023: 'ConstraintAssociatedTokenTokenProgram',
+	2500: 'RequireViolated', 2501: 'RequireEqViolated', 2502: 'RequireKeysEqViolated', 2503: 'RequireNeqViolated', 2504: 'RequireKeysNeqViolated',
+	2505: 'RequireGtViolated', 2506: 'RequireGteViolated',
+	3000: 'AccountDiscriminatorAlreadySet', 3001: 'AccountDiscriminatorNotFound', 3002: 'AccountDiscriminatorMismatch', 3003: 'AccountDidNotDeserialize',
+	3004: 'AccountDidNotSerialize', 3005: 'AccountNotEnoughKeys', 3006: 'AccountNotMutable', 3007: 'AccountOwnedByWrongProgram',
+	3008: 'InvalidProgramId', 3009: 'InvalidProgramExecutable', 3010: 'AccountNotSigner', 3011: 'AccountNotSystemOwned',
+	3012: 'AccountNotInitialized', 3013: 'AccountNotProgramData', 3014: 'AccountNotAssociatedTokenAccount', 3015: 'AccountSysvarMismatch',
+	3016: 'AccountReallocExceedsLimit', 3017: 'AccountDuplicateReallocs', 4100: 'DeclaredProgramIdMismatch', 4101: 'TryingToInitPayerAsProgramAccount',
+	4102: 'InvalidNumericConversion', 5000: 'Deprecated',
+}
+
 const sha8 = (s: string) => createHash('sha256').update(s).digest().readBigUInt64LE(0)
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toLowerCase()
 
@@ -108,8 +128,10 @@ export class Semantics {
 	keyAddrs = new Map<bigint, string>()      // rodata address of a 32-byte known key -> name
 	disc = new Map<bigint, string>()          // 8-byte discriminator value -> "ix:swap" / "account:Pool"
 	ixNames = new Map<number, string>()       // function pc -> instruction name (from Anchor logs)
+	anchor = false
 	constructor(p: Program) {
 		this.p = p
+		for (const r of p.image.regions) if (!r.exec && Buffer.from(r.bytes).includes('AnchorError occurred')) this.anchor = true
 		for (const [k, n] of Object.entries(KNOWN_KEYS)) {
 			const b = unb58(k)
 			if (k.startsWith('1111')) continue // all-zero chunks are too common to annotate
@@ -200,6 +222,7 @@ export class Semantics {
 		const d = looksRandom(v) ? this.disc.get(v) : undefined
 		if (d) return d
 		if (role === 'addr') return undefined
+		if (this.anchor && v >= 100n && v <= 5000n && ANCHOR_ERRORS[Number(v)]) return `anchor::${ANCHOR_ERRORS[Number(v)]}`
 		const k = this.keyAddrs.get(v)
 		if (k) return `&${k}`
 		const c = this.keyChunks.get(v)

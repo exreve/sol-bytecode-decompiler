@@ -29,7 +29,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
         Ix::Deposit { amount } => {
             let mut s = State::try_from_slice(&state.data.borrow()).map_err(|_| ProgramError::InvalidAccountData)?;
-            s.amount = s.amount.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?;
+            s.amount = s.amount.checked_add(amount).ok_or(ProgramError::InvalidArgument)?;
             let src = next_account_info(it)?; let dst = next_account_info(it)?; let tp = next_account_info(it)?;
             let acc = spl_token::state::Account::unpack(&src.data.borrow())?;
             msg!("bal {}", acc.amount);

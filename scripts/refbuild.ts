@@ -6,20 +6,27 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-interface Variant { name: string; template: string; toolchain: string; vars: Record<string, string>; pins?: [string, string][] }
-const T141 = { toolchain: 'sbf141', rust: '1.75' }
+interface Variant { name: string; template: string; tools: string; rust: string; vars: Record<string, string>; pins?: [string, string][] }
+// toolchains newer than v1.41 need glibc >= 2.34: they run inside an ubuntu:24.04 container
+const TOOLS: Record<string, { rust: string; docker: boolean }> = { 'v1.41': { rust: '1.75', docker: false }, 'v1.43': { rust: '1.79', docker: true }, 'v1.48': { rust: '1.84', docker: true } }
 const matrix: Variant[] = []
-for (const [sol, spl] of [['1.16.27', '4.0.0'], ['1.17.34', '4.0.0'], ['1.18.26', '4.0.0']]) {
-	matrix.push({ name: `native-sol${sol}-t141`, template: 'native', toolchain: T141.toolchain, vars: { RUST: T141.rust, SOLANA: sol, SPL_TOKEN: spl }, pins: [['blake3', '1.5.5'], ['cc', '1.0.94']] })
-}
-for (const [anchor, bump] of [['0.28.0', '*ctx.bumps.get("vault").unwrap()'], ['0.29.0', 'ctx.bumps.vault'], ['0.30.1', 'ctx.bumps.vault']]) {
-	matrix.push({ name: `anchor${anchor}-t141`, template: 'anchor', toolchain: T141.toolchain, vars: { RUST: T141.rust, ANCHOR: anchor, BUMP: bump }, pins: [['blake3', '1.5.5'], ['cc', '1.0.94']] })
-}
+const PINS141: [string, string][] = [['blake3', '1.5.5'], ['cc', '1.0.94']]
+const nat = (tools: string, sol: string, spl: string, pins: [string, string][] = []) => matrix.push({ name: `native-sol${sol}-t${tools.slice(1)}`, template: 'native', tools, rust: TOOLS[tools].rust, vars: { SOLANA: sol, SPL_TOKEN: spl }, pins })
+const anc = (tools: string, anchor: string, bump: string, pins: [string, string][] = []) => matrix.push({ name: `anchor${anchor}-t${tools.slice(1)}`, template: 'anchor', tools, rust: TOOLS[tools].rust, vars: { ANCHOR: anchor, BUMP: bump }, pins })
+for (const sol of ['1.16.27', '1.17.34', '1.18.26']) nat('v1.41', sol, '4.0.0', PINS141)
+anc('v1.41', '0.28.0', '*ctx.bumps.get("vault").unwrap()', PINS141)
+anc('v1.41', '0.29.0', 'ctx.bumps.vault', PINS141)
+anc('v1.41', '0.30.1', 'ctx.bumps.vault', PINS141)
+nat('v1.43', '1.18.26', '4.0.0', PINS141)
+nat('v1.43', '2.1.21', '7.0.0')
+anc('v1.43', '0.30.1', 'ctx.bumps.vault', PINS141)
+anc('v1.43', '0.31.1', 'ctx.bumps.vault')
+nat('v1.48', '2.2.1', '8.0.0')
+anc('v1.48', '0.31.1', 'ctx.bumps.vault')
 
 const filter = process.argv[2]
 const root = process.cwd()
 mkdirSync(join(root, 'refbuild/out'), { recursive: true })
-const tools = (tc: string) => join(homedir(), '.cache/sbf-tools', 'v' + tc.replace('sbf', '').replace(/^(\d)(\d+)$/, '$1.$2'))
 for (const v of matrix) {
 	if (filter && !v.name.includes(filter)) continue
 	const out = join(root, 'refbuild/out', v.name + '.so')
@@ -29,7 +36,7 @@ for (const v of matrix) {
 	cpSync(join(root, 'refbuild/templates', v.template), wd, { recursive: true })
 	for (const f of ['Cargo.toml', 'src/lib.rs']) {
 		let s = readFileSync(join(wd, f), 'utf8')
-		for (const [k, val] of Object.entries(v.vars)) s = s.replaceAll(`{{${k}}}`, val)
+		for (const [k, val] of Object.entries({ ...v.vars, RUST: v.rust })) s = s.replaceAll(`{{${k}}}`, val)
 		writeFileSync(join(wd, f), s)
 	}
 	const sh = (cmd: string, env: Record<string, string> = {}) => execSync(cmd, { cwd: wd, stdio: 'pipe', env: { ...process.env, ...env }, maxBuffer: 1 << 26 }).toString()
@@ -37,8 +44,16 @@ for (const v of matrix) {
 		sh('cargo generate-lockfile', { CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: 'fallback' })
 		for (const [pkg, ver] of v.pins ?? []) { try { sh(`cargo update -p ${pkg} --precise ${ver}`) } catch { /* not in graph */ } }
 		writeFileSync(join(wd, 'Cargo.lock'), readFileSync(join(wd, 'Cargo.lock'), 'utf8').replace(/^version = 4$/m, 'version = 3'))
-		const t = tools(v.toolchain)
-		sh(`cargo +${v.toolchain} build --release --target sbf-solana-solana`, { PATH: `${t}/llvm/bin:${process.env.PATH}`, CC: 'clang', AR: 'llvm-ar' })
+		const t = join(homedir(), '.cache/sbf-tools', v.tools)
+		if (TOOLS[v.tools].docker) {
+			const uid = execSync('id -u').toString().trim(), gid = execSync('id -g').toString().trim()
+			const home = join(homedir(), '.cache/sbf-cargo-' + v.tools)
+			mkdirSync(home, { recursive: true })
+			sh(`docker run --rm -u ${uid}:${gid} -v ${t}:/tools:ro -v ${home}:/cargo -v ${wd}:/w -w /w -e CARGO_HOME=/cargo -e HOME=/tmp -e PATH=/tools/llvm/bin:/tools/rust/bin:/usr/bin:/bin -e CC=clang -e AR=llvm-ar -e RUSTC=/tools/rust/bin/rustc sbf-builder sh -c "cargo fetch && cargo build --offline --release --target sbf-solana-solana"`)
+		} else {
+			execSync(`rustup toolchain link sbf-${v.tools} ${t}/rust`, { stdio: 'ignore' })
+			sh(`cargo +sbf-${v.tools} build --release --target sbf-solana-solana`, { PATH: `${t}/llvm/bin:${process.env.PATH}`, CC: 'clang', AR: 'llvm-ar' })
+		}
 		const rel = join(wd, 'target/sbf-solana-solana/release')
 		const so = readdirSync(rel).find(f => f.endsWith('.so'))!
 		cpSync(join(rel, so), out)
