@@ -99,7 +99,11 @@ function summary(r: Result): string[] {
 	const lines = [`// program: sBPF v${p.version}, ${p.insns.length} instructions, ${p.funcs.size} functions (${r.funcs.length} decompiled, ${r.libCount} library)`]
 	if (r.instructions.length) {
 		lines.push(r.anchor ? `// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data, as u64):` : `// instruction handlers (from their "Instruction: X" logs):`)
-		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) lines.push(r.anchor ? `//   ${i.name.padEnd(28)} 0x${i.disc.toString(16).padStart(16, '0')}  -> ix_${i.name}` : `//   ${i.name.padEnd(28)} -> ix_${i.name}`)
+		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) {
+			lines.push(r.anchor ? `//   ${i.name.padEnd(28)} 0x${i.disc.toString(16).padStart(16, '0')}  -> ix_${i.name}` : `//   ${i.name.padEnd(28)} -> ix_${i.name}`)
+			if (i.args?.length) lines.push(`//     args: ${i.args.join(', ')}`)
+			if (i.accounts?.length) lines.push(`//     accounts: ${i.accounts.join(', ')}`)
+		}
 	}
 	for (const pr of r.processors) lines.push(`// instructions handled inline by ${pr.fn} (search its "Instruction: X" log calls): ${pr.names.join(', ')}`)
 	return lines

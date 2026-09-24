@@ -7,6 +7,8 @@ designed to be read by LLMs reviewing many programs.
 node src/cli.ts program.so                 # single file to stdout
 node src/cli.ts program.so -o out.ts       # single file
 node src/cli.ts program.so -o outdir/      # project layout (see below)
+  --idl f.json         Anchor IDL: instruction args/accounts (signer/mut/pda), custom error names
+  --program-id <id>    fetch the on-chain Anchor IDL (mainnet, or $RPC)
   --full   also decompile recognized library functions
   --raw    no Solana-specific names/comments (the form verified by the test harness)
 ```

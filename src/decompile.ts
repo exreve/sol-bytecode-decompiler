@@ -7,6 +7,7 @@ import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
 import { Semantics, constsIn } from './semantics.ts';
 import { renderSingle } from './layout.ts';
+import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
@@ -17,6 +18,7 @@ export interface Options {
   only?: Set<number>;    // restrict to these function entry pcs
   full?: boolean;        // decompile library functions too (default: typed stubs only)
   exactMemory?: boolean; // no stack promotion / stack-arg elision (exact even for memory-unsafe executions)
+  idl?: IdlInfo;         // Anchor IDL of the program (names, accounts, args, error codes)
 }
 
 export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
@@ -24,7 +26,7 @@ export interface Result {
   program: Program;
   funcs: FuncOut[];
   stubs: string[];                 // `declare function` lines for referenced library functions
-  instructions: { name: string; pc: number; disc: bigint }[];
+  instructions: { name: string; pc: number; disc: bigint; args?: string[]; accounts?: string[] }[];
   processors: { fn: string; names: string[] }[];  // functions handling several instructions inline (native programs)
   anchor: boolean;
   libCount: number;
@@ -46,7 +48,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // ---- phase 1: whole-program analysis ----
   const p = loadProgram(bytes);
   inferSignatures(p);
-  const sem = new Semantics(p);
+  const sem = new Semantics(p, opts.idl);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
@@ -219,7 +221,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     lines.push('}');
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
   }
-  const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => ({ name, pc, disc: sem.discOf(name) }));
+  const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => {
+    const d = opts.idl?.instructions.find(i => i.name === name);
+    return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts };
+  });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
   res.text = renderSingle(res);

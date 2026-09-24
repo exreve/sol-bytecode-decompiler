@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { Program, Func } from './program.ts'
 import { type Expr, walkExpr } from './ir.ts'
 import { previewString } from './fingerprint.ts'
+import type { IdlInfo } from './idl.ts'
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 export function b58(b: Uint8Array): string {
@@ -132,8 +133,10 @@ export class Semantics {
 	ixLogs = new Map<number, string[]>()
 	logSites: { fpc: number; block: number; stmt: number; name: string }[] = []
 	anchor = false
-	constructor(p: Program) {
+	idl?: IdlInfo
+	constructor(p: Program, idl?: IdlInfo) {
 		this.p = p
+		this.idl = idl
 		for (const r of p.image.regions) if (!r.exec && Buffer.from(r.bytes).includes('AnchorError occurred')) this.anchor = true
 		for (const [k, n] of Object.entries(KNOWN_KEYS)) {
 			const b = unb58(k)
@@ -142,6 +145,7 @@ export class Semantics {
 			for (let i = 0; i < 4; i++) this.keyChunks.set(dv.getBigUint64(i * 8, true), i === 0 ? n : `${n}[${i}]`)
 		}
 		this.scanRodata()
+		if (idl) for (const [v, n] of idl.discs) this.disc.set(v, n)
 		this.scanInstructionLogs()
 		this.classifyInstructionLogs()
 	}
@@ -265,6 +269,7 @@ export class Semantics {
 		if (d) return d
 		if (role === 'addr') return undefined
 		if (this.anchor && v >= 100n && v <= 5000n && ANCHOR_ERRORS[Number(v)]) return `anchor::${ANCHOR_ERRORS[Number(v)]}`
+		if (this.idl && v >= 6000n && v < 0x10000n && this.idl.errors.has(Number(v))) return `error::${this.idl.errors.get(Number(v))}`
 		const k = this.keyAddrs.get(v)
 		if (k) return `&${k}`
 		const c = this.keyChunks.get(v)
