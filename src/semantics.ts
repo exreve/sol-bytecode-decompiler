@@ -127,7 +127,9 @@ export class Semantics {
 	keyChunks = new Map<bigint, string>()     // u64 chunk of a well-known key -> comment
 	keyAddrs = new Map<bigint, string>()      // rodata address of a 32-byte known key -> name
 	disc = new Map<bigint, string>()          // 8-byte discriminator value -> "ix:swap" / "account:Pool"
-	ixNames = new Map<number, string>()       // function pc -> instruction name (from Anchor logs)
+	ixNames = new Map<number, string>()       // handler function pc -> instruction name (logs exactly one "Instruction: X")
+	processors = new Map<number, string[]>()  // function pc -> instruction names handled inline (native dispatchers)
+	ixLogs = new Map<number, string[]>()
 	anchor = false
 	constructor(p: Program) {
 		this.p = p
@@ -140,6 +142,7 @@ export class Semantics {
 		}
 		this.scanRodata()
 		this.scanInstructionLogs()
+		this.classifyInstructionLogs()
 	}
 
 	/** Known keys stored in rodata; identifier-like strings as discriminator dictionary. */
@@ -192,8 +195,15 @@ export class Semantics {
 				if (ptr === undefined || len === undefined || len > 200n) continue
 				const bytes = this.p.image.bytesAt(ptr, Number(len))
 				const m = bytes && /^Instruction: ([A-Za-z0-9_]+)$/.exec(Buffer.from(bytes).toString('latin1'))
-				if (m) this.ixNames.set(f.pc, snake(m[1]))
+				if (m) { let l = this.ixLogs.get(f.pc); if (!l) this.ixLogs.set(f.pc, (l = [])); if (!l.includes(snake(m[1]))) l.push(snake(m[1])) }
 			}
+		}
+	}
+
+	classifyInstructionLogs() {
+		for (const [pc, names] of this.ixLogs) {
+			if (names.length === 1) this.ixNames.set(pc, names[0])
+			else this.processors.set(pc, names)
 		}
 	}
 
@@ -244,7 +254,10 @@ export class Semantics {
 	sugar(_e: Expr, _pr: (e: Expr, prec: number) => string): string | undefined { return undefined }
 	funcComment(f: Func): string | undefined {
 		const ix = this.ixNames.get(f.pc)
-		return ix ? `instruction handler: ${ix} (discriminator sha256("global:${ix}")[..8] = 0x${sha8(`global:${ix}`).toString(16)})` : undefined
+		if (ix) return this.anchor ? `instruction handler: ${ix} (discriminator sha256("global:${ix}")[..8] = 0x${sha8(`global:${ix}`).toString(16)})` : `instruction handler: ${ix}`
+		const pr = this.processors.get(f.pc)
+		if (pr) return `instruction processor (handles inline, see its "Instruction: X" logs): ${pr.join(', ')}`
+		return undefined
 	}
 	header(): string { return '' }
 }

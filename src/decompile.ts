@@ -25,6 +25,8 @@ export interface Result {
   funcs: FuncOut[];
   stubs: string[];                 // `declare function` lines for referenced library functions
   instructions: { name: string; pc: number; disc: bigint }[];
+  processors: { fn: string; names: string[] }[];  // functions handling several instructions inline (native programs)
+  anchor: boolean;
   libCount: number;
   text: string;                    // single-file rendering
 }
@@ -218,7 +220,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
   }
   const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => ({ name, pc, disc: sem.discOf(name) }));
-  const res: Result = { program: p, funcs, stubs, instructions, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
+  const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
   res.text = renderSingle(res);
   return res;
 }

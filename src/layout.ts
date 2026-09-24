@@ -48,7 +48,9 @@ export interface Group { key: string; title: string; funcs: FuncOut[] }
 
 export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } {
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
-	const handlers = r.funcs.filter(f => f.name.startsWith('ix_'))
+	const procNames = new Set(r.processors.map(x => x.fn))
+	const isRoot = (f: FuncOut) => f.name.startsWith('ix_') || procNames.has(f.name)
+	const handlers = r.funcs.filter(isRoot)
 	const owners = new Map<number, Set<number>>()
 	for (const h of handlers) {
 		const seen = new Set<number>([h.pc])
@@ -56,19 +58,21 @@ export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } 
 		while (q.length) {
 			const x = q.pop()!
 			let o = owners.get(x); if (!o) owners.set(x, (o = new Set())); o.add(h.pc)
-			for (const t of byPc.get(x)?.calls ?? []) if (byPc.has(t) && !seen.has(t) && !byPc.get(t)!.name.startsWith('ix_')) { seen.add(t); q.push(t) }
+			for (const t of byPc.get(x)?.calls ?? []) if (byPc.has(t) && !seen.has(t) && !isRoot(byPc.get(t)!)) { seen.add(t); q.push(t) }
 		}
 	}
 	const entry: Group = { key: 'entrypoint', title: 'entrypoint, dispatcher and code outside instruction handlers', funcs: [] }
 	const shared: Group = { key: 'shared', title: 'helpers used by several instructions', funcs: [] }
-	const ix = new Map<number, Group>(handlers.map(h => [h.pc, { key: `ix/${h.name.slice(3)}`, title: `instruction ${h.name.slice(3)}`, funcs: [] }]))
+	const ix = new Map<number, Group>(handlers.map(h => [h.pc, h.name.startsWith('ix_')
+		? { key: `ix/${h.name.slice(3)}`, title: `instruction ${h.name.slice(3)}`, funcs: [] }
+		: { key: `processor_${h.name}`, title: `instruction processor ${h.name} (handles several instructions inline)`, funcs: [] }]))
 	// order: handler first, then helpers in call order
 	const placed = new Set<number>()
 	for (const h of handlers) {
 		const g = ix.get(h.pc)!
 		const order: number[] = []
 		const seen = new Set<number>()
-		const dfs = (x: number) => { if (seen.has(x)) return; seen.add(x); order.push(x); for (const t of byPc.get(x)?.calls ?? []) if (byPc.has(t) && owners.get(t)?.size === 1 && owners.get(t)!.has(h.pc) && !byPc.get(t)!.name.startsWith('ix_')) dfs(t) }
+		const dfs = (x: number) => { if (seen.has(x)) return; seen.add(x); order.push(x); for (const t of byPc.get(x)?.calls ?? []) if (byPc.has(t) && owners.get(t)?.size === 1 && owners.get(t)!.has(h.pc) && !isRoot(byPc.get(t)!)) dfs(t) }
 		dfs(h.pc)
 		for (const x of order) { g.funcs.push(byPc.get(x)!); placed.add(x) }
 	}
@@ -94,9 +98,10 @@ function summary(r: Result): string[] {
 	const p = r.program
 	const lines = [`// program: sBPF v${p.version}, ${p.insns.length} instructions, ${p.funcs.size} functions (${r.funcs.length} decompiled, ${r.libCount} library)`]
 	if (r.instructions.length) {
-		lines.push(`// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data):`)
-		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) lines.push(`//   ${i.name.padEnd(28)} 0x${i.disc.toString(16).padStart(16, '0')}  -> ix_${i.name}`)
+		lines.push(r.anchor ? `// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data, as u64):` : `// instruction handlers (from their "Instruction: X" logs):`)
+		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) lines.push(r.anchor ? `//   ${i.name.padEnd(28)} 0x${i.disc.toString(16).padStart(16, '0')}  -> ix_${i.name}` : `//   ${i.name.padEnd(28)} -> ix_${i.name}`)
 	}
+	for (const pr of r.processors) lines.push(`// instructions handled inline by ${pr.fn} (search its "Instruction: X" log calls): ${pr.names.join(', ')}`)
 	return lines
 }
 
