@@ -203,12 +203,14 @@ function substVars(e: Expr, m: Map<number, Expr>): Expr {
   return go(e);
 }
 
-function mapStmtExprs(s: Stmt, f: (e: Expr) => Expr): Stmt {
+export function mapStmtExprs(s: Stmt, f: (e: Expr) => Expr): Stmt {
   switch (s.k) {
     case 'set': return { ...s, e: f(s.e) };
     case 'store': return { ...s, addr: f(s.addr), v: f(s.v) };
     case 'eval': return { ...s, e: f(s.e) };
     case 'call': return { ...s, args: s.args.map(f), t: s.t.k === 'ind' ? { k: 'ind', e: f(s.t.e) } : s.t, extra: s.extra?.map(f) };
+    case 'stores': return { ...s, addr: f(s.addr), vals: s.vals.map(f) };
+    case 'copy': return { ...s, dst: f(s.dst), src: f(s.src) };
     default: return s;
   }
 }
@@ -219,6 +221,8 @@ export function stmtExprs(s: Stmt): Expr[] {
     case 'store': return [s.addr, s.v];
     case 'eval': return [s.e];
     case 'call': return [...s.args, ...(s.t.k === 'ind' ? [s.t.e] : []), ...(s.extra ?? [])];
+    case 'stores': return [s.addr, ...s.vals];
+    case 'copy': return [s.dst, s.src];
     default: return [];
   }
 }
@@ -347,7 +351,13 @@ function inlineLocal(f: VarFunc): boolean {
         if (j === b.stmts.length) break;
         const t = b.stmts[j];
         if ((t.k === 'set' || t.k === 'call') && t.dst >= 0 && reads.has(t.dst)) break;
-        if ((fx.load || fx.trap) && (t.k === 'store' || t.k === 'call' || t.k === 'trap')) break;
+        // effects of the statement we would move past
+        const te = stmtExprs(t).map(hasSideEffectsOrMem);
+        const tLoads = te.some(g => g.load), tCalls = t.k === 'call' || te.some(g => g.call);
+        const tWrites = t.k === 'store' || t.k === 'stores' || t.k === 'copy' || t.k === 'trap' || tCalls;
+        if ((fx.load || fx.trap || fx.call) && tWrites) break;
+        // a call may write memory that t reads, and may trap before t's own traps
+        if (fx.call && (tLoads || te.some(g => g.trap))) break;
         if (t.k === 'set' || t.k === 'eval') {
           // moving a trapping expression past another trapping expression is fine (both abort)
         }

@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { decompile } from '../src/decompile.ts'
 const [file, name] = process.argv.slice(2)
-const res = decompile(new Uint8Array(readFileSync(file)), { sugar: false })
+const res = decompile(new Uint8Array(readFileSync(file)), { sugar: false, full: true })
 const f = res.funcs.find(x => x.name === name)!
 console.log(f.text)
 const p = res.program

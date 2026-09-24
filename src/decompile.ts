@@ -5,8 +5,10 @@ import { optimizeFunc, stmtExprs } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr } from './ir.ts';
-import { Semantics } from './semantics.ts';
+import { Semantics, constsIn } from './semantics.ts';
+import { renderSingle } from './layout.ts';
 import { promoteStack } from './stack.ts';
+import { compactStores } from './compact.ts';
 import { classify, type LibInfo } from './library.ts';
 
 export interface Options {
@@ -15,8 +17,15 @@ export interface Options {
   full?: boolean;        // decompile library functions too (default: typed stubs only)
 }
 
-export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[] }
-export interface Result { program: Program; funcs: FuncOut[]; header: string; text: string }
+export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
+export interface Result {
+  program: Program;
+  funcs: FuncOut[];
+  stubs: string[];                 // `declare function` lines for referenced library functions
+  instructions: { name: string; pc: number; disc: bigint }[];
+  libCount: number;
+  text: string;                    // single-file rendering
+}
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
@@ -27,42 +36,70 @@ function* shortNames(): Generator<string> {
   for (let i = 0; ; i++) yield `v${i}`;
 }
 
+interface Built { f: VarFunc; body: Node[]; irreducible: boolean }
+
 export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
+  // ---- phase 1: whole-program analysis ----
   const p = loadProgram(bytes);
   inferSignatures(p);
   const sem = new Semantics(p);
-  const funcs: FuncOut[] = [];
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
+  for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
-  for (const f of p.funcs.values()) fnByAddr.set(fnAddr(p, f.pc), f.name);
+  const pcByAddr = new Map<bigint, number>();
+  for (const f of p.funcs.values()) { fnByAddr.set(fnAddr(p, f.pc), f.name); pcByAddr.set(fnAddr(p, f.pc), f.pc); }
 
-  // library functions directly called from user code get a one-line declaration
-  const stubs: string[] = [];
-  const called = new Set<number>();
-  for (const f0 of p.funcs.values()) {
-    if (isLib(f0.pc)) continue;
-    for (const b of f0.blocks) for (const s of b.stmts) if (s.k === 'call' && s.t.k === 'fn' && isLib(s.t.pc)) called.add(s.t.pc);
-    // function pointers taken by user code
-    for (const b of f0.blocks) for (const s of b.stmts) if (s.k === 'set' && s.e.k === 'const') { const g = fnByAddr.get(s.e.v); if (g) for (const [pc, l] of libs) if (l.lib && p.funcs.get(pc)!.name === g) called.add(pc); }
-  }
-  for (const pc of [...called].sort((a, b) => a - b)) {
-    const f = p.funcs.get(pc)!, info = libs.get(pc)!;
-    const params = Array.from({ length: f.nparams }, (_, i) => `${'abcde'[i]}: u64`).concat(f.extraIn.map(r => `r${r}: u64`));
-    stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${info.hint ? ' ' + info.hint : ''}`);
-  }
-
+  // ---- phase 2: build every user function ----
+  const built = new Map<number, Built>();
   for (const f0 of p.funcs.values()) {
     if (opts.only && !opts.only.has(f0.pc)) continue;
     if (isLib(f0.pc)) continue;
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (promoteStack(f)) optimizeFunc(f);
+    compactStores(f);
     const st = structure(f);
-    const body = cleanup(st, f.returns);
-    // ---- naming ----
+    built.set(f.pc, { f, body: cleanup(st, f.returns), irreducible: st.irreducible });
+  }
+
+  // ---- phase 3: resolve discriminator-looking constants against the selector vocabulary ----
+  const consts = new Set<bigint>();
+  for (const { f } of built.values()) for (const b of f.blocks) {
+    for (const s of b.stmts) stmtExprs(s).forEach(e => constsIn(e, consts));
+    if (b.term.k === 'br') constsIn(b.term.c, consts);
+  }
+  if (opts.sugar !== false) sem.resolveCandidates(consts);
+
+  // ---- library stubs referenced from user code ----
+  const callsOf = (f: VarFunc) => {
+    const out = new Set<number>();
+    const visitE = (e: Expr) => walkExpr(e, x => {
+      if (x.k === 'call' && x.t.k === 'fn') out.add(x.t.pc);
+      if (x.k === 'const') { const t = pcByAddr.get(x.v); if (t !== undefined) out.add(t); }
+    });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) { if (s.k === 'call' && s.t.k === 'fn') out.add(s.t.pc); stmtExprs(s).forEach(visitE); }
+      if (b.term.k === 'br') visitE(b.term.c);
+      else if (b.term.k === 'ret' && b.term.e) visitE(b.term.e);
+    }
+    return out;
+  };
+  const stubs: string[] = [];
+  const calledLib = new Set<number>();
+  const callMap = new Map<number, Set<number>>();
+  for (const [pc, { f }] of built) { const c = callsOf(f); callMap.set(pc, c); for (const t of c) if (isLib(t)) calledLib.add(t); }
+  for (const pc of [...calledLib].sort((a, b) => a - b)) {
+    const f = p.funcs.get(pc)!, info = libs.get(pc)!;
+    const params = Array.from({ length: f.nparams }, (_, i) => `${'abcde'[i]}: u64`).concat(f.extraIn.map(r => `r${r}: u64`));
+    stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${info.hint ? ' ' + info.hint : ''}`);
+  }
+
+  // ---- phase 4: print ----
+  const funcs: FuncOut[] = [];
+  for (const [pc, { f, body, irreducible }] of built) {
     const names: string[] = [];
     const used = new Set<number>();
     const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') used.add(x.id); });
@@ -89,7 +126,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (const v of f.vars) if (names[v.id] === undefined && used.has(v.id)) names[v.id] = gen.next().value as string;
     const ctx: PrintCtx = {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
-      constComment: v => sem.constComment(v), varName: id => names[id] ?? `u${id}`,
+      constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
+      strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
     const pr = new Printer(ctx);
@@ -102,19 +141,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     const lines: string[] = [];
     const sig = `function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ''}`;
-    const hdr = sem.funcComment(f);
+    const hdr = opts.sugar === false ? undefined : sem.funcComment(f);
     if (hdr) lines.push(`// ${hdr}`);
-    if (st.irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
+    if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
-    const hoistedUsed = hoisted.filter(v => used.has(v));
     if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]} = 0`).join(', ')}`);
-    lines.push(...printBody(pr, f, body, '\t', decls, hoistedUsed));
+    lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
     lines.push('}');
-    funcs.push({ pc: f.pc, name: f.name, text: lines.join('\n'), irreducible: st.irreducible, f, body, names });
+    funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
   }
-  const nlib = [...libs.values()].filter(l => l.lib).length;
-  const header = sem.header() + (nlib ? `// ${nlib} library functions recognized (not decompiled); ${stubs.length} referenced below\n${stubs.join('\n')}\n` : '');
-  return { program: p, funcs, header, text: header + '\n' + funcs.map(f => f.text).join('\n\n') + '\n' };
+  const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => ({ name, pc, disc: sem.discOf(name) }));
+  const res: Result = { program: p, funcs, stubs, instructions, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
+  res.text = renderSingle(res);
+  return res;
 }
 
 /** Decide where each variable is declared (see README: "declarations"). */

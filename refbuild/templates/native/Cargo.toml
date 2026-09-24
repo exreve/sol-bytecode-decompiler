@@ -1,0 +1,18 @@
+[package]
+name = "ref_native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "{{RUST}}"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "={{SOLANA}}"
+borsh = { version = "0.10" }
+spl-token = { version = "={{SPL_TOKEN}}", features = ["no-entrypoint"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

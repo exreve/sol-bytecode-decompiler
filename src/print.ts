@@ -12,7 +12,9 @@ export interface PrintCtx {
   fnName: (pc: number) => string;
   fnAddrName: (addr: bigint) => string | undefined;   // function pointer constants
   sysName: (name: string) => string;
-  constComment: (v: bigint) => string | undefined;    // e.g. string preview for rodata pointers
+  constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
+  strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
+  dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
 }
@@ -32,8 +34,16 @@ const BIN: Record<string, [string, number]> = {
 };
 const CMPS: Record<string, string> = { eq: '==', ne: '!=', ugt: '>', uge: '>=', ult: '<', ule: '<=', sgt: '>', sge: '>=', slt: '<', sle: '<=' };
 
+/** Join call arguments, parenthesizing ones that TypeScript could misparse as generic type arguments. */
+export function joinArgs(a: string[]): string {
+  if (a.length < 2 || !a.some(x => x.includes('<')) || !a.some(x => x.includes('>'))) return a.join(', ');
+  return a.map(x => (/[<>]/.test(x) && !/^\w+\(.*\)$/.test(x) ? `(${x})` : x)).join(', ');
+}
+
 export class Printer {
   ctx: PrintCtx;
+  addrDepth = 0;
+  retTop: Expr | null = null;
   constructor(ctx: PrintCtx) { this.ctx = ctx; }
 
   /** true if printing `e` yields a signed (possibly negative) intermediate value */
@@ -58,7 +68,7 @@ export class Printer {
         const fn = this.ctx.fnAddrName(e.v);
         if (fn) return { t: fn, prec: P.prim };
         const t = fmtConst(e.v);
-        const cm = this.ctx.constComment(e.v);
+        const cm = this.ctx.constComment(e.v, this.addrDepth ? 'addr' : this.retTop === e ? 'ret' : 'value');
         return { t: cm ? `${t} /* ${cm} */` : t, prec: t.startsWith('-') ? P.unary : P.prim };
       }
       case 'var': return { t: this.ctx.varName(e.id), prec: P.prim };
@@ -73,9 +83,9 @@ export class Printer {
           const [o, p] = BIN[op];
           return { t: `${this.u(e.a, p, false)} ${o} ${this.u(this.shiftAmt(e.b), p + 1, false)}`, prec: p };
         }
-        if (op === 'ashr') return { t: `sar(${this.u(e.a, 0)}, ${this.u(this.shiftAmt(e.b), 0)})`, prec: P.call };
+        if (op === 'ashr') return { t: `sar(${joinArgs([this.u(e.a, 0), this.u(this.shiftAmt(e.b), 0)])})`, prec: P.call };
         const fnOps: Record<string, string> = { sdiv: 'sdiv', srem: 'srem', sdiv32: 'sdiv32', srem32: 'srem32', uhmul: 'mulhu', shmul: 'mulhs' };
-        if (fnOps[op]) return { t: `${fnOps[op]}(${this.u(e.a, 0)}, ${this.u(e.b, 0)})`, prec: P.call };
+        if (fnOps[op]) return { t: `${fnOps[op]}(${joinArgs([this.u(e.a, 0), this.u(e.b, 0)])})`, prec: P.call };
         const [o, p] = BIN[op];
         const sOk = op !== 'udiv' && op !== 'urem';
         // left-assoc: right operand needs strictly higher precedence
@@ -85,7 +95,7 @@ export class Printer {
       case 'not': return { t: `~${this.u(e.a, P.unary + 1)}`, prec: P.unary };
       case 'ext': return { t: `${this.expr(e.a, P.unary)} as ${e.signed ? 'i' : 'u'}${e.bits}`, prec: P.as };
       case 'bswap': return { t: `bswap${e.bits}(${this.u(e.a, 0)})`, prec: P.call };
-      case 'load': return { t: `ld${e.size * 8}(${this.u(e.addr, 0)})`, prec: P.call };
+      case 'load': { this.addrDepth++; const a = this.u(e.addr, 0); this.addrDepth--; return { t: `ld${e.size * 8}(${a})`, prec: P.call }; }
       case 'cmp': {
         if (e.op === 'set') return { t: `(${this.u(e.a, P.band)} & ${this.u(e.b, P.band + 1)}) != 0`, prec: P.eq };
         const signed = e.op[0] === 's';
@@ -116,10 +126,16 @@ export class Printer {
   }
 
   callText(t: CallTarget, args: Expr[]): string {
+    if (this.ctx.dropUndefArgs) { let n = args.length; while (n > 0 && args[n - 1].k === 'undef') n--; args = args.slice(0, n); }
     const a = args.map(x => this.u(x, P.assign));
-    if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${a.join(', ')})`;
-    if (t.k === 'sys') return `${this.ctx.sysName(t.name)}(${a.join(', ')})`;
-    return `callx(${[this.u(t.e, P.assign), ...a].join(', ')})`;
+    // (pointer, length) pairs into rodata render as the string they denote
+    if (this.ctx.strAt) for (let i = 0; i + 1 < args.length; i++) {
+      const x = args[i], y = args[i + 1];
+      if (x.k === 'const' && y.k === 'const') { const str = this.ctx.strAt(x.v, y.v); if (str !== undefined) a[i] = JSON.stringify(str); }
+    }
+    if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${joinArgs(a)})`;
+    if (t.k === 'sys') return `${this.ctx.sysName(t.name)}(${joinArgs(a)})`;
+    return `callx(${joinArgs([this.u(t.e, P.assign), ...a])})`;
   }
 }
 
@@ -138,7 +154,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         out.push(`${I(d)}${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ${pr.u(s.e, P.assign)}`);
         break;
       }
-      case 'store': out.push(`${I(d)}st${s.size * 8}(${pr.u(s.addr, P.assign)}, ${pr.u(s.v, P.assign)})`); break;
+      case 'store': { pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--; out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, pr.u(s.v, P.assign)])})`); break; }
       case 'call': {
         const kw = decls.get(s);
         const txt = pr.callText(s.t, [...s.args, ...(s.extra ?? [])]);
@@ -146,6 +162,8 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         break;
       }
       case 'eval': out.push(`${I(d)}void ${pr.u(s.e, P.unary)}`); break;
+      case 'stores': { pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--; out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, ...s.vals.map(v => pr.u(v, P.assign))])})`); break; }
+      case 'copy': out.push(`${I(d)}copy(${joinArgs([pr.u(s.dst, P.assign), pr.u(s.src, P.assign), fmtConst(BigInt(s.n))])})`); break;
       case 'trap': out.push(`${I(d)}trap(${JSON.stringify(s.msg)})`); break;
     }
   };
@@ -183,7 +201,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         }
         case 'break': out.push(`${I(d)}break${n.label ? ' ' + n.label : ''}`); break;
         case 'continue': out.push(`${I(d)}continue${n.label ? ' ' + n.label : ''}`); break;
-        case 'return': out.push(`${I(d)}return${n.e ? ' ' + pr.u(n.e, P.assign) : ''}`); break;
+        case 'return': pr.retTop = n.e; out.push(`${I(d)}return${n.e ? ' ' + pr.u(n.e, P.assign) : ''}`); pr.retTop = null; break;
         case 'trap': if (n.msg) out.push(`${I(d)}trap(${JSON.stringify(n.msg)})`); break;
         case 'setstate': out.push(`${I(d)}${pr.ctx.varName(n.v)} = ${n.val}`); break;
         case 'switch':

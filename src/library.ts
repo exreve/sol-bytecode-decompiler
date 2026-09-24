@@ -6,6 +6,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Program, Func } from './program.ts'
 import { fingerprint, previewString } from './fingerprint.ts'
+import { crateOf } from './demangle.ts'
 
 export const MIN_LIB_INSNS = 6
 
@@ -65,23 +66,58 @@ export function behaviorName(p: Program, f: Func, strings: string[]): string | u
 	return undefined
 }
 
+let names: Record<string, string> | null | undefined
+export function libNames(): Record<string, string> | null {
+	if (names !== undefined) return names
+	const path = fileURLToPath(new URL('../data/libnames.json', import.meta.url))
+	names = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null
+	return names
+}
+
+/** Crates that are runtime/framework plumbing for every program: always shown as stubs. */
+const GENERIC = /^(core|alloc|std|compiler_builtins|solana_[a-z0-9_]+|borsh[a-z0-9_]*|anchor_lang|anchor_spl|bs58|bytemuck[a-z_]*|hashbrown|num_[a-z_]+|thiserror|arrayref|bincode|serde[a-z_]*|curve25519_dalek|ark_[a-z_]+|sha2|sha3|blake3|keccak|base64|memchr|itoa|ryu|getrandom|rand[a-z_]*|spl_discriminator|spl_pod|spl_type_length_value|spl_program_error|spl_tlv_account_resolution|pinocchio[a-z_]*|light_[a-z_]+|hex|byteorder|static_assertions|five8[a-z_]*|uint|primitive_types|fixed|rust_decimal)$/
+
+/** Turn a Rust path into a short identifier: `<a::B as c::D>::f` -> `B_f`, `a::b::c` -> `b_c`. */
+export function identFromPath(name: string): string {
+	let n = name
+	const impl = /^<(?:&(?:mut )?)?(?:[A-Za-z0-9_]+::)*([A-Za-z0-9_]+)(?:<[^>]*>)?(?: as [^>]*)?>::([A-Za-z0-9_]+)/.exec(n)
+	if (impl) return `${impl[1]}_${impl[2]}`
+	n = n.replace(/<[^<>]*>/g, '').replace(/<[^<>]*>/g, '')
+	const segs = n.split('::').filter(Boolean)
+	return segs.slice(-2).join('_').replace(/[^A-Za-z0-9_]/g, '_')
+}
+
 export function classify(p: Program): Map<number, LibInfo> {
 	const d = libDb()
+	const nm = libNames()
 	const out = new Map<number, LibInfo>()
 	const used = new Map<string, number>()
+	const prints = new Map<number, ReturnType<typeof fingerprint>>()
+	for (const f of p.funcs.values()) prints.set(f.pc, fingerprint(p, f))
+	// crates this program *is* (its own processor/instruction code is recognized): never elided
+	const owned = new Set<string>()
+	for (const [, fp] of prints) {
+		const n = nm?.[fp.hash]
+		if (n && /::processor::|process_instruction|::instruction::[A-Z]\w*::unpack/.test(n) && !GENERIC.test(crateOf(n))) owned.add(crateOf(n))
+	}
 	for (const f of p.funcs.values()) {
-		const fp = fingerprint(p, f)
-		const hit = d && fp.insns >= MIN_LIB_INSNS ? d.sigs[fp.hash] : undefined
-		const info: LibInfo = { lib: !!hit && !f.isEntry, families: hit?.[0] ?? 0 }
+		const fp = prints.get(f.pc)!
+		const big = fp.insns >= MIN_LIB_INSNS
+		const hit = d && big ? d.sigs[fp.hash] : undefined
+		const rust = big ? nm?.[fp.hash] : undefined
+		let lib = (!!hit || !!rust) && !f.isEntry
+		if (lib && rust && owned.has(crateOf(rust))) lib = false
+		const info: LibInfo = { lib, families: hit?.[0] ?? 0 }
 		if (info.lib) {
-			const n = behaviorName(p, f, fp.strings)
+			const n = rust ? identFromPath(rust) : behaviorName(p, f, fp.strings)
+			if (rust) info.hint = rust.length > 90 ? rust.slice(0, 90) + '…' : rust
 			if (n) {
 				const k = (used.get(n) ?? 0) + 1
 				used.set(n, k)
 				info.name = n
 			}
 			const strs = fp.strings.filter(s => s.length >= 6).slice(0, 2).map(s => JSON.stringify(s.length > 40 ? s.slice(0, 40) + '…' : s))
-			if (strs.length) info.hint = strs.join(', ')
+			if (!info.hint && strs.length) info.hint = strs.join(', ')
 		}
 		out.set(f.pc, info)
 	}

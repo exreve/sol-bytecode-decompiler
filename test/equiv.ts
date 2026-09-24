@@ -68,6 +68,10 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 					let n = a.length
 					if (target.startsWith('ptr:')) while (n > 0 && a[n - 1] === UNDEF) n--
 					for (const x of a.slice(0, n)) h = ((h ^ x) * 0x100000001b3n) & ((1n << 64n) - 1n)
+					// callees may write through pointer arguments: model that (identically on both sides)
+					for (const x of a.slice(0, n)) {
+						if (x >= 0x2_0000_0000n && x < 0x5_0000_0000n && (x & 7n) === 0n) mem.store(x, 8, (h ^ x) & 0xffffn)
+					}
 					return R2(h, target)
 				}
 				if (side === 'emu') {

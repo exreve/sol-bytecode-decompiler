@@ -39,6 +39,8 @@ export type Stmt =
   | { k: 'store'; size: 1 | 2 | 4 | 8; addr: Expr; v: Expr; pc: number }
   | { k: 'call'; dst: number | -1; t: CallTarget; args: Expr[]; pc: number; extra?: Expr[] }       // extra: implicit register inputs (r0/r6-r9)
   | { k: 'eval'; e: Expr; pc: number }                             // evaluated for side effect/trap only
+  | { k: 'stores'; size: 1 | 2 | 4 | 8; addr: Expr; vals: Expr[]; pc: number } // vals[i] -> addr + i*size, in order
+  | { k: 'copy'; dst: Expr; src: Expr; n: number; pc: number }     // n/8 ascending 8-byte word copies
   | { k: 'trap'; msg: string; pc: number };                        // invalid instruction / unreachable
 
 export type Term =

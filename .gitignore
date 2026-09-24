@@ -7,3 +7,4 @@ samples/*.so
 !samples/ata.so
 out.*.ts
 corpus/
+refbuild/out/
