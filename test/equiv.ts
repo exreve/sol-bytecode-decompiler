@@ -2,7 +2,7 @@
 // usage: node test/equiv.ts <program.so> [trials] [maxFuncs]
 import { readFileSync } from 'node:fs'
 import { decompile } from '../src/decompile.ts'
-import { emulate, TestMem, Abort, UNDEF, type Event } from '../src/emu.ts'
+import { emulate, TestMem, Abort, StepLimit, UNDEF, type Event } from '../src/emu.ts'
 import { fnAddr } from '../src/program.ts'
 import { parseFunctions, runFunction, EvalError } from './evaluate.ts'
 
@@ -51,11 +51,14 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				if (k === 4) return R() % 0x10000n
 				return R()
 			}
-			const args = [pick(), pick(), pick(), pick(), pick()]
-			const extra = [pick(), pick(), pick(), pick(), pick()]
+			const args = f.isEntry ? [0x4_0000_0000n, 0n, 0n, 0n, 0n] : [pick(), pick(), pick(), pick(), pick()]
+			const extra = f.isEntry ? [0n, 0n, 0n, 0n, 0n] : [pick(), pick(), pick(), pick(), pick()]
 			const fp = 0x2_0000_1000n + 0x2000n * BigInt(1 + (t % 5))
+			let cap = Infinity
 			const run = (side: 'emu' | 'dec') => {
 				const events: Event[] = []
+				const push = events.push.bind(events)
+				events.push = (...e: Event[]) => { if (events.length >= cap) throw new StepLimit(); return push(...e) }
 				const mem = new TestMem(p.image, seed, events)
 				let calls = 0
 				const onCall = (target: string, a: bigint[]) => {
@@ -72,17 +75,19 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 					const r = emulate(p, fo.pc, args, fp, mem, onCall, 20000, argRegs, extraIn)
 					return { ...r, events }
 				}
-				const pargs = args.slice(0, f.nparams)
-				for (const r of f.extraIn) pargs.push(r === 0 ? extra[0] : extra[r - 5])
+				const pargs = args.slice(0, f.isEntry ? 1 : f.nparams)
+				if (!f.isEntry) for (const r of f.extraIn) pargs.push(r === 0 ? extra[0] : extra[r - 5])
 				try {
-					const r = runFunction(decl, pargs, { mem, onCall, fp, fnAddr: fnAddrMap, fnTarget, sysTarget, maxSteps: 100000 })
+					const r = runFunction(decl, pargs, { mem, onCall, fp, fnAddr: fnAddrMap, fnTarget, sysTarget, maxSteps: 20000 })
 					return { ...r, events }
 				} catch (e) {
 					if (e instanceof EvalError) return { err: e.message, events }
 					throw e
 				}
 			}
-			const a = run('emu') as any, b = run('dec') as any
+			const a = run('emu') as any
+			if (a.limit) cap = a.events.length + 1
+			const b = run('dec') as any
 			if (dumpSeed !== undefined && seed === dumpSeed) {
 				console.log('EMU', a.ret?.toString(16), a.abort ?? '', a.limit ?? ''); a.events.forEach((e: Event) => console.log('  ', fmtEv(e)))
 				console.log('DEC', b.ret?.toString(16), b.abort ?? '', b.err ?? ''); b.events.forEach((e: Event) => console.log('  ', fmtEv(e)))

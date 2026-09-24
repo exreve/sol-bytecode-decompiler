@@ -54,8 +54,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     noteNodes(body);
     const gen = shortNames();
     const paramName = ['r0', 'a', 'b', 'c', 'd', 'e', 'r6', 'r7', 'r8', 'r9', 'fp'];
+    // the VM starts the entrypoint with r1 = input, r10 = frame pointer and every other register zeroed
+    const zeroInit = f.isEntry ? f.vars.filter(v => v.param >= 0 && v.param !== 1 && v.param !== 10 && used.has(v.id)) : [];
     for (const v of f.vars) {
-      if (v.param >= 0) names[v.id] = paramName[v.param];
+      if (v.param >= 0 && !zeroInit.includes(v)) names[v.id] = f.isEntry && v.param === 1 ? 'input' : paramName[v.param];
       else if (v.reg === -1) names[v.id] = 'state';
     }
     for (const v of f.vars) if (names[v.id] === undefined && used.has(v.id)) names[v.id] = gen.next().value as string;
@@ -67,8 +69,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const pr = new Printer(ctx);
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
-    for (let r = 1; r <= f.nparams; r++) params.push(`${paramName[r]}: u64`);
-    for (const r of f.extraIn) params.push(`${paramName[r]}: u64`);
+    if (f.isEntry) params.push('input: u64');
+    else {
+      for (let r = 1; r <= f.nparams; r++) params.push(`${paramName[r]}: u64`);
+      for (const r of f.extraIn) params.push(`${paramName[r]}: u64`);
+    }
     const lines: string[] = [];
     const sig = `function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ''}`;
     const hdr = sem.funcComment(f);
@@ -76,6 +81,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (st.irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
     const hoistedUsed = hoisted.filter(v => used.has(v));
+    if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]} = 0`).join(', ')}`);
     lines.push(...printBody(pr, f, body, '\t', decls, hoistedUsed));
     lines.push('}');
     funcs.push({ pc: f.pc, name: f.name, text: lines.join('\n'), irreducible: st.irreducible, f, body, names });

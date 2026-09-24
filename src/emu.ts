@@ -252,6 +252,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 		}
 	} catch (e) {
 		if (e instanceof Abort) return { abort: e.message, steps }
+		if (e instanceof StepLimit) return { steps, limit: true }
 		throw e
 	}
 }

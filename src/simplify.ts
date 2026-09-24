@@ -5,7 +5,8 @@ import {
   type Expr, type Stmt, type CmpOp, B, C, M64, NEG_CMP, SWAP_CMP,
   evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize,
 } from './ir.ts';
-import type { VarFunc } from './dataflow.ts';
+import { type VarFunc, pruneUnreachable } from './dataflow.ts';
+import { tailDuplicate, mergeBlocks, localConstProp, deadStores, globalConstProp, localCopyProp } from './cfgopt.ts';
 
 const bitlen = (v: bigint) => v.toString(2).length - (v === 0n ? 1 : 0);
 
@@ -262,9 +263,14 @@ export function optimizeFunc(f: VarFunc) {
     changed = propagateGlobal(f) || changed;
     changed = inlineLocal(f) || changed;
     changed = dce(f) || changed;
+    changed = localConstProp(f) || changed;
+    changed = globalConstProp(f) || changed;
+    changed = localCopyProp(f) || changed;
+    if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; }
+    changed = deadStores(f) || changed;
+    if (round < 6 && tailDuplicate(f)) changed = true;
     if (!changed) break;
   }
-  foldConstBranches(f);
 }
 
 /** Substitute single-def vars whose definition is a cheap pure expression over single-def vars / constants. */
@@ -324,9 +330,10 @@ function inlineLocal(f: VarFunc): boolean {
   for (const b of f.blocks) {
     for (let i = 0; i < b.stmts.length; i++) {
       const s = b.stmts[i];
+      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, sites)) { changed = true; i--; continue; }
       if (s.k !== 'set') continue;
       const v = s.dst;
-      if (uses[v] !== 1 || sites[v].length !== 1 || f.vars[v].param >= 0 || f.vars[v].undef) continue;
+      if (!(uses[v] === 1 && sites[v].length === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
       const fx = hasSideEffectsOrMem(s.e);
       const reads = new Set<number>(); varsIn(s.e, reads);
       // find use
@@ -360,6 +367,42 @@ function inlineLocal(f: VarFunc): boolean {
     }
   }
   return changed;
+}
+
+
+/** If the definition of v at stmt i only reaches uses inside this block, return how many; else -1. */
+function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number, v: number): number {
+  let n = 0;
+  const cnt = (e: Expr) => walkExpr(e, x => { if (x.k === 'var' && x.id === v) n++; });
+  for (let j = i + 1; j < b.stmts.length; j++) {
+    const t = b.stmts[j];
+    stmtExprs(t).forEach(cnt);
+    if ((t.k === 'set' || t.k === 'call') && t.dst === v) return n;
+  }
+  if (b.term.k === 'br') cnt(b.term.c);
+  else if (b.term.k === 'ret' && b.term.e) cnt(b.term.e);
+  return b.succs.length === 0 ? n : -1;
+}
+
+/** `v = call(...)` immediately followed by the single use of v -> call expression at the use site. */
+function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses: Int32Array, sites: DefSite[][]): boolean {
+  const s = b.stmts[i] as Extract<Stmt, { k: 'call' }>;
+  const v = s.dst;
+  if (!(uses[v] === 1 && sites[v].length === 1 && f.vars[v].param < 0) && localReach(b as any, i, v) !== 1) return false;
+  const next = i + 1 < b.stmts.length ? stmtExprs(b.stmts[i + 1]) : b.term.k === 'br' ? [b.term.c] : b.term.k === 'ret' && b.term.e ? [b.term.e] : null;
+  if (!next) return false;
+  let hit = false, impure = false;
+  for (const e of next) { walkExpr(e, x => { if (x.k === 'var' && x.id === v) hit = true; }); const fx = hasSideEffectsOrMem(e); if (fx.load || fx.call || fx.trap) impure = true; }
+  if (!hit || impure) return false;
+  if (i + 1 < b.stmts.length && b.stmts[i + 1].k === 'call' && (b.stmts[i + 1] as any).t.k === 'ind' && false) return false;
+  const ce: Expr = { k: 'call', t: s.t, args: [...s.args, ...(s.extra ?? [])] };
+  const m = new Map([[v, ce]]);
+  if (i + 1 < b.stmts.length) b.stmts[i + 1] = mapStmtExprs(b.stmts[i + 1], e => substVars(e, m));
+  else if (b.term.k === 'br') b.term.c = substVars(b.term.c, m);
+  else b.term.e = substVars(b.term.e, m);
+  b.stmts.splice(i, 1);
+  const r = defSites(f); for (let k = 0; k < sites.length; k++) sites[k] = r.sites[k];
+  return true;
 }
 
 /** Remove definitions of unused variables (keeping anything that may trap or has effects). */
