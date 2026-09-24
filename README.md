@@ -55,6 +55,7 @@ entrypoint.ts   entrypoint, dispatcher, code not owned by a single instruction
 ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
+bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
 ```
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.

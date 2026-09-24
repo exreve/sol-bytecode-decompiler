@@ -154,5 +154,16 @@ export function renderProject(r: Result): Map<string, string> {
 	for (const i of r.instructions) idx.push(`export { ix_${i.name} } from './ix/${i.name}.ts'`)
 	idx.push(`export { entrypoint } from './entrypoint.ts'`)
 	files.set('index.ts', idx.join('\n') + '\n')
+	// self-contained per-instruction bundles: handler + all user code it reaches + the stubs it needs
+	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
+	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) {
+		const seen = new Set<number>([h.pc]), order = [h]
+		for (let i = 0; i < order.length; i++) for (const t of order[i].calls) { const g = byPc.get(t); if (g && !seen.has(t)) { seen.add(t); order.push(g) } }
+		const text = order.map(f => f.text).join('\n\n')
+		const used = new Set([...text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\(/g)].map(m => m[1]))
+		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
+		const sys = usedSyscalls({ ...r, funcs: order })
+		files.set(`bundle/${h.name.slice(3)}.ts`, [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...sys, ...stubs, '', text, ''].join('\n'))
+	}
 	return files
 }
