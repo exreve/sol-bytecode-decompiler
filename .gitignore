@@ -8,3 +8,4 @@ samples/*.so
 out.*.ts
 corpus/
 refbuild/out/
+.claude/
