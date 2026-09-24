@@ -11,13 +11,17 @@ pub mod ref_anchor_rich {
     use super::*;
 
     pub fn init_pool(ctx: Context<InitPool>, fee_bps: u16, name: String, symbol: String, uri: String) -> Result<()> {
-        let p = &mut ctx.accounts.pool;
-        p.authority = ctx.accounts.authority.key();
-        p.mint = ctx.accounts.mint.key();
-        p.fee_bps = fee_bps;
-        p.bump = ctx.bumps.pool;
-        p.total = 0;
-        let seeds: &[&[u8]] = &[b"pool", p.mint.as_ref(), &[p.bump]];
+        let mint = ctx.accounts.mint.key();
+        let bump = ctx.bumps.pool;
+        {
+            let p = &mut ctx.accounts.pool;
+            p.authority = ctx.accounts.authority.key();
+            p.mint = mint;
+            p.fee_bps = fee_bps;
+            p.bump = bump;
+            p.total = 0;
+        }
+        let seeds: &[&[u8]] = &[b"pool", mint.as_ref(), &[bump]];
         create_metadata_accounts_v3(CpiContext::new_with_signer(ctx.accounts.metadata_program.to_account_info(), CreateMetadataAccountsV3 {
             metadata: ctx.accounts.metadata.to_account_info(),
             mint: ctx.accounts.mint.to_account_info(),
@@ -27,7 +31,6 @@ pub mod ref_anchor_rich {
             system_program: ctx.accounts.system_program.to_account_info(),
             rent: ctx.accounts.rent.to_account_info(),
         }, &[seeds]), DataV2 { name, symbol, uri, seller_fee_basis_points: 0, creators: None, collection: None, uses: None }, true, true, None)?;
-        emit_cpi!(PoolCreated { pool: ctx.accounts.pool.key(), fee_bps });
         Ok(())
     }
 
@@ -39,14 +42,15 @@ pub mod ref_anchor_rich {
             to: ctx.accounts.vault.to_account_info(), authority: ctx.accounts.user.to_account_info(),
         }), amount, decimals)?;
         let fee = (amount as u128).checked_mul(ctx.accounts.pool.fee_bps as u128).unwrap() / 10_000;
-        let p = &mut ctx.accounts.pool;
-        p.total = p.total.checked_add(amount - fee as u64).ok_or(RefError::Overflow)?;
-        let seeds: &[&[u8]] = &[b"pool", p.mint.as_ref(), &[p.bump]];
+        let (mint, bump) = (ctx.accounts.pool.mint, ctx.accounts.pool.bump);
+        ctx.accounts.pool.total = ctx.accounts.pool.total.checked_add(amount - fee as u64).ok_or(RefError::Overflow)?;
+        let seeds: &[&[u8]] = &[b"pool", mint.as_ref(), &[bump]];
         token_interface::mint_to(CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), MintTo {
             mint: ctx.accounts.mint.to_account_info(), to: ctx.accounts.user_ata.to_account_info(), authority: ctx.accounts.pool.to_account_info(),
         }, &[seeds]), fee as u64)?;
         system_program::transfer(CpiContext::new(ctx.accounts.system_program.to_account_info(), system_program::Transfer {
             from: ctx.accounts.user.to_account_info(), to: ctx.accounts.pool.to_account_info() }), 1000)?;
+        emit_cpi!(PoolCreated { pool: ctx.accounts.pool.key(), fee_bps: 1 });
         Ok(())
     }
 

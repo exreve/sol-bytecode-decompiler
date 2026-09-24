@@ -6,9 +6,6 @@ import { Abort, StepLimit, UNDEF, type TestMem, type CallHook } from '../src/emu
 const M = (1n << 64n) - 1n
 const W = (v: bigint) => v & M
 
-class Break { label: string | null; constructor(l: string | null) { this.label = l } }
-class Continue { label: string | null; constructor(l: string | null) { this.label = l } }
-class Return { v: bigint | undefined; constructor(v: bigint | undefined) { this.v = v } }
 export class EvalError extends Error {}
 
 export interface EvalEnv {
@@ -30,193 +27,211 @@ export function parseFunctions(src: string): Map<string, ts.FunctionDeclaration>
 	return m
 }
 
-export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: EvalEnv): { ret?: bigint; abort?: string; limit?: boolean } {
-	const scopes: Map<string, bigint | undefined>[] = [new Map()]
-	fn.parameters.forEach((p, i) => scopes[0].set((p.name as ts.Identifier).text, W(args[i] ?? 0n)))
-	scopes[0].set('fp', env.fp)
-	let steps = 0
-	const tick = () => { if (++steps > env.maxSteps) throw new StepLimit() }
-	const lookup = (n: string): bigint => {
-		for (let i = scopes.length - 1; i >= 0; i--) if (scopes[i].has(n)) {
-			const v = scopes[i].get(n)
-			if (v === undefined) throw new EvalError(`read of uninitialized variable ${n}`)
-			return v
-		}
-		if (n === 'undef') return UNDEF
-		const fa = env.fnAddr.get(n)
-		if (fa !== undefined) return fa
-		throw new EvalError(`unknown identifier ${n}`)
-	}
-	const assign = (n: string, v: bigint) => {
-		for (let i = scopes.length - 1; i >= 0; i--) if (scopes[i].has(n)) { scopes[i].set(n, W(v)); return }
-		throw new EvalError(`assignment to undeclared ${n}`)
-	}
-	const truth = (v: bigint) => W(v) !== 0n
-	const B = (b: boolean) => (b ? 1n : 0n)
+type Ex = () => bigint
+type St = () => number // 0 normal, 1 break, 2 continue, 3 return
+interface Ctl { label: string | null; ret: bigint | undefined; steps: number; max: number }
+interface Compiled { slots: Map<string, number>; nparams: number; body: St; ctl: Ctl; vals: (bigint | undefined)[]; env: { cur: EvalEnv | null } }
+const cache = new WeakMap<ts.FunctionDeclaration, Compiled>()
 
-	const call = (name: string, a: bigint[]): bigint => {
+/** Compile a decompiled function to closures (the output language semantics; see src/layout.ts PRELUDE). */
+function compile(fn: ts.FunctionDeclaration): Compiled {
+	const slots = new Map<string, number>()
+	const vals: (bigint | undefined)[] = []
+	const slot = (n: string) => { let i = slots.get(n); if (i === undefined) { i = vals.length; slots.set(n, i); vals.push(undefined) } return i }
+	fn.parameters.forEach(p => slot((p.name as ts.Identifier).text))
+	const fpSlot = slot('fp')
+	const ctl: Ctl = { label: null, ret: undefined, steps: 0, max: 0 }
+	const envRef: { cur: EvalEnv | null } = { cur: null }
+	const env = () => envRef.cur!
+	const B = (b: boolean) => (b ? 1n : 0n)
+	const K = ts.SyntaxKind
+
+	const helper = (name: string, args: Ex[]): Ex => {
 		const ld = /^ld(8|16|32|64)$/.exec(name)
-		if (ld) { const v = env.mem.load(W(a[0]), Number(ld[1]) / 8); if (process.env.SBPF_TRACE) console.log(`LD ${name} ${W(a[0]).toString(16)} = ${v.toString(16)}`); return v }
+		if (ld) { const sz = Number(ld[1]) / 8, a = args[0]; return () => env().mem.load(W(a()), sz) }
 		const st = /^st(8|16|32|64)$/.exec(name)
-		if (st) { const sz = Number(st[1]) / 8; for (let i = 1; i < a.length; i++) env.mem.store(W(a[0] + BigInt((i - 1) * sz)), sz, W(a[i])); return 0n }
-		if (name === 'copy') { for (let o = 0n; o < a[2]; o += 8n) env.mem.store(W(a[0] + o), 8, env.mem.load(W(a[1] + o), 8)); return 0n }
-		if (name === 'copyr') { for (let o = a[2] - 8n; o >= 0n; o -= 8n) env.mem.store(W(a[0] + o), 8, env.mem.load(W(a[1] + o), 8)); return 0n }
+		if (st) { const sz = Number(st[1]) / 8; return () => { const vs = args.map(f => f()); for (let i = 1; i < vs.length; i++) env().mem.store(W(vs[0] + BigInt((i - 1) * sz)), sz, W(vs[i])); return 0n } }
+		const two = () => [args[0](), args[1]()]
 		switch (name) {
-			case 'shl': if (W(a[1]) > 63n) throw new EvalError('shift >= 64'); return W(a[0] << W(a[1]))
-			case 'sar': if (W(a[1]) > 63n) throw new EvalError('shift >= 64'); return W(BigInt.asIntN(64, a[0]) >> W(a[1]))
-			case 'sdiv': case 'srem': {
-				const x = BigInt.asIntN(64, a[0]), y = BigInt.asIntN(64, a[1])
+			case 'copy': return () => { const [d, s0, n] = args.map(f => f()); for (let o = 0n; o < n; o += 8n) env().mem.store(W(d + o), 8, env().mem.load(W(s0 + o), 8)); return 0n }
+			case 'copyr': return () => { const [d, s0, n] = args.map(f => f()); for (let o = n - 8n; o >= 0n; o -= 8n) env().mem.store(W(d + o), 8, env().mem.load(W(s0 + o), 8)); return 0n }
+			case 'shl': return () => { const [a, b] = two(); if (W(b) > 63n) throw new EvalError('shift >= 64'); return W(a << W(b)) }
+			case 'sar': return () => { const [a, b] = two(); if (W(b) > 63n) throw new EvalError('shift >= 64'); return W(BigInt.asIntN(64, a) >> W(b)) }
+			case 'sdiv': case 'srem': return () => {
+				const [p, q] = two(); const x = BigInt.asIntN(64, p), y = BigInt.asIntN(64, q)
 				if (y === 0n) throw new Abort('division by zero')
 				if (x === -(1n << 63n) && y === -1n) throw new Abort('division overflow')
 				return W(name === 'sdiv' ? x / y : x % y)
 			}
-			case 'sdiv32': case 'srem32': {
-				const x = BigInt.asIntN(32, a[0]), y = BigInt.asIntN(32, a[1])
+			case 'sdiv32': case 'srem32': return () => {
+				const [p, q] = two(); const x = BigInt.asIntN(32, p), y = BigInt.asIntN(32, q)
 				if (y === 0n) throw new Abort('division by zero')
 				if (x === -(1n << 31n) && y === -1n) throw new Abort('division overflow')
 				return BigInt.asUintN(32, name === 'sdiv32' ? x / y : x % y)
 			}
-			case 'mulhu': return (W(a[0]) * W(a[1])) >> 64n
-			case 'mulhs': return W((BigInt.asIntN(64, a[0]) * BigInt.asIntN(64, a[1])) >> 64n)
+			case 'mulhu': return () => { const [a, b] = two(); return (W(a) * W(b)) >> 64n }
+			case 'mulhs': return () => { const [a, b] = two(); return W((BigInt.asIntN(64, a) * BigInt.asIntN(64, b)) >> 64n) }
 			case 'bswap16': case 'bswap32': case 'bswap64': {
 				const bits = Number(name.slice(5))
-				let x = BigInt.asUintN(bits, a[0]), y = 0n
-				for (let i = 0; i < bits / 8; i++) { y = (y << 8n) | (x & 0xffn); x >>= 8n }
-				return y
+				return () => { let x = BigInt.asUintN(bits, args[0]()), y = 0n; for (let i = 0; i < bits / 8; i++) { y = (y << 8n) | (x & 0xffn); x >>= 8n } return y }
 			}
-			case 'trap': throw new Abort('trap')
-			case 'callx': return W(env.onCall(`ptr:${W(a[0]).toString(16)}`, a.slice(1).map(W)))
+			case 'trap': return () => { throw new Abort('trap') }
+			case 'callx': return () => { const vs = args.map(f => W(f())); return W(env().onCall(`ptr:${vs[0].toString(16)}`, vs.slice(1))) }
 		}
-		const ft = env.fnTarget.get(name)
-		if (ft) return W(env.onCall(ft, a.map(W)))
-		const sc = env.sysTarget.get(name)
-		if (sc) return W(env.onCall(sc, a.map(W)))
-		throw new EvalError(`unknown function ${name}`)
+		return () => {
+			const e = env()
+			const t = e.fnTarget.get(name) ?? e.sysTarget.get(name)
+			if (!t) throw new EvalError(`unknown function ${name}`)
+			return W(e.onCall(t, args.map(f => W(f()))))
+		}
 	}
 
-	const ev = (e: ts.Expression): bigint => {
-		if (ts.isParenthesizedExpression(e)) return ev(e.expression)
-		if (ts.isNumericLiteral(e)) return BigInt(e.getText())
-		if (e.kind === ts.SyntaxKind.TrueKeyword) return 1n
-		if (ts.isStringLiteral(e)) return 0n // only used as trap() message
-		if (ts.isIdentifier(e)) return lookup(e.text)
+	const ex = (e: ts.Expression): Ex => {
+		if (ts.isParenthesizedExpression(e)) return ex(e.expression)
+		if (ts.isNumericLiteral(e)) { const v = BigInt(e.getText()); return () => v }
+		if (e.kind === K.TrueKeyword) return () => 1n
+		if (ts.isStringLiteral(e)) return () => 0n
+		if (ts.isIdentifier(e)) {
+			const n = e.text
+			if (n === 'undef') return () => UNDEF
+			if (slots.has(n)) { const i = slots.get(n)!; return () => { const v = vals[i]; if (v === undefined) throw new EvalError(`read of uninitialized variable ${n}`); return v } }
+			return () => {
+				const i = slots.get(n)
+				if (i !== undefined) { const v = vals[i]; if (v === undefined) throw new EvalError(`read of uninitialized variable ${n}`); return v }
+				const fa = env().fnAddr.get(n)
+				if (fa !== undefined) return fa
+				throw new EvalError(`unknown identifier ${n}`)
+			}
+		}
 		if (ts.isPrefixUnaryExpression(e)) {
-			// a negative numeric literal is a signed value (used as-is by relational operators)
-			if (e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(e.operand)) return -BigInt(e.operand.getText())
-			const v = ev(e.operand)
+			if (e.operator === K.MinusToken && ts.isNumericLiteral(e.operand)) { const v = -BigInt(e.operand.getText()); return () => v }
+			const a = ex(e.operand)
 			switch (e.operator) {
-				case ts.SyntaxKind.MinusToken: return W(-v)
-				case ts.SyntaxKind.TildeToken: return W(~v)
-				case ts.SyntaxKind.ExclamationToken: return B(!truth(v))
+				case K.MinusToken: return () => W(-a())
+				case K.TildeToken: return () => W(~a())
+				case K.ExclamationToken: return () => B(W(a()) === 0n)
 			}
 			throw new EvalError('bad unary')
 		}
-		if (ts.isVoidExpression(e)) { ev(e.expression); return 0n }
+		if (ts.isVoidExpression(e)) { const a = ex(e.expression); return () => { a(); return 0n } }
 		if (ts.isAsExpression(e)) {
-			const v = ev(e.expression)
-			const t = e.type.getText()
-			const m = /^([ui])(8|16|32|64)$/.exec(t)
-			if (!m) throw new EvalError('bad cast ' + t)
-			return m[1] === 'u' ? BigInt.asUintN(Number(m[2]), v) : BigInt.asIntN(Number(m[2]), v)
+			const a = ex(e.expression)
+			const m = /^([ui])(8|16|32|64)$/.exec(e.type.getText())
+			if (!m) throw new EvalError('bad cast ' + e.type.getText())
+			const bits = Number(m[2])
+			return m[1] === 'u' ? () => BigInt.asUintN(bits, a()) : () => BigInt.asIntN(bits, a())
 		}
-		if (ts.isCallExpression(e)) {
-			const name = e.expression.getText()
-			return call(name, e.arguments.map(ev))
-		}
-		if (ts.isConditionalExpression(e)) return truth(ev(e.condition)) ? ev(e.whenTrue) : ev(e.whenFalse)
+		if (ts.isCallExpression(e)) return helper(e.expression.getText(), e.arguments.map(ex))
+		if (ts.isConditionalExpression(e)) { const c = ex(e.condition), a = ex(e.whenTrue), b = ex(e.whenFalse); return () => (W(c()) !== 0n ? a() : b()) }
 		if (ts.isBinaryExpression(e)) {
 			const op = e.operatorToken.kind
-			const K = ts.SyntaxKind
-			if (op === K.AmpersandAmpersandToken) return B(truth(ev(e.left)) && truth(ev(e.right)))
-			if (op === K.BarBarToken) return B(truth(ev(e.left)) || truth(ev(e.right)))
-			if (op === K.EqualsToken) { const v = ev(e.right); assign((e.left as ts.Identifier).text, v); return v }
-			const a = ev(e.left), b = ev(e.right)
+			if (op === K.EqualsToken) {
+				const i = slot((e.left as ts.Identifier).text), r = ex(e.right)
+				return () => { const v = W(r()); vals[i] = v; return v }
+			}
+			const a = ex(e.left), b = ex(e.right)
 			switch (op) {
-				case K.PlusToken: return W(a + b)
-				case K.MinusToken: return W(a - b)
-				case K.AsteriskToken: return W(a * b)
-				case K.SlashToken: if (W(b) === 0n) throw new Abort('division by zero'); if (a < 0n || b < 0n) throw new EvalError('signed operand to /'); return a / b
-				case K.PercentToken: if (W(b) === 0n) throw new Abort('division by zero'); if (a < 0n || b < 0n) throw new EvalError('signed operand to %'); return a % b
-				case K.AmpersandToken: return W(a & b)
-				case K.BarToken: return W(a | b)
-				case K.CaretToken: return W(a ^ b)
-				case K.LessThanLessThanToken: if (b < 0n || b > 63n) throw new EvalError('shift amount out of range'); return W(a << b)
-				case K.GreaterThanGreaterThanToken: if (b < 0n || b > 63n) throw new EvalError('shift amount out of range'); if (a < 0n) throw new EvalError('signed operand to >>'); return a >> b
-				case K.EqualsEqualsToken: case K.EqualsEqualsEqualsToken: return B(W(a) === W(b))
-				case K.ExclamationEqualsToken: case K.ExclamationEqualsEqualsToken: return B(W(a) !== W(b))
-				case K.LessThanToken: return B(a < b)
-				case K.LessThanEqualsToken: return B(a <= b)
-				case K.GreaterThanToken: return B(a > b)
-				case K.GreaterThanEqualsToken: return B(a >= b)
+				case K.AmpersandAmpersandToken: return () => B(W(a()) !== 0n && W(b()) !== 0n)
+				case K.BarBarToken: return () => B(W(a()) !== 0n || W(b()) !== 0n)
+				case K.PlusToken: return () => W(a() + b())
+				case K.MinusToken: return () => W(a() - b())
+				case K.AsteriskToken: return () => W(a() * b())
+				case K.SlashToken: case K.PercentToken: return () => {
+					const x = a(), y = b()
+					if (W(y) === 0n) throw new Abort('division by zero')
+					if (x < 0n || y < 0n) throw new EvalError('signed operand to / or %')
+					return op === K.SlashToken ? x / y : x % y
+				}
+				case K.AmpersandToken: return () => W(a() & b())
+				case K.BarToken: return () => W(a() | b())
+				case K.CaretToken: return () => W(a() ^ b())
+				case K.LessThanLessThanToken: return () => { const x = a(), y = b(); if (y < 0n || y > 63n) throw new EvalError('shift amount out of range'); return W(x << y) }
+				case K.GreaterThanGreaterThanToken: return () => { const x = a(), y = b(); if (y < 0n || y > 63n) throw new EvalError('shift amount out of range'); if (x < 0n) throw new EvalError('signed operand to >>'); return x >> y }
+				case K.EqualsEqualsToken: case K.EqualsEqualsEqualsToken: return () => B(W(a()) === W(b()))
+				case K.ExclamationEqualsToken: case K.ExclamationEqualsEqualsToken: return () => B(W(a()) !== W(b()))
+				case K.LessThanToken: return () => B(a() < b())
+				case K.LessThanEqualsToken: return () => B(a() <= b())
+				case K.GreaterThanToken: return () => B(a() > b())
+				case K.GreaterThanEqualsToken: return () => B(a() >= b())
 			}
 			throw new EvalError('bad binary ' + e.operatorToken.getText())
 		}
 		throw new EvalError('unsupported expression ' + ts.SyntaxKind[e.kind] + ': ' + e.getText())
 	}
 
-	const execList = (ss: readonly ts.Statement[]) => {
-		scopes.push(new Map())
-		try { for (const s of ss) exec(s) } finally { scopes.pop() }
+	const list = (ss: readonly ts.Statement[]): St => {
+		const cs = ss.map(s => st(s))
+		return () => { for (const c of cs) { const r = c(); if (r) return r } return 0 }
 	}
-	const loopBody = (s: ts.Statement, label: string | null): 'break' | 'next' => {
-		try { tick(); exec(s) } catch (x) {
-			if (x instanceof Break && (x.label === null || x.label === label)) return 'break'
-			if (x instanceof Continue && (x.label === null || x.label === label)) return 'next'
-			throw x
-		}
-		return 'next'
+	// run a loop body; returns -1 to exit the loop, 0 to continue looping, or a propagating signal
+	const loopBody = (body: St, label: string | null) => (): number => {
+		if (++ctl.steps > ctl.max) throw new StepLimit()
+		const r = body()
+		if (r === 1 && (ctl.label === null || ctl.label === label)) { ctl.label = null; return -1 }
+		if (r === 2 && (ctl.label === null || ctl.label === label)) { ctl.label = null; return 0 }
+		return r
 	}
-	const exec = (s: ts.Statement, label: string | null = null): void => {
-		if (ts.isBlock(s)) return execList(s.statements)
-		if (ts.isExpressionStatement(s)) { ev(s.expression); return }
+	const st = (s: ts.Statement, label: string | null = null): St => {
+		if (ts.isBlock(s)) return list(s.statements)
+		if (ts.isExpressionStatement(s)) { const e = ex(s.expression); return () => { e(); return 0 } }
 		if (ts.isVariableStatement(s)) {
-			for (const d of s.declarationList.declarations) {
-				const n = (d.name as ts.Identifier).text
-				scopes[scopes.length - 1].set(n, d.initializer ? W(ev(d.initializer)) : undefined)
-			}
-			return
+			const ds = s.declarationList.declarations.map(d => ({ i: slot((d.name as ts.Identifier).text), init: d.initializer ? ex(d.initializer) : null }))
+			return () => { for (const d of ds) vals[d.i] = d.init ? W(d.init()) : undefined; return 0 }
 		}
 		if (ts.isIfStatement(s)) {
-			if (truth(ev(s.expression))) exec(s.thenStatement)
-			else if (s.elseStatement) exec(s.elseStatement)
-			return
+			const c = ex(s.expression), t = st(s.thenStatement), f = s.elseStatement ? st(s.elseStatement) : null
+			return () => (W(c()) !== 0n ? t() : f ? f() : 0)
 		}
 		if (ts.isWhileStatement(s)) {
-			while (truth(ev(s.expression))) if (loopBody(s.statement, label) === 'break') break
-			return
+			const c = ex(s.expression), body = loopBody(st(s.statement), label)
+			return () => { while (W(c()) !== 0n) { const r = body(); if (r === -1) break; if (r) return r } return 0 }
 		}
 		if (ts.isDoStatement(s)) {
-			do { if (loopBody(s.statement, label) === 'break') break } while (truth(ev(s.expression)))
-			return
+			const c = ex(s.expression), body = loopBody(st(s.statement), label)
+			return () => { do { const r = body(); if (r === -1) break; if (r) return r } while (W(c()) !== 0n); return 0 }
 		}
 		if (ts.isLabeledStatement(s)) {
 			const l = s.label.text
 			const inner = s.statement
-			if (ts.isWhileStatement(inner) || ts.isDoStatement(inner)) return exec(inner, l)
-			try { exec(inner) } catch (x) { if (x instanceof Break && x.label === l) return; throw x }
-			return
+			if (ts.isWhileStatement(inner) || ts.isDoStatement(inner)) return st(inner, l)
+			const b = st(inner)
+			return () => { const r = b(); if (r === 1 && ctl.label === l) { ctl.label = null; return 0 } return r }
 		}
-		if (ts.isBreakStatement(s)) throw new Break(s.label?.text ?? null)
-		if (ts.isContinueStatement(s)) throw new Continue(s.label?.text ?? null)
-		if (ts.isReturnStatement(s)) throw new Return(s.expression ? W(ev(s.expression)) : undefined)
+		if (ts.isBreakStatement(s)) { const l = s.label?.text ?? null; return () => { ctl.label = l; return 1 } }
+		if (ts.isContinueStatement(s)) { const l = s.label?.text ?? null; return () => { ctl.label = l; return 2 } }
+		if (ts.isReturnStatement(s)) { const e = s.expression ? ex(s.expression) : null; return () => { ctl.ret = e ? W(e()) : undefined; return 3 } }
 		if (ts.isSwitchStatement(s)) {
-			const v = W(ev(s.expression))
-			let matched = false
-			try {
-				for (const c of s.caseBlock.clauses) {
-					if (!matched && ts.isCaseClause(c) && W(ev(c.expression)) === v) matched = true
-					if (matched) for (const st of c.statements) exec(st)
+			const v = ex(s.expression)
+			const cases = s.caseBlock.clauses.map(c => ({ val: ts.isCaseClause(c) ? ex(c.expression) : null, body: list(c.statements) }))
+			return () => {
+				const x = W(v())
+				let matched = false
+				for (const c of cases) {
+					if (!matched && c.val && W(c.val()) === x) matched = true
+					if (matched) { const r = c.body(); if (r === 1 && ctl.label === null) return 0; if (r) return r }
 				}
-			} catch (x) { if (x instanceof Break && x.label === null) return; throw x }
-			return
+				return 0
+			}
 		}
 		throw new EvalError('unsupported statement ' + ts.SyntaxKind[s.kind])
 	}
+	const body = list(fn.body!.statements)
+	return { slots, nparams: fn.parameters.length, body, ctl, vals, env: envRef, fpSlot } as Compiled & { fpSlot: number }
+}
+
+export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: EvalEnv): { ret?: bigint; abort?: string; limit?: boolean } {
+	let c = cache.get(fn)
+	if (!c) { c = compile(fn); cache.set(fn, c) }
+	const cc = c as Compiled & { fpSlot: number }
+	cc.vals.fill(undefined)
+	for (let i = 0; i < cc.nparams; i++) cc.vals[i] = W(args[i] ?? 0n)
+	cc.vals[cc.fpSlot] = env.fp
+	cc.env.cur = env
+	cc.ctl.steps = 0; cc.ctl.max = env.maxSteps; cc.ctl.label = null; cc.ctl.ret = undefined
 	try {
-		execList(fn.body!.statements)
-		return { ret: undefined }
+		const r = cc.body()
+		return { ret: r === 3 ? cc.ctl.ret : undefined }
 	} catch (x) {
-		if (x instanceof Return) return { ret: x.v }
 		if (x instanceof Abort) return { abort: x.message }
 		if (x instanceof StepLimit) return { limit: true }
 		throw x
