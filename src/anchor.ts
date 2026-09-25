@@ -25,16 +25,10 @@ export interface AnchorFn {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 type Call = { pc: number; args: Expr[] }
-// statements are never mutated in place: their calls are found once (the analyses below and
-// findNameFn walk the same statements several times)
-const callCache = new WeakMap<Stmt, Call[]>()
 function callsIn(s: Stmt): Call[] {
-	let out = callCache.get(s)
-	if (out) return out
-	out = []
+	const out: Call[] = []
 	if (s.k === 'call' && s.t.k === 'fn') out.push({ pc: s.t.pc, args: s.args })
-	for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') out!.push({ pc: x.t.pc, args: x.args }) })
-	callCache.set(s, out)
+	for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') out.push({ pc: x.t.pc, args: x.args }) })
 	return out
 }
 
