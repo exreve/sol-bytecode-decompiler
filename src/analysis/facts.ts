@@ -49,6 +49,7 @@ export interface Check {
 	main: boolean
 	before?: number        // the callee of the last call before the check in its statement list (Anchor try-call pattern)
 	via?: { fn: string; kinds: string[] } // the checks that callee makes (kinds from its Anchor error codes, see calleeChecks)
+	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -67,11 +68,16 @@ export interface Op {
 	value?: string
 	pda?: { fn: string; seeds: string; program: string }
 	via?: string                  // the CPI is made through this (small) user function wrapping invoke
+	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
 }
 
-export interface Call { line: number; callee: number; main: boolean; errPath: boolean }
+export interface Call { line: number; pc?: number; callee: number; main: boolean; errPath: boolean }
 
-export interface FnFacts { pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean }
+export interface FnFacts {
+	pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean
+	lines: string[]; at: number          // the printed text (for the IR-level analyses, src/analysis/flow.ts)
+	pcLine: Map<number, number>        // statement pc -> 1-based line
+}
 
 const ACC_FIELDS = new Set(['key', 'owner', 'is_signer', 'is_writable', 'executable', 'lamports', 'data', 'data_len', 'rent_epoch', 'original_data_len', 'dup_marker'])
 const FIELD_KIND: Record<string, string> = { is_signer: 'signer', is_writable: 'writable', executable: 'executable', owner: 'owner', key: 'key', data_len: 'data_len', lamports: 'lamports' }
@@ -109,7 +115,7 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
-	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map() }
+	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map() }
 	// declared types and single-definition aliases (x = path) of the function's names
 	const alias = new Map<string, string | null>()
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
@@ -270,7 +276,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
 		if (!kinds.length && !named) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c })
 	}
 
 	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
@@ -280,10 +286,11 @@ export function functionFacts(inp: FnInput): FnFacts {
 			site(n, main, err)
 			switch (n.k) {
 				case 'stmt': {
+					if (!facts.pcLine.has(n.s.pc)) facts.pcLine.set(n.s.pc, lineOf(n) + 1)
 					store(n, main, err)
 					const cs = calleesOf(n.s)
 					for (const c of cs) {
-						facts.calls.push({ line: lineOf(n) + 1, callee: c, main, errPath: err })
+						facts.calls.push({ line: lineOf(n) + 1, pc: n.s.pc, callee: c, main, errPath: err })
 						const nm = inp.calleeName(c)
 						if (/find_program_address|create_program_address/.test(nm) && !inp.sites.has(n)) {
 							// (out, seeds, seeds_len, program_id): a constant seed list is read from program memory

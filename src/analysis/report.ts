@@ -41,6 +41,7 @@
 import type { Result } from '../decompile.ts'
 import type { FnFacts, Op, OpKind } from './facts.ts'
 import { refOf } from './facts.ts'
+import { addExitWrites } from './flow.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -104,6 +105,7 @@ function parseIdlAccount(s: string, i: number): AccountRow {
 
 function analyze0(r: Result): Analysis {
 	const facts = r.facts, p = r.program
+	addExitWrites(r)
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	const procNames = new Set(r.processors.map(x => x.fn))
 	let roots = r.funcs.filter(f => f.name.startsWith('ix_') || procNames.has(f.name))

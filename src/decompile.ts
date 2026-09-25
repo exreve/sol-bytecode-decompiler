@@ -48,6 +48,7 @@ export interface Result {
   facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
   tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
   programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
+  idl?: IdlInfo;                   // the IDL given (account layouts for the analysis)
 }
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
@@ -1105,7 +1106,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address, idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }
