@@ -3,9 +3,9 @@ import { loadProgram, type Program, fnAddr } from './program.ts';
 import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
-import { Printer, printBody, type PrintCtx } from './print.ts';
+import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
-import { Semantics, constsIn, NICHE, OK_TAGS } from './semantics.ts';
+import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
@@ -15,7 +15,7 @@ import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
-import { findCpiSites, describeCpi, type CpiEnv } from './cpi.ts';
+import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
 import { Views } from './views.ts';
 import { findNameFn, anchorFn, type AnchorFn } from './anchor.ts';
 
@@ -215,6 +215,32 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
   }
+  // functions that make exactly one CPI, of a decoded well-known instruction: cpi_<program>_<instruction>
+  if (opts.sugar !== false) {
+    const taken = new Set([...p.funcs.values()].map(x => x.name));
+    for (const [pc, bt] of built) {
+      const fn = p.funcs.get(pc)!;
+      const fpv = bt.f.vars.find(v => v.param === 10)?.id;
+      if (!/^fn_[0-9a-f]+$/.test(fn.name) || fpv === undefined) continue;
+      // small functions only (a wrapper around the CPI, not a handler that also makes one)
+      let size = 0;
+      for (const b of bt.f.blocks) size += b.stmts.length;
+      if (size > 120) continue;
+      const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? invokeAbi(t.name) : t.k === 'fn' ? invokeThunks.get(t.pc) ?? null : null));
+      if (sites.size !== 1) continue;
+      const d = cpiDesc([...sites.values()][0], { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) });
+      if (!d?.ix) continue;
+      const base = `cpi_${d.family}_${d.ix.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`;
+      let nm = base, k = 2;
+      while (taken.has(nm)) nm = `${base}_${k++}`;
+      const old = fn.name;
+      fn.name = nm; taken.add(nm);
+      fnByAddr.set(fnAddr(p, pc), nm);
+      (fnNotes.get(pc) ?? fnNotes.set(pc, []).get(pc)!).push(d.guessed
+        ? `name [heur]: its CPI's data and accounts match ${d.family === 'token' ? 'SPL Token' : 'System'} ${d.ix}, but the program id is not a constant here (was ${old})`
+        : `name [known]: makes the CPI ${d.ix} of a well-known program (was ${old})`);
+    }
+  }
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
@@ -381,6 +407,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? 'call' : null));
       if (sites.size) {
         const env: CpiEnv = {
+          programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
           constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
@@ -530,6 +557,29 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
     } else hoisted.push(v);
   }
   return { decls, hoisted: hoisted.sort((a, b) => a - b) };
+}
+
+/** Known keys (program ids by name) that the 32 bytes at `ptr` are compared with somewhere in f (keyeq, memeq, memcmp-style calls). */
+function keyCompares(f: VarFunc, ptr: Expr, keyAt: (a: bigint) => string | undefined): string[] {
+  const out = new Set<string>();
+  const name = (b: string) => KNOWN_KEYS[b] ?? `key ${b}`;
+  const other = (xs: Expr[]) => (exprEq(xs[0], ptr) ? xs[1] : exprEq(xs[1], ptr) ? xs[0] : undefined);
+  const visit = (e: Expr) => walkExpr(e, x => {
+    if (x.k === 'fn' && x.name === 'keyeq' && exprEq(x.args[0], ptr)) out.add(name(keyB58(x.args.slice(1))));
+    if ((x.k === 'fn' && x.name === 'memeq') || (x.k === 'call' && x.args.length >= 3 && x.args[2].k === 'const' && x.args[2].v === 32n)) {
+      const o = other(x.args);
+      const k = o?.k === 'const' ? keyAt(o.v) : undefined;
+      if (k) out.add(name(k));
+    }
+  });
+  for (const b of f.blocks) {
+    for (const s of b.stmts) {
+      stmtExprs(s).forEach(visit);
+      if (s.k === 'call' && s.args.length >= 3 && s.args[2].k === 'const' && s.args[2].v === 32n) { const o = other(s.args); const k = o?.k === 'const' ? keyAt(o.v) : undefined; if (k) out.add(name(k)); }
+    }
+    if (b.term.k === 'br') visit(b.term.c);
+  }
+  return [...out];
 }
 
 function childLists(n: Node): Node[][] {

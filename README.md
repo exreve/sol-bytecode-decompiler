@@ -144,9 +144,16 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
 * `Result<(), ProgramError>` with a u32 variant tag (older toolchains; Ok tag inferred per program): constant tag
   stores into such a result get `// Err(ProgramError::InvalidSeeds)`, `// Err(ProgramError::Custom(6008))`, `// Ok`;
 * cross-program invocations (`sol_invoke_signed_c/_rust` and thin wrappers) whose instruction is built in the
-  frame get a line describing it, read back from the stores along straight-line code:
-  `// CPI: program *(n + 8), accounts [h + 8 (w), g + 8 (w), f + 8 (s)], data 9 bytes [u8 3 (Token Transfer if the program is SPL Token), u64 ld64(a + 0x20)]`
-  (known program ids by name, signer seeds as strings/keys when constant);
+  frame get a line describing it, read back from the stores along straight-line code. Instructions of well-known
+  programs (SPL Token / Token-2022 incl. p-token, System, Associated Token Account, Compute Budget) are decoded,
+  accounts by role and data fields by name:
+  `// CPI TOKEN_PROGRAM.Transfer { source: f.key (w), destination: g.key (w), authority: h.key (s), amount: ld64(a + 0x20) }, no signer seeds`.
+  When the program id is not a constant, the comment says whether it is compared with a known program id in the
+  same function, and a data/account shape matching SPL Token or System is decoded as such, marked as a guess:
+  `// CPI program *(q + 8) (id not a constant, and not compared with a known program id in this function) — data and accounts match SPL Token TransferChecked; if it is SPL Token: { source: i.key (w), mint: h.key, … }`.
+  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`.
+  Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
+  is a constant, `[heur]` when only the data shape matches);
 * calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
 
 ## Library code
