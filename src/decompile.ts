@@ -58,7 +58,7 @@ interface Built { f: VarFunc; body: Node[]; irreducible: boolean }
 
 export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // ---- phase 1: whole-program analysis ----
-  const p = loadProgram(bytes);
+  const p = loadProgram(bytes, { lazyBlocks: true }); // (blocks formed by inferSignatures, see program.ts)
   inferSignatures(p);
   const sem = new Semantics(p, opts.idl);
   setFoldImage(DISABLED.has('rofold') ? null : p.image);

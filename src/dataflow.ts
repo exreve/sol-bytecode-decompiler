@@ -1,5 +1,6 @@
 // Register liveness, interprocedural parameter/return inference and variable recovery (webs).
 import type { Program, Func, Block } from './program.ts';
+import { hasPendingBlocks, pendingCalls, reachesReturnPending, materializeBlocks, endPendingBlocks } from './program.ts';
 import { type Expr, type Stmt, walkExpr, mapExpr } from './ir.ts';
 
 const ARG_MASK = [0, 0b10, 0b110, 0b1110, 0b11110, 0b111110]; // r1..rk
@@ -200,27 +201,34 @@ export function inferSignatures(p: Program) {
   // (worklist: a function can only lose its path to `ret` when one of its callees becomes
   // noreturn, so only callers of newly noreturn functions are re-checked; the set only grows and
   // reachesReturn is monotone in it, hence the same least fixed point as re-scanning everything)
+  // (with lazily formed blocks, see loadProgram's lazyBlocks: the same call targets and the same
+  // reachability, read from the walked instructions; the blocks are formed after the cut)
+  const lazy = hasPendingBlocks(p);
+  const noret = (s: Stmt) => s.k === 'call' && calleeInfo(p, s).noreturn;
   const nrCallers = new Map<number, Func[]>();
   for (const f of funcs) {
     const seen = new Set<number>();
-    for (const b of f.blocks) for (const s of b.stmts) {
-      if (s.k !== 'call' || s.t.k !== 'fn' || seen.has(s.t.pc)) continue;
-      seen.add(s.t.pc);
-      let l = nrCallers.get(s.t.pc); if (!l) nrCallers.set(s.t.pc, (l = [])); l.push(f);
-    }
+    const note = (t: number) => {
+      if (seen.has(t)) return;
+      seen.add(t);
+      let l = nrCallers.get(t); if (!l) nrCallers.set(t, (l = [])); l.push(f);
+    };
+    if (lazy) pendingCalls(f).forEach(note);
+    else for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'call' && s.t.k === 'fn') note(s.t.pc);
   }
   {
     const queue = [...funcs], queued = new Set(funcs);
     for (let qi = 0; qi < queue.length; qi++) {
       const f = queue[qi];
       queued.delete(f);
-      if (f.noreturn || reachesReturn(p, f)) continue;
+      if (f.noreturn || (lazy ? reachesReturnPending(p, f, noret) : reachesReturn(p, f))) continue;
       f.noreturn = true;
       for (const c of nrCallers.get(f.pc) ?? []) if (!c.noreturn && !queued.has(c)) { queued.add(c); queue.push(c); }
     }
   }
   // Cut blocks after calls to noreturn callees (code after them is unreachable)
-  for (const f of funcs) truncateNoreturn(p, f);
+  if (lazy) { for (const f of funcs) materializeBlocks(p, f, noret); endPendingBlocks(p); }
+  else for (const f of funcs) truncateNoreturn(p, f);
   // lifted statements are shared between overlapping functions (Lifter.liftShared); call statements
   // get per-function state (indClobber, and in-place rewriting in recoverVars): unshare them now
   for (const f of funcs) for (const b of f.blocks) {

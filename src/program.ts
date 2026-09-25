@@ -277,7 +277,12 @@ export class Lifter {
   }
 }
 
-export function loadProgram(bytes: Uint8Array): Program {
+/**
+ * `lazyBlocks` (the decompiler's path): the functions' blocks are formed by inferSignatures, once
+ * noreturn callees are known, and only those that remain after cutting blocks at noreturn calls
+ * (see materializeBlocks). Otherwise every function's full CFG is formed here, as before.
+ */
+export function loadProgram(bytes: Uint8Array, opts: { lazyBlocks?: boolean } = {}): Program {
   const elf = parseElf(bytes);
   const n = Math.floor(elf.text.size / 8);
   const insns = decode(elf.bytes, elf.text.offset, n);
@@ -290,7 +295,7 @@ export function loadProgram(bytes: Uint8Array): Program {
     }
   }
   const p: Program = { elf, version: elf.version, image, insns, textVaddr: elf.textVaddr, funcs: new Map(), syscalls: new Map(), symbolNames, addressTaken: new Set() };
-  discover(p);
+  discover(p, !!opts.lazyBlocks);
   return p;
 }
 
@@ -305,7 +310,7 @@ function instructionStarts(p: Program): Uint8Array {
   return starts;
 }
 
-function discover(p: Program) {
+function discover(p: Program, lazy: boolean) {
   const lifter = new Lifter(p);
   const starts = instructionStarts(p);
   const entries = new Set<number>();
@@ -330,13 +335,17 @@ function discover(p: Program) {
   }
   const seen = new Int32Array(p.insns.length), lead = new Int32Array(p.insns.length);
   let stamp = 0;
-  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, buildFunc(p, lifter, pc, starts, seen, lead, ++stamp));
+  if (lazy) lazyState.set(p, { lifter, starts });
+  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, (lazy ? pendingFunc : buildFunc)(p, lifter, pc, starts, seen, lead, ++stamp));
 }
 
-function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, lead: Int32Array, stamp: number): Func {
-  // 1) find leaders via reachability
-  // seen[pc] === stamp: visited by this function (out-of-text pcs stop the walk right away);
-  // lead[pc] === stamp: in-text leader of this function (out-of-text leaders are kept in `outside`)
+/**
+ * Leaders of the function at `entry`: the entry, then every jump target reached (in walk order).
+ * seen[pc] === stamp: visited by this function (out-of-text pcs stop the walk right away);
+ * lead[pc] === stamp: in-text leader of this function (out-of-text leaders are kept in `outside`).
+ * `onLift` sees every lifted instruction of the walk.
+ */
+function findLeaders(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, lead: Int32Array, stamp: number, onLift?: (l: Lifted) => void) {
   const n = p.insns.length;
   const leaderList: number[] = [entry];
   const outside = new Set<number>();
@@ -353,6 +362,7 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       seen[pc] = stamp;
       if (!starts[pc]) break;
       const l = lifter.liftShared(pc);
+      onLift?.(l);
       if ('next' in l) { pc = l.next; continue; }
       const t = l.term;
       if (t.k === 'jmp') { addLeader(t.to); work.push(t.to); }
@@ -360,25 +370,29 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       break;
     }
   }
-  const isLeader = (x: number) => (x >= 0 && x < n ? lead[x] === stamp : outside.has(x));
-  // 2) form blocks
-  const blockAt = new Map<number, number>();
-  const blocks: Block[] = [];
-  const sortedLeaders = [entry, ...leaderList.slice(1).sort((a, b) => a - b)];
-  for (const l of sortedLeaders) { blockAt.set(l, blocks.length); blocks.push({ id: blocks.length, start: l, end: l, stmts: [], term: { k: 'trap', msg: '' }, succs: [], preds: [] }); }
-  for (const b of blocks) {
-    let pc = b.start;
-    while (true) {
-      // every pc reached here was visited (and so lifted) by the walk above
-      const l = pc >= 0 && pc < n && starts[pc] ? lifter.memo[pc] : undefined;
-      if (!l) { b.term = { k: 'trap', msg: pc >= p.insns.length || pc < 0 ? 'jump outside text' : 'jump into middle of lddw' }; break; }
-      for (const s of l.stmts) b.stmts.push(s);
-      if ('term' in l) { b.term = { ...l.term }; b.end = pc; break; } // terminators are patched per function (block ids): never shared
-      b.end = pc;
-      if (isLeader(l.next)) { b.term = { k: 'jmp', to: l.next }; break; }
-      pc = l.next;
-    }
+  return { leaderList, outside };
+}
+
+/** The block starting at leader `start`, as the full CFG has it (term not yet patched to block ids). */
+function formBlock(p: Program, lifter: Lifter, starts: Uint8Array, start: number, id: number, isLeader: (x: number) => boolean): Block {
+  const n = p.insns.length;
+  const b: Block = { id, start, end: start, stmts: [], term: { k: 'trap', msg: '' }, succs: [], preds: [] };
+  let pc = start;
+  while (true) {
+    // every pc reached here was visited (and so lifted) by the walk that found the leaders
+    const l = pc >= 0 && pc < n && starts[pc] ? lifter.memo[pc] : undefined;
+    if (!l) { b.term = { k: 'trap', msg: pc >= p.insns.length || pc < 0 ? 'jump outside text' : 'jump into middle of lddw' }; break; }
+    for (const s of l.stmts) b.stmts.push(s);
+    if ('term' in l) { b.term = { ...l.term }; b.end = pc; break; } // terminators are patched per function (block ids): never shared
+    b.end = pc;
+    if (isLeader(l.next)) { b.term = { k: 'jmp', to: l.next }; break; }
+    pc = l.next;
   }
+  return b;
+}
+
+/** Patch jump targets from leader pcs to block ids; successors and predecessors. */
+function linkBlocks(blocks: Block[], blockAt: Map<number, number>) {
   const bid = (pc: number) => blockAt.get(pc)!;
   for (const b of blocks) {
     const t = b.term;
@@ -386,8 +400,116 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
     else if (t.k === 'br') { t.t = bid(t.t); t.f = bid(t.f); b.succs = t.t === t.f ? [t.t] : [t.t, t.f]; }
   }
   for (const b of blocks) for (const s of b.succs) blocks[s].preds.push(b.id);
-  const name = p.symbolNames.get(entry) ?? (entry === p.elf.entryPc ? 'entrypoint' : `fn_${(p.elf.text.addr + entry * 8).toString(16)}`);
-  return { pc: entry, name, blocks, blockAt, noreturn: false, nparams: 5, extraIn: [], returns: true, isEntry: entry === p.elf.entryPc };
 }
+
+const funcName = (p: Program, entry: number) => p.symbolNames.get(entry) ?? (entry === p.elf.entryPc ? 'entrypoint' : `fn_${(p.elf.text.addr + entry * 8).toString(16)}`);
+
+function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, lead: Int32Array, stamp: number): Func {
+  // 1) find leaders via reachability
+  const n = p.insns.length;
+  const { leaderList, outside } = findLeaders(p, lifter, entry, starts, seen, lead, stamp);
+  const isLeader = (x: number) => (x >= 0 && x < n ? lead[x] === stamp : outside.has(x));
+  // 2) form blocks
+  const blockAt = new Map<number, number>();
+  const blocks: Block[] = [];
+  const sortedLeaders = [entry, ...leaderList.slice(1).sort((a, b) => a - b)];
+  for (const l of sortedLeaders) { blockAt.set(l, blocks.length); blocks.push(formBlock(p, lifter, starts, l, blocks.length, isLeader)); }
+  linkBlocks(blocks, blockAt);
+  return { pc: entry, name: funcName(p, entry), blocks, blockAt, noreturn: false, nparams: 5, extraIn: [], returns: true, isEntry: entry === p.elf.entryPc };
+}
+
+// ---------------- lazy CFGs (loadProgram's lazyBlocks) ----------------
+//
+// Before noreturn callees are known, a function's CFG runs past every panic call into whatever code
+// follows (often the rest of the program): in big programs the full CFGs hold several times the
+// program's code, most of which inferSignatures then cuts off (truncateNoreturn + pruneUnreachable).
+// Lazily, discovery only walks each function (the same walk, so the same leaders and lifting) and
+// keeps its leaders and direct call targets; inferSignatures decides noreturn with
+// reachesReturnPending (the same reachability over the same blocks, followed through the lifted
+// instructions instead of formed blocks), then materializeBlocks forms the blocks that the cut
+// leaves, exactly as truncateNoreturn + pruneUnreachable leave the full CFG.
+
+interface Pending { leaders: Set<number>; sorted: number[]; calls: number[] }
+const pending = new WeakMap<Func, Pending>();
+const lazyState = new WeakMap<Program, { lifter: Lifter; starts: Uint8Array }>();
+
+/** The program was loaded with lazyBlocks and its blocks are not formed yet. */
+export const hasPendingBlocks = (p: Program) => lazyState.has(p);
+
+function pendingFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, lead: Int32Array, stamp: number): Func {
+  const calls = new Set<number>();
+  const { leaderList } = findLeaders(p, lifter, entry, starts, seen, lead, stamp, l => { for (const s of l.stmts) if (s.k === 'call' && s.t.k === 'fn') calls.add(s.t.pc); });
+  const f: Func = { pc: entry, name: funcName(p, entry), blocks: [], blockAt: new Map(), noreturn: false, nparams: 5, extraIn: [], returns: true, isEntry: entry === p.elf.entryPc };
+  pending.set(f, { leaders: new Set(leaderList), sorted: [entry, ...leaderList.slice(1).sort((a, b) => a - b)], calls: [...calls] });
+  return f;
+}
+
+/** Direct call targets anywhere in the function's full CFG (distinct). */
+export function pendingCalls(f: Func): number[] { return pending.get(f)!.calls; }
+
+/**
+ * reachesReturn on the full CFG: from the entry block, is a `ret` terminator reached through blocks
+ * without a call to a noreturn callee (such a block is a dead end, whatever its terminator)?
+ */
+export function reachesReturnPending(p: Program, f: Func, noret: (s: Stmt) => boolean): boolean {
+  const { lifter, starts } = lazyState.get(p)!, pd = pending.get(f)!, n = p.insns.length;
+  const seen = new Set<number>([f.pc]), st = [f.pc];
+  const push = (x: number) => { if (!seen.has(x)) { seen.add(x); st.push(x); } };
+  while (st.length) {
+    let pc = st.pop()!;
+    // the block starting at this leader (formBlock's walk)
+    for (;;) {
+      const l = pc >= 0 && pc < n && starts[pc] ? lifter.memo[pc] : undefined;
+      if (!l) break; // trap terminator
+      if (l.stmts.some(noret)) break; // dead block
+      if ('term' in l) {
+        const t = l.term;
+        if (t.k === 'ret') return true;
+        if (t.k === 'jmp') push(t.to);
+        else if (t.k === 'br') { push(t.t); push(t.f); }
+        break;
+      }
+      if (pd.leaders.has(l.next)) { push(l.next); break; }
+      pc = l.next;
+    }
+  }
+  return false;
+}
+
+/**
+ * Form the function's blocks: the full CFG's blocks that remain after truncateNoreturn (a block is
+ * cut after its first noreturn call, unless that call ends a block that ends in a trap, and loses
+ * its successors) and pruneUnreachable (blocks no longer reachable from the entry are dropped, the
+ * others renumbered in order). The remaining blocks are exactly those reached from the entry through
+ * the successors of blocks as cut, so only they are formed; ids, terminators, successors, the
+ * predecessors (in block order), `end` (a cut block keeps it) and blockAt come out the same.
+ */
+export function materializeBlocks(p: Program, f: Func, noret: (s: Stmt) => boolean) {
+  const { lifter, starts } = lazyState.get(p)!, pd = pending.get(f)!;
+  pending.delete(f);
+  const isLeader = (x: number) => pd.leaders.has(x);
+  const formed = new Map<number, Block>(); // leader -> block (id assigned below)
+  const st = [f.pc];
+  formed.set(f.pc, null as unknown as Block);
+  while (st.length) {
+    const L = st.pop()!;
+    const b = formBlock(p, lifter, starts, L, -1, isLeader);
+    formed.set(L, b);
+    const i = b.stmts.findIndex(noret);
+    if (i >= 0 && !(i === b.stmts.length - 1 && b.term.k === 'trap')) { b.stmts.length = i + 1; b.term = { k: 'trap', msg: '' }; continue; }
+    const t = b.term;
+    const next = t.k === 'jmp' ? [t.to] : t.k === 'br' ? [t.t, t.f] : [];
+    for (const x of next) if (!formed.has(x)) { formed.set(x, null as unknown as Block); st.push(x); }
+  }
+  const blocks: Block[] = [];
+  const blockAt = new Map<number, number>();
+  for (const l of pd.sorted) { const b = formed.get(l); if (b) { b.id = blocks.length; blockAt.set(l, b.id); blocks.push(b); } }
+  linkBlocks(blocks, blockAt);
+  f.blocks = blocks;
+  f.blockAt = blockAt;
+}
+
+/** All functions' blocks are formed: drop the lifter. */
+export function endPendingBlocks(p: Program) { lazyState.delete(p); }
 
 export function fnAddr(p: Program, pc: number): bigint { return p.textVaddr + BigInt(pc * 8); }
