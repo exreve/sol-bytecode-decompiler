@@ -139,7 +139,7 @@ export class Semantics {
 	constructor(p: Program, idl?: IdlInfo) {
 		this.p = p
 		this.idl = idl
-		for (const r of p.image.regions) if (!r.exec && Buffer.from(r.bytes).includes('AnchorError occurred')) this.anchor = true
+		for (const r of p.image.regions) if (!r.exec && Buffer.from(r.bytes.buffer, r.bytes.byteOffset, r.bytes.byteLength).includes('AnchorError occurred')) this.anchor = true
 		for (const [k, n] of Object.entries(KNOWN_KEYS)) {
 			const b = unb58(k)
 			if (k.startsWith('1111')) continue // all-zero chunks are too common to annotate
@@ -155,19 +155,25 @@ export class Semantics {
 	/** Known keys stored in rodata; identifier-like strings as discriminator dictionary. */
 	scanRodata() {
 		const known = new Map<string, string>()
-		for (const [k, n] of Object.entries(KNOWN_KEYS)) known.set(Buffer.from(unb58(k)).toString('hex'), n)
+		// first 4 bytes of every known key: only offsets starting with one of them can match, so the
+		// 32-byte hex lookup is done for those alone (same matches, same order)
+		const prefixes = new Set<number>()
+		for (const [k, n] of Object.entries(KNOWN_KEYS)) {
+			const kb = Buffer.from(unb58(k))
+			known.set(kb.toString('hex'), n)
+			prefixes.add(kb.readUInt32LE(0))
+		}
 		const words = new Set<string>()
 		for (const r of this.p.image.regions) {
 			if (r.exec) continue
 			const b = r.bytes
 			for (let o = 0; o + 32 <= b.length; o += 1) {
-				if (o % 1 === 0) {
-					const h = known.get(Buffer.from(b.subarray(o, o + 32)).toString('hex'))
-					if (h && !h.startsWith('SYSTEM')) this.keyAddrs.set(r.vaddr + BigInt(o), h)
-				}
+				if (!prefixes.has((b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24) >>> 0)) continue
+				const h = known.get(Buffer.from(b.subarray(o, o + 32)).toString('hex'))
+				if (h && !h.startsWith('SYSTEM')) this.keyAddrs.set(r.vaddr + BigInt(o), h)
 			}
 			// identifier-like words
-			const s = Buffer.from(b).toString('latin1')
+			const s = Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('latin1') // view, no copy
 			for (const m of s.matchAll(/[A-Za-z][A-Za-z0-9_]{2,40}/g)) words.add(m[0])
 		}
 		// Anchor: account/event discriminators from type names; instruction from snake names
