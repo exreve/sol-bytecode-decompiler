@@ -599,10 +599,12 @@ function inlineLocal(f: VarFunc, exactCounts?: (uses: Int32Array) => void): bool
   for (const b of f.blocks) {
     for (let i = 0; i < b.stmts.length; i++) {
       const s = b.stmts[i];
-      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd)) { cur[s.dst]--; changed = true; i--; continue; }
+      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd, cur)) { cur[s.dst]--; changed = true; i--; continue; }
       if (s.k !== 'set') continue;
       const v = s.dst;
-      if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
+      // (cur[v] = 0: v occurs nowhere, so localReach would find no use; it would scan the rest of
+      // the block for each of the many dead definitions of large straight-line code)
+      if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && (cur[v] === 0 || localReach(b, i, v) !== 1)) continue;
       const fx = stmtInfo(s); // stmtExprs(set) = [s.e]
       const reads = new Set<number>(fx.vars);
       // find use
@@ -682,10 +684,10 @@ function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number,
 }
 
 /** `v = call(...)` immediately followed by the single use of v -> call expression at the use site. */
-function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses: Int32Array, nd: Int32Array): boolean {
+function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses: Int32Array, nd: Int32Array, cur: Int32Array): boolean {
   const s = b.stmts[i] as Extract<Stmt, { k: 'call' }>;
   const v = s.dst;
-  if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b as any, i, v) !== 1) return false;
+  if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && (cur[v] === 0 || localReach(b as any, i, v) !== 1)) return false;
   const next = i + 1 < b.stmts.length ? stmtExprs(b.stmts[i + 1]) : b.term.k === 'br' ? [b.term.c] : b.term.k === 'ret' && b.term.e ? [b.term.e] : null;
   if (!next) return false;
   let hit = false, impure = false;
