@@ -414,6 +414,22 @@ export function setFoldImage(img: Image | null) { foldImage = img; }
 
 export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filter(Boolean));
 
+/**
+ * mapStmtExprsKeep(s, simplifyExpr), skipping statements already known to be left unchanged by it.
+ * simplifyExpr is a pure function of the expression's structure (and of the program image, fixed
+ * during a decompilation), and statements are never mutated in place after variable recovery, so a
+ * statement it returned unchanged once is returned unchanged every time: optimizeFunc re-simplified
+ * every statement in every round (and in every later optimizeFunc call) although most are stable.
+ * The mark is a non-enumerable symbol property, like stmtInfo's cache (spread copies do not inherit it).
+ */
+const SIMPLE = Symbol('simplified');
+function simplifyStmt(s: Stmt): Stmt {
+  if ((s as any)[SIMPLE]) return s;
+  const n = mapStmtExprsKeep(s, simplifyExpr);
+  if (n === s) Object.defineProperty(s, SIMPLE, { value: true });
+  return n;
+}
+
 export function optimizeFunc(f: VarFunc) {
   // simplify all expressions first
   // `changed` keeps the historical per-pass flags (propagateGlobal and localCopyProp over-report),
@@ -426,7 +442,7 @@ export function optimizeFunc(f: VarFunc) {
     const st = { real: false };
     for (const b of f.blocks) {
       const ss = b.stmts;
-      for (let i = 0; i < ss.length; i++) { const n = mapStmtExprsKeep(ss[i], simplifyExpr); if (n !== ss[i]) { ss[i] = n; st.real = true; } }
+      for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) { ss[i] = n; st.real = true; } }
       if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) { b.term.c = c; st.real = true; } }
       else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) { b.term.e = c; st.real = true; } }
     }
@@ -450,7 +466,7 @@ export function optimizeFunc(f: VarFunc) {
   // expressions created by the last round's passes (e.g. selects from if-conversion) still get simplified
   for (const b of f.blocks) {
     const ss = b.stmts;
-    for (let i = 0; i < ss.length; i++) { const n = mapStmtExprsKeep(ss[i], simplifyExpr); if (n !== ss[i]) ss[i] = n; }
+    for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) ss[i] = n; }
     if (b.term.k === 'br') b.term.c = simplifyExpr(b.term.c);
     else if (b.term.k === 'ret' && b.term.e) b.term.e = simplifyExpr(b.term.e);
   }
@@ -613,7 +629,11 @@ function occursLazily(e: Expr, v: number): boolean {
   return lazy;
 }
 
-/** If the definition of v at stmt i only reaches uses inside this block, return how many; else -1. */
+/**
+ * If the definition of v at stmt i only reaches uses inside this block, return how many; else -1.
+ * Callers only ask whether that is exactly one use: once two uses are seen the answer is some n >= 2
+ * or -1, never 1, so the scan stops there (returning 2).
+ */
 function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number, v: number): number {
   let n = 0;
   const cnt = (e: Expr) => walkExpr(e, x => { if (x.k === 'var' && x.id === v) n++; });
@@ -621,6 +641,7 @@ function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number,
     const t = b.stmts[j];
     n += countIn(stmtInfo(t).vars, v);
     if ((t.k === 'set' || t.k === 'call') && t.dst === v) return n;
+    if (n >= 2) return n;
   }
   if (b.term.k === 'br') cnt(b.term.c);
   else if (b.term.k === 'ret' && b.term.e) cnt(b.term.e);
