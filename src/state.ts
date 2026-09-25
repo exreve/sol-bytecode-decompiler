@@ -79,12 +79,12 @@ export function accountDataVars(funcs: Map<number, { f: VarFunc }>, discs: Map<b
 			const { f } = info.get(pc)!
 			for (const b of f.blocks) for (const s of b.stmts) {
 				if (s.k !== 'call' || s.t.k !== 'fn') continue
-				const callee = info.get(s.t.pc)
+				const cpc = s.t.pc, callee = info.get(cpc)
 				if (!callee) continue
 				s.args.forEach((a, i) => {
 					const t = a.k === 'var' ? sl.get(a.id) : undefined
 					const pv = t && callee.f.vars.find(v => v.param === i + 1)
-					if (pv && !callee.defs.has(pv.id) && setIn(slices, s.t.pc, pv.id, t!)) changed = true
+					if (pv && !callee.defs.has(pv.id) && setIn(slices, cpc, pv.id, t!)) changed = true
 				})
 			}
 		}

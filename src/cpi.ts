@@ -299,10 +299,12 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		const fam = program.known ? FAMILY[program.known] : undefined
 		const cands: Family[] = fam ? [fam] : program.known ? [] : [TOKEN, SYSTEM]
 		for (const F of cands) {
-			const tag = dl === 0 && F === ATA ? 0n : at(dOff, F.tagSize)
-			if (tag?.k !== 'const' && !(dl === 0 && F === ATA)) continue
-			const t = typeof tag === 'bigint' ? tag : (tag as { v: bigint }).v
-			const lay = F.ixs[Number(t)]
+			// the instruction tag (an empty ATA instruction is Create)
+			let tag: bigint | undefined
+			if (dl === 0 && F === ATA) tag = 0n
+			else { const e = at(dOff, F.tagSize); if (e?.k === 'const') tag = e.v }
+			if (tag === undefined) continue
+			const lay: IxLayout | undefined = F.ixs[Number(tag)]
 			if (!lay) continue
 			// a guess (program not constant) must match the data length and the account count exactly
 			if (!fam && (lay.len === undefined || lay.len !== dl || (nAcc !== undefined && nAcc !== lay.accounts.length))) continue

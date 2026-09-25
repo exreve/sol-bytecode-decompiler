@@ -334,7 +334,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const sites = findCpiSites(hb.body, fpv, t => (t.k === 'fn' && t.pc !== tpc && built.has(t.pc) ? 'call' : null));
     for (const site of sites.values()) {
       if (site.t?.k !== 'fn') continue;
-      const callee = built.get(site.t.pc);
+      const cpc = site.t.pc, callee = built.get(cpc);
       if (!callee) continue;
       site.args.forEach((arg, i) => {
         const F = fo(arg);
@@ -346,7 +346,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
         const pv = callee.f.vars.find(v => v.param === reg);
         if (!pv || defCount(callee.f, pv.id) !== 0) return;
-        let m = paramTypes.get(site.t.pc); if (!m) paramTypes.set(site.t.pc, (m = new Map()));
+        let m = paramTypes.get(cpc); if (!m) paramTypes.set(cpc, (m = new Map()));
         m.set(pv.id, [`${P}Context`, `the handler ix_${ix} passes a frame object holding (program_id, address of a copy of the Accounts result)`]);
       });
     }
