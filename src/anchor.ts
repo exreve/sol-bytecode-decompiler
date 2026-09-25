@@ -187,6 +187,49 @@ function exits(ns: Node[]): boolean {
 	return l.k === 'if' && exits(l.then) && exits(l.else)
 }
 
+/**
+ * Layout of the Accounts struct a try_accounts function returns through its first parameter: offset ->
+ * account name, from stores `st64(out + off, v)` of a named account variable (or of a frame slot stored
+ * exactly once, with such a variable). Offsets stored with different names are dropped.
+ */
+export function accountsLayout(f: VarFunc, names: Map<number, string>): Map<number, string> {
+	const out = f.vars.find(v => v.param === 1)?.id
+	const fp = f.vars.find(v => v.param === 10)?.id
+	const res = new Map<number, string>(), bad = new Set<number>()
+	if (out === undefined) return res
+	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === out) return res
+	const fo = (e: Expr) => frameOff(e, fp ?? -1)
+	// frame slots stored exactly once
+	const slot = new Map<number, Expr | null>()
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'store' && s.size === 8) { const o = fo(s.addr); if (o !== undefined) slot.set(o, slot.has(o) ? null : s.v) }
+		else if (s.k === 'stores' && s.size === 8) { const o = fo(s.addr); if (o !== undefined) s.vals.forEach((v, i) => slot.set(o + 8 * i, slot.has(o + 8 * i) ? null : v)) }
+	}
+	const nameOf = (e: Expr): string | undefined => {
+		if (e.k === 'var') return names.get(e.id)
+		if (e.k === 'load' && e.size === 8) { const o = fo(e.addr); const v = o !== undefined ? slot.get(o) : undefined; return v?.k === 'var' ? names.get(v.id) : undefined }
+		return undefined
+	}
+	const note = (off: number, v: Expr) => {
+		const nm = nameOf(v)
+		if (!nm) return
+		if (res.has(off) && res.get(off) !== nm) bad.add(off)
+		res.set(off, nm)
+	}
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k !== 'store' && s.k !== 'stores') continue
+		const a = s.addr
+		const off = a.k === 'var' && a.id === out ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === out && a.b.k === 'const' ? Number(a.b.v) : -1
+		if (off < 0 || off > 0x10000 || s.size !== 8) continue
+		if (s.k === 'store') note(off, s.v); else s.vals.forEach((v, i) => note(off + 8 * i, v))
+	}
+	for (const o of bad) res.delete(o)
+	// one offset per name
+	const seen = new Map<string, number>()
+	for (const [o, nm] of res) { if (seen.has(nm)) { res.delete(o); res.delete(seen.get(nm)!) } else seen.set(nm, o) }
+	return res
+}
+
 const addOff = (o: number | undefined, c: bigint) => (o === undefined ? undefined : o + Number(BigInt.asIntN(64, c)))
 
 function children(n: Node): Node[][] {

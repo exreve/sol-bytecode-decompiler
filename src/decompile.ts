@@ -17,7 +17,7 @@ import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
 import { Views, exprType } from './views.ts';
-import { findNameFn, anchorFn, type AnchorFn } from './anchor.ts';
+import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 
@@ -92,7 +92,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (!DISABLED.has('compact')) compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
-    if (!DISABLED.has('stmtidioms')) bt.body = statementIdioms(bt.body);
+    if (!DISABLED.has('stmtidioms')) bt.body = statementIdioms(bt.body, opts.exactMemory ? undefined : bt.f.vars.find(v => v.param === 10)?.id);
     bt.irreducible = st.irreducible;
   }
 
@@ -258,6 +258,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const anchorInfo = new Map<number, AnchorFn>();
   const fnNotes = new Map<number, string[]>(); // extra header lines per function
   const strAccounts = new Map<number, string[]>(); // handler pc -> account names from strings
+  const tryOf = new Map<number, number>();          // handler pc -> its Accounts::try_accounts function
+  const paramTypes = new Map<number, Map<number, [string, string]>>(); // fn pc -> param var -> [view, provenance note]
   // IDL: accounts and arguments of each handler
   if (opts.sugar !== false && opts.idl) for (const [hpc, ix] of sem.ixNames) {
     const d = opts.idl.instructions.find(i => i.name === ix);
@@ -291,6 +293,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         };
         visit(bt.body);
         if (tpc === undefined) continue;
+        tryOf.set(hpc, tpc);
         const a = anchorInfo.get(tpc)!, fn = p.funcs.get(tpc)!;
         if (/^fn_[0-9a-f]+$/.test(fn.name) && !taken.has(`accounts_${ix}`)) {
           const old = fn.name;
@@ -303,6 +306,52 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
   }
+  // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
+  for (const [hpc, tpc] of tryOf) {
+    const ix = sem.ixNames.get(hpc)!;
+    const layout = accountsLayout(built.get(tpc)!.f, anchorInfo.get(tpc)!.varNames);
+    if (!layout.size) continue;
+    const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
+    if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
+    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo) at the offsets it stores them [str names; offsets inferred]`, fields: [...layout].sort((x, y) => x[0] - y[0]).map(([off, nm]) => ({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' } })) });
+    views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts), as the handler builds it [layout from the handler's stores]`, fields: [{ name: 'program_id', off: 0, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: 8, t: { k: 'ref', to: `${P}Accounts` } }] });
+    // the handler: the frame object R receiving try_accounts' result, and a call passing a frame object
+    // whose word 0 is program_id and word 8 the address of a copy of R
+    const hb = built.get(hpc)!, hf = hb.f;
+    const fpv = hf.vars.find(v => v.param === 10)?.id;
+    const prog = [...(abiNames.get(hpc) ?? [])].find(([, n]) => n === 'program_id')?.[0];
+    if (fpv === undefined || prog === undefined) continue;
+    const fo = (e: Expr | undefined): number | undefined => (e && e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : e?.k === 'var' && e.id === fpv ? 0 : undefined);
+    const defs = new Map<number, Expr[]>();
+    for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'set') { let l = defs.get(st.dst); if (!l) defs.set(st.dst, (l = [])); l.push(st.e); }
+    let R: number | undefined;
+    for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn' && st.t.pc === tpc) R = fo(st.args[0]);
+    if (R === undefined) continue;
+    const loadsR = (e: Expr, k: number) => {
+      if (e.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
+      return e.k === 'load' && e.size === 8 && fo(e.addr) === R! + k;
+    };
+    const sites = findCpiSites(hb.body, fpv, t => (t.k === 'fn' && t.pc !== tpc && built.has(t.pc) ? 'call' : null));
+    for (const site of sites.values()) {
+      if (site.t?.k !== 'fn') continue;
+      const callee = built.get(site.t.pc);
+      if (!callee) continue;
+      site.args.forEach((arg, i) => {
+        const F = fo(arg);
+        if (F === undefined) return;
+        const w0 = site.facts.find(x => x.off === F && x.size === 8)?.e, w1 = site.facts.find(x => x.off === F + 8 && x.size === 8)?.e;
+        const G = fo(w1);
+        if (w0?.k !== 'var' || w0.id !== prog || G === undefined) return;
+        if (!site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) return;
+        const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
+        const pv = callee.f.vars.find(v => v.param === reg);
+        if (!pv || defCount(callee.f, pv.id) !== 0) return;
+        let m = paramTypes.get(site.t.pc); if (!m) paramTypes.set(site.t.pc, (m = new Map()));
+        m.set(pv.id, [`${P}Context`, `the handler ix_${ix} passes a frame object holding (program_id, address of a copy of the Accounts result)`]);
+      });
+    }
+  }
+
   // functions that make exactly one CPI, of a decoded well-known instruction: cpi_<program>_<instruction>
   if (opts.sugar !== false) {
     const taken = new Set([...p.funcs.values()].map(x => x.name));
@@ -486,10 +535,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
     const varTypes = new Map<number, string>();
     const dataNotes: string[] = [];
+    const ctxNotes: string[] = [];
     if (opts.sugar !== false) {
       for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
       for (const v of an?.accountVars ?? []) if (!varTypes.has(v)) varTypes.set(v, 'AccountInfo');
       for (const [v, t] of argTypes) varTypes.set(v, t);
+      for (const [v, [t, why]] of paramTypes.get(pc) ?? []) if (!varTypes.has(v)) { varTypes.set(v, t); ctxNotes.push(`${names[v]}: ${t} (${why})`); }
       for (const [v, t] of dataVars.get(pc) ?? []) if ((!varTypes.has(v) || varTypes.get(v) === 'AccountRecord') && used.has(v)) { varTypes.set(v, t); dataNotes.push(`${names[v]}: ${t}`); }
       // single-definition variables holding a typed object (x = acc.data): that object's view type
       for (let it = 0, grew = true; grew && it < 4; it++) {
@@ -567,6 +618,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (ps.length) lines.push(`// instruction data may reach [heur: flow-insensitive taint from the handlers' ix_args]: ${ps.join(', ')}`);
     }
     if (abiNm.length) lines.push(`// names [heur: Anchor dispatcher / handler argument order (out, program_id, accounts, accounts_len, instruction data after the discriminator, its length)]: ${abiNm.join(', ')}`);
+    if (ctxNotes.length) lines.push(`// types [heur]: ${ctxNotes.join('; ')}`);
     if (dataNotes.length) lines.push(`// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: ${dataNotes.join(', ')}`);
     if (argNames.length) lines.push(`// names [idl: argument names and layout; which variable holds the instruction data is inferred]: ${argNames.join(', ')}`);
     if (an) {

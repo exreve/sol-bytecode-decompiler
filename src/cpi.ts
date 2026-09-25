@@ -28,7 +28,7 @@ interface Fact { off: number; size: number; e: Expr }
 // CPI (C / Rust ABI); PDA derivation: syscall argument order (seeds, n, program_id, out[, bump]) or
 // Pubkey::find/create_program_address (out, seeds, n, program_id); or another call taking a frame address
 export type SiteKind = 'c' | 'rust' | 'pda_find' | 'pda_create' | 'pda_find_out' | 'pda_create_out' | 'call'
-export interface CpiSite { abi: SiteKind; args: Expr[]; facts: Fact[] }
+export interface CpiSite { abi: SiteKind; args: Expr[]; facts: Fact[]; t?: Extract<Stmt, { k: 'call' }>['t'] }
 
 /** CPI call sites of a structured body, keyed by the node (statement / return) containing the call. */
 export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, { k: 'call' }>['t']) => SiteKind | null): Map<Node, CpiSite> {
@@ -48,7 +48,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 		walkExpr(e, x => {
 			if (x.k !== 'call' || x.t.k === 'ind') return
 			const abi = abiOf(x.t)
-			if (abi && !sites.has(n) && ((abi !== 'call' && !abi.startsWith('pda')) || x.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: x.args, facts: [...facts] })
+			if (abi && !sites.has(n) && ((abi !== 'call' && !abi.startsWith('pda')) || x.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: x.args, facts: [...facts], t: x.t })
 		})
 	}
 	const run = (ns: Node[], facts0: Fact[]): Fact[] => {
@@ -58,7 +58,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 				case 'stmt': {
 					const s = n.s
 					if (s.k === 'call') {
-						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi && ((abi !== 'call' && !abi.startsWith('pda')) || s.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: s.args, facts: [...facts] }) }
+						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi && ((abi !== 'call' && !abi.startsWith('pda')) || s.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: s.args, facts: [...facts], t: s.t }) }
 						facts = []
 					} else if (s.k === 'set') {
 						note(n, s.e, facts)

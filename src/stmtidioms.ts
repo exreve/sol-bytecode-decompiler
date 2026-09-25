@@ -12,11 +12,13 @@
 // statements between the load and the store may only assign variables (no call, no store: at most
 // a load or a trapping division, whose fault aborts either way before any effect) and must neither
 // read x nor assign a variable of p, so performing the load right before the store reads the same
-// word. In both forms x has no other use.
+// word. In both forms x has no other use. With the frame pointer given (default memory model: the frame
+// is only accessed through frame-pointer-derived addresses), statements moved before the helper may
+// also load from the frame when p is not a frame address: such a load cannot read the word p.
 import type { Node } from './structure.ts'
 import { type Expr, walkExpr, exprEq, hasSideEffectsOrMem, M64 } from './ir.ts'
 
-export function statementIdioms(body: Node[]): Node[] {
+export function statementIdioms(body: Node[], fp?: number): Node[] {
 	const uses = new Map<number, number>()
 	const count = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') uses.set(x.id, (uses.get(x.id) ?? 0) + 1) })
 	const scan = (ns: Node[]) => {
@@ -42,7 +44,29 @@ export function statementIdioms(body: Node[]): Node[] {
 		}
 	}
 	scan(body)
-	return rewrite(body, uses)
+	return rewrite(body, uses, fp)
+}
+
+/** e with every load of the current frame (fp + c, inside the 4 KiB frame: it cannot fault) replaced by 0 */
+function withoutFrameLoads(e: Expr, fp: number): Expr {
+	const m = (x: Expr): Expr => {
+		switch (x.k) {
+			case 'load': {
+				const a = x.addr
+				if (a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === fp && a.b.k === 'const') {
+					const c = BigInt.asIntN(64, a.b.v)
+					if (c >= -0x1000n && c + BigInt(x.size) <= 0n) return { k: 'const', v: 0n }
+				}
+				return { ...x, addr: m(x.addr) }
+			}
+			case 'bin': case 'cmp': case 'land': case 'lor': return { ...x, a: m(x.a), b: m(x.b) } as Expr
+			case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...x, a: m(x.a) } as Expr
+			case 'sel': return { ...x, c: m(x.c), a: m(x.a), b: m(x.b) }
+			case 'call': case 'fn': return { ...x, args: x.args.map(m) } as Expr
+			default: return x
+		}
+	}
+	return m(e)
 }
 
 const hasCall = (e: Expr) => { let c = false; walkExpr(e, x => { if (x.k === 'call') c = true }); return c }
@@ -63,10 +87,10 @@ function noFallThrough(ns: Node[]): boolean {
 	return l.k === 'if' && noFallThrough(l.then) && noFallThrough(l.else)
 }
 
-/** `y = e` with e free of loads, calls and traps, keeping x and the variables of p */
-function isPureSet(n: Node, x: number, pv: Set<number>): boolean {
+/** `y = e` with e free of loads (frame loads allowed with `frameOk`), calls and traps, keeping x and the variables of p */
+function isPureSet(n: Node, x: number, pv: Set<number>, frameOk?: number): boolean {
 	if (n.k !== 'stmt' || n.s.k !== 'set' || n.s.dst === x || pv.has(n.s.dst) || mentions(n.s.e, x)) return false
-	const fx = hasSideEffectsOrMem(n.s.e)
+	const fx = hasSideEffectsOrMem(frameOk !== undefined ? withoutFrameLoads(n.s.e, frameOk) : n.s.e)
 	return !fx.load && !fx.call && !fx.trap
 }
 
@@ -82,12 +106,12 @@ function isWeakDec(ns: Node[], p: Expr): boolean {
 }
 const split = (e: Expr): [Expr, bigint] => (e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? [e.a, e.b.v] : [e, 0n])
 
-function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
+function rewrite(ns: Node[], uses: Map<number, number>, fp?: number): Node[] {
 	let out: Node[] = ns.map(n => {
 		switch (n.k) {
-			case 'if': return { ...n, then: rewrite(n.then, uses), else: rewrite(n.else, uses) }
-			case 'block': case 'loop': return { ...n, body: rewrite(n.body, uses) } as Node
-			case 'switch': return { ...n, cases: n.cases.map(c => ({ ...c, body: rewrite(c.body, uses) })) }
+			case 'if': return { ...n, then: rewrite(n.then, uses, fp), else: rewrite(n.else, uses, fp) }
+			case 'block': case 'loop': return { ...n, body: rewrite(n.body, uses, fp) } as Node
+			case 'switch': return { ...n, cases: n.cases.map(c => ({ ...c, body: rewrite(c.body, uses, fp) })) }
 			default: return n
 		}
 	})
@@ -100,8 +124,9 @@ function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 		const x = v.a.id, inc = v.b.v === 1n
 		const pv = new Set<number>(); walkExpr(p, y => { if (y.k === 'var') pv.add(y.id) })
 		// assignments of pure values between the store and the check commute with both: they go first
+		const pIsFrame = fp !== undefined && (p.k === 'var' ? p.id === fp : p.k === 'bin' && p.op === 'add' && p.a.k === 'var' && p.a.id === fp)
 		let k = j + 1
-		while (k < out.length && isPureSet(out[k], x, pv)) k++
+		while (k < out.length && isPureSet(out[k], x, pv, pIsFrame ? undefined : fp)) k++
 		const br = out[k]
 		if (!br) continue
 		if (br.k !== 'if' || br.else.length || uses.get(x) !== 3) continue
