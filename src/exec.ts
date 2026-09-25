@@ -32,6 +32,26 @@ function imagePages(image: { regions: { vaddr: bigint; bytes: Uint8Array }[] }):
 	}
 	return s
 }
+/**
+ * The pseudo-random bytes of page k for a seed: a xorshift32 stream (little-endian words). Cached (up
+ * to 16 MiB): the runs of an analysis use the same seeds, and the pointers they load from the filler
+ * are the same in every run, so most pages are materialized again and again.
+ */
+const fillCache = new Map<number, Map<number, Uint8Array>>()
+let fillCached = 0
+function fillBytes(seed: number, k: bigint): Uint8Array {
+	let c = fillCache.get(seed)
+	if (!c) fillCache.set(seed, (c = new Map()))
+	const r = c.get(Number(k))
+	if (r) return r
+	let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(seed, 0x85ebca6b)) | 0
+	x = x || 1
+	const u = new Uint32Array(1024)
+	for (let i = 0; i < 1024; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; u[i] = x }
+	const b = new Uint8Array(u.buffer)
+	if (fillCached < 4096) { c.set(Number(k), b); fillCached++ }
+	return b
+}
 /** page buffers of released memories (ExecMem.release) */
 const bufPool: ArrayBuffer[] = []
 const tArr = (pg: Page) => (pg.t ??= new Uint8Array(4096).fill(pg.t0))
@@ -57,13 +77,7 @@ export class ExecMem extends TestMem {
 		const b = pooled ? new Uint8Array(pooled) : new Uint8Array(4096), t0 = base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1
 		if (pooled && !this.fillSeed) b.fill(0)
 		let t: Uint8Array | undefined
-		if (this.fillSeed) {
-			// xorshift32 stream per page (little-endian words)
-			let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(this.fillSeed, 0x85ebca6b)) | 0
-			x = x || 1
-			const u = new Uint32Array(b.buffer)
-			for (let i = 0; i < 1024; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; u[i] = x }
-		}
+		if (this.fillSeed) b.set(fillBytes(this.fillSeed, k))
 		if (base === 0x3_0000_0000n) b.fill(0, 0, 8)
 		let ro: Uint8Array | undefined
 		if (imagePages(this.image).has(Number(k))) for (const r of this.image.regions) {
@@ -446,11 +460,20 @@ function backward(preds: Map<number, number[]>, seeds: number[]): Set<number> {
 	return reach
 }
 
-/** Instructions of the function at fpc from which `target` can be reached (within the function; calls fall through). */
+/**
+ * Instructions of the function at fpc from which `target` can be reached (within the function; calls
+ * fall through). Cached (the several runs towards one call share it); callers must not modify it.
+ */
+const reachCache = new WeakMap<Program, Map<string, Set<number> | undefined>>()
 export function reaching(p: Program, fpc: number, target: number): Set<number> | undefined {
+	let c = reachCache.get(p)
+	if (!c) reachCache.set(p, (c = new Map()))
+	const k = `${fpc}:${target}`
+	if (c.has(k)) return c.get(k)
 	const { preds, end } = cfgOf(p, fpc)
-	if (target < fpc || target >= end) return undefined
-	return backward(preds, [target])
+	const r = target < fpc || target >= end ? undefined : backward(preds, [target])
+	c.set(k, r)
+	return r
 }
 
 /** Instructions of the function at fpc from which it can return (not only abort / panic). */
