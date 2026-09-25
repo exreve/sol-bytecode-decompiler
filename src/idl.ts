@@ -15,7 +15,9 @@ export interface IdlInfo {
 
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toLowerCase()
 const pascal = (s: string) => s.split(/[_\s-]+/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join('')
-const le8 = (b: Uint8Array | number[]) => Buffer.from(b).readBigUInt64LE(0)
+// Anchor 0.31 allows custom discriminators of any length: shorter ones are zero-padded (never matched as
+// a u64 constant: only random-looking values are annotated), longer ones truncated to their first 8 bytes
+const le8 = (b: Uint8Array | number[]) => { const x = Buffer.alloc(8); Buffer.from(b).copy(x, 0, 0, 8); return x.readBigUInt64LE(0) }
 const sha8 = (s: string) => le8(createHash('sha256').update(s).digest())
 
 function typeStr(t: any): string {
