@@ -68,20 +68,35 @@ function guards(lines: Line[], i: number): string[] {
 	return out
 }
 
-/** Definitions (within the function) of the identifiers used by the given lines, transitively. */
-function defsFor(lines: Line[], uses: string[], limit = 12): string[] {
+/** A function's printed lines, split once for all slice kinds; `defs` indexes its definition lines (built on first use). */
+interface FnLines { raw: string[]; lines: Line[]; defs?: Map<string, { k: number; rhs: string }[]> }
+
+/**
+ * Definitions (within the function) of the identifiers used by the given lines, transitively.
+ * Definition lines come from an index (identifier -> its definition lines, in line order) built once
+ * per function, instead of matching every line of the function again for every identifier: a line
+ * defines one identifier at most, so the same lines are found in the same order.
+ */
+function defsFor(fl: FnLines, uses: string[], limit = 12): string[] {
+	const lines = fl.lines
+	if (!fl.defs) {
+		fl.defs = new Map()
+		for (let k = 0; k < lines.length; k++) {
+			const t = lines[k].text.trim()
+			const m = /^(?:const |let )?([a-z_][a-z0-9_]*)(?::\s*\w+)? = (.*)$/.exec(t)
+			if (!m || / = fp - 0x/.test(t)) continue
+			let l = fl.defs.get(m[1]); if (!l) fl.defs.set(m[1], (l = [])); l.push({ k, rhs: m[2] })
+		}
+	}
 	const want = new Set<string>()
 	for (const u of uses) for (const m of u.replace(/\/\*.*?\*\/|\/\/.*$|"(?:[^"\\]|\\.)*"/g, '').matchAll(/\b[a-z_][a-z0-9_]*\b/g)) want.add(m[0])
 	const seen = new Set<number>(), out: number[] = []
 	const queue = [...want]
 	for (let q = 0; q < queue.length && out.length < limit; q++) {
-		const id = queue[q]
-		for (let k = 0; k < lines.length; k++) {
-			const t = lines[k].text.trim()
-			const m = /^(?:const |let )?([a-z_][a-z0-9_]*)(?::\s*\w+)? = (.*)$/.exec(t)
-			if (!m || m[1] !== id || seen.has(k) || / = fp - 0x/.test(t)) continue
+		for (const { k, rhs } of fl.defs.get(queue[q]) ?? []) {
+			if (seen.has(k)) continue
 			seen.add(k); out.push(k)
-			for (const x of m[2].replace(/\/\*.*?\*\/|"(?:[^"\\]|\\.)*"/g, '').matchAll(/\b[a-z_][a-z0-9_]*\b/g)) if (!want.has(x[0])) { want.add(x[0]); queue.push(x[0]) }
+			for (const x of rhs.replace(/\/\*.*?\*\/|"(?:[^"\\]|\\.)*"/g, '').matchAll(/\b[a-z_][a-z0-9_]*\b/g)) if (!want.has(x[0])) { want.add(x[0]); queue.push(x[0]) }
 		}
 	}
 	return out.sort((a, b) => a - b).map(k => lines[k].text.trim())
@@ -90,12 +105,17 @@ function defsFor(lines: Line[], uses: string[], limit = 12): string[] {
 /** One slice file per kind: path -> text (empty kinds omitted). */
 export function renderSlices(funcs: FuncOut[], reachers: (f: FuncOut) => string[]): Map<string, string> {
 	const files = new Map<string, string>()
+	const split = new Map<FuncOut, FnLines>() // shared by all kinds
+	const linesOf = (f: FuncOut): FnLines => {
+		let fl = split.get(f)
+		if (!fl) { const raw = f.text.split('\n'); split.set(f, (fl = { raw, lines: raw.map(t => ({ text: t, depth: depthOf(t) })) })) }
+		return fl
+	}
 	for (const kind of SLICE_KINDS) {
 		const parts: string[] = []
 		let n = 0
 		for (const f of funcs) {
-			const raw = f.text.split('\n')
-			const lines: Line[] = raw.map(t => ({ text: t, depth: depthOf(t) }))
+			const fl = linesOf(f), { raw, lines } = fl
 			const hits: number[] = []
 			raw.forEach((t, i) => {
 				if (!kind.match(t)) return
@@ -113,7 +133,7 @@ export function renderSlices(funcs: FuncOut[], reachers: (f: FuncOut) => string[
 				const at = /^\s*\/\//.test(raw[i]) && i + 1 < raw.length ? i + 1 : i
 				const all = guards(lines, at), max = kind.maxGuards ?? 12
 				const g = all.length > max ? all.slice(-max) : all
-				const defs = kind.defs === false ? [] : defsFor(lines, [raw[i], raw[at], ...g])
+				const defs = kind.defs === false ? [] : defsFor(fl, [raw[i], raw[at], ...g])
 				parts.push('', `   line ${at + 1}:`)
 				if (g.length) parts.push(`   under${all.length > g.length ? ` (innermost ${g.length} of ${all.length})` : ''}:`, ...g.map(x => `     ${x.trim()}`))
 				if (defs.length) parts.push('   using:', ...defs.map(x => `     ${x}`))
