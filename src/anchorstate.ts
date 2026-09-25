@@ -83,6 +83,8 @@ function splSample(kind: 'TokenAccount' | 'Mint'): Sample {
 }
 
 const OUT = 0x2_0000_0200n, SIZE = 0x1000, AI = 0x4_2000_0400n
+// the synthetic account's memory: owner key, account key, the data and lamports Rc<RefCell> boxes
+const BASE = 0x4_2000_0000n, K2 = BASE + 0x100n, DC = BASE + 0x200n, LC = BASE + 0x300n
 
 /**
  * Run an account-taking callee x (out, &mut &[AccountInfo] in every other argument register: its ABI is not
@@ -90,8 +92,7 @@ const OUT = 0x2_0000_0200n, SIZE = 0x1000, AI = 0x4_2000_0400n
  */
 function runAccountCallee(p: Program, x: number, data: number[], owner: Uint8Array, flags: [number, number, number], boxAt?: number): Uint8Array | undefined {
 	const mem = new ExecMem(p, 5)
-	const base = 0x4_2000_0000n
-	const K1 = base, K2 = base + 0x100n, DC = base + 0x200n, LC = base + 0x300n, LV = base + 0x380n, SL = base + 0x500n, DB = base + 0x1000n
+	const K1 = BASE, LV = BASE + 0x380n, SL = BASE + 0x500n, DB = BASE + 0x1000n
 	const w = (a: bigint, b: Uint8Array | number[]) => mem.write(a, new Uint8Array(b))
 	const w64 = (a: bigint, v: bigint) => mem.store(a, 8, v)
 	w(K1, owner)
@@ -120,9 +121,17 @@ function heapWords(b: Uint8Array): number[] {
 	return out
 }
 
-/** The first 8-aligned word of an object holding the AccountInfo pointer AI. */
-function infoIn(b: Uint8Array, n = SIZE): number | undefined {
-	for (let i = 0; i + 8 <= n; i += 8) { let v = 0n; for (let j = 7; j >= 0; j--) v = (v << 8n) | BigInt(b[i + j]); if (v === AI) return i }
+/** Where an object holds the account's AccountInfo: the offset of the AccountInfo pointer AI, or of a copy in place. */
+export interface InfoAt { off: number; embed: boolean }
+
+/**
+ * The first 8-aligned word of an object holding the AccountInfo pointer AI or, failing that, the first
+ * AccountInfo copied in place (its key, lamports and data words: K2, LC, DC).
+ */
+function infoIn(b: Uint8Array, n = SIZE): InfoAt | undefined {
+	const word = (i: number) => { let v = 0n; for (let j = 7; j >= 0; j--) v = (v << 8n) | BigInt(b[i + j]); return v }
+	for (let i = 0; i + 8 <= n; i += 8) if (word(i) === AI) return { off: i, embed: false }
+	for (let i = 0; i + 0x30 <= n; i += 8) if (word(i) === K2 && word(i + 8) === LC && word(i + 0x10) === DC) return { off: i, embed: true }
 	return undefined
 }
 
@@ -130,7 +139,7 @@ function infoIn(b: Uint8Array, n = SIZE): number | undefined {
  * Located leaves of the sample (path -> offset in the object), or undefined when too few were found. The
  * object is the callee's out object, or (boxAt) the heap object an out word points to.
  */
-function locate(p: Program, x: number, smp: Sample): { at: Map<string, SampleLeaf & { mem: number }>; info?: number; boxAt?: number } | undefined {
+function locate(p: Program, x: number, smp: Sample): { at: Map<string, SampleLeaf & { mem: number }>; info?: InfoAt; boxAt?: number } | undefined {
 	const r = locateIn(p, x, smp, undefined)
 	if (r) return r
 	const out = runAccountCallee(p, x, dataOf(smp, smp.bytes), unb58(smp.owner), [0, 1, 0])
@@ -140,7 +149,7 @@ function locate(p: Program, x: number, smp: Sample): { at: Map<string, SampleLea
 
 const dataOf = (smp: Sample, bytes: number[]) => [...(smp.disc === undefined ? [] : Array.from({ length: 8 }, (_, i) => Number((smp.disc! >> BigInt(8 * i)) & 0xffn))), ...bytes]
 
-function locateIn(p: Program, x: number, smp: Sample, boxAt: number | undefined): { at: Map<string, SampleLeaf & { mem: number }>; info?: number } | undefined {
+function locateIn(p: Program, x: number, smp: Sample, boxAt: number | undefined): { at: Map<string, SampleLeaf & { mem: number }>; info?: InfoAt } | undefined {
 	const owner = unb58(smp.owner)
 	const run = (bytes: number[]) => runAccountCallee(p, x, dataOf(smp, bytes), owner, [0, 1, 0], boxAt)
 	const base = run(smp.bytes)
@@ -181,7 +190,7 @@ function locateIn(p: Program, x: number, smp: Sample, boxAt: number | undefined)
 }
 
 /** Views of a located layout: the object, nested structs and arrays of structs as element views. */
-function buildViews(views: Views, top: string, doc: string, at: Map<string, SampleLeaf & { mem: number }>, info: number | undefined): string | undefined {
+function buildViews(views: Views, top: string, doc: string, at: Map<string, SampleLeaf & { mem: number }>, info: InfoAt | undefined): string | undefined {
 	const taken = (n: string) => views.map.has(n) || views.opaque.has(n)
 	// (another layout of the same type, e.g. another container: <T>_2; a name taken by another view: <T>Obj)
 	const viewName = (n: string) => {
@@ -241,7 +250,7 @@ function buildViews(views: Views, top: string, doc: string, at: Map<string, Samp
 		return out
 	}
 	const fields = fieldsOf(root, 0, '', top)
-	if (info !== undefined) fields.push({ name: 'info', off: info, t: { k: 'ref', to: 'AccountInfo' }, doc: '&AccountInfo' })
+	if (info) fields.push(info.embed ? { name: 'info', off: info.off, t: { k: 'embed', type: 'AccountInfo' }, doc: 'AccountInfo (a copy in place)' } : { name: 'info', off: info.off, t: { k: 'ref', to: 'AccountInfo' }, doc: '&AccountInfo' })
 	fields.sort((a, b) => a.off - b.off)
 	// the same layout found through another callee: that view
 	const key = JSON.stringify(fields)
@@ -325,7 +334,7 @@ function u128(views: Views): string {
  * returns, the struct's words holding a boxed account, and those holding the &AccountInfo other account
  * kinds start with (Signer, AccountLoader, Program, UncheckedAccount, …), by account name.
  */
-export interface AccountObjs { boxes: Map<number, AccountObj>; inline: Map<number, AccountObj>; refs: Map<number, AccountObj>; infos: Map<number, string> }
+export interface AccountObjs { boxes: Map<number, AccountObj>; inline: Map<number, AccountObj>; refs: Map<number, AccountObj>; infos: Map<number, { name: string; type?: string; embed: boolean }> }
 
 /**
  * Per try_accounts function (see the file comment): variables holding a boxed deserialized account, and
@@ -396,8 +405,8 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		return v
 	}
 	const boxAtOf = new Map<string, number>() // `${callee}:${type}` -> out word holding a box of the object
-	const infoWords = new Map<number, number | null>()
-	const infoWord = (x: number, t: string | undefined): number | undefined => {
+	const infoWords = new Map<number, InfoAt | null>()
+	const infoWord = (x: number, t: string | undefined): InfoAt | undefined => {
 		if (!infoWords.has(x)) {
 			// (an IDL account type: its discriminator and the program as owner, e.g. for AccountLoader<T>)
 			const acc = t && !t.startsWith('spl:') ? idl?.accounts.find(a => a.name === t) : undefined
@@ -431,7 +440,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			return undefined
 		}
 		const fo = (e: Expr) => off(e, id => id === fp), oo = (e: Expr) => off(e, isOut)
-		interface Obj { type?: string; callee: number; view?: string; name?: string }
+		interface Obj { type?: string; callee: number; view?: string; name?: string; embed?: boolean }
 		// the accounts slice (&mut &[AccountInfo], the third parameter): calls given it take the next account
 		const accountsP = f.vars.find(v => v.param === 3)?.id
 		const takesAccounts = (args: Expr[]) => accountsP !== undefined && !defs.has(accountsP) && args.some(a => a.k === 'var' && a.id === accountsP)
@@ -485,7 +494,8 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			// the account-name error: its payload is the error the call returned (words of its out object)
 			if (tpc === nameFn) {
 				const nm = nameArg(s.args, strAt)
-				for (const a of s.args.slice(0, -2)) { const o = originOf(a); if (o && nm && !objs[o.obj].name) objs[o.obj].name = nm }
+				// (the error given by value, or by the address of a frame copy of it)
+				for (const a of s.args.slice(0, -2)) { const g = fo(a), o = originOf(a) ?? (g !== undefined ? org.get(g) : undefined); if (o && nm && !objs[o.obj].name) objs[o.obj].name = nm }
 				return
 			}
 			const isCopy = s.t.k === 'sys' ? s.t.name === 'sol_memcpy_' || s.t.name === 'sol_memmove_' : /^(memcpy|memmove)\d*_?$/.test(p.funcs.get(tpc)?.name ?? '')
@@ -510,9 +520,10 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 					const w = infoWord(tpc, t)
 					if (w !== undefined) {
 						// (the other words of the out object: the Err payload an account-name error is given)
-						const id = objs.push({ callee: tpc, type: t }) - 1
-						clobber(out, 0x40)
-						for (let w2 = 0; w2 < 0x40; w2 += 8) org.set(out + w2, { obj: id, off: w2 - w })
+						const id = objs.push({ callee: tpc, type: t, embed: w.embed }) - 1
+						const n = Math.max(0x40, w.off + 0x30)
+						clobber(out, n)
+						for (let w2 = 0; w2 < n; w2 += 8) org.set(out + w2, { obj: id, off: w2 - w.off })
 					}
 				}
 			}
@@ -557,7 +568,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const inline = new Map<number, AccountObj>()
 		const bases = new Map<string, number>() // `${obj}:${base}` -> words
 		for (const [k, o] of outWords) { const key = `${o.obj}:${k - o.off}`; bases.set(key, (bases.get(key) ?? 0) + 1) }
-		const infos = new Map<number, string>()
+		const infos = new Map<number, { name: string; type?: string; embed: boolean }>()
 		const acc = (ob: { name?: string; view?: string; type?: string }): AccountObj => ({ name: ob.name!, view: ob.view!, rust: ob.type!.replace(/^spl:/, '') })
 		const boxes = new Map<number, AccountObj>(), refs = new Map<number, AccountObj>()
 		for (const [v, id] of boxVars) if (objs[id].name && objs[id].type) boxes.set(v, acc(objs[id]))
@@ -566,7 +577,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			const [obj, base] = key.split(':').map(Number)
 			const ob = objs[obj]
 			if (!ob.name || base < 0 || key.endsWith(':-1') || outWords.get(base)?.off === -1) continue
-			if (!ob.view) { if (outWords.get(base)?.off === 0) infos.set(base, ob.type ? `${ob.name}:${ob.type.replace(/^spl:/, '')}` : ob.name); continue }
+			if (!ob.view) { if (outWords.get(base)?.off === 0) infos.set(base, { name: ob.name, type: ob.type?.replace(/^spl:/, ''), embed: !!ob.embed }); continue }
 			if (n < 2 || !ob.type) continue
 			inline.set(base, { name: ob.name, view: ob.view, rust: ob.type.replace(/^spl:/, '') })
 		}

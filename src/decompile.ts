@@ -368,20 +368,24 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (const [off, nm] of layout) if (!covered(off) && !inl.some(([, a]) => a.name === nm) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: objView.get(nm)?.view ?? 'AccountInfo' }, doc: objView.has(nm) ? `Box<Account<${objView.get(nm)!.rust}>>` : undefined });
     for (const [off, a] of inl) fields.push({ name: a.name, off, t: { k: 'embed', type: a.view }, doc: `Account<${a.rust}> in place` });
     // other accounts' &AccountInfo words (named by the error following the call that took the account)
-    for (const [off, nt] of objs?.infos ?? []) {
-      const [nm, ty] = nt.split(':');
-      if (!covered(off) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' }, doc: ty ? `the &AccountInfo of an account of type ${ty} (e.g. AccountLoader<${ty}>: data not deserialized)` : undefined });
+    for (const [off, { name: nm, type: ty, embed }] of objs?.infos ?? []) {
+      if (covered(off) || fields.some(x => x.off === off || x.name === nm)) continue;
+      if (embed) fields.push({ name: nm, off, t: { k: 'embed', type: 'AccountInfo' }, doc: `the AccountInfo (a copy in place)${ty ? ` of an account of type ${ty} (data not deserialized here)` : ''}` });
+      else fields.push({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' }, doc: ty ? `the &AccountInfo of an account of type ${ty} (e.g. AccountLoader<${ty}>: data not deserialized)` : undefined });
     }
     if (!fields.length) continue;
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
     if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
-    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: fields.sort((x, y) => x.off - y.off) });
-    // the Context view, once its layout is known from a call site (see below)
+    // the Accounts and Context views, once the Context's layout is known from a call site (see below);
+    // shift: where the Accounts struct starts in try_accounts' out object (after a Result tag word)
     let ctxLayout: string | undefined;
-    const ctxView = (op: number, oa: number, or?: number) => {
-      const key = `${op}:${oa}:${or}`;
+    const ctxView = (op: number, oa: number, or: number | undefined, shift: number) => {
+      const key = `${op}:${oa}:${or}:${shift}`;
       if (ctxLayout) return ctxLayout === key;
+      const afs = fields.filter(x => x.off >= shift).map(x => ({ ...x, off: x.off - shift }));
+      if (!afs.length) return false;
       ctxLayout = key;
+      views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it${shift ? ` (at +0x${shift.toString(16)} of its out object)` : ''}: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: afs.sort((x, y) => x.off - y.off) });
       const fs: import('./views.ts').Field[] = [{ name: 'program_id', off: op, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: oa, t: { k: 'ref', to: `${P}Accounts` } }];
       if (or !== undefined) fs.push({ name: 'remaining_accounts', off: or, t: { k: 'ref', to: 'AccountInfo' }, doc: '&[AccountInfo]: the accounts after the instruction\'s own' }, { name: 'remaining_accounts_len', off: or + 8, t: { k: 'scalar', size: 8 } });
       views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts${or !== undefined ? ', remaining_accounts' : ''}${op === 0 && oa === 8 ? '' : '; other fields not shown'}), as the handler builds it [layout from the handler's stores]`, fields: fs.sort((x, y) => x.off - y.off) });
@@ -408,9 +412,28 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (e?.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
       return S !== undefined && e?.k === 'load' && e.size === 8 && fo(e.addr) === S + k;
     };
-    const loadsR = (e: Expr, k: number) => {
+    // where in R (the offset) a value comes from: a load of R's words (directly or through a variable)
+    const fromR = (e: Expr): number | undefined => {
       if (e.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
-      return e.k === 'load' && e.size === 8 && fo(e.addr) === R! + k;
+      const o = e.k === 'load' && e.size === 8 ? fo(e.addr) : undefined;
+      return o !== undefined && o >= R! && o < R! + 0x800 ? o - R! : undefined;
+    };
+    // frame-to-frame copies in the handler (copy statements, memcpy-like calls of a constant length)
+    const fcopies: [number, number, number][] = [];
+    for (const b of hf.blocks) for (const st of b.stmts) {
+      if (st.k === 'copy') { const d = fo(st.dst), s = fo(st.src); if (d !== undefined && s !== undefined) fcopies.push([d, s, st.n]); continue; }
+      const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined;
+      if (!c || c.args.length < 3 || c.args[2].k !== 'const') continue;
+      const isCopy = c.t.k === 'sys' ? /^sol_mem(cpy|move)_$/.test(c.t.name) : c.t.k === 'fn' && /^(memcpy|memmove)\d*_?$/.test(p.funcs.get(c.t.pc)?.name ?? '');
+      const d = fo(c.args[0]), s = fo(c.args[1]);
+      if (isCopy && d !== undefined && s !== undefined) fcopies.push([d, s, Number(c.args[2].v)]);
+    }
+    // the shift of the Accounts struct inside R that a frame object at G is a copy of (through copies)
+    const copyOfR = (G: number, depth = 0): number | undefined => {
+      if (G >= R! && G <= R! + 0x10) return G - R!;
+      if (depth > 4) return undefined;
+      for (const [d, s, n] of fcopies) if (G >= d && G < d + n && d !== s) { const r = copyOfR(s + G - d, depth + 1); if (r !== undefined) return r; }
+      return undefined;
     };
     // program_id, or a variable loaded from the frame slot it alone was stored in
     const slotVals = new Map<number, Expr[]>();
@@ -435,18 +458,22 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         const F = fo(arg);
         if (F === undefined) return;
         const word = (k: number) => site.facts.find(x => x.off === F + k && x.size === 8)?.e;
-        let op: number | undefined, oa: number | undefined;
-        for (let k = 0; k < 0x30 && (op === undefined || oa === undefined); k += 8) {
+        let op: number | undefined, oa: number | undefined, shift = 0;
+        for (let k = 0; k < 0x40 && (op === undefined || oa === undefined); k += 8) {
           const w = word(k), G = fo(w);
-          if (op === undefined && isProg(w)) op = k;
-          else if (oa === undefined && G !== undefined && G !== F && site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) oa = k;
+          if (op === undefined && isProg(w)) { op = k; continue; }
+          if (oa !== undefined || G === undefined || G === F) continue;
+          // the words stored at G load R's words at one distance (0: the struct is R; a tag word first: 8, …)
+          const fact = site.facts.find(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && fromR(x.e) !== undefined);
+          const sh = fact ? fromR(fact.e)! - (fact.off - G) : copyOfR(G);
+          if (sh !== undefined && sh >= 0 && sh <= 0x10) { oa = k; shift = sh; }
         }
         if (op === undefined || oa === undefined) return;
         let or: number | undefined;
-        for (let k = 0; k < 0x30 && or === undefined; k += 8) if (k !== op && k !== oa && ((loadsS(word(k), 0) && loadsS(word(k + 8), 8)) || copiesS.has(F + k))) or = k;
+        for (let k = 0; k < 0x40 && or === undefined; k += 8) if (k !== op && k !== oa && ((loadsS(word(k), 0) && loadsS(word(k + 8), 8)) || copiesS.has(F + k))) or = k;
         const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
         const pv = callee.f.vars.find(v => v.param === reg);
-        if (!pv || defCount(callee.f, pv.id) !== 0 || !ctxView(op, oa, or)) return;
+        if (!pv || defCount(callee.f, pv.id) !== 0 || !ctxView(op, oa, or, shift)) return;
         let m = paramTypes.get(cpc); if (!m) paramTypes.set(cpc, (m = new Map()));
         m.set(pv.id, [`${P}Context`, `the handler ix_${ix} passes a frame object holding (program_id, address of a copy of the Accounts result)`]);
       });
@@ -1084,8 +1111,8 @@ function spillSlots(f: VarFunc): Map<number, Expr> {
 
 /**
  * The program id an Anchor program declares (declare_id!): the one key compared, in the functions that
- * raise anchor's DeclaredProgramIdMismatch (4100, given as a call argument), with 32 bytes through keyeq
- * or a memcmp-style call with a rodata operand. Undefined when there is not exactly one.
+ * use anchor's DeclaredProgramIdMismatch (4100) as a constant, with 32 bytes through keyeq or a
+ * memcmp-style call with a rodata operand. Undefined when there is not exactly one.
  */
 function declaredId(fs: VarFunc[], keyAt: (a: bigint) => string | undefined): string | undefined {
   const keys = new Set<string>();
@@ -1093,7 +1120,7 @@ function declaredId(fs: VarFunc[], keyAt: (a: bigint) => string | undefined): st
     let raises = false;
     const found = new Set<string>();
     const visit = (e: Expr) => walkExpr(e, x => {
-      if (x.k === 'call' && x.args.some(a => a.k === 'const' && a.v === 0x1004n)) raises = true;
+      if (x.k === 'const' && x.v === 0x1004n) raises = true;
       if (x.k === 'fn' && x.name === 'keyeq') found.add(keyB58(x.args.slice(1)));
       if ((x.k === 'fn' && x.name === 'memeq') || (x.k === 'call' && x.args.length >= 3 && x.args[2].k === 'const' && x.args[2].v === 32n))
         for (const o of x.args.slice(0, 2)) { const k = o.k === 'const' ? keyAt(o.v) : undefined; if (k) found.add(k); }
@@ -1102,7 +1129,6 @@ function declaredId(fs: VarFunc[], keyAt: (a: bigint) => string | undefined): st
       for (const s of b.stmts) {
         stmtExprs(s).forEach(visit);
         if (s.k === 'call') {
-          if (s.args.some(a => a.k === 'const' && a.v === 0x1004n)) raises = true;
           if (s.args.length >= 3 && s.args[2].k === 'const' && s.args[2].v === 32n) for (const o of s.args.slice(0, 2)) { const k = o.k === 'const' ? keyAt(o.v) : undefined; if (k) found.add(k); }
         }
       }
