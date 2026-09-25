@@ -2,15 +2,17 @@
 //
 //   x = ld64(p); …; st64(p, x + 1); if (x == -1) { abort() }   ->   rc_inc(p)
 //   st64(p, x + 1); if (x == -1) { abort() }                    ->   rc_inc(p, x)
+//   x = ld64(p); …; st64(p, x - 1); if (x == 1) { st64(p + 8, ld64(p + 8) - 1) }   ->   rc_dec(p)  (or rc_dec(p, x))
 //
-// (Rc::clone / Rc strong-count increment: *p += 1, aborting when the count was u64::MAX.)
+// (Rc::clone / Rc strong-count increment: *p += 1, aborting when the count was u64::MAX; Rc drop:
+// strong count -= 1 and, when it reaches 0, weak count -= 1 — the bump allocator frees nothing.)
 // The helper loads, stores and aborts exactly like the statements it replaces. For the first form,
 // statements between the load and the store may only assign variables (no call, no store: at most
 // a load or a trapping division, whose fault aborts either way before any effect) and must neither
 // read x nor assign a variable of p, so performing the load right before the store reads the same
 // word. In both forms x has no other use.
 import type { Node } from './structure.ts'
-import { type Expr, walkExpr, exprEq, M64 } from './ir.ts'
+import { type Expr, walkExpr, exprEq, hasSideEffectsOrMem, M64 } from './ir.ts'
 
 export function statementIdioms(body: Node[]): Node[] {
 	const uses = new Map<number, number>()
@@ -50,6 +52,25 @@ function isAbort(ns: Node[]): boolean {
 	return ns.length === 1 || (ns.length === 2 && b.k === 'trap')
 }
 
+/** `y = e` with e free of loads, calls and traps, keeping x and the variables of p */
+function isPureSet(n: Node, x: number, pv: Set<number>): boolean {
+	if (n.k !== 'stmt' || n.s.k !== 'set' || n.s.dst === x || pv.has(n.s.dst) || mentions(n.s.e, x)) return false
+	const fx = hasSideEffectsOrMem(n.s.e)
+	return !fx.load && !fx.call && !fx.trap
+}
+
+/** [st64(p + 8, ld64(p + 8) - 1)] */
+function isWeakDec(ns: Node[], p: Expr): boolean {
+	if (ns.length !== 1 || ns[0].k !== 'stmt') return false
+	const s = ns[0].s
+	if (s.k !== 'store' || s.size !== 8) return false
+	const [pb, po] = split(p), [qb, qo] = split(s.addr)
+	if (!exprEq(pb, qb) || qo !== BigInt.asUintN(64, po + 8n)) return false
+	const v = s.v
+	return v.k === 'bin' && v.op === 'add' && v.b.k === 'const' && v.b.v === M64 && v.a.k === 'load' && v.a.size === 8 && exprEq(v.a.addr, s.addr)
+}
+const split = (e: Expr): [Expr, bigint] => (e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? [e.a, e.b.v] : [e, 0n])
+
 function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 	let out: Node[] = ns.map(n => {
 		switch (n.k) {
@@ -60,17 +81,23 @@ function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 		}
 	})
 	for (let j = 0; j + 1 < out.length; j++) {
-		// st64(p, x + 1); if (x == -1) { abort() }
-		const st = out[j], br = out[j + 1]
+		// st64(p, x + 1); if (x == -1) { abort() }   |   st64(p, x - 1); if (x == 1) { st64(p + 8, ld64(p + 8) - 1) }
+		const st = out[j]
 		if (st.k !== 'stmt' || st.s.k !== 'store' || st.s.size !== 8 || hasCall(st.s.addr)) continue
 		const v = st.s.v, p = st.s.addr
-		if (!(v.k === 'bin' && v.op === 'add' && v.a.k === 'var' && v.b.k === 'const' && v.b.v === 1n)) continue
-		const x = v.a.id
-		if (br.k !== 'if' || br.else.length || !isAbort(br.then) || uses.get(x) !== 3) continue
-		const c = br.c
-		if (!(c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === M64)) continue
-		// the load of x: in this list, followed only by variable assignments that keep p and x
+		if (!(v.k === 'bin' && v.op === 'add' && v.a.k === 'var' && v.b.k === 'const' && (v.b.v === 1n || v.b.v === M64))) continue
+		const x = v.a.id, inc = v.b.v === 1n
 		const pv = new Set<number>(); walkExpr(p, y => { if (y.k === 'var') pv.add(y.id) })
+		// assignments of pure values between the store and the check commute with both: they go first
+		let k = j + 1
+		while (k < out.length && isPureSet(out[k], x, pv)) k++
+		const br = out[k]
+		if (!br) continue
+		if (br.k !== 'if' || br.else.length || uses.get(x) !== 3) continue
+		const c = br.c
+		if (!(c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === (inc ? M64 : 1n))) continue
+		if (inc ? !isAbort(br.then) : !isWeakDec(br.then, p)) continue
+		// the load of x: in this list, followed only by variable assignments that keep p and x
 		let i = j - 1
 		for (; i >= 0; i--) {
 			const m = out[i]
@@ -81,9 +108,10 @@ function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 		const def = i >= 0 ? out[i] : undefined
 		const adjacent = def?.k === 'stmt' && def.s.k === 'set' && def.s.e.k === 'load' && def.s.e.size === 8 && exprEq(def.s.e.addr, p)
 		const args = adjacent ? [p] : [p, { k: 'var', id: x } as Expr]
-		const call: Node = { k: 'stmt', s: { k: 'eval', e: { k: 'fn', name: 'rc_inc', args }, pc: st.s.pc } }
-		if (adjacent) { out = [...out.slice(0, i), ...out.slice(i + 1, j), call, ...out.slice(j + 2)]; j-- }
-		else out = [...out.slice(0, j), call, ...out.slice(j + 2)]
+		const call: Node = { k: 'stmt', s: { k: 'eval', e: { k: 'fn', name: inc ? 'rc_inc' : 'rc_dec', args }, pc: st.s.pc } }
+		const moved = out.slice(j + 1, k)
+		if (adjacent) { out = [...out.slice(0, i), ...out.slice(i + 1, j), ...moved, call, ...out.slice(k + 1)]; j += moved.length - 1 }
+		else { out = [...out.slice(0, j), ...moved, call, ...out.slice(k + 1)]; j += moved.length }
 	}
 	return out
 }

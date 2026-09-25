@@ -116,6 +116,12 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 				}
 				return 0n
 			}
+			case 'rc_dec': return () => {
+				const p = W(args[0]()), x = args[1] ? W(args[1]()) : env().mem.load(p, 8)
+				env().mem.store(p, 8, W(x - 1n))
+				if (x === 1n) env().mem.store(W(p + 8n), 8, W(env().mem.load(W(p + 8n), 8) - 1n))
+				return 0n
+			}
 			case 'trap': return () => { throw new Abort('trap') }
 			case 'callx': return () => { const vs = args.map(f => W(f())); return W(env().onCall(`ptr:${vs[0].toString(16)}`, vs.slice(1))) }
 		}

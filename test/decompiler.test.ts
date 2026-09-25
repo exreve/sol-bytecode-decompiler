@@ -139,7 +139,7 @@ for (const f of ['memo', 'token', 'ata']) {
 	})
 }
 
-test('rc_inc statement idiom: same loads, stores, abort and result as the statements it replaces', () => {
+test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as the statements they replace', () => {
 	const V = (id: number): Expr => ({ k: 'var', id })
 	const C = (v: bigint): Expr => ({ k: 'const', v })
 	const M = (1n << 64n) - 1n
@@ -147,6 +147,11 @@ test('rc_inc statement idiom: same loads, stores, abort and result as the statem
 	const inc = (p: Expr): Node[] => [
 		{ k: 'stmt', s: { k: 'store', size: 8, addr: p, v: { k: 'bin', op: 'add', a: V(3), b: C(1n) }, pc: 0 } },
 		{ k: 'if', c: { k: 'cmp', op: 'eq', a: V(3), b: C(M) }, then: abort, else: [] },
+	]
+	const a8: Expr = { k: 'bin', op: 'add', a: V(0), b: C(8n) }
+	const dec = (p: Expr): Node[] => [
+		{ k: 'stmt', s: { k: 'store', size: 8, addr: p, v: { k: 'bin', op: 'add', a: V(3), b: C(M) }, pc: 0 } },
+		{ k: 'if', c: { k: 'cmp', op: 'eq', a: V(3), b: C(1n) }, then: [{ k: 'stmt', s: { k: 'store', size: 8, addr: a8, v: { k: 'bin', op: 'add', a: { k: 'load', size: 8, addr: a8 }, b: C(M) }, pc: 0 } }], else: [] },
 	]
 	const bodies: Node[][] = [
 		// x = ld64(a); y = b + 1; st64(a, x + 1); if (x == -1) abort(); return y   -> rc_inc(a)
@@ -156,6 +161,15 @@ test('rc_inc statement idiom: same loads, stores, abort and result as the statem
 		// the count loaded from elsewhere: rc_inc(a, x)
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(1) }, pc: 0 } },
 			...inc(V(0)), { k: 'return', e: { k: 'load', size: 8, addr: V(0) } }],
+		// x = ld64(a); st64(a, x - 1); if (x == 1) st64(a + 8, ld64(a + 8) - 1); return ld64(a + 8)  -> rc_dec(a)
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, ...dec(V(0)),
+			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(1) }, pc: 0 } }, ...dec(V(0)),
+			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
+		// a pure assignment between the store and the check
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, dec(V(0))[0],
+			{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, dec(V(0))[1],
+			{ k: 'return', e: { k: 'bin', op: 'add', a: V(4), b: { k: 'load', size: 8, addr: a8 } } }],
 	]
 	const names = ['a', 'b', 'c', 'x', 'y']
 	const pr = new Printer({ fnName: () => 'f', fnAddrName: () => undefined, sysName: n => n, constComment: () => undefined, varName: id => names[id] })
@@ -163,17 +177,17 @@ test('rc_inc statement idiom: same loads, stores, abort and result as the statem
 	for (const body of bodies) {
 		const src = (b: Node[]) => `function t(a: u64, b: u64, c: u64): u64 {\n${printBody(pr, f, b, '\t', new Map(), [3, 4]).join('\n')}\n}`
 		const before = src(body), after = src(statementIdioms(body))
-		assert.ok(after.includes('rc_inc(') && !after.includes('abort'), after)
-		for (const v of [0n, 5n, M, M - 1n]) {
+		assert.ok(/rc_(inc|dec)\(/.test(after) && !after.includes('abort') && !after.includes('if'), after)
+		for (const v of [0n, 1n, 2n, 5n, M, M - 1n]) {
 			const run = (text: string) => {
 				const mem = new TestMem(new Image([]), 1, [])
-				mem.store(0x3_0000_0000n, 8, v); mem.store(0x3_0000_0100n, 8, (v + 7n) & M)
+				mem.store(0x3_0000_0000n, 8, v); mem.store(0x3_0000_0008n, 8, 3n); mem.store(0x3_0000_0100n, 8, (v + 7n) & M)
 				const calls: string[] = []
 				const r = runFunction(parseFunctions(text).get('t')!, [0x3_0000_0000n, 0x3_0000_0100n, 0n], {
 					mem, fp: 0n, fnAddr: new Map(), fnTarget: new Map(), sysTarget: new Map([['abort', 'sys:abort']]), maxSteps: 100,
 					onCall: t => { calls.push(t); if (t === 'sys:abort') throw new Abort('abort'); return 0n },
 				})
-				return JSON.stringify({ r: r.ret?.toString(), abort: !!r.abort, calls, m: mem.load(0x3_0000_0000n, 8).toString() })
+				return JSON.stringify({ r: r.ret?.toString(), abort: !!r.abort, calls, m: [0n, 8n, 0x100n].map(o => mem.load(0x3_0000_0000n + o, 8).toString()) })
 			}
 			assert.equal(run(after), run(before), `${before}\n${after}`)
 		}

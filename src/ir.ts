@@ -151,8 +151,9 @@ export type MemIntrinsic = 'memeq' | 'keyeq';
 /**
  * Statement helpers with effects, introduced only on the final structured body (src/stmtidioms.ts):
  *   rc_inc(p[, x])   x = ld64(p) (unless given); st64(p, x + 1); if (x == u64::MAX) abort()
+ *   rc_dec(p[, x])   x = ld64(p) (unless given); st64(p, x - 1); if (x == 1) st64(p + 8, ld64(p + 8) - 1)
  */
-export type EffIntrinsic = 'rc_inc';
+export type EffIntrinsic = 'rc_inc' | 'rc_dec';
 export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic | EffIntrinsic;
 export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq' || n === 'keyeq';
 const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
@@ -202,7 +203,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
     else if (x.k === 'fn' && isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
-    else if (x.k === 'fn' && x.name === 'rc_inc') { r.load = true; r.trap = true; r.call = true; }
+    else if (x.k === 'fn' && (x.name === 'rc_inc' || x.name === 'rc_dec')) { r.load = true; r.trap = true; r.call = true; }
     else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
   });
   return r;

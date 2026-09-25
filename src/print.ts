@@ -237,7 +237,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         out.push(`${I(d)}${s.dst >= 0 ? `${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ` : ''}${txt}`);
         break;
       }
-      case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && s.e.name === 'rc_inc' ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;
+      case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && (s.e.name === 'rc_inc' || s.e.name === 'rc_dec') ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;
       case 'stores': {
         pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--;
         // four large constant words: a public key written in place
