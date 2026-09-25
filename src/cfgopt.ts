@@ -375,7 +375,14 @@ export function globalConstProp(f: VarFunc): boolean {
   let changed = false;
   for (const b of f.blocks) {
     if (!hasIn[b.id]) continue;
-    const st = IN.subarray(b.id * K, b.id * K + K);
+    // (in a block where no variable holds a known constant on entry and none is assigned one, no
+    // variable ever becomes known: rewriteBlock would leave the block as it is)
+    const r0 = b.id * K;
+    let any = false;
+    for (let k = 0; k < K && !any; k++) if (IN[r0 + k] >= 0) any = true;
+    if (!any) { const g = gen[b.id]; for (let i = 1; i < g.length && !any; i += 2) if (g[i] >= 0) any = true; }
+    if (!any) continue;
+    const st = IN.subarray(r0, r0 + K);
     // block-local overrides of the entry state (null = no longer known constant)
     const loc = new Map<number, Expr | null>();
     const look = (v: number): Expr | undefined => {
