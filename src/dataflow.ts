@@ -197,9 +197,27 @@ function markUsedResults(p: Program, f: Func, liveOut: Int32Array, onMarked: (cf
 export function inferSignatures(p: Program) {
   const funcs = [...p.funcs.values()];
   // noreturn: optimistic "returns" start, monotone decreasing reachability
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const f of funcs) if (!f.noreturn && !reachesReturn(p, f)) { f.noreturn = true; changed = true; }
+  // (worklist: a function can only lose its path to `ret` when one of its callees becomes
+  // noreturn, so only callers of newly noreturn functions are re-checked; the set only grows and
+  // reachesReturn is monotone in it, hence the same least fixed point as re-scanning everything)
+  const nrCallers = new Map<number, Func[]>();
+  for (const f of funcs) {
+    const seen = new Set<number>();
+    for (const b of f.blocks) for (const s of b.stmts) {
+      if (s.k !== 'call' || s.t.k !== 'fn' || seen.has(s.t.pc)) continue;
+      seen.add(s.t.pc);
+      let l = nrCallers.get(s.t.pc); if (!l) nrCallers.set(s.t.pc, (l = [])); l.push(f);
+    }
+  }
+  {
+    const queue = [...funcs], queued = new Set(funcs);
+    for (let qi = 0; qi < queue.length; qi++) {
+      const f = queue[qi];
+      queued.delete(f);
+      if (f.noreturn || reachesReturn(p, f)) continue;
+      f.noreturn = true;
+      for (const c of nrCallers.get(f.pc) ?? []) if (!c.noreturn && !queued.has(c)) { queued.add(c); queue.push(c); }
+    }
   }
   // Cut blocks after calls to noreturn callees (code after them is unreachable)
   for (const f of funcs) truncateNoreturn(p, f);
@@ -220,15 +238,35 @@ export function inferSignatures(p: Program) {
   // function is re-evaluated only when an input of its liveness changed: its own `returns`
   // (set by a caller's markUsedResults) or a callee's nparams/extraIn.
   const callers = new Map<number, Func[]>();
+  const callees = new Map<Func, Func[]>();
   for (const f of funcs) {
     const seen = new Set<number>();
+    const out: Func[] = [];
     for (const b of f.blocks) for (const s of b.stmts) {
       if (s.k !== 'call' || s.t.k !== 'fn' || seen.has(s.t.pc)) continue;
       seen.add(s.t.pc);
       let l = callers.get(s.t.pc); if (!l) callers.set(s.t.pc, (l = [])); l.push(f);
+      const g = p.funcs.get(s.t.pc); if (g) out.push(g);
+    }
+    callees.set(f, out);
+  }
+  // initial order: callees before callers (DFS postorder of the call graph), so that most
+  // signatures are final before their callers are first evaluated (fewer re-evaluations)
+  const queue: Func[] = [];
+  {
+    const done = new Set<Func>();
+    for (const root of funcs) {
+      if (done.has(root)) continue;
+      done.add(root);
+      const st: [Func, number][] = [[root, 0]];
+      while (st.length) {
+        const top = st[st.length - 1], cs = callees.get(top[0])!;
+        if (top[1] < cs.length) { const g = cs[top[1]++]; if (!done.has(g)) { done.add(g); st.push([g, 0]); } }
+        else { queue.push(top[0]); st.pop(); }
+      }
     }
   }
-  const queue = [...funcs], queued = new Set(funcs);
+  const queued = new Set(funcs);
   const enqueue = (g: Func) => { if (!queued.has(g)) { queued.add(g); queue.push(g); } };
   for (let qi = 0; qi < queue.length; qi++) {
     const f = queue[qi];
