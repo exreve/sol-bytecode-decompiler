@@ -19,13 +19,32 @@ Requires Node ≥ 23.6 (runs TypeScript directly). No runtime dependencies.
 
 ```ts
 // instruction handler: swap (discriminator sha256("global:swap")[..8] = 0xc88775e1919ec6f8)
-export function ix_swap(a: u64, b: u64, c: u64, d: u64, p5: u64, p6: u64): u64 {
-	const s70 = fp - 0x70, sd8 = fp - 0xd8
+// accounts [idl]: 0 token_program [= TokenkegQ…], 1 token_authority [signer], 2 whirlpool [mut], …
+// args [idl]: amount: u64, other_amount_threshold: u64, sqrt_price_limit: u128, amount_specified_is_input: bool, a_to_b: bool
+// names [heur: Anchor dispatcher / handler argument order (…)]: program_id, accounts, accounts_len, ix_args, ix_args_len
+// names [idl: argument names and layout; which variable holds the instruction data is inferred]: args, amount, …
+function ix_swap(a: u64, program_id: u64, accounts: u64, accounts_len: u64, ix_args: u64, ix_args_len: u64): u64 {
 	sol_log("Instruction: Swap", 0x11)
-	if (memcmp(f, 0x10015380d /* &ORCA_WHIRLPOOL_PROGRAM */, 0x20) != 0) { ... }
-	...
-}
+	…
+	const args: SwapArgs = ix_args
+	const amount = args.amount
+	const u = ld64(args.sqrt_price_limit + 8)
+	if (2 > amount_specified_is_input) { …
+	t = accounts_swap(s70, program_id, s10, other_amount_threshold, fp)
+
+// account checks: account (errors raised when a check on it fails) [str: …]: whirlpools_config (ConstraintMut), …
+function accounts_set_fee_authority(a: u64, b: u64, c: u64, d: u64, e: u64): u64 {
+	const whirlpools_config: AccountInfo = ld64(s108)
+	if (whirlpools_config.is_writable == 0) { …anchor::ConstraintMut… }
+
+// elsewhere: CPIs and PDA derivations described from the frame contents at the call
+	// CPI TOKEN_PROGRAM.Transfer { source: q + 8 (w), destination: r + 8 (w), authority: s + 8 (s), amount: ah }
+	// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2) [ix data?]], program *(ld64(s2b0)))
 ```
+
+Everything printed is executable under the runtime model below and verified against the bytecode
+(`test/equiv.ts`); names, view types and comments carry their provenance (`[idl]`, `[str]`, `[known]`,
+`[heur]`, see "Recovered names"). Security slices (`slices/*.txt`) are separate, unverified views.
 
 Runtime model (also emitted as the file prelude / `lib.d.ts`):
 
