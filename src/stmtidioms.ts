@@ -19,6 +19,9 @@ import type { Node } from './structure.ts'
 import { type Expr, walkExpr, exprEq, hasSideEffectsOrMem, M64 } from './ir.ts'
 
 export function statementIdioms(body: Node[], fp?: number): Node[] {
+	// every rewrite starts at a store `st64(p, x ± 1)`: without one, rewrite() would only rebuild the
+	// same tree, so the body is returned as it is
+	if (!hasCandidate(body)) return body
 	const uses = new Map<number, number>()
 	const count = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') uses.set(x.id, (uses.get(x.id) ?? 0) + 1) })
 	const scan = (ns: Node[]) => {
@@ -45,6 +48,22 @@ export function statementIdioms(body: Node[], fp?: number): Node[] {
 	}
 	scan(body)
 	return rewrite(body, uses, fp)
+}
+
+function hasCandidate(ns: Node[]): boolean {
+	for (const n of ns) {
+		switch (n.k) {
+			case 'stmt': {
+				const s = n.s
+				if (s.k === 'store' && s.size === 8 && s.v.k === 'bin' && s.v.op === 'add' && s.v.a.k === 'var' && s.v.b.k === 'const' && (s.v.b.v === 1n || s.v.b.v === M64)) return true
+				break
+			}
+			case 'if': if (hasCandidate(n.then) || hasCandidate(n.else)) return true; break
+			case 'block': case 'loop': if (hasCandidate(n.body)) return true; break
+			case 'switch': if (n.cases.some(c => hasCandidate(c.body))) return true; break
+		}
+	}
+	return false
 }
 
 /** e with every load of the current frame (fp + c, inside the 4 KiB frame: it cannot fault) replaced by 0 */
