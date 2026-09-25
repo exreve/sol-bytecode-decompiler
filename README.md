@@ -203,6 +203,11 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   `Pubkey::find/create_program_address`) whose seed list is built in the frame:
   `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`
   (string seeds, known keys, `*src` for 32 bytes copied from `src`, `u16 v` for small values);
+* instruction-data taint (`[heur]`): from the handlers' `ix_args`, values that may derive from the instruction
+  data are followed through arithmetic, frame slots and call arguments (flow-insensitive, interprocedural;
+  call results and callee writes are not followed). CPI data fields and PDA seeds that may derive from it are
+  marked `[ix data?]` (a program id: `[id from ix data]`), and functions list the parameters it may reach:
+  `// instruction data may reach [heur: …]: c (points to it), d (value)`;
 * calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
 
 ## Library code
@@ -293,6 +298,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
 | `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
+| `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |

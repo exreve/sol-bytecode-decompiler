@@ -125,7 +125,11 @@ export interface CpiEnv {
 	read?: (addr: bigint, size: number) => bigint | undefined // read-only program memory
 	/** known program ids the 32 bytes at `ptr` are compared with in this function (keyeq / memeq) */
 	programCheck?: (ptr: Expr) => string[]
+	/** may the value derive from instruction data (taint.ts)? */
+	tainted?: (e: Expr) => boolean
 }
+
+const IXD = ' [ix data?]'
 
 /** Instruction of a well-known program: account roles, data fields (name, byte offset, size or 'key'), data length. */
 interface IxLayout { name: string; accounts: string[]; fields: [string, number, number | 'key'][]; len?: number }
@@ -284,9 +288,10 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 	const accText = (a: Acc) => `${a.text}${flags(a.w, a.s)}`
 	// program id not constant: is it compared with a known id in this function?
 	let check = ''
+	if (!program.known && program.src && env.tainted?.(program.src)) check += ' [id from ix data]'
 	if (!program.known && program.src && env.programCheck) {
 		const ids = env.programCheck(program.src)
-		check = ids.length ? ` (id compared with ${ids.join(' / ')} in this function)` : ' (id not a constant, and not compared with a known program id in this function)'
+		check += ids.length ? ` (id compared with ${ids.join(' / ')} in this function)` : ' (id not a constant, and not compared with a known program id in this function)'
 	}
 	// well-known program: decode the instruction (accounts by role, data fields)
 	const dOff = dataPtr ? fo(dataPtr) : null
@@ -307,8 +312,8 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 			for (const [name, off, size] of lay.fields) {
 				if (off >= dl) continue
 				let v: string
-				if (size === 'key') v = keyInFrame(dOff + off)?.text ?? '?'
-				else { const e = at(dOff + off, size); v = e ? env.expr(e) : '?' }
+				if (size === 'key') { const k = keyInFrame(dOff + off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : '') }
+				else { const e = at(dOff + off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?' }
 				parts.push(`${name}: ${v}`)
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
@@ -344,7 +349,7 @@ function describeData(ptr: Expr, len: number, at: (o: number, size: number) => E
 		let e: Expr | undefined, size = 0
 		for (const s of [8, 4, 2, 1]) if (p + s <= o + len && (e = at(p, s))) { size = s; break }
 		if (!e) { if (items.length) items.push('?'); break }
-		let t = `u${size * 8} ${env.expr(e)}`
+		let t = `u${size * 8} ${env.expr(e)}${env.tainted?.(e) ? IXD : ''}`
 		// an 8-byte constant first: an Anchor instruction discriminator
 		if (first && e.k === 'const' && size === 8) { const n = env.constName?.(e.v); if (n && !t.includes('/*')) t += ` (${n})` }
 		items.push(t)
@@ -367,11 +372,12 @@ function seedText(p: Expr, l: Expr, at: At, fo: (e: Expr) => number | null, env:
 		if (l.v === 32n) {
 			// 32 bytes copied into the frame from one place: *src
 			const w0 = at(o, 8)
-			if (w0?.k === 'load' && [1, 2, 3].every(i => { const w = at(o + 8 * i, 8); return w?.k === 'load' && exprEq(w.addr, addOff(w0.addr, 8 * i)) })) return `*${wrap(env.expr(w0.addr))}`
+			if (w0?.k === 'load' && [1, 2, 3].every(i => { const w = at(o + 8 * i, 8); return w?.k === 'load' && exprEq(w.addr, addOff(w0.addr, 8 * i)) })) return `*${wrap(env.expr(w0.addr))}${env.tainted?.(w0.addr) ? IXD : ''}`
 		}
-		if (l.v === 1n || l.v === 2n || l.v === 4n || l.v === 8n) { const v = at(o, Number(l.v)); if (v) return `u${Number(l.v) * 8} ${env.expr(v)}` }
+		if (l.v === 1n || l.v === 2n || l.v === 4n || l.v === 8n) { const v = at(o, Number(l.v)); if (v) return `u${Number(l.v) * 8} ${env.expr(v)}${env.tainted?.(v) ? IXD : ''}` }
 	}
-	return l.k === 'const' && l.v === 32n ? `*${wrap(env.expr(p))}` : `${wrap(env.expr(p))}[..${env.expr(l)}]`
+	const mark = env.tainted?.(p) || env.tainted?.(l) ? IXD : ''
+	return (l.k === 'const' && l.v === 32n ? `*${wrap(env.expr(p))}` : `${wrap(env.expr(p))}[..${env.expr(l)}]`) + mark
 }
 
 /** Seeds of a PDA derivation (ptr: &[&[u8]] built in the frame, n seeds). */

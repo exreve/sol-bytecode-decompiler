@@ -19,6 +19,7 @@ import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
 import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
+import { instructionTaint, exprTainted } from './taint.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -147,7 +148,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 
   // ---- Anchor dispatcher: compares the instruction data's first 8 bytes with each handler's discriminator ----
   const abiNames = new Map<number, Map<number, string>>(); // fn pc -> var id -> name (Anchor dispatch / handler ABI)
-  if (opts.sugar !== false && sem.anchor) {
+  if (opts.sugar !== false) {
     const handlerOf = new Map([...sem.ixNames].map(([pc, ix]) => [ix, pc]));
     const setName = (pc: number, v: number, nm: string) => { let m = abiNames.get(pc); if (!m) abiNames.set(pc, (m = new Map())); if (!m.has(v)) m.set(v, nm); };
     for (const [dpc, { f }] of built) {
@@ -196,6 +197,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
   }
+
+  // ---- instruction-data taint from the handlers' ix_args (see taint.ts) ----
+  const seeds = new Map<number, number[]>();
+  for (const [pc, m] of abiNames) for (const [v, nm] of m) if (nm === 'ix_args') { let l = seeds.get(pc); if (!l) seeds.set(pc, (l = [])); l.push(v); }
+  const taint = opts.sugar !== false && seeds.size ? instructionTaint(built, seeds) : new Map();
 
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
@@ -532,6 +538,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (sites.size) {
         const env: CpiEnv = {
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
+          tainted: e => exprTainted(taint.get(pc), e, fpVar),
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
           constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
@@ -554,6 +561,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
     if (heurNames.has(pc)) lines.push(`// ${heurNames.get(pc)}`);
+    const tp = taint.get(pc);
+    if (tp && !sem.ixNames.has(pc)) {
+      const ps = f.vars.filter(v => v.param >= 1 && v.param !== 10 && tp.vars.has(v.id) && names[v.id]).map(v => `${names[v.id]} (${tp.vars.get(v.id) === 'ptr' ? 'points to it' : 'value'})`);
+      if (ps.length) lines.push(`// instruction data may reach [heur: flow-insensitive taint from the handlers' ix_args]: ${ps.join(', ')}`);
+    }
     if (abiNm.length) lines.push(`// names [heur: Anchor dispatcher / handler argument order (out, program_id, accounts, accounts_len, instruction data after the discriminator, its length)]: ${abiNm.join(', ')}`);
     if (dataNotes.length) lines.push(`// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: ${dataNotes.join(', ')}`);
     if (argNames.length) lines.push(`// names [idl: argument names and layout; which variable holds the instruction data is inferred]: ${argNames.join(', ')}`);
