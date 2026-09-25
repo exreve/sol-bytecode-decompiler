@@ -205,16 +205,20 @@ function compare(a: any, b: any, returns: boolean, fp?: bigint): string | null {
 }
 
 if (import.meta.main) {
-	const file = process.argv[2]
-	const trials = Number(process.argv[3] ?? 20)
-	const maxFuncs = Number(process.argv[4] ?? Infinity)
+	// usage: node test/equiv.ts <program.so> [trials=20] [--raw] [--idl file.json] [--only fn_x,..] [--seed N] [--max N]
+	const argv = process.argv.slice(2)
+	const opt = (n: string) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined }
+	const pos = argv.filter((a, i) => !a.startsWith('--') && !['--idl', '--only', '--seed', '--max'].includes(argv[i - 1]))
+	const file = pos[0]
+	const trials = Number(pos[1] ?? 20)
+	const maxFuncs = Number(opt('--max') ?? Infinity)
 	const t0 = Date.now()
 	const bytes = new Uint8Array(readFileSync(file))
 	const txt = loadProgram(bytes).elf.text.addr
-	const only = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(x => (x.startsWith('fn_') ? (parseInt(x.slice(3), 16) - txt) / 8 : Number(x)))) : undefined
-	// SUGAR=1: check the readable output; IDL=<file.json>: with the program's Anchor IDL
-	const idl = process.env.IDL ? JSON.parse(readFileSync(process.env.IDL, 'utf8')) : undefined
-	const r = checkProgram(new Uint8Array(readFileSync(file)), trials, maxFuncs, only, true, process.env.SEED ? Number(process.env.SEED) : undefined, !!process.env.SUGAR || !!idl, idl)
+	const only = opt('--only') ? new Set(opt('--only')!.split(',').map(x => (x.startsWith('fn_') ? (parseInt(x.slice(3), 16) - txt) / 8 : Number(x)))) : undefined
+	const idl = opt('--idl') ? JSON.parse(readFileSync(opt('--idl')!, 'utf8')) : undefined
+	// default: the readable output the CLI produces; --raw: the plain form
+	const r = checkProgram(bytes, trials, maxFuncs, only, true, opt('--seed') ? Number(opt('--seed')) : undefined, !argv.includes('--raw'), idl)
 	console.log(`${file}: ${r.funcs} functions, ${r.trials} trials (${r.skipped ?? 0} skipped: memory-unsafe), ${r.failures.length} failing functions, ${r.errors.length} errors, ${Date.now() - t0}ms`)
 	for (const e of r.errors.slice(0, 10)) console.log('ERROR', e.fn, e.why)
 	if (r.failures.length || r.errors.length) process.exitCode = 1

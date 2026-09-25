@@ -6,8 +6,10 @@ import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 import { b58 } from './fetch-samples.ts'
 
-const RPC = process.env.SOLANA_RPC_URL ?? ''
-if (!RPC) { console.error('set SOLANA_RPC_URL to a Solana RPC endpoint'); process.exit(1) }
+const ri = process.argv.indexOf('--rpc')
+const RPC = ri >= 0 ? process.argv[ri + 1] : ''
+if (!RPC) { console.error('pass --rpc <url>'); process.exit(1) }
+process.argv.splice(ri, 2) // remaining positional arguments keep their meaning
 const target = Number(process.argv[2] ?? 300)
 const out = process.argv[3] ?? 'corpus'
 mkdirSync(`${out}/idl`, { recursive: true })
