@@ -166,6 +166,11 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(1) }, pc: 0 } }, ...dec(V(0)),
 			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
+		// inverted: st64(a, x + 1); if (x != -1) { …; return } abort()   -> rc_inc(a); …; return
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } },
+			inc(V(0))[0],
+			{ k: 'if', c: { k: 'cmp', op: 'ne', a: V(3), b: C(M) }, then: [{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, { k: 'return', e: V(4) }], else: [] },
+			...abort],
 		// a pure assignment between the store and the check
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, dec(V(0))[0],
 			{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, dec(V(0))[1],

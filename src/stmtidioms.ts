@@ -3,6 +3,8 @@
 //   x = ld64(p); …; st64(p, x + 1); if (x == -1) { abort() }   ->   rc_inc(p)
 //   st64(p, x + 1); if (x == -1) { abort() }                    ->   rc_inc(p, x)
 //   x = ld64(p); …; st64(p, x - 1); if (x == 1) { st64(p + 8, ld64(p + 8) - 1) }   ->   rc_dec(p)  (or rc_dec(p, x))
+//   …; st64(p, x + 1); if (x != -1) { B } abort()   ->   rc_inc(p); B   when B never falls through (the
+//       abort after the if is reached only when x == -1: it is the abort of rc_inc)
 //
 // (Rc::clone / Rc strong-count increment: *p += 1, aborting when the count was u64::MAX; Rc drop:
 // strong count -= 1 and, when it reaches 0, weak count -= 1 — the bump allocator frees nothing.)
@@ -52,6 +54,15 @@ function isAbort(ns: Node[]): boolean {
 	return ns.length === 1 || (ns.length === 2 && b.k === 'trap')
 }
 
+/** control never reaches the end of the list (return, trap, abort, break, continue, or an if whose both sides never do) */
+function noFallThrough(ns: Node[]): boolean {
+	const l = ns[ns.length - 1]
+	if (!l) return false
+	if (l.k === 'return' || l.k === 'trap' || l.k === 'break' || l.k === 'continue') return true
+	if (l.k === 'stmt') return l.s.k === 'trap' || (l.s.k === 'call' && l.s.t.k === 'sys' && l.s.t.name === 'abort')
+	return l.k === 'if' && noFallThrough(l.then) && noFallThrough(l.else)
+}
+
 /** `y = e` with e free of loads, calls and traps, keeping x and the variables of p */
 function isPureSet(n: Node, x: number, pv: Set<number>): boolean {
 	if (n.k !== 'stmt' || n.s.k !== 'set' || n.s.dst === x || pv.has(n.s.dst) || mentions(n.s.e, x)) return false
@@ -95,8 +106,14 @@ function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 		if (!br) continue
 		if (br.k !== 'if' || br.else.length || uses.get(x) !== 3) continue
 		const c = br.c
-		if (!(c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === (inc ? M64 : 1n))) continue
-		if (inc ? !isAbort(br.then) : !isWeakDec(br.then, p)) continue
+		// inverted: if (x != -1) { B } abort(), B never falling through
+		const abortEnd = out[k + 2]?.k === 'trap' ? k + 3 : k + 2
+		const inverted = inc && c.k === 'cmp' && c.op === 'ne' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === M64
+			&& noFallThrough(br.then) && isAbort(out.slice(k + 1, abortEnd))
+		if (!inverted) {
+			if (!(c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === (inc ? M64 : 1n))) continue
+			if (inc ? !isAbort(br.then) : !isWeakDec(br.then, p)) continue
+		}
 		// the load of x: in this list, followed only by variable assignments that keep p and x
 		let i = j - 1
 		for (; i >= 0; i--) {
@@ -110,8 +127,10 @@ function rewrite(ns: Node[], uses: Map<number, number>): Node[] {
 		const args = adjacent ? [p] : [p, { k: 'var', id: x } as Expr]
 		const call: Node = { k: 'stmt', s: { k: 'eval', e: { k: 'fn', name: inc ? 'rc_inc' : 'rc_dec', args }, pc: st.s.pc } }
 		const moved = out.slice(j + 1, k)
-		if (adjacent) { out = [...out.slice(0, i), ...out.slice(i + 1, j), ...moved, call, ...out.slice(k + 1)]; j += moved.length - 1 }
-		else { out = [...out.slice(0, j), ...moved, call, ...out.slice(k + 1)]; j += moved.length }
+		// inverted form: the if's body follows the helper; the abort after it is the helper's
+		const after = inverted ? [...br.then, ...out.slice(abortEnd)] : out.slice(k + 1)
+		if (adjacent) { out = [...out.slice(0, i), ...out.slice(i + 1, j), ...moved, call, ...after]; j += moved.length - 1 }
+		else { out = [...out.slice(0, j), ...moved, call, ...after]; j += moved.length }
 	}
 	return out
 }
