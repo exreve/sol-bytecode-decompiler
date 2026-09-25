@@ -3,8 +3,8 @@
 // syscalls modeled, and memory a sparse byte map whose unwritten bytes come from a filler function
 // (zero by default: the VM zero-initializes stack and heap). Callers use it to learn what a function
 // does on concrete inputs, e.g. which bytes of its inputs end up where in its outputs. Optionally the
-// run tracks input taint (see emu.ts TaintHooks): which bytes may depend on the inputs, through data or
-// through input-dependent control flow.
+// run tracks input taint (see emu.ts TaintHooks): which bytes may depend on the inputs' data; values
+// that input-dependent branches select show up by running the other side of those branches (`flip`).
 import { createHash } from 'node:crypto'
 import type { Program } from './program.ts'
 import { emulate, TestMem, Abort, callTargetName, type TaintHooks } from './emu.ts'
@@ -14,24 +14,25 @@ const M = (1n << 64n) - 1n
 /**
  * Memory in 4 KiB pages, materialized on first access: program image bytes where the image maps them
  * (read-only), else pseudo-random bytes from `seed` (0: zeros; the word at 0x3_0000_0000, the heap
- * allocator's cursor, always starts at zero as the VM starts it). Each byte has input-taint bits
- * (TaintHooks): image bytes 0, other unwritten bytes 1. Loads can be observed (see onLoad).
+ * allocator's cursor, always starts at zero as the VM starts it). Each byte has an input taint
+ * (TaintHooks): unwritten bytes are inputs except the image and the heap (fresh memory the program
+ * allocates). Loads can be observed (see onLoad).
  */
 interface Page { b: Uint8Array; dv: DataView; t: Uint8Array; ro?: Uint8Array }
 const PAGE = 4096n
 export class ExecMem extends TestMem {
-	seed: number
+	fillSeed: number
 	pages = new Map<bigint, Page>()
 	onLoad?: (addr: bigint, size: number, v: bigint) => void
-	constructor(p: Program, seed = 0) { super(p.image, 0, []); this.seed = seed }
+	constructor(p: Program, seed = 0) { super(p.image, 0, []); this.fillSeed = seed }
 	private page(k: bigint): Page {
 		let pg = this.pages.get(k)
 		if (pg) return pg
-		const b = new Uint8Array(4096), t = new Uint8Array(4096).fill(1)
 		const base = k * PAGE
-		if (this.seed) {
+		const b = new Uint8Array(4096), t = new Uint8Array(4096).fill(base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1)
+		if (this.fillSeed) {
 			// xorshift32 stream per page
-			let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(this.seed, 0x85ebca6b)) | 0
+			let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(this.fillSeed, 0x85ebca6b)) | 0
 			x = x || 1
 			for (let i = 0; i < 4096; i += 4) {
 				x ^= x << 13; x ^= x >>> 17; x ^= x << 5
@@ -135,6 +136,24 @@ export class Exec {
 	taint: boolean
 	/** in called functions, force branches away from paths that can only abort (panics on the synthetic inputs) */
 	noPanic = false
+	/**
+	 * Explore the other side of input-dependent branches (on taint): take it the first time each is
+	 * executed where the forcing leaves the choice open, unless in `noFlip`. A flip is added to `noFlip`
+	 * (and `blamed` set) when the run's function then has to be forced against its inputs' choice: the
+	 * flipped branch led to an error path (e.g. an Err return the caller then checks).
+	 */
+	flip = false
+	noFlip = new Set<string>()
+	blamed = false
+	/** the branches flipped in the last run, in order */
+	flipped = new Set<string>()
+	private flipLog: string[] = []
+	/**
+	 * Control taint (bit 2, TaintHooks) from the branches whose other side is not explored: those in
+	 * noFlip, or every one ('all'), or those in noFlip in the run's function and every one in called
+	 * functions ('callees').
+	 */
+	sticky: 'noflip' | 'all' | 'callees' = 'noflip'
 	/** 1: the models of the PDA syscalls derive other bump seeds (so runs 0 and 1 disagree on them) */
 	variant = 0
 	private pdaCalls = 0
@@ -152,8 +171,9 @@ export class Exec {
 		const start = this.steps
 		const reach = target === undefined ? undefined : reaching(this.p, pc, target)
 		this.force = reach ? { reach, target: target! } : undefined
+		this.flipped.clear(); this.flipLog = []; this.blamed = false
 		try {
-			const r = this.frame(pc, args, fp, 0, extraIn, Array.from({ length: 11 }, (_, i) => (i === 10 ? 0 : 1)), 0)
+			const r = this.frame(pc, args, fp, 0, extraIn, Array.from({ length: 11 }, (_, i) => (i === 10 ? 0 : 1)))
 			return { ret: r.ret, steps: this.steps - start }
 		} catch (e) {
 			if (e instanceof Stop) return { stopped: true, steps: this.steps - start }
@@ -163,30 +183,38 @@ export class Exec {
 		}
 	}
 
-	/** A branch override from the set of instructions the run wants to reach (forced when only one side can). */
-	private forcer(reach: Set<number>): { branch: (pc: number, taken: boolean) => boolean; forced: (pc: number) => boolean } {
+	/** Branch decisions (forced when only one side can reach `reach`; flips, see `flip`) and the sticky predicate. */
+	private forcer(fpc: number, depth: number, reach: Set<number> | undefined): { branch: (pc: number, taken: boolean, tainted: boolean) => boolean; sticky: (pc: number) => boolean } {
 		const insns = this.p.insns
-		const sides = (pc: number) => [reach.has(pc + 1 + insns[pc].off), reach.has(pc + 1)]
+		const forced = (pc: number) => !!reach && reach.has(pc + 1 + insns[pc].off) !== reach.has(pc + 1)
 		return {
-			branch: (pc, taken) => { const [t, n] = sides(pc); return t && !n ? true : n && !t ? false : taken },
-			forced: pc => { const [t, n] = sides(pc); return t !== n },
+			sticky: pc => !forced(pc) && (this.sticky === 'all' || (this.sticky === 'callees' && depth > 0) || this.noFlip.has(`${fpc}:${pc}`)),
+			branch: (pc, taken, tainted) => {
+				if (forced(pc)) {
+					const dir = reach!.has(pc + 1 + insns[pc].off)
+					if (depth === 0) {
+						// forced against the inputs' choice right after flips: blame them
+						if (dir !== taken && this.flipLog.length) { for (const k of this.flipLog) this.noFlip.add(k); this.blamed = true }
+						if (dir === taken) this.flipLog = []
+					}
+					return dir
+				}
+				const k = `${fpc}:${pc}`
+				if (this.flip && tainted && !this.flipped.has(k) && !this.noFlip.has(k)) { this.flipped.add(k); this.flipLog.push(k); return !taken }
+				return taken
+			},
 		}
 	}
 
-	private frame(pc: number, args: bigint[], fp: bigint, depth: number, extraIn: bigint[], init: number[], base: number): { ret?: bigint; retTaint?: number } {
+	private frame(pc: number, args: bigint[], fp: bigint, depth: number, extraIn: bigint[], init: number[], base = 0): { ret?: bigint; retTaint?: number } {
 		const budget = this.maxSteps - this.steps
 		if (budget <= 0 || depth > this.maxDepth) throw new Limit()
 		const m = this.mem
-		const f = depth === 0 && this.force ? this.forcer(this.force.reach) : this.noPanic ? this.forcer(returning(this.p, pc)) : undefined
-		// control taint: post-dominators among the paths the run is interested in (towards the target;
-		// in callees, those that return)
-		const pd = depth === 0 && this.force ? postdomsTowards(this.p, pc, this.force.target, this.force.reach) : undefined
-		const taint: TaintHooks | undefined = this.taint ? {
-			init, base, mem: (a, n) => m.tainted(a, n), set: (a, n, t) => m.setTaint(a, n, t),
-			forced: f?.forced, ipdom: pd ? x => pd.get(x) ?? -1 : x => postdom(this.p, pc, x),
-		} : undefined
-		const r = emulate(this.p, pc, args, fp, this.mem, (t, a, cpc) => this.call(t, a, cpc, fp, depth, taint), budget,
-			() => [1, 2, 3, 4, 5], extraIn, () => 0, { frameCheck: false, branch: f?.branch, taint })
+		const reach = depth === 0 && this.force ? this.force.reach : this.noPanic ? returning(this.p, pc) : undefined
+		const f = this.forcer(pc, depth, reach)
+		const taint: TaintHooks | undefined = this.taint ? { init, base, sticky: f.sticky, mem: (a, n) => m.tainted(a, n), set: (a, n, t) => m.setTaint(a, n, t) } : undefined
+		const r = emulate(this.p, pc, args, fp, this.mem, (t, a, cpc) => this.call(t, a, cpc ?? -1, fp, depth, taint), budget,
+			() => [1, 2, 3, 4, 5], extraIn, () => 0, { frameCheck: false, branch: f.branch, taint })
 		this.steps += r.steps
 		if (r.limit) throw new Limit()
 		if (r.abort !== undefined) throw new Abort(r.abort)
@@ -195,7 +223,6 @@ export class Exec {
 
 	private call(t: string, a: bigint[], cpc: number, fp: bigint, depth: number, taint?: TaintHooks): bigint {
 		this.onCall?.(t, a, cpc, depth)
-		const ctl = taint?.ctl ?? 0
 		let target: number | undefined
 		if (t.startsWith('fn:')) target = Number(t.slice(3))
 		else if (t.startsWith('ptr:')) {
@@ -206,15 +233,15 @@ export class Exec {
 		if (target !== undefined) {
 			// callee registers: the arguments with their taint; the others (callee-saved, clobbered) as inputs
 			const init = [1, ...(taint?.args ?? [1, 1, 1, 1, 1]), 1, 1, 1, 1, 0]
-			const r = this.frame(target, a, fp + 0x2000n, depth + 1, [], init, ctl)
+			const r = this.frame(target, a, fp + 0x2000n, depth + 1, [], init, taint?.ctl ?? 0)
 			if (taint) taint.ret = r.retTaint ?? 1
 			return r.ret ?? 0n
 		}
 		const name = t.startsWith('sys:') ? t.slice(4) : t
-		if (taint) taint.ret = ctl
+		if (taint) taint.ret = taint.ctl ?? 0
 		const h = this.onSyscall?.(name, a, this)
 		if (h !== undefined) return h
-		return this.syscall(name, a, taint?.args ?? [1, 1, 1, 1, 1], ctl)
+		return this.syscall(name, a, taint?.args ?? [1, 1, 1, 1, 1])
 	}
 
 	/** n pseudo-random bytes (depending on the memory's seed; tainted): outputs of the environment (sysvars) */
@@ -225,9 +252,9 @@ export class Exec {
 
 	/**
 	 * Syscall models (enough for straight-line library code: memory ops, logs, hashes; sysvars from the
-	 * filler). `at`: taint of the argument registers, `ctl`: control taint at the call.
+	 * filler). `at`: taint of the argument registers.
 	 */
-	syscall(name: string, a: bigint[], at: number[] = [1, 1, 1, 1, 1], ctl = 0): bigint {
+	syscall(name: string, a: bigint[], at: number[] = [1, 1, 1, 1, 1]): bigint {
 		const m = this.mem
 		const n = Number(a[2] & 0xffffffffn)
 		switch (name) {
@@ -235,16 +262,16 @@ export class Exec {
 			case 'sol_memcpy_': case 'sol_memmove_': {
 				if (n > 1 << 20) throw new Abort('memcpy size')
 				if (m.onLoad) for (let i = 0; i + 8 <= n; i += 8) m.onLoad((a[1] + BigInt(i)) & M, 8, m.readU(a[1] + BigInt(i), 8))
-				m.write(a[0], m.read(a[1], n), m.taintBytes(a[1], n).map(t => t | ctl | at[1] | at[2]))
+				m.write(a[0], m.read(a[1], n), m.taintBytes(a[1], n).map(t => t | at[1] | at[2]))
 				return 0n
 			}
-			case 'sol_memset_': { if (n > 1 << 20) throw new Abort('memset size'); m.write(a[0], new Uint8Array(n).fill(Number(a[1] & 0xffn)), at[1] | at[2] | ctl); return 0n }
+			case 'sol_memset_': { if (n > 1 << 20) throw new Abort('memset size'); m.write(a[0], new Uint8Array(n).fill(Number(a[1] & 0xffn)), at[1] | at[2]); return 0n }
 			case 'sol_memcmp_': {
 				const x = m.read(a[0], n), y = m.read(a[1], n)
 				let r = 0
 				for (let i = 0; i < n; i++) if (x[i] !== y[i]) { r = x[i] - y[i]; break }
 				m.store(a[3], 4, BigInt.asUintN(32, BigInt(r)))
-				m.setTaint(a[3], 4, m.tainted(a[0], n) | m.tainted(a[1], n) | at[0] | at[1] | at[2] | ctl)
+				m.setTaint(a[3], 4, m.tainted(a[0], n) | m.tainted(a[1], n) | at[0] | at[1] | at[2])
 				return 0n
 			}
 			case 'sol_sha256': case 'sol_keccak256': {
@@ -297,7 +324,7 @@ function extentOf(p: Program, fpc: number): number {
  * Machine-level control flow of a function (instructions within its extent): predecessor and successor
  * lists; exits are returns; calls to noreturn functions end their path.
  */
-interface Cfg { preds: Map<number, number[]>; succs: Map<number, number[]>; exits: number[]; end: number; ipdom?: Map<number, number> }
+interface Cfg { preds: Map<number, number[]>; succs: Map<number, number[]>; exits: number[]; end: number }
 const cfgCache = new WeakMap<Program, Map<number, Cfg>>()
 function cfgOf(p: Program, fpc: number): Cfg {
 	let c = cfgCache.get(p)
@@ -353,70 +380,4 @@ export function returning(p: Program, fpc: number): Set<number> {
 	let r = c.get(fpc)
 	if (!r) { const { preds, exits } = cfgOf(p, fpc); r = backward(preds, exits); c.set(fpc, r) }
 	return r
-}
-
-/**
- * Immediate post-dominator of instruction `pc` in the function at fpc (-1: the function's exit, i.e.
- * nothing after the branch is reached on every path). Paths that end in an abort count as reaching
- * the exit (they leave the function too).
- */
-export function postdom(p: Program, fpc: number, pc: number): number {
-	const g = cfgOf(p, fpc)
-	if (!g.ipdom) g.ipdom = postdoms(g, fpc)
-	return g.ipdom.get(pc) ?? -1
-}
-
-/** Immediate post-dominators on the paths towards `target` (instructions in `reach`; the target is their exit). */
-const towardsCache = new WeakMap<Program, Map<string, Map<number, number>>>()
-function postdomsTowards(p: Program, fpc: number, target: number, reach: Set<number>): Map<number, number> {
-	let c = towardsCache.get(p)
-	if (!c) towardsCache.set(p, (c = new Map()))
-	const k = `${fpc}:${target}`
-	let r = c.get(k)
-	if (!r) { r = postdoms(cfgOf(p, fpc), fpc, reach, target); c.set(k, r) }
-	return r
-}
-
-function postdoms(g: Cfg, fpc: number, within?: Set<number>, target?: number): Map<number, number> {
-	// reverse graph rooted at a virtual exit X (-1): X -> every instruction without successors (or the target)
-	const X = -1
-	const ok = (x: number) => !within || within.has(x)
-	const succ = (x: number): number[] => (x === target ? [] : (g.succs.get(x) ?? []).filter(ok))
-	const rsucc = (x: number): number[] => (x === X ? sinks : (g.preds.get(x) ?? []).filter(y => ok(y) && y !== target))
-	const sinks: number[] = []
-	if (target !== undefined) sinks.push(target)
-	else for (let pc = fpc; pc < g.end; pc++) if (!(g.succs.get(pc)?.length) && (g.preds.has(pc) || pc === fpc)) sinks.push(pc)
-	// postorder of the reverse graph from X
-	const order: number[] = [], seen = new Set<number>([X])
-	const stack: [number, number][] = [[X, 0]]
-	while (stack.length) {
-		const top = stack[stack.length - 1]
-		const ch = rsucc(top[0])
-		if (top[1] < ch.length) { const n = ch[top[1]++]; if (!seen.has(n)) { seen.add(n); stack.push([n, 0]) } }
-		else { order.push(top[0]); stack.pop() }
-	}
-	const po = new Map<number, number>()
-	order.forEach((n, i) => po.set(n, i))
-	const idom = new Map<number, number>([[X, X]])
-	const intersect = (a: number, b: number) => {
-		while (a !== b) {
-			while (po.get(a)! < po.get(b)!) a = idom.get(a)!
-			while (po.get(b)! < po.get(a)!) b = idom.get(b)!
-		}
-		return a
-	}
-	for (let changed = true; changed;) {
-		changed = false
-		for (let i = order.length - 2; i >= 0; i--) {
-			const n = order[i]
-			// predecessors in the reverse graph = successors in the CFG (or X for sinks)
-			const ss = succ(n)
-			const ps = ss.length ? ss : [X]
-			let d: number | undefined
-			for (const q of ps) if (idom.has(q)) d = d === undefined ? q : intersect(q, d)
-			if (d !== undefined && idom.get(n) !== d) { idom.set(n, d); changed = true }
-		}
-	}
-	idom.delete(X)
-	return idom
 }

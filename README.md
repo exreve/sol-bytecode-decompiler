@@ -273,17 +273,21 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
   is a constant, `[heur]` when only the data shape matches);
 * CPIs whose instruction the frame does not show (built on the heap, by builder functions such as
-  `spl_token::instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
+  `system_instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
   are described from two runs of the function in the reference interpreter (`src/exec.ts`, `src/cpiexec.ts`), marked
-  `[exec]`: the parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two runs),
-  branches are forced towards the call when only one side can reach it (and away from panics in callees), and library
-  wrappers are given no account infos (their RefCell checks are skipped; the run checks that the wrapper passes the
-  instruction on unchanged). The instruction reaching the CPI syscall is read back and each part traced with input taint
-  (bits for data and for input-dependent control flow): the same untainted bytes in both runs are constants, values an
-  8-byte load produced are `ld64(<address traced the same way>)`, 32 bytes read at an address are `*<address>`; anything
-  computed, or selected by input-dependent branches, is `?`:
-  `// CPI SYSTEM_PROGRAM.Transfer { from: *b.key (w,s), to: *c.key (w), lamports: p7 }, signer seeds p5[..p6] [exec]`
-  (bump seeds and PDAs are never taken for constants: the PDA syscall models differ between the runs);
+  `[exec]`. The parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two
+  runs); branches are forced towards the call when only one side can reach it (and away from panics in callees);
+  library wrappers get no account infos (their RefCell checks are skipped; the run checks that the wrapper passes the
+  instruction on). The instruction reaching the CPI syscall is read back and traced with input taint: the same
+  untainted bytes in both runs are constants, a value an 8-byte load produced is `ld64(<its address traced the same
+  way>)`, 32 bytes read at an address `*<address>` (shown as the function's variable defined as that expression, when
+  there is one); anything computed from the inputs is `?`. Values input-dependent branches select: run B takes the
+  other side of each such branch (until the call; flips that keep it from the CPI are dropped), so they differ between
+  the runs; after the branches it could not explore, and after any in called functions, computed numbers are not
+  taken for constants (instruction tags, keys, flags and random-looking words are):
+  `// CPI SYSTEM_PROGRAM.Transfer { from: *f (w,s), to: *l (w), lamports: p7 }, signer seeds p5[..p6] [exec]`
+  (bump seeds and PDAs are never taken for constants: the PDA syscall models differ between the runs; a
+  budget of interpreter steps per program bounds the time);
 * PDA derivations (`sol_try_find_program_address` / `sol_create_program_address`, thin wrappers, and
   `Pubkey::find/create_program_address`) whose seed list is built in the frame:
   `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`

@@ -4,7 +4,7 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
+import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
 import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
@@ -286,7 +286,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (let pc = fpc; pc < end; pc++) if (p.insns[pc].opc === 0x85 && callTargetName(p, pc, p.insns[pc].imm) === target) out.push(pc);
     return out;
   };
-  let execBudget = 40; // CPI sites described by execution per program (see cpiexec.ts)
+  // CPI sites described by execution (cpiexec.ts): interpreter steps per program (deterministic)
+  const execBudget = { steps: 600_000 };
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
@@ -625,7 +626,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false && fpVar !== undefined) {
       const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
       if (sites.size) {
+        // exec descriptions (cpiexec.ts) are expressions of the parameters: variables defined (once) as such
+        // an expression print as that variable
+        let defsByKey: Map<string, number> | undefined;
+        const ekey = (e: Expr) => JSON.stringify(e, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+        const named = (e: Expr): Expr => {
+          if (!defsByKey) {
+            defsByKey = new Map();
+            for (const b of f.blocks) for (const st of b.stmts) if (st.k === 'set' && names[st.dst] && (st.e.k === 'load' || st.e.k === 'bin') && defCount(f, st.dst) === 1) { const k = ekey(st.e); if (!defsByKey.has(k)) defsByKey.set(k, st.dst); }
+          }
+          return mapExpr(e, x => { const v = x.k === 'load' || x.k === 'bin' ? defsByKey!.get(ekey(x)) : undefined; return v !== undefined ? { k: 'var', id: v } : x; });
+        };
         const env: CpiEnv = {
+          named,
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           tainted: e => exprTainted(taint.get(pc), e, fpVar),
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
@@ -645,11 +658,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (!s) return undefined;
           const d = cpiDesc(s, env);
           const kind = execKind(s);
-          if (kind && !(d?.family && !d.guessed) && execBudget > 0) {
+          if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
             const at = sitePc(n, s);
             if (at !== undefined) {
-              execBudget--;
-              const m = describeByExec(p, f, at, kind, env);
+              const m = describeByExec(p, f, at, kind, env, execBudget);
               const x = m && formatIx(m, env);
               if (x) return x.text;
             }

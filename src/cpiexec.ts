@@ -23,11 +23,13 @@ const M = (1n << 64n) - 1n
 const HEAP_CURSOR = 0x3_0000_0000n
 const TOP_FP = 0x2_0000_3000n, CALLER_FP = 0x2_0000_1000n
 const MAX_STEPS = 20_000
+/** steps of all runs (statistics) */
+export const execStats = { runs: 0, steps: 0 }
 
 /** How the call at the site reaches the CPI syscall. */
 export type ExecSiteKind = 'sys' | 'thunk' | 'wrapper' // wrapper: (out, &Instruction, infos, infos_len, …)
 
-/** bytes with their input taint (bits: 1 data, 2 control; see emu.ts TaintHooks) */
+/** bytes with their input taint (see emu.ts TaintHooks) */
 interface TB { b: Uint8Array; t: number[] }
 interface Captured {
 	abi: 'c' | 'rust'
@@ -104,12 +106,14 @@ const eqBytes = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.eve
  * One run of the function at f.pc towards the call at sitePc; the instruction at the CPI syscall reached
  * from that call (undefined when none is reached, or it is malformed).
  */
-function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number): Run | undefined {
+interface RunCtl { flip: boolean; noFlip: Set<string>; sticky: Exec['sticky']; blamed?: boolean; flipped?: string[]; flippedAfterCall?: string[] }
+function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl): Run | undefined {
 	const mem = new ExecMem(p, seed)
 	const sym = new Sym(mem)
 	const x = new Exec(p, mem, { maxSteps: MAX_STEPS, taint: true })
 	x.noPanic = true
 	x.variant = seed === 2 ? 1 : 0
+	x.flip = ctl.flip; x.noFlip = ctl.noFlip; x.sticky = ctl.sticky
 	const base = 0x4_1000_0000n + BigInt(seed) * 0x2000_0000n
 	const marker = (k: number) => base + BigInt(k) * 0x100_0000n
 	const param = (reg: number) => f.vars.find(v => v.param === reg)?.id
@@ -128,9 +132,12 @@ function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, see
 	mem.onLoad = (a, size, v) => sym.note(a, size, v)
 	let reached = false, infos: bigint | undefined
 	let cap: Captured | undefined
+	let flipsAtCall = 0
 	x.onCall = (t, a, cpc, d) => {
 		if (d !== 0 || cpc !== sitePc) return
 		reached = true
+		flipsAtCall = x.flipped.size
+		x.flip = false // (the call itself only has to reach the syscall)
 		// library wrappers check the metas against the account infos (RefCell borrows): pass none
 		if (kind === 'wrapper') { infos = a[2]; a[3] = 0n }
 	}
@@ -142,6 +149,9 @@ function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, see
 		throw new Stop()
 	}
 	const r = x.run(f.pc, regs, TOP_FP, sitePc, extra)
+	ctl.blamed = x.blamed
+	ctl.flipped = [...x.flipped]
+	ctl.flippedAfterCall = reached ? ctl.flipped.slice(flipsAtCall) : []
 	execStats.runs++; execStats.steps += r.steps
 	if (!cap) return undefined
 	sym.finish()
@@ -211,43 +221,65 @@ export interface ExecEnv {
  * The instruction a CPI site passes, from two runs of its function (see the file comment); undefined
  * when either run does not reach the CPI syscall from this call, or the runs disagree on its shape.
  */
-export const execStats = { ms: 0, runs: 0, steps: 0 }
-export function describeByExec(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv): IxModel | undefined {
-	const t0 = performance.now()
-	try { return describeByExec0(p, f, sitePc, kind, env) } finally { execStats.ms += performance.now() - t0 }
+/** Interpreter steps spent (all runs of a decompilation share a budget, see ExecBudget). */
+export interface ExecBudget { steps: number }
+export function describeByExec(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv, budget: ExecBudget): IxModel | undefined {
+	const before = execStats.steps
+	try { return describeByExec0(p, f, sitePc, kind, env) } finally { budget.steps -= execStats.steps - before }
 }
 function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv): IxModel | undefined {
-	const A = runOnce(p, f, sitePc, kind, 1)
-	if (!A) return undefined
-	const B = runOnce(p, f, sitePc, kind, 2)
-	if (!B) return undefined
+	// run B takes the other side of input-dependent branches until the site's call (values they select
+	// then differ between the runs); flips after which it does not reach the CPI syscall are dropped and
+	// B retried. Run A follows the inputs; values computed after branches whose other side B did not
+	// explore, and after any in called functions, are marked (taint bit 2: small numbers computed on two
+	// paths may still coincide, e.g. 0 from saturating arithmetic on the synthetic inputs).
+	let noFlip = new Set<string>()
+	let B: Run | undefined
+	for (let i = 0; i < 4 && !B; i++) {
+		const used = new Set(noFlip), c: RunCtl = { flip: true, noFlip: new Set(noFlip), sticky: 'noflip' }
+		B = runOnce(p, f, sitePc, kind, 2, c)
+		if (B) { noFlip = used; break } // (flips B was blamed for were still explored)
+		if (!c.flipped!.length) break
+		for (const k of c.flipped!) noFlip.add(k)
+	}
+	let A: Run | undefined
+	if (B) A = runOnce(p, f, sitePc, kind, 1, { flip: false, noFlip, sticky: 'callees' })
+	if (!A || !B) {
+		// no exploration: every input-dependent branch marks what follows
+		A = runOnce(p, f, sitePc, kind, 1, { flip: false, noFlip, sticky: 'all' })
+		if (!A) return undefined
+		B = runOnce(p, f, sitePc, kind, 2, { flip: false, noFlip, sticky: 'all' })
+		if (!B) return undefined
+	}
 	const a = A.cap, b = B.cap
+	const nm = (e: Expr) => (env.named ? env.named(e) : e)
+	const expr = (e: Expr) => env.expr(nm(e))
 	if (a.abi !== b.abi || a.metas.length !== b.metas.length || a.data.b.length !== b.data.b.length) return undefined
-	// constant: the same untainted bytes in both runs
-	const constant = (x: TB, y: TB, o = 0, n = x.b.length) => { for (let i = o; i < o + n; i++) if (x.t[i] || y.t[i] || x.b[i] !== y.b[i]) return false; return true }
-	// values selected by input-dependent control flow are not traced either
-	const selected = (x: TB, y: TB, o = 0, n = x.b.length) => { for (let i = o; i < o + n; i++) if ((x.t[i] | y.t[i]) & 2) return true; return false }
+	// constant: the same untainted bytes in both runs; `mask` 1: control taint does not matter (keys, flags,
+	// instruction tags: not values two paths could compute alike by chance)
+	const constant = (x: TB, y: TB, o = 0, n = x.b.length, mask = 3) => { for (let i = o; i < o + n; i++) if ((x.t[i] | y.t[i]) & mask || x.b[i] !== y.b[i]) return false; return true }
 	const keyText = (x: TB, y: TB, px?: bigint, py?: bigint): KeyText => {
-		if (constant(x, y)) { const k = b58(x.b); const n = KNOWN_KEYS[k]; return { text: n ?? `key ${k}`, known: n ?? `key ${k}` } }
-		if (selected(x, y)) return { text: '?' }
+		if (constant(x, y, 0, 32, 1)) { const k = b58(x.b); const n = KNOWN_KEYS[k]; return { text: n ?? `key ${k}`, known: n ?? `key ${k}` } }
 		// C ABI: the pointer is traced (as the static description prints it), else the bytes' address
-		if (px !== undefined && py !== undefined) { const e = agree(opt(A.sym.addr(px)), opt(B.sym.addr(py))); if (e) return { text: env.expr(e), src: e } }
+		if (px !== undefined && py !== undefined) { const e = agree(opt(A.sym.addr(px)), opt(B.sym.addr(py))); if (e) return { text: expr(e), src: nm(e) } }
 		const e = agree(opt(A.sym.key(x.b)), opt(B.sym.key(y.b)))
-		return e ? { text: `*${wrapT(env.expr(e))}`, src: e } : { text: '?' }
+		return e ? { text: `*${wrapT(expr(e))}`, src: nm(e) } : { text: '?' }
 	}
 	const program = keyText(a.program, b.program, a.programPtr, b.programPtr)
 	const accounts: Acc[] = a.metas.map((m, i) => {
 		const n = b.metas[i]
 		const k = keyText(m.key, n.key, m.ptr, n.ptr)
-		const fixed = !m.flagsTainted && !n.flagsTainted
+		const fixed = !(m.flagsTainted & 1) && !(n.flagsTainted & 1)
 		return { text: k.known ?? k.text, w: fixed && m.w === n.w ? m.w : undefined, s: fixed && m.s === n.s ? m.s : undefined }
 	})
 	const at = (o: number, size: number): Expr | undefined => {
 		if (o + size > a.data.b.length) return undefined
 		const va = le(a.data.b, o, size), vb = le(b.data.b, o, size)
-		if (constant(a.data, b.data, o, size)) return { k: 'const', v: va }
-		if (selected(a.data, b.data, o, size)) return undefined
-		return agree(A.sym.values(va, size), B.sym.values(vb, size))
+		// (the tag, and random-looking constants such as discriminators, cannot coincide by chance)
+		const wide = size === 8 && va >= 0x1_0000_0000n && va.toString(2).replace(/0/g, '').length >= 16
+		if (constant(a.data, b.data, o, size, o === 0 || wide ? 1 : 3)) return { k: 'const', v: va }
+		const e = agree(A.sym.values(va, size), B.sym.values(vb, size))
+		return e && nm(e)
 	}
 	const dataKey = (o: number): KeyText | undefined => o + 32 <= a.data.b.length ? keyText(sub(a.data, o, 32), sub(b.data, o, 32)) : undefined
 	// signer seeds
@@ -260,7 +292,7 @@ function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteK
 	} else {
 		// the list itself comes from the inputs: &[&[&[u8]]] at ptr, len
 		const pe = agree(opt(A.sym.value(a.seedsPtr)), opt(B.sym.value(b.seedsPtr))), le_ = a.seedsLen === b.seedsLen ? { k: 'const' as const, v: a.seedsLen } : agree(opt(A.sym.value(a.seedsLen)), opt(B.sym.value(b.seedsLen)))
-		if (pe && le_) seeds = `signer seeds ${wrapT(env.expr(pe))}[..${env.expr(le_)}]`
+		if (pe && le_) seeds = `signer seeds ${wrapT(expr(pe))}[..${expr(le_)}]`
 	}
 	return { program, accounts, nAcc: accounts.length, dl: a.data.b.length, data: { at, key: dataKey }, seeds, note: '[exec]' }
 }
@@ -269,11 +301,11 @@ const opt = (e: Expr | undefined) => (e ? [e] : [])
 const sub = (x: TB, o: number, n: number): TB => ({ b: x.b.subarray(o, o + n), t: x.t.slice(o, o + n) })
 const wrapT = (t: string) => (/^[\w.]+$/.test(t) ? t : `(${t})`)
 
-function seedText(A: Run, B: Run, x: { ptr: bigint; len: bigint }, y: { ptr: bigint; len: bigint }, env: CpiEnv): string {
+function seedText(A: Run, B: Run, x: { ptr: bigint; len: bigint }, y: { ptr: bigint; len: bigint }, env0: CpiEnv): string {
+	const env = { ...env0, expr: (e: Expr) => env0.expr(env0.named ? env0.named(e) : e) }
 	if (x.len !== y.len) return '?'
 	const n = Number(x.len)
 	const bx = A.sym.mem.read(x.ptr, n), by = B.sym.mem.read(y.ptr, n)
-	if (A.sym.mem.tainted(x.ptr, n) & 2 || B.sym.mem.tainted(y.ptr, n) & 2) return '?'
 	if (eqBytes(bx, by) && !A.sym.mem.tainted(x.ptr, n) && !B.sym.mem.tainted(y.ptr, n)) {
 		if (n > 0 && bx.every(c => c >= 0x20 && c < 0x7f)) return JSON.stringify(Buffer.from(bx).toString('latin1'))
 		if (n === 32) { const k = b58(bx); return KNOWN_KEYS[k] ?? `key ${k}` }

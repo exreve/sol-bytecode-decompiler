@@ -137,6 +137,8 @@ export interface CpiEnv {
 	programCheck?: (ptr: Expr) => string[]
 	/** name of the function at a code address (formatter functions of fmt arguments) */
 	fnAt?: (addr: bigint) => string | undefined
+	/** an expression of the function's parameters in terms of its variables where one is defined as it (cpiexec.ts) */
+	named?: (e: Expr) => Expr
 	/** may the value derive from instruction data (taint.ts)? */
 	tainted?: (e: Expr) => boolean
 }
