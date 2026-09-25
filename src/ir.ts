@@ -154,20 +154,35 @@ export function walkExpr(e: Expr, f: (e: Expr) => void): void {
     case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': walkExpr(e.a, f); break;
     case 'load': walkExpr(e.addr, f); break;
     case 'sel': walkExpr(e.c, f); walkExpr(e.a, f); walkExpr(e.b, f); break;
-    case 'call': if (e.t.k === 'ind') walkExpr(e.t.e, f); e.args.forEach(a => walkExpr(a, f)); break;
+    case 'call': if (e.t.k === 'ind') walkExpr(e.t.e, f); for (const a of e.args) walkExpr(a, f); break;
   }
 }
 
-export function exprSize(e: Expr): number { let n = 0; walkExpr(e, () => n++); return n; }
+export function exprSize(e: Expr): number {
+  switch (e.k) {
+    case 'bin': case 'cmp': case 'land': case 'lor': return 1 + exprSize(e.a) + exprSize(e.b);
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return 1 + exprSize(e.a);
+    case 'load': return 1 + exprSize(e.addr);
+    case 'sel': return 1 + exprSize(e.c) + exprSize(e.a) + exprSize(e.b);
+    case 'call': { let n = 1; if (e.t.k === 'ind') n += exprSize(e.t.e); for (const a of e.args) n += exprSize(a); return n; }
+    default: return 1;
+  }
+}
 
 export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; trap: boolean } {
   const r = { load: false, call: false, trap: false };
-  walkExpr(e, x => {
-    if (x.k === 'load') { r.load = true; r.trap = true; }
-    else if (x.k === 'call') r.call = true;
-    else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
-  });
+  sideEffects(e, r);
   return r;
+}
+function sideEffects(x: Expr, r: { load: boolean; call: boolean; trap: boolean }): void {
+  switch (x.k) {
+    case 'load': r.load = true; r.trap = true; sideEffects(x.addr, r); return;
+    case 'call': r.call = true; if (x.t.k === 'ind') sideEffects(x.t.e, r); for (const a of x.args) sideEffects(a, r); return;
+    case 'bin': if (isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true; sideEffects(x.a, r); sideEffects(x.b, r); return;
+    case 'cmp': case 'land': case 'lor': sideEffects(x.a, r); sideEffects(x.b, r); return;
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': sideEffects(x.a, r); return;
+    case 'sel': sideEffects(x.c, r); sideEffects(x.a, r); sideEffects(x.b, r); return;
+  }
 }
 
 export function exprEq(a: Expr, b: Expr): boolean {
@@ -192,7 +207,7 @@ export function exprEq(a: Expr, b: Expr): boolean {
 export const isDivOp = (op: BinOp) => op === 'udiv' || op === 'urem' || op === 'sdiv' || op === 'srem' || op === 'sdiv32' || op === 'srem32';
 
 /** Division that provably cannot trap: constant divisor, non-zero (in the operand width), not -1 for signed ops. */
-function safeDivisor(op: BinOp, b: Expr): boolean {
+export function safeDivisor(op: BinOp, b: Expr): boolean {
   if (b.k !== 'const') return false;
   const w32 = op === 'sdiv32' || op === 'srem32';
   const v = w32 ? BigInt.asUintN(32, b.v) : b.v;

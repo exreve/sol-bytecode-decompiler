@@ -3,7 +3,7 @@
 // across a side effect.
 import {
   type Expr, type Stmt, type CmpOp, B, C, M64, NEG_CMP, SWAP_CMP,
-  evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize,
+  evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize, isDivOp, safeDivisor,
 } from './ir.ts';
 import { type VarFunc, pruneUnreachable } from './dataflow.ts';
 import type { Image } from './elf.ts';
@@ -282,16 +282,22 @@ const INFO = Symbol('stmtInfo');
 export function stmtInfo(s: Stmt): StmtInfo {
   let r: StmtInfo | undefined = (s as any)[INFO];
   if (r) return r;
-  const vars: number[] = [];
-  let load = false, call = false, trap = false;
-  for (const e of stmtExprs(s)) {
-    walkExpr(e, x => { if (x.k === 'var') vars.push(x.id); });
-    const fx = hasSideEffectsOrMem(e);
-    load ||= fx.load; call ||= fx.call; trap ||= fx.trap;
-  }
-  r = { vars, load, call, trap };
+  r = { vars: [], load: false, call: false, trap: false };
+  for (const e of stmtExprs(s)) scanInfo(e, r);
   Object.defineProperty(s, INFO, { value: r });
   return r;
+}
+/** One walk computing what walkExpr (var occurrences) and hasSideEffectsOrMem compute. */
+function scanInfo(e: Expr, r: StmtInfo): void {
+  switch (e.k) {
+    case 'var': r.vars.push(e.id); return;
+    case 'load': r.load = true; r.trap = true; scanInfo(e.addr, r); return;
+    case 'call': r.call = true; if (e.t.k === 'ind') scanInfo(e.t.e, r); for (const a of e.args) scanInfo(a, r); return;
+    case 'bin': if (isDivOp(e.op) && !safeDivisor(e.op, e.b)) r.trap = true; scanInfo(e.a, r); scanInfo(e.b, r); return;
+    case 'cmp': case 'land': case 'lor': scanInfo(e.a, r); scanInfo(e.b, r); return;
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': scanInfo(e.a, r); return;
+    case 'sel': scanInfo(e.c, r); scanInfo(e.a, r); scanInfo(e.b, r); return;
+  }
 }
 const countIn = (vars: number[], v: number) => { let n = 0; for (let k = 0; k < vars.length; k++) if (vars[k] === v) n++; return n; };
 
