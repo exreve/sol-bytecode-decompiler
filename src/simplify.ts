@@ -360,8 +360,10 @@ export function optimizeFunc(f: VarFunc) {
     const off = (n: string) => DISABLED.has(n);
     const exact = (c: boolean) => { if (c) { changed = true; st.real = true; } };
     if (!off('prop')) changed = propagateGlobal(f, st) || changed;
-    if (!off('inline')) exact(inlineLocal(f));
-    exact(dce(f));
+    // inlineLocal hands dce the exact use counts after its rewrites (saves a recount)
+    let counts: Int32Array | undefined;
+    if (!off('inline')) exact(inlineLocal(f, c => { counts = c; }));
+    exact(dce(f, counts));
     if (!off('lconst')) exact(localConstProp(f));
     if (!off('gconst')) exact(globalConstProp(f));
     if (!off('copy')) changed = localCopyProp(f, st) || changed;
@@ -451,14 +453,17 @@ function resolveSmall(e: Expr, m: Map<number, Expr>, depth: number): Expr {
 }
 
 /** Inline single-use definitions into their (same-block) use when no intervening statement interferes. */
-function inlineLocal(f: VarFunc): boolean {
-  const uses = countUses(f);
+function inlineLocal(f: VarFunc, exactCounts?: (uses: Int32Array) => void): boolean {
+  const uses = countUses(f); // deliberately not updated during the pass
+  // exact counts: an inline replaces the single occurrence of v by its definition, which moves
+  // (not copies) the other variables' occurrences, so only v loses a use
+  const cur = uses.slice();
   const nd = defCounts(f);
   let changed = false;
   for (const b of f.blocks) {
     for (let i = 0; i < b.stmts.length; i++) {
       const s = b.stmts[i];
-      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd)) { changed = true; i--; continue; }
+      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd)) { cur[s.dst]--; changed = true; i--; continue; }
       if (s.k !== 'set') continue;
       const v = s.dst;
       if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
@@ -495,10 +500,12 @@ function inlineLocal(f: VarFunc): boolean {
       else if (b.term.k === 'ret' && b.term.e) b.term.e = substVars(b.term.e, m);
       b.stmts.splice(i, 1);
       nd[v]--; // the removed statement was a definition of v (the old code recomputed all def sites here)
+      cur[v]--;
       i--;
       changed = true;
     }
   }
+  exactCounts?.(cur);
   return changed;
 }
 
@@ -539,11 +546,11 @@ function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses
 }
 
 /** Remove definitions of unused variables (keeping anything that may trap or has effects). */
-function dce(f: VarFunc): boolean {
+function dce(f: VarFunc, initialUses?: Int32Array): boolean {
   let changed = false;
   // use counts are computed once and then kept equal to a recount: each pass reads the counts at
   // its start (`uses`) and records the effect of every removed/rewritten statement in `next`
-  let uses = countUses(f);
+  let uses = initialUses ?? countUses(f);
   const drop = (next: Int32Array, s: Stmt) => { for (const v of stmtInfo(s).vars) next[v]--; };
   const add = (next: Int32Array, s: Stmt) => { for (const v of stmtInfo(s).vars) next[v]++; };
   for (let iter = 0; iter < 10; iter++) {

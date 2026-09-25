@@ -73,6 +73,7 @@ function stmtUseDef(p: Program, s: Stmt): { use: number; def: number } {
   return r;
 }
 const UD = Symbol('useDef');
+const GK = Symbol('blockGenKill');
 
 function stmtUseDef0(p: Program, s: Stmt): { use: number; def: number } {
   switch (s.k) {
@@ -102,13 +103,25 @@ export function liveness(p: Program, f: Func): { liveIn: Int32Array; liveOut: In
   const n = f.blocks.length;
   const gen = new Int32Array(n), kill = new Int32Array(n);
   for (const b of f.blocks) {
-    let g = termUse(f, b), k = 0;
-    for (let i = b.stmts.length - 1; i >= 0; i--) {
-      const { use, def } = stmtUseDef(p, b.stmts[i]);
-      g = (g & ~def) | use;
-      k |= def;
+    // Folding x -> (x & ~def) | use backwards over the statements gives x -> (x & ~K) | G with
+    // K = union of defs and G = the fold of 0, so gen = G | (termUse & ~K). (G, K) of a block
+    // without calls does not depend on signatures and is cached (same statements array/length).
+    let G: number, K: number;
+    const c: { stmts: Stmt[]; len: number; g: number; k: number } | undefined = (b as any)[GK];
+    if (c && c.stmts === b.stmts && c.len === b.stmts.length) { G = c.g; K = c.k; }
+    else {
+      G = 0; K = 0;
+      let calls = false;
+      for (let i = b.stmts.length - 1; i >= 0; i--) {
+        const s = b.stmts[i];
+        if (s.k === 'call') calls = true;
+        const { use, def } = stmtUseDef(p, s);
+        G = (G & ~def) | use;
+        K |= def;
+      }
+      if (!calls) Object.defineProperty(b, GK, { value: { stmts: b.stmts, len: b.stmts.length, g: G, k: K }, writable: true, configurable: true });
     }
-    gen[b.id] = g; kill[b.id] = k;
+    gen[b.id] = G | (termUse(f, b) & ~K); kill[b.id] = K;
   }
   const liveIn = new Int32Array(n), liveOut = new Int32Array(n);
   let changed = true;
