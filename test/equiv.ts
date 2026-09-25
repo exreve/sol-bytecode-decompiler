@@ -60,7 +60,7 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				const events: Event[] = []
 				const push = events.push.bind(events)
 				events.push = (...e: Event[]) => { if (events.length >= cap) throw new StepLimit(); return push(...e) }
-				const mem = new TestMem(p.image, seed, events)
+				const mem = new TestMem(p.image, seed, events, t % 4 === 3)
 				let calls = 0
 				const onCall = (target: string, a: bigint[]) => {
 					events.push({ k: 'call', t: target, args: a })

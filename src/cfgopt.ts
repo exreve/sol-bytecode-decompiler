@@ -53,6 +53,44 @@ export function tailDuplicate(f: VarFunc, budget = 6): boolean {
   return changed;
 }
 
+/**
+ * Jump threading: edges into empty `jmp` blocks go straight to the final target, and a branch
+ * whose two edges then coincide becomes a jump (keeping its condition as `eval` if it may trap).
+ */
+export function threadJumps(f: VarFunc): boolean {
+  const final = (id: number): number => {
+    const seen = new Set<number>();
+    let b = f.blocks[id];
+    while (b.id !== 0 && !b.stmts.length && b.term.k === 'jmp' && !seen.has(b.id)) { seen.add(b.id); b = f.blocks[b.term.to]; }
+    return seen.has(b.id) ? id : b.id; // a cycle of empty blocks is left alone
+  };
+  let changed = false;
+  for (const b of f.blocks) {
+    if (!b.succs.length) continue;
+    for (const s of [...new Set(b.succs)]) {
+      const to = final(s);
+      if (to === s) continue;
+      retarget(b, s, to);
+      f.blocks[s].preds = f.blocks[s].preds.filter(p => p !== b.id);
+      f.blocks[to].preds.push(b.id);
+      changed = true;
+    }
+    const t = b.term;
+    if (t.k === 'br' && t.t === t.f) {
+      const fx = hasSideEffectsOrMem(t.c);
+      if (fx.load || fx.trap || fx.call) b.stmts.push({ k: 'eval', e: t.c, pc: b.stmts[b.stmts.length - 1]?.pc ?? 0 });
+      b.term = { k: 'jmp', to: t.t };
+      b.succs = [t.t];
+      const T = f.blocks[t.t];
+      const i = T.preds.indexOf(b.id);
+      if (T.preds.lastIndexOf(b.id) !== i) T.preds.splice(i, 1);
+      changed = true;
+    }
+  }
+  if (changed) pruneUnreachable(f);
+  return changed;
+}
+
 function retarget(pb: Block, from: number, to: number) {
   const t = pb.term;
   if (t.k === 'jmp' && t.to === from) t.to = to;
@@ -87,6 +125,7 @@ function substExpr(e: Expr, m: Map<number, Expr>): Expr {
     case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: substExpr(e.a, m) } as Expr;
     case 'load': return { ...e, addr: substExpr(e.addr, m) };
     case 'sel': return { ...e, c: substExpr(e.c, m), a: substExpr(e.a, m), b: substExpr(e.b, m) };
+    case 'fn': return { ...e, args: e.args.map(a => substExpr(a, m)) };
     default: return e;
   }
 }
@@ -116,6 +155,30 @@ export function localConstProp(f: VarFunc): boolean {
   return changed;
 }
 const rep = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v);
+
+/** Variables live at the entry of each block (bitsets indexed by variable id). */
+export function liveInSets(f: VarFunc): Uint32Array[] {
+  const W = (f.vars.length + 31) >>> 5;
+  const uses = (e: Expr, set: Uint32Array) => walkExpr(e, x => { if (x.k === 'var') set[x.id >>> 5] |= 1 << (x.id & 31); });
+  const liveIn = f.blocks.map(() => new Uint32Array(W));
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let id = f.blocks.length - 1; id >= 0; id--) {
+      const b = f.blocks[id];
+      const live = new Uint32Array(W);
+      for (const s of b.succs) { const li = liveIn[s]; for (let k = 0; k < W; k++) live[k] |= li[k]; }
+      if (b.term.k === 'br') uses(b.term.c, live);
+      else if (b.term.k === 'ret' && b.term.e) uses(b.term.e, live);
+      for (let i = b.stmts.length - 1; i >= 0; i--) {
+        const s = b.stmts[i];
+        if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
+        stmtExprs(s).forEach(e => uses(e, live));
+      }
+      for (let k = 0; k < W; k++) if (live[k] !== liveIn[id][k]) { liveIn[id] = live; changed = true; break; }
+    }
+  }
+  return liveIn;
+}
 
 /** Backward variable liveness; removes dead pure assignments (multi-def variables included). */
 export function deadStores(f: VarFunc): boolean {

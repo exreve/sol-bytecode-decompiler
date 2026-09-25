@@ -27,7 +27,8 @@ export type Expr =
   | { k: 'lnot'; a: Expr }                                     // logical not of a boolean
   | { k: 'land'; a: Expr; b: Expr } | { k: 'lor'; a: Expr; b: Expr } // short-circuit booleans
   | { k: 'sel'; c: Expr; a: Expr; b: Expr }                    // c ? a : b
-  | { k: 'call'; t: CallTarget; args: Expr[] };
+  | { k: 'call'; t: CallTarget; args: Expr[] }
+  | { k: 'fn'; name: Intrinsic; args: Expr[] };              // pure, total helper function (see INTRINSICS)
 
 export type CallTarget =
   | { k: 'fn'; pc: number }
@@ -123,6 +124,34 @@ export function evalBswap(bits: number, a: bigint): bigint {
 
 export class Trap extends Error {}
 
+/**
+ * Pure, total helper functions the output language provides (printed as `name(args)`).
+ * They are introduced only by exact idiom rewrites (src/idioms.ts); the definitions here are
+ * the reference semantics (also implemented by test/evaluate.ts and documented in the prelude).
+ */
+export const INTRINSICS = {
+  popcount: (a: bigint[]) => { let x = a[0], n = 0n; while (x) { n += x & 1n; x >>= 1n; } return n; },
+  clz: (a: bigint[]) => BigInt(64 - bitLength(a[0])),
+  ctz: (a: bigint[]) => { if (a[0] === 0n) return 64n; let x = a[0], n = 0n; while (!(x & 1n)) { n++; x >>= 1n; } return n; },
+  rotl: (a: bigint[]) => { const n = a[1] & 63n; return u64((a[0] << n) | (a[0] >> ((64n - n) & 63n))); },
+  min: (a: bigint[]) => (a[0] < a[1] ? a[0] : a[1]),
+  max: (a: bigint[]) => (a[0] > a[1] ? a[0] : a[1]),
+  smin: (a: bigint[]) => (i64(a[0]) < i64(a[1]) ? a[0] : a[1]),
+  smax: (a: bigint[]) => (i64(a[0]) > i64(a[1]) ? a[0] : a[1]),
+  sat_sub: (a: bigint[]) => (a[0] >= a[1] ? a[0] - a[1] : 0n),
+} satisfies Record<string, (a: bigint[]) => bigint>;
+/**
+ * Helpers that read memory (they may fault like the loads they stand for); both compare ascending
+ * 8-byte words, first word first, and stop at the first difference:
+ *   memeq(p, q, n)        the n bytes at p equal the n bytes at q
+ *   keyeq(p, c0, …, c3)   the 32 bytes at p equal the key whose little-endian words are c0..c3
+ *                         (printed as keyeq(p, "<base58>"))
+ */
+export type MemIntrinsic = 'memeq' | 'keyeq';
+export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic;
+export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq' || n === 'keyeq';
+const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
+
 export const NEG_CMP: Record<CmpOp, CmpOp | null> = {
   eq: 'ne', ne: 'eq', ugt: 'ule', uge: 'ult', ult: 'uge', ule: 'ugt',
   sgt: 'sle', sge: 'slt', slt: 'sge', sle: 'sgt', set: null,
@@ -142,6 +171,7 @@ export function mapExpr(e: Expr, f: (e: Expr) => Expr): Expr {
     case 'cmp': case 'land': case 'lor': n = { ...e, a: mapExpr(e.a, f), b: mapExpr(e.b, f) } as Expr; break;
     case 'sel': n = { ...e, c: mapExpr(e.c, f), a: mapExpr(e.a, f), b: mapExpr(e.b, f) }; break;
     case 'call': n = { ...e, t: e.t.k === 'ind' ? { k: 'ind', e: mapExpr(e.t.e, f) } : e.t, args: e.args.map(a => mapExpr(a, f)) }; break;
+    case 'fn': n = { ...e, args: e.args.map(a => mapExpr(a, f)) }; break;
     default: n = e;
   }
   return f(n);
@@ -155,6 +185,7 @@ export function walkExpr(e: Expr, f: (e: Expr) => void): void {
     case 'load': walkExpr(e.addr, f); break;
     case 'sel': walkExpr(e.c, f); walkExpr(e.a, f); walkExpr(e.b, f); break;
     case 'call': if (e.t.k === 'ind') walkExpr(e.t.e, f); e.args.forEach(a => walkExpr(a, f)); break;
+    case 'fn': e.args.forEach(a => walkExpr(a, f)); break;
   }
 }
 
@@ -165,6 +196,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
   walkExpr(e, x => {
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
+    else if (x.k === 'fn' && isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
     else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
   });
   return r;
@@ -185,19 +217,17 @@ export function exprEq(a: Expr, b: Expr): boolean {
     case 'load': { const c = b as typeof a; return a.size === c.size && exprEq(a.addr, c.addr); }
     case 'sel': { const c = b as typeof a; return exprEq(a.c, c.c) && exprEq(a.a, c.a) && exprEq(a.b, c.b); }
     case 'call': return false;
+    case 'fn': { const c = b as typeof a; return a.name === c.name && a.args.length === c.args.length && a.args.every((x, i) => exprEq(x, c.args[i])); }
     case 'undef': return true;
   }
 }
 
-export const isDivOp = (op: BinOp) => op === 'udiv' || op === 'urem' || op === 'sdiv' || op === 'srem' || op === 'sdiv32' || op === 'srem32';
-
-/** Division that provably cannot trap: constant divisor, non-zero (in the operand width), not -1 for signed ops. */
+/** A constant divisor that can never trap (32-bit ops divide by the low 32 bits; signed ops trap on MIN / -1). */
 function safeDivisor(op: BinOp, b: Expr): boolean {
   if (b.k !== 'const') return false;
-  const w32 = op === 'sdiv32' || op === 'srem32';
-  const v = w32 ? BigInt.asUintN(32, b.v) : b.v;
-  if (v === 0n) return false;
-  if (op === 'sdiv' || op === 'srem') return b.v !== M64;
-  if (w32) return v !== 0xffffffffn;
-  return true;
+  if (op === 'sdiv32' || op === 'srem32') return BigInt.asUintN(32, b.v) !== 0n && BigInt.asIntN(32, b.v) !== -1n;
+  return b.v !== 0n && !(op[0] === 's' && b.v === M64);
 }
+
+export const isDivOp = (op: BinOp) => op === 'udiv' || op === 'urem' || op === 'sdiv' || op === 'srem' || op === 'sdiv32' || op === 'srem32';
+

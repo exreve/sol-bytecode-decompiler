@@ -36,6 +36,10 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `(a as i64) < (b as i64)` | signed comparison (relational ops compare mathematically) |
 | `ldN(p)`, `stN(p, v, …)` | N-bit little-endian load/store (extra values go to `p+N`, `p+2N`, …) |
 | `copy(d, s, n)` | n bytes copied as ascending 8-byte words |
+| `c ? a : b` | select (from if-conversion; only the chosen arm is evaluated) |
+| `popcount clz ctz min max smin smax sat_sub` | pure helpers recognized from bit tricks / branches (`clz(0) = 64`, `sat_sub(a, b) = a >= b ? a - b : 0`) |
+| `memeq(p, q, n)` | n bytes at p equal n bytes at q, compared as ascending 8-byte words, stopping at the first difference |
+| `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
 | `undef` | a register value left over by a callee (unspecified) |
@@ -59,6 +63,17 @@ bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stu
 ```
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.
+
+### Annotations (comments only)
+
+* account fields: loads through pointers recognized as a Rust `AccountInfo` (slice iteration with stride
+  0x30, typical field accesses, parameters receiving one) or as a raw serialized account record
+  (pinocchio style) name the field: `ld8(c + 0x28 /* is_signer */)`, `ld64(x + 0x50 /* data_len */)`;
+* `Result<_, ProgramError>` niche values: `0x8000000000000007 /* Err(ProgramError::MissingRequiredSignature) */`,
+  the `Ok` value being inferred per program (it depends on the solana-program version);
+* public keys: known program ids, 32-byte rodata keys compared/copied by address (`/* key <base58> */`),
+  keys written as four constant words; Anchor error codes, discriminators, `ProgramError` return codes;
+* `ld64(0x300000000 /* heap bump-allocator cursor */)`.
 
 ## Library code
 
@@ -139,7 +154,9 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/elf.ts` | ELF loader, relocations exactly as the runtime applies them |
 | `src/program.ts` | decoding, function discovery, CFG, lifting to IR (all SBPF versions) |
 | `src/dataflow.ts` | liveness, interprocedural params/returns/noreturn, variable recovery |
-| `src/simplify.ts`, `src/cfgopt.ts` | exact expression simplification, propagation, tail duplication, DSE |
+| `src/simplify.ts`, `src/cfgopt.ts` | exact expression simplification, propagation, tail duplication, DSE, jump threading |
+| `src/ifconv.ts`, `src/idioms.ts` | if-conversion to selects; bit-trick and multi-word compare idioms (popcount/clz/ctz, memeq/keyeq) |
+| `src/accounts.ts` | AccountInfo / raw account pointer recognition (field-name comments) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; state machine for irreducible CFGs) |
 | `src/compact.ts` | store/copy run compaction |

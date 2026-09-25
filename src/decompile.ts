@@ -4,13 +4,15 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr } from './ir.ts';
-import { Semantics, constsIn } from './semantics.ts';
+import { type Expr, type Stmt, walkExpr, INTRINSICS } from './ir.ts';
+import { Semantics, constsIn, NICHE } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
+import { recognizeIdioms } from './idioms.ts';
+import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 
 export interface Options {
@@ -35,6 +37,9 @@ export interface Result {
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
+const HELPERS = new Set(['copy', 'copyr', 'sar', 'shl', 'sdiv', 'srem', 'sdiv32', 'srem32', 'mulhu', 'mulhs', 'trap', 'callx', 'undef', 'fp',
+  'memeq', 'keyeq', ...Object.keys(INTRINSICS)]);
+
 function* shortNames(): Generator<string> {
   const al = 'abcdefghijklmnopqrstuvwxyz';
   for (const c of 'fghijklmnopqrstuvwxyz') yield c;
@@ -54,6 +59,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
   nameThunks(p);
+  // names of the output language's own helpers stay unambiguous
+  for (const f of p.funcs.values()) if (HELPERS.has(f.name) || /^(ld|st)(8|16|32|64)$|^bswap(16|32|64)$/.test(f.name)) f.name += '_';
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
@@ -68,6 +75,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (!opts.exactMemory && !DISABLED.has('promote') && promoteStack(f)) optimizeFunc(f);
+    if (!DISABLED.has('idioms') && recognizeIdioms(f)) optimizeFunc(f);
     built.set(f.pc, { f, body: [], irreducible: false });
   }
 
@@ -87,6 +95,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (b.term.k === 'br') constsIn(b.term.c, consts);
   }
   if (opts.sugar !== false) sem.resolveCandidates(consts);
+  // Result<_, ProgramError> niche constants compared with == / != (see Semantics.noteResultCompares)
+  const niche = new Map<bigint, number>();
+  const noteCmp = (e: Expr) => walkExpr(e, x => {
+    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const' && x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
+  });
+  for (const { f } of built.values()) for (const b of f.blocks) {
+    for (const s of b.stmts) stmtExprs(s).forEach(noteCmp);
+    if (b.term.k === 'br') noteCmp(b.term.c);
+  }
+  sem.noteResultCompares(niche);
 
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
@@ -124,6 +142,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // ---- phase 4: print ----
+  const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
@@ -158,6 +177,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
       strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
@@ -172,6 +192,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const fld = off >= 0 ? inputField(off, e.size) : undefined;
           if (fld) return `ld${e.size * 8}(${pr(a, 0)} /* ${fld} */)`;
         }
+        return prev?.(e, pr);
+      };
+    }
+    // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
+    const accTyped = accountInfos?.get(pc);
+    let inAddr = false; // printing the address of an annotated load
+    if (accTyped?.size) {
+      const prev = ctx.exprHook;
+      ctx.exprHook = (e, pr) => {
+        const fld = accountField(accTyped, e);
+        if (fld && e.k === 'load') { inAddr = true; const a = pr(e.addr, 0); inAddr = false; return `ld${e.size * 8}(${a} /* ${fld} */)`; }
+        const adr = e.k === 'bin' && !inAddr ? accountAddr(accTyped, e) : undefined;
+        if (adr && e.k === 'bin') return `(${pr(e.a, 13)} + ${pr(e.b, 14)} /* ${adr} */)`;
         return prev?.(e, pr);
       };
     }
@@ -317,7 +350,7 @@ function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<nu
       case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, false); break;
       case 'load': visit(e.addr, true); break;
       case 'sel': visit(e.c, false); visit(e.a, false); visit(e.b, false); break;
-      case 'call': e.args.forEach(a => visit(a, false)); if (e.t.k === 'ind') visit(e.t.e, false); break;
+      case 'call': case 'fn': e.args.forEach(a => visit(a, false)); if (e.k === 'call' && e.t.k === 'ind') visit(e.t.e, false); break;
     }
   };
   for (const b of f.blocks) {

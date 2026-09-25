@@ -87,6 +87,10 @@ export const KNOWN_KEYS: Record<string, string> = {
 	T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt: 'JITO_TIP_PROGRAM',
 }
 
+/** 0x8000_0000_0000_0000: first niche value of Result<_, ProgramError> (see noteResultCompares) */
+export const NICHE = 0x8000000000000000n
+const HEAP_CURSOR = 0x300000000n // the bump allocator keeps its current (downward-growing) pointer here
+
 const PROGRAM_ERRORS = ['', 'Custom(0)', 'InvalidArgument', 'InvalidInstructionData', 'InvalidAccountData', 'AccountDataTooSmall',
 	'InsufficientFunds', 'IncorrectProgramId', 'MissingRequiredSignature', 'AccountAlreadyInitialized', 'UninitializedAccount',
 	'NotEnoughAccountKeys', 'AccountBorrowFailed', 'MaxSeedLengthExceeded', 'InvalidSeeds', 'BorshIoError', 'AccountNotRentExempt',
@@ -262,10 +266,25 @@ export class Semantics {
 
 	syscallName(n: string): string { return this.p.syscalls.get(n)?.alias ?? n }
 
+	/**
+	 * Result<_, ProgramError> in memory: ProgramError's String-carrying variant (BorshIoError) makes
+	 * the other variants niche values 0x8000_0000_0000_0000 + variant index, and Ok the next one
+	 * (= the number of variants, which depends on the solana-program version). The Ok value is the
+	 * one results are compared against: the most frequent such constant in == / != comparisons.
+	 */
+	resultOk?: bigint
+	noteResultCompares(counts: Map<bigint, number>) {
+		let best: bigint | undefined, n = 0
+		for (const [v, c] of counts) if (c > n || (c === n && best !== undefined && v > best)) { best = v; n = c }
+		if (best !== undefined && n >= 3 && best >= NICHE + 0x10n && best < NICHE + BigInt(PROGRAM_ERRORS.length)) this.resultOk = best
+	}
+
 	constComment(v: bigint, role: 'value' | 'addr' | 'ret' = 'value'): string | undefined {
 		const d = looksRandom(v) ? this.disc.get(v) : undefined
 		if (d) return d
+		if (v === HEAP_CURSOR) return 'heap bump-allocator cursor'
 		if (role === 'addr') return undefined
+		if (this.resultOk !== undefined && v > NICHE && v <= this.resultOk) return v === this.resultOk ? 'Ok' : `Err(ProgramError::${PROGRAM_ERRORS[Number(v - NICHE) + 1]})`
 		if (this.anchor && v >= 100n && v <= 5000n && ANCHOR_ERRORS[Number(v)]) return `anchor::${ANCHOR_ERRORS[Number(v)]}`
 		if (this.idl && v >= 6000n && v < 0x10000n && this.idl.errors.has(Number(v))) return `error::${this.idl.errors.get(Number(v))}`
 		const k = this.keyAddrs.get(v)
@@ -274,6 +293,14 @@ export class Semantics {
 		if (c) return c
 		if (role === 'ret' && (v & 0xffffffffn) === 0n && v >> 32n > 0n && v >> 32n < BigInt(PROGRAM_ERRORS.length)) return `ProgramError::${PROGRAM_ERRORS[Number(v >> 32n)]}`
 		return undefined
+	}
+
+	/** base58 of 32 non-text bytes in rodata at ptr (a public key compared or copied by address) */
+	keyAt(ptr: bigint): string | undefined {
+		const r = this.p.image.region(ptr, 32)
+		if (!r || r.exec || this.strAt(ptr, 32n) !== undefined) return undefined
+		const b = this.p.image.bytesAt(ptr, 32)
+		return b && b.some(x => x !== 0) ? b58(b) : undefined
 	}
 
 	strAt(ptr: bigint, len: bigint): string | undefined {

@@ -18,6 +18,20 @@ export interface EvalEnv {
 	maxSteps: number
 }
 
+/** 32 bytes denoted by a base58 string (leading '1's are leading zero bytes). */
+function base58Decode(s: string): number[] {
+	const A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+	let n = 0n
+	for (const ch of s) { const d = A.indexOf(ch); if (d < 0) throw new EvalError('bad base58 ' + s); n = n * 58n + BigInt(d) }
+	const out: number[] = []
+	for (let i = 0; i < 32; i++) { out.unshift(Number(n & 0xffn)); n >>= 8n }
+	if (n !== 0n) throw new EvalError('base58 key longer than 32 bytes: ' + s)
+	let zeros = 0
+	while (s[zeros] === '1') zeros++
+	for (let i = 0; i < zeros; i++) if (out[i] !== 0) throw new EvalError('bad base58 leading zeros: ' + s)
+	return out
+}
+
 export function parseFunctions(src: string): Map<string, ts.FunctionDeclaration> {
 	const sf = ts.createSourceFile('out.ts', src, ts.ScriptTarget.ES2022, true)
 	const diags = (sf as any).parseDiagnostics as ts.Diagnostic[]
@@ -75,6 +89,21 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 				const bits = Number(name.slice(5))
 				return () => { let x = BigInt.asUintN(bits, args[0]()), y = 0n; for (let i = 0; i < bits / 8; i++) { y = (y << 8n) | (x & 0xffn); x >>= 8n } return y }
 			}
+			// pure helpers (independent implementations of src/ir.ts INTRINSICS)
+			case 'popcount': return () => { const x = W(args[0]()); let n = 0n; for (let i = 0; i < 64; i++) n += (x >> BigInt(i)) & 1n; return n }
+			case 'clz': return () => { const x = W(args[0]()); let n = 0n; for (let i = 63; i >= 0 && ((x >> BigInt(i)) & 1n) === 0n; i--) n++; return n }
+			case 'ctz': return () => { const x = W(args[0]()); let n = 0n; for (let i = 0; i < 64 && ((x >> BigInt(i)) & 1n) === 0n; i++) n++; return n }
+			case 'rotl': return () => { const [a0, b0] = two(); const x = W(a0), n = W(b0) % 64n; return W((x << n) | (x >> (64n - n))) }
+			case 'min': return () => { const [a0, b0] = two(); return W(a0) < W(b0) ? W(a0) : W(b0) }
+			case 'max': return () => { const [a0, b0] = two(); return W(a0) > W(b0) ? W(a0) : W(b0) }
+			case 'smin': return () => { const [a0, b0] = two(); return BigInt.asIntN(64, a0) < BigInt.asIntN(64, b0) ? W(a0) : W(b0) }
+			case 'smax': return () => { const [a0, b0] = two(); return BigInt.asIntN(64, a0) > BigInt.asIntN(64, b0) ? W(a0) : W(b0) }
+			case 'sat_sub': return () => { const [a0, b0] = two(); return W(a0) >= W(b0) ? W(a0) - W(b0) : 0n }
+			case 'memeq': return () => {
+				const [p0, q0, n0] = args.map(f => f())
+				for (let o = 0n; o < W(n0); o += 8n) if (env().mem.load(W(p0 + o), 8) !== env().mem.load(W(q0 + o), 8)) return 0n
+				return 1n
+			}
 			case 'trap': return () => { throw new Abort('trap') }
 			case 'callx': return () => { const vs = args.map(f => W(f())); return W(env().onCall(`ptr:${vs[0].toString(16)}`, vs.slice(1))) }
 		}
@@ -121,7 +150,18 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 			const bits = Number(m[2])
 			return m[1] === 'u' ? () => BigInt.asUintN(bits, a()) : () => BigInt.asIntN(bits, a())
 		}
-		if (ts.isCallExpression(e)) return helper(e.expression.getText(), e.arguments.map(ex))
+		if (ts.isCallExpression(e)) {
+			const name = e.expression.getText()
+			if (name === 'keyeq') {
+				// keyeq(p, "<base58>"): 32 bytes at p == the key, compared as ascending 8-byte words
+				const p0 = ex(e.arguments[0]), lit = e.arguments[1]
+				if (!ts.isStringLiteral(lit)) throw new EvalError('keyeq needs a base58 literal')
+				const key = base58Decode(lit.text)
+				const words = [0, 1, 2, 3].map(i => { let w = 0n; for (let j = 7; j >= 0; j--) w = (w << 8n) | BigInt(key[i * 8 + j]); return w })
+				return () => { const p = p0(); for (let i = 0; i < 4; i++) if (env().mem.load(W(p + BigInt(8 * i)), 8) !== words[i]) return 0n; return 1n }
+			}
+			return helper(name, e.arguments.map(ex))
+		}
 		if (ts.isConditionalExpression(e)) { const c = ex(e.condition), a = ex(e.whenTrue), b = ex(e.whenFalse); return () => (W(c()) !== 0n ? a() : b()) }
 		if (ts.isBinaryExpression(e)) {
 			const op = e.operatorToken.kind
