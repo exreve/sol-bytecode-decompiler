@@ -26,6 +26,7 @@ import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
+import { accountResolver } from './analysis/flow.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -51,6 +52,7 @@ export interface Result {
   programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
   sigs: Map<number, FnSig>;        // per-function signatures of the lifted bytecode (fingerprint.ts), by function pc
   libPcs: Set<number>;             // recognized library functions
+  idl?: IdlInfo;                   // the IDL given (account layouts for the analysis)
 }
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
@@ -1092,6 +1094,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false) facts.set(pc, functionFacts({
       pc, name: f.name, body, lines, at: bodyAt, spans, sites: siteNotes, anchor: sem.anchor,
       noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
+      irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }).refs(e),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
@@ -1109,7 +1112,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)) };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }

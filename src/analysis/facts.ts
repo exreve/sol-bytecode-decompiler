@@ -32,6 +32,7 @@ export interface FnInput {
 	anchor: boolean
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
+	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -49,6 +50,7 @@ export interface Check {
 	main: boolean
 	before?: number        // the callee of the last call before the check in its statement list (Anchor try-call pattern)
 	via?: { fn: string; kinds: string[] } // the checks that callee makes (kinds from its Anchor error codes, see calleeChecks)
+	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -67,11 +69,16 @@ export interface Op {
 	value?: string
 	pda?: { fn: string; seeds: string; program: string }
 	via?: string                  // the CPI is made through this (small) user function wrapping invoke
+	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
 }
 
-export interface Call { line: number; callee: number; main: boolean; errPath: boolean }
+export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)
 
-export interface FnFacts { pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean }
+export interface FnFacts {
+	pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean
+	lines: string[]; at: number          // the printed text (for the IR-level analyses, src/analysis/flow.ts)
+	pcLine: Map<number, number>        // statement pc -> 1-based line
+}
 
 const ACC_FIELDS = new Set(['key', 'owner', 'is_signer', 'is_writable', 'executable', 'lamports', 'data', 'data_len', 'rent_epoch', 'original_data_len', 'dup_marker'])
 const FIELD_KIND: Record<string, string> = { is_signer: 'signer', is_writable: 'writable', executable: 'executable', owner: 'owner', key: 'key', data_len: 'data_len', lamports: 'lamports' }
@@ -109,7 +116,7 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
-	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map() }
+	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map() }
 	// declared types and single-definition aliases (x = path) of the function's names
 	const alias = new Map<string, string | null>()
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
@@ -219,7 +226,17 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const l = lineOf(n)
 		const t = lines[l]?.trim() ?? ''
 		const m = /^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: \/\/.*)?$/.exec(t)
-		if (!m) return
+		if (!m) {
+			// raw account data: stN(X.data + off, v) with X an account (record / AccountInfo)
+			const d = /^st(8|16|32|64)\(([A-Za-z_][\w.]*)\.data(?: \+ (0x[0-9a-f]+|\d+))?(?: \/\*[^*]*\*\/)?, (.*)\)$/.exec(t)
+			const r = d && refOf(resolve(d[2]) + '.data', facts.types)
+			if (!d || !r || s.k !== 'store') return
+			const off = Number(d[3] ?? 0), z = Number(d[1]) / 8
+			const field = `data[${off}..${off + z}]`
+			const self = new RegExp(`^ld${d[1]}\\(${d[2].replace(/\./g, '\\.')}\\.data${d[3] ? ` \\+ ${d[3]}` : ''}\\) ([-+]) `).exec(d[4])
+			facts.ops.push({ line: l + 1, pc: s.pc, kinds: ['ACCOUNT_DATA_WRITE'], text: t, main, errPath: err, target: { acct: r.acct, field }, how: self ? (self[1] === '+' ? '+=' : '-=') : '=', value: d[4] })
+			return
+		}
 		const lv = resolve(m[1]), rhs = m[2]
 		if (/\.(borrow|strong|weak|dup_marker)$/.test(lv)) return
 		const r = refOf(lv, facts.types)
@@ -253,7 +270,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 			if (FIELD_KIND[f0]) add(FIELD_KIND[f0])
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
-		if (/\bkeyeq\(|memeq\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
+		for (const x of inp.irRefs?.(n.c) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
+		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// the error raised: an IDL error, else an Anchor error that reports a constraint, else any Anchor / program error
 		let error = ''
 		const cm2 = /\berror::(\w+)/.exec(ft)
@@ -270,7 +288,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
 		if (!kinds.length && !named) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c })
 	}
 
 	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
@@ -280,10 +298,11 @@ export function functionFacts(inp: FnInput): FnFacts {
 			site(n, main, err)
 			switch (n.k) {
 				case 'stmt': {
+					if (!facts.pcLine.has(n.s.pc)) facts.pcLine.set(n.s.pc, lineOf(n) + 1)
 					store(n, main, err)
 					const cs = calleesOf(n.s)
 					for (const c of cs) {
-						facts.calls.push({ line: lineOf(n) + 1, callee: c, main, errPath: err })
+						facts.calls.push({ line: lineOf(n) + 1, pc: n.s.pc, callee: c, main, errPath: err })
 						const nm = inp.calleeName(c)
 						if (/find_program_address|create_program_address/.test(nm) && !inp.sites.has(n)) {
 							// (out, seeds, seeds_len, program_id): a constant seed list is read from program memory
@@ -299,7 +318,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 					if (cs.length) before = cs[cs.length - 1]
 					break
 				}
-				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, callee: c, main, errPath: err }); break
+				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, ret: n.e, callee: c, main, errPath: err }); break
 				case 'if': {
 					const rest = ns.slice(k + 1)
 					// (the rest of the list ends with the list's last node: its exit is the same for every k)
@@ -339,6 +358,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const la = span(a), lb = span(b)
 		if (!strict && la * 4 <= lb && la <= 40) return 'then'
 		if (!strict && lb * 4 <= la && lb <= 40) return 'rest'
+		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")
+		if (!strict && inp.anchor && la <= 60 && la * 2 <= lb && inlineString(a)) return 'then'
 		// (the failing side raises its error first thing; the passing side, if at all, after further checks)
 		const fa = firstMark(a), fb = firstMark(b)
 		if (fa !== fb && Math.min(fa, fb) + 8 < Math.max(fa, fb)) return fa < fb ? 'then' : 'rest'

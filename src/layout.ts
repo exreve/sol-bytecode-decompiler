@@ -291,7 +291,7 @@ export function renderProject(r: Result): Map<string, string> {
 	const ixFile = (ix: { name: string }) => `${ix.name}.md`
 	files.set('security/analysis.json', renderJson(a, where))
 	files.set('security/summary.md', renderSummary(a, where, ixFile))
-	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, renderIx(ix, where))
+	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, renderIx(ix, where, a))
 	files.set('security/fingerprints.json', fingerprints(r))
 	files.set('index.ts', files.get('index.ts')! + `// security/summary.md: read first — instructions ranked by sensitivity, their effects, privileges and checks (derived, over-approximate views; security/<ix>.md per instruction, security/analysis.json)\n`)
 	return files

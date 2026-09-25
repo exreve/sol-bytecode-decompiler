@@ -21,7 +21,7 @@ export type Node =
 
 export interface Structured { body: Node[]; irreducible: boolean; stateVar?: number }
 
-function computeRpo(f: VarFunc): { order: number[]; rpo: Int32Array } {
+export function computeRpo(f: VarFunc): { order: number[]; rpo: Int32Array } {
   const n = f.blocks.length;
   const seen = new Uint8Array(n), post: number[] = [];
   const stack: [number, number][] = [[0, 0]];
@@ -40,7 +40,7 @@ function computeRpo(f: VarFunc): { order: number[]; rpo: Int32Array } {
   return { order, rpo };
 }
 
-function dominators(f: VarFunc, order: number[], rpo: Int32Array): Int32Array {
+export function dominators(f: VarFunc, order: number[], rpo: Int32Array): Int32Array {
   const idom = new Int32Array(f.blocks.length).fill(-1);
   idom[0] = 0;
   const intersect = (a: number, b: number) => {

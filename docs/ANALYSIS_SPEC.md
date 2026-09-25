@@ -66,6 +66,16 @@ Phase 2:
   - token destination whose mint is not related to the source/state mint.
   Each result: rule id, instruction, accounts, path, evidence, confidence.
 
+Status (implemented, src/analysis/phase2.ts, flow.ts): dominance on the IR's CFGs (a check takes effect at
+its deciding block and, when on every path of its function, at the call sites up the call path; statuses
+found/partial come from it); trust of account keys / data / instruction args; parameter sources (taint.ts
+`[ix data?]` marks, account keys, stored fields: text-level); relations from equality checks and Anchor
+has_one; authority graph; rules `cpi-unchecked-program`, `value-move-no-signer`,
+`signer-not-related-to-authority`, `check-bypassable`, `token-mint-unrelated`,
+`caller-controlled-sensitive-param`, `unverified-account-data`. Phase-1 gaps closed alongside: Anchor
+fields written back on exit, native instruction split on the tag dispatch (with account[i] resolution),
+function pointers / tables / vtables, Anchor checks naming the account with a heap-built string.
+
 Phase 3 (bounded, best-effort):
 - Path conditions to reach each sensitive operation (with a per-operation budget); which checks are
   not required on some path.
