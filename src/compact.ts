@@ -24,6 +24,11 @@ export function compactStores(f: VarFunc) {
 		const st = b.stmts
 		for (let i = 0; i < st.length; i++) {
 			const s = st[i]
+			// a load from the own frame [fp - 0x1000, fp) cannot fault: evaluating it for effect is a no-op
+			if (s.k === 'eval' && s.e.k === 'load') {
+				const [lb, lo] = baseOff(s.e.addr)
+				if (isFp(lb) && lo >= -0x1000n && lo + BigInt(s.e.size) <= 0n) continue
+			}
 			if (s.k !== 'store') { out.push(s); continue }
 			const [db] = baseOff(s.addr)
 			// maximal window of stores with the same destination base
@@ -34,7 +39,27 @@ export function compactStores(f: VarFunc) {
 			out.push(...done)
 			i = j - 1
 		}
+		// `void ldN(p)` (kept for its possible fault) right before a branch whose condition first
+		// loads the same bytes: that load faults exactly when the dropped one would
+		const last = out[out.length - 1]
+		if (last?.k === 'eval' && last.e.k === 'load' && b.term.k === 'br') {
+			const fl = firstLoad(b.term.c)
+			if (fl && fl.size >= last.e.size && exprEq(fl.addr, last.e.addr)) out.pop()
+		}
 		b.stmts = out
+	}
+}
+
+/** The load an expression performs first, when nothing before it can trap or have effects. */
+function firstLoad(e: Expr): Extract<Expr, { k: 'load' }> | null {
+	switch (e.k) {
+		case 'load': return pure(e.addr) ? e : firstLoad(e.addr)
+		case 'cmp': case 'bin': case 'land': case 'lor': return pure(e.a) ? firstLoad(e.b) : firstLoad(e.a)
+		case 'ext': case 'lnot': case 'not': case 'neg': case 'bswap': return firstLoad(e.a)
+		case 'fn':
+			if ((e.name === 'keyeq' || (e.name === 'memeq' && e.args[2].k === 'const' && e.args[2].v > 0n)) && e.args.every(pure)) return { k: 'load', size: 8, addr: e.args[0] }
+			return null
+		default: return null
 	}
 }
 

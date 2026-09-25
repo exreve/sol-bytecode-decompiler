@@ -4,7 +4,8 @@
 // blocks/breaks into if/else, while and do-while where the rewrite is an exact equivalence.
 import type { Expr, Stmt } from './ir.ts';
 import { negate } from './simplify.ts';
-import type { VarFunc } from './dataflow.ts';
+import { type VarFunc, pruneUnreachable } from './dataflow.ts';
+import type { Block } from './program.ts';
 
 export type Node =
   | { k: 'stmt'; s: Stmt }
@@ -64,23 +65,145 @@ function dominators(f: VarFunc, order: number[], rpo: Int32Array): Int32Array {
   return idom;
 }
 
+/** A retreating edge p -> h whose target does not dominate its source (the CFG is irreducible). */
+function irreducibleEdge(f: VarFunc, rpo: Int32Array, idom: Int32Array, order: number[]): [number, number] | null {
+  const dominates = (a: number, b: number) => { while (true) { if (a === b) return true; if (b === 0) return false; b = idom[b]; } };
+  for (const b of order) for (const p of f.blocks[b].preds) if (rpo[p] >= 0 && rpo[p] >= rpo[b] && !dominates(b, p)) return [p, b];
+  return null;
+}
+
+/** Strongly connected components of the subgraph induced by `nodes` (Tarjan, iterative). */
+function sccs(f: VarFunc, nodes: Set<number>): number[][] {
+  const index = new Map<number, number>(), low = new Map<number, number>(), on = new Set<number>();
+  const stack: number[] = [], out: number[][] = [];
+  let next = 0;
+  for (const root of nodes) {
+    if (index.has(root)) continue;
+    const work: [number, number][] = [[root, 0]];
+    index.set(root, next); low.set(root, next++); stack.push(root); on.add(root);
+    while (work.length) {
+      const top = work[work.length - 1];
+      const [v] = top;
+      const succ = f.blocks[v].succs;
+      if (top[1] < succ.length) {
+        const w = succ[top[1]++];
+        if (!nodes.has(w)) continue;
+        if (!index.has(w)) { index.set(w, next); low.set(w, next++); stack.push(w); on.add(w); work.push([w, 0]); }
+        else if (on.has(w)) low.set(v, Math.min(low.get(v)!, index.get(w)!));
+        continue;
+      }
+      work.pop();
+      if (work.length) { const u = work[work.length - 1][0]; low.set(u, Math.min(low.get(u)!, low.get(v)!)); }
+      if (low.get(v) === index.get(v)) {
+        const c: number[] = [];
+        let w: number;
+        do { w = stack.pop()!; on.delete(w); c.push(w); } while (w !== v);
+        out.push(c);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Controlled node splitting. A loop (strongly connected region) entered at several blocks gets one
+ * of them as its header; the part of the loop reachable from the other entries without passing
+ * through the header is copied, and the outside edges into those entries go to the copies. A copy
+ * has the same statements and terminator as its original (its successors inside the copied part
+ * are the corresponding copies), so executing it is executing the original: the transformation is
+ * exact. Nested regions (the loop minus its header) are handled the same way. Gives up, restoring
+ * the CFG, when the copies would exceed a size budget.
+ */
+function makeReducible(f: VarFunc): boolean {
+  const saved = f.blocks.map(b => ({ ...b, preds: [...b.preds], succs: [...b.succs], term: { ...b.term } as typeof b.term }));
+  const cost = (b: number) => f.blocks[b].stmts.length + 1;
+  let budget = Math.min(800, 40 + f.blocks.reduce((a, b) => a + b.stmts.length + 1, 0));
+  const reach = (from: number[], within: Set<number>, avoid: number): Set<number> => {
+    const seen = new Set<number>(), st = from.filter(x => x !== avoid);
+    st.forEach(x => seen.add(x));
+    while (st.length) for (const s of f.blocks[st.pop()!].succs) if (within.has(s) && s !== avoid && !seen.has(s)) { seen.add(s); st.push(s); }
+    return seen;
+  };
+  /** one split in the region `nodes` (or its nested regions); false if the region is reducible */
+  let live = new Set<number>();
+  const fixOne = (nodes: Set<number>): boolean | 'fail' => {
+    for (const c of sccs(f, nodes)) {
+      const S = new Set(c);
+      if (c.length === 1 && !f.blocks[c[0]].succs.includes(c[0])) continue;
+      const entries = c.filter(x => x === 0 || f.blocks[x].preds.some(p => live.has(p) && !S.has(p)));
+      if (entries.length > 1) {
+        // header: the entry whose alternative leaves the least code to copy
+        let best: { h: number; R: Set<number>; size: number } | null = null;
+        for (const h of entries) {
+          if (entries.includes(0) && h !== 0) continue;
+          const R = reach(entries.filter(x => x !== h), S, h);
+          let size = 0; for (const x of R) size += cost(x);
+          if (!best || size < best.size) best = { h, R, size };
+        }
+        if (!best || (budget -= best.size) < 0) return 'fail';
+        const copy = new Map<number, number>();
+        for (const x of best.R) copy.set(x, f.blocks.length + copy.size);
+        const retargetT = (t: Block['term'], m: (s: number) => number): Block['term'] => {
+          if (t.k === 'jmp') return { k: 'jmp', to: m(t.to) };
+          if (t.k === 'br') return { k: 'br', c: t.c, t: m(t.t), f: m(t.f) };
+          return { ...t } as Block['term'];
+        };
+        for (const [x, nx] of copy) {
+          const ob = f.blocks[x];
+          const m = (s: number) => copy.get(s) ?? s;
+          f.blocks.push({ ...ob, id: nx, stmts: ob.stmts.map(s => ({ ...s })), term: retargetT(ob.term, m), succs: ob.succs.map(m), preds: [] });
+        }
+        // outside edges into the copied entries go to the copies
+        for (const e of entries) {
+          if (e === best.h || !copy.has(e)) continue;
+          for (const p of new Set(f.blocks[e].preds)) {
+            if (S.has(p) || !live.has(p)) continue;
+            const pb = f.blocks[p], m = (s: number) => (s === e ? copy.get(e)! : s);
+            pb.term = retargetT(pb.term, m);
+            pb.succs = pb.succs.map(m);
+          }
+        }
+        for (const b of f.blocks) b.preds = [];
+        for (const b of f.blocks) for (const s of b.succs) f.blocks[s].preds.push(b.id);
+        return true;
+      }
+      const inner = new Set(c);
+      inner.delete(entries[0]);
+      const r = fixOne(inner);
+      if (r) return r;
+    }
+    return false;
+  };
+  for (let iter = 0; iter < 100; iter++) {
+    live = new Set(computeRpo(f).order);
+    const r = fixOne(live);
+    if (r === 'fail') break;
+    if (!r) { pruneUnreachable(f); return true; }
+  }
+  f.blocks = saved;
+  return false;
+}
+
 export function structure(f: VarFunc): Structured {
-  const { order, rpo } = computeRpo(f);
-  const idom = dominators(f, order, rpo);
+  let { order, rpo } = computeRpo(f);
+  let idom = dominators(f, order, rpo);
+  if (irreducibleEdge(f, rpo, idom, order)) {
+    if (process.env.SBPF_DISABLE?.includes('split') || !makeReducible(f)) return dispatcher(f, order);
+    ({ order, rpo } = computeRpo(f));
+    idom = dominators(f, order, rpo);
+  }
   const n = f.blocks.length;
   const dominates = (a: number, b: number) => { while (true) { if (a === b) return true; if (b === 0) return false; b = idom[b]; } };
   const isHeader = new Uint8Array(n), isMerge = new Uint8Array(n);
-  let irreducible = false;
   for (const b of order) {
     let fwd = 0;
     for (const p of f.blocks[b].preds) {
       if (rpo[p] < 0) continue;
-      if (rpo[p] >= rpo[b]) { isHeader[b] = 1; if (!dominates(b, p)) irreducible = true; }
+      if (rpo[p] >= rpo[b]) isHeader[b] = 1;
       else fwd++;
     }
     if (fwd >= 2) isMerge[b] = 1;
   }
-  if (irreducible) return dispatcher(f, order);
 
   const kids: number[][] = Array.from({ length: n }, () => []);
   for (const b of order) if (b !== 0) kids[idom[b]].push(b);
@@ -281,9 +404,16 @@ function ifPass(ns: Node[], cont: Cont): Node[] {
         if (!th.length && el.length) { th = el; el = []; cond = negate(cond); }
         // early exit: `if (c) { <cont-jump> } rest...` where rest continues to the same continuation
         const rest = ns.slice(i + 1);
-        if (!el.length && th.length === 1 && rest.length && isJumpIn(th[0], cont) && !endsInJump(rest) ) {
+        const toBlock = th.length === 1 && th[0].k === 'break' && !!th[0].label?.startsWith('B');
+        if (!el.length && th.length === 1 && rest.length && isJumpIn(th[0], cont) && (!endsInJump(rest) || toBlock)) {
           // rest falls off the end -> same continuation; guard it instead
           out.push({ k: 'if', c: negate(cond), then: ifPass(rest, cont), else: [] });
+          return out;
+        }
+        // inside a block B: `if (c) { A; break B } rest` (rest runs to the block end) -> `if (c) { A } else { rest }`
+        const lastTh = th[th.length - 1];
+        if (!el.length && th.length > 1 && lastTh.k === 'break' && lastTh.label?.startsWith('B') && isJumpIn(lastTh, cont) && !endsInJump(th.slice(0, -1))) {
+          out.push({ k: 'if', c: cond, then: th.slice(0, -1), else: ifPass(rest, cont) });
           return out;
         }
         if (el.length && endsInJump(th)) { out.push({ k: 'if', c: cond, then: th, else: [] }); out.push(...el); continue; }
@@ -371,6 +501,66 @@ function dropLoopLabels(ns: Node[], refs: Map<string, number>): Node[] {
   });
 }
 
+const nodeSize = (ns: Node[]): number => ns.reduce((a, n) => a + (n.k === 'if' ? 1 + nodeSize(n.then) + nodeSize(n.else)
+  : n.k === 'block' || n.k === 'loop' ? 1 + nodeSize(n.body) : n.k === 'switch' ? 1 + n.cases.reduce((b, c) => b + nodeSize(c.body), 0) : 1), 0);
+
+function cloneNodes(ns: Node[]): Node[] {
+  return ns.map(n => {
+    switch (n.k) {
+      case 'stmt': return { k: 'stmt', s: { ...n.s } as Stmt };
+      case 'if': return { ...n, then: cloneNodes(n.then), else: cloneNodes(n.else) };
+      case 'block': case 'loop': return { ...n, body: cloneNodes(n.body) } as Node;
+      case 'switch': return { ...n, cases: n.cases.map(c => ({ ...c, body: cloneNodes(c.body) })) };
+      default: return { ...n };
+    }
+  });
+}
+
+/**
+ * `B: { … break B … } rest` where rest is short and ends in a jump (return, abort, break/continue
+ * to a label): every `break B` becomes a copy of rest. All labels are still explicit here and every
+ * label rest mentions encloses the break sites too, so a copy jumps where rest would. (If the block
+ * body can no longer fall off its end, rest after it is dead and dropped.)
+ */
+function dupPass(ns: Node[]): Node[] {
+  const out: Node[] = [];
+  for (let i = 0; i < ns.length; i++) {
+    let n = ns[i];
+    switch (n.k) {
+      case 'if': n = { ...n, then: dupPass(n.then), else: dupPass(n.else) }; break;
+      case 'loop': n = { ...n, body: dupPass(n.body) }; break;
+      case 'switch': n = { ...n, cases: n.cases.map(c => ({ ...c, body: dupPass(c.body) })) }; break;
+      case 'block': {
+        let body = dupPass(n.body);
+        const rest = ns.slice(i + 1);
+        const sz = nodeSize(rest);
+        const refs = new Map<string, number>(); countRefs(body, refs);
+        const k = refs.get(n.label) ?? 0;
+        if (endsInJump(rest) && sz <= 4 && k * sz <= 8 && !rest.some(x => x.k === 'block' || x.k === 'loop' || x.k === 'switch')) {
+          const label = n.label;
+          const rep = (xs: Node[]): Node[] => xs.flatMap(x => {
+            switch (x.k) {
+              case 'break': return x.label === label ? cloneNodes(rest) : [x];
+              case 'if': return [{ ...x, then: rep(x.then), else: rep(x.else) }];
+              case 'block': case 'loop': return [{ ...x, body: rep(x.body) } as Node];
+              case 'switch': return [{ ...x, cases: x.cases.map(c => ({ ...c, body: rep(c.body) })) }];
+              default: return [x];
+            }
+          });
+          body = rep(body);
+          out.push(...body);
+          if (endsInJump(body)) return out;
+          continue;
+        }
+        n = { ...n, body };
+        break;
+      }
+    }
+    out.push(n);
+  }
+  return out;
+}
+
 export function cleanup(s: Structured, returnsValue: boolean): Node[] {
   let body = s.body;
   if (process.env.SBPF_DISABLE?.includes('cleanup')) return body;
@@ -381,6 +571,7 @@ export function cleanup(s: Structured, returnsValue: boolean): Node[] {
     let refs = new Map<string, number>(); countRefs(body, refs);
     body = labelPass(body, refs);
     body = ifPass(body, top);
+    if (!process.env.SBPF_DISABLE?.includes('dup')) body = dupPass(body);
     body = tailPass(body, top, []);
     refs = new Map(); countRefs(body, refs);
     body = labelPass(body, refs);

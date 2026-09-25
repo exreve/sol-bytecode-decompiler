@@ -175,10 +175,12 @@ const sameBody = (x: Blk, y: Blk) => x.id === y.id || body(x) === body(y)
 
 /** A word compare branch: ld64(p) against ld64(q) or a constant; targets if different / if equal. */
 interface WordCmp { p: Expr; q: Expr | null; c: bigint; differ: number; equal: number }
-function wordCompare(b: Blk): WordCmp | null {
+function wordCompare(f: VarFunc, b: Blk): WordCmp | null {
 	const t = b.term
 	if (t.k !== 'br' || t.c.k !== 'cmp' || (t.c.op !== 'ne' && t.c.op !== 'eq') || t.t === t.f) return null
-	const { a, b: c } = t.c
+	let { a, b: c } = t.c
+	// a word loaded into a variable earlier, with nothing stored since: the same load
+	if (a.k === 'var') { const x = loadedWord(f, b, a.id); if (!x) return null; a = { k: 'load', size: 8, addr: x } }
 	if (a.k !== 'load' || a.size !== 8 || hasSideEffectsOrMem(a.addr).call) return null
 	const [differ, equal] = t.c.op === 'ne' ? [t.t, t.f] : [t.f, t.t]
 	if (c.k === 'const') return { p: a.addr, q: null, c: c.v, differ, equal }
@@ -186,14 +188,64 @@ function wordCompare(b: Blk): WordCmp | null {
 	return { p: a.addr, q: c.addr, c: 0n, differ, equal }
 }
 
+/**
+ * The value of variable v at the end of block b is `ld64(addr)` for the returned addr, and loading
+ * addr there reads the same word without a new fault: v was assigned that load in b or in its
+ * single-predecessor chain, and since then nothing was stored or called and no variable of addr
+ * was reassigned.
+ */
+function loadedWord(f: VarFunc, b: Blk, v: number): Expr | null {
+	const assigned = new Set<number>()
+	let blk = b
+	for (let hop = 0; hop < 3; hop++) {
+		const st = blk.stmts
+		for (let i = st.length - 1; i >= 0; i--) {
+			const s = st[i]
+			if (s.k === 'set' && s.dst === v) {
+				if (s.e.k !== 'load' || s.e.size !== 8 || hasSideEffectsOrMem(s.e.addr).call) return null
+				let ok = true
+				walkExpr(s.e.addr, x => { if (x.k === 'var' && (assigned.has(x.id) || x.id === v)) ok = false; if (x.k === 'undef') ok = false })
+				return ok ? s.e.addr : null
+			}
+			if (s.k !== 'set' || hasSideEffectsOrMem(s.e).call) return null
+			assigned.add(s.dst)
+		}
+		if (blk.preds.length !== 1 || blk.id === 0) return null
+		blk = f.blocks[blk.preds[0]]
+		if (blk === b) return null
+	}
+	return null
+}
+
+/**
+ * Block d, entered when word 0 of p equals c0 (and memory is unchanged), goes straight to a block
+ * like e: it has no statements and compares word 0 of p with a different constant (first word of
+ * a key, or keyeq with another key), branching to e on a difference.
+ */
+function altKeyMiss(f: VarFunc, d: Blk, p: Expr, c0: bigint, e: Blk): boolean {
+	if (d.stmts.length || d.term.k !== 'br') return false
+	const t = d.term
+	if (t.c.k === 'fn' && t.c.name === 'keyeq') {
+		const k0 = t.c.args[1]
+		return exprEq(t.c.args[0], p) && k0.k === 'const' && k0.v !== c0 && sameBody(f.blocks[t.f], e)
+	}
+	const w = wordCompare(f, d)
+	return !!w && !w.q && w.c !== c0 && exprEq(w.p, p) && sameBody(f.blocks[w.differ], e)
+}
+
 function mergeWordCompares(f: VarFunc): boolean {
 	let changed = false
 	let live: Uint32Array[] | null = null
 	const isLive = (b: number, v: number) => ((live ??= liveInSets(f))[b][v >>> 5] >>> (v & 31)) & 1
 	for (const a of f.blocks) {
-		const w0 = wordCompare(a)
+		const w0 = wordCompare(f, a)
 		if (!w0) continue
 		const err = w0.differ
+		// a key compare whose first-word mismatch goes on to compare another key (`k0 == c0 ?
+		// rest of key 1 : key 2`): the later words' mismatches may go to that key's miss target
+		let miss = err
+		const w1 = !w0.q && f.blocks[w0.equal].preds.length === 1 ? wordCompare(f, f.blocks[w0.equal]) : null
+		if (w1 && !w1.q && !sameBody(f.blocks[w1.differ], f.blocks[err]) && altKeyMiss(f, f.blocks[err], w0.p, w0.c, f.blocks[w1.differ])) miss = w1.differ
 		const [pb, po] = splitAddr(w0.p), [qb, qo] = w0.q ? splitAddr(w0.q) : [null, 0n]
 		const chain: Blk[] = [a], consts = [w0.c]
 		const hoist: Stmt[] = [], errTargets = [err]
@@ -201,8 +253,8 @@ function mergeWordCompares(f: VarFunc): boolean {
 		for (let k = 1; k < (w0.q ? 8 : 4); k++) {
 			const n = f.blocks[ok]
 			if (n.id === 0 || n.preds.length !== 1 || chain.includes(n)) break
-			const w = wordCompare(n)
-			if (!w || !w.q !== !w0.q || chain.some(c => c.id === w.differ || c.id === w.equal) || !sameBody(f.blocks[w.differ], f.blocks[err])) break
+			const w = wordCompare(f, n)
+			if (!w || !w.q !== !w0.q || chain.some(c => c.id === w.differ || c.id === w.equal) || !sameBody(f.blocks[w.differ], f.blocks[miss])) break
 			const at = (x: Expr, base: Expr, off: bigint) => { const [b, o] = splitAddr(x); return exprEq(b, base) && o === BigInt.asUintN(64, off + BigInt(8 * k)) }
 			if (!at(w.p, pb, po) || (qb && !at(w.q!, qb, qo))) break
 			// statements between compares (e.g. `flag = 0` before the last word) run before all loads
