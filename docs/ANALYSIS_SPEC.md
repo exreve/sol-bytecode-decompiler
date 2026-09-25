@@ -73,3 +73,13 @@ Phase 3 (bounded, best-effort):
 - Arithmetic: checked vs unchecked ops on caller-controlled values, dominating bounds, widening.
 - State machine: status/enum fields, which instructions set them, which instructions check them.
 - Per-operation property checklist ("proof tree") with found/not_found for each expected property.
+
+Phase 3 additions (pattern rules over the facts, each with evidence + confidence):
+- instruction that writes program state with no signer check and no constraint gating it;
+- share-price math where supply can be zero or donated (division by a supply field / token balance with
+  no dominating zero / minimum check);
+- mint/burn whose authority comes from account data rather than a signer;
+- verbatim CPI forwarder (caller accounts passed through, no signer seeds, account-supplied program id);
+- account close without zeroing data/discriminator; close followed by realloc (revival);
+- unchecked (wrapping) subtraction on value paths with no dominating bound check;
+- recipient/destination with no owner or mint binding.
