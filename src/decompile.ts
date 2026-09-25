@@ -120,6 +120,83 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   sem.noteResultTags(tags, tagStores);
   const resultOut = sem.resultOkTag !== undefined && opts.sugar !== false ? resultOutParams(built, sem.resultOkTag) : new Set<number>();
 
+  // ---- Anchor error helpers (named before anything is printed) ----
+  const heurNames = new Map<number, string>(); // pc -> provenance note of a heuristic function name
+  let nameFn: number | undefined;
+  if (opts.sugar !== false && sem.anchor) {
+    nameFn = findNameFn([...built.values()].map(b => b.f), (ptr, len) => sem.strAt(ptr, len));
+    const rename = (pc: number, nm: string, why: string) => {
+      const fn = p.funcs.get(pc);
+      if (!fn || !/^fn_[0-9a-f]+$/.test(fn.name) || [...p.funcs.values()].some(x => x.name === nm)) return;
+      heurNames.set(pc, `name [heur]: ${why} (was ${fn.name})`);
+      fn.name = nm;
+      fnByAddr.set(fnAddr(p, pc), nm);
+    };
+    if (nameFn !== undefined) rename(nameFn, 'Error_with_account_name', 'the callee most often given an account-name string as its last argument pair');
+    // the Anchor error constructor: the callee most often given an anchor_lang ErrorCode as second argument
+    const count = new Map<number, number>();
+    for (const { f } of built.values()) for (const b of f.blocks) for (const st of b.stmts) {
+      const calls: { pc: number; args: Expr[] }[] = [];
+      if (st.k === 'call' && st.t.k === 'fn') calls.push({ pc: st.t.pc, args: st.args });
+      for (const c of calls) { const a = c.args[1]; if (a?.k === 'const' && a.v >= 2000n && a.v <= 5000n && sem.anchorError(a.v)) count.set(c.pc, (count.get(c.pc) ?? 0) + 1); }
+    }
+    let best: number | undefined, n = 0;
+    for (const [pc, c] of count) if (c > n) { best = pc; n = c; }
+    if (best !== undefined && n >= 3 && best !== nameFn) rename(best, 'anchor_error_from', 'the callee most often given an anchor_lang ErrorCode as its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from');
+  }
+
+  // ---- Anchor dispatcher: compares the instruction data's first 8 bytes with each handler's discriminator ----
+  const abiNames = new Map<number, Map<number, string>>(); // fn pc -> var id -> name (Anchor dispatch / handler ABI)
+  if (opts.sugar !== false && sem.anchor) {
+    const handlerOf = new Map([...sem.ixNames].map(([pc, ix]) => [ix, pc]));
+    const setName = (pc: number, v: number, nm: string) => { let m = abiNames.get(pc); if (!m) abiNames.set(pc, (m = new Map())); if (!m.has(v)) m.set(v, nm); };
+    for (const [dpc, { f }] of built) {
+      // if (ld64(X) == disc) { … handler(out, p1, p2, p3[, X + 8, L - 8]) … }
+      const hits: { x: number; call: Extract<Stmt, { k: 'call' }> }[] = [];
+      for (const b of f.blocks) {
+        if (b.term.k !== 'br') continue;
+        const c = b.term.c;
+        if (c.k !== 'cmp' || (c.op !== 'eq' && c.op !== 'ne') || c.b.k !== 'const' || c.a.k !== 'load' || c.a.size !== 8 || c.a.addr.k !== 'var') continue;
+        const d = sem.disc.get(c.b.v);
+        const hpc = d?.startsWith('ix:') ? handlerOf.get(d.slice(3)) : undefined;
+        if (hpc === undefined) continue;
+        const next = f.blocks[c.op === 'eq' ? b.term.t : b.term.f];
+        const call = next?.stmts.find(x => x.k === 'call' && x.t.k === 'fn' && x.t.pc === hpc) as Extract<Stmt, { k: 'call' }> | undefined;
+        if (call) hits.push({ x: c.a.addr.id, call });
+      }
+      if (hits.length < 3 || hits.some(h => h.x !== hits[0].x)) continue;
+      const fn = p.funcs.get(dpc)!;
+      if (/^fn_[0-9a-f]+$/.test(fn.name) && ![...p.funcs.values()].some(x => x.name === 'anchor_dispatch')) {
+        heurNames.set(dpc, `name [heur]: compares the instruction data's first 8 bytes with ${hits.length} handlers' discriminators and calls the matching handler (was ${fn.name})`);
+        fn.name = 'anchor_dispatch'; fnByAddr.set(fnAddr(p, dpc), fn.name);
+      }
+      const X = hits[0].x;
+      setName(dpc, X, 'ix_data');
+      // arguments passed the same way to every handler: Anchor handler ABI (out, program_id, accounts, accounts_len, args, args_len)
+      const ABI = ['', 'program_id', 'accounts', 'accounts_len', 'ix_args', 'ix_args_len'];
+      for (let k = 1; k <= 5; k++) {
+        const args = hits.map(h => h.call.args[k]).filter(Boolean);
+        if (!args.length) continue;
+        const same = args.every(a => exprEq(a, args[0]));
+        if (!same) continue;
+        const a = args[0];
+        const ok = k <= 3 ? a.k === 'var' : k === 4 ? a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === X && a.b.k === 'const' && a.b.v === 8n
+          : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' && a.b.v === BigInt.asUintN(64, -8n);
+        if (!ok) continue;
+        if (k <= 3 && a.k === 'var') setName(dpc, a.id, ABI[k]);
+        if (k === 5 && a.k === 'bin' && a.a.k === 'var') setName(dpc, a.a.id, 'ix_data_len');
+        for (const h of hits) {
+          const hpc = (h.call.t as { pc: number }).pc, hb = built.get(hpc);
+          if (!hb) continue;
+          // argument k -> the callee's parameter: registers r1..r5, or r1..r4 then stack-passed p5, p6, …
+          const reg = hb.f.stackArgs ? (k < 4 ? k + 1 : 100 + (k - 4)) : k + 1;
+          const target = hb.f.vars.find(v => v.param === reg);
+          if (target && defCount(hb.f, target.id) === 0) setName(hpc, target.id, ABI[k]);
+        }
+      }
+    }
+  }
+
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
     const out = new Set<number>();
@@ -152,6 +229,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
       if (uses.size) hint = 'uses ' + [...uses].slice(0, 4).join(', ') + (uses.size > 4 ? ', …' : '');
     }
+    if (heurNames.has(pc)) hint = heurNames.get(pc) + (hint ? `; ${hint}` : '');
     stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${hint ? ' ' + hint : ''}`);
   }
 
@@ -184,7 +262,6 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
   if (opts.sugar !== false && sem.anchor) {
     const strAt = (ptr: bigint, len: bigint) => sem.strAt(ptr, len);
-    const nameFn = findNameFn([...built.values()].map(b => b.f), strAt);
     if (nameFn !== undefined) {
       for (const [pc, bt] of built) {
         const a = anchorFn(bt.f, bt.body, nameFn, strAt, v => sem.anchorError(v), v => accountInfos?.get(pc)?.get(`v${v}`) === 'info');
@@ -304,6 +381,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         }
       }
     }
+    // Anchor dispatcher / handler ABI names
+    const abiNm: string[] = [];
+    for (const [v, nm] of abiNames.get(pc) ?? []) if (used.has(v) && !argTypes.has(v)) { names[v] = unique(nm); abiNm.push(names[v]); }
     // account data pointers (IDL layouts): <account type>_data
     for (const [v, t] of dataVars.get(pc) ?? []) {
       if (!used.has(v) || argTypes.has(v) || f.vars[v]?.param === 10) continue;
@@ -473,6 +553,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const hdr = opts.sugar === false ? undefined : sem.funcComment(f);
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
+    if (heurNames.has(pc)) lines.push(`// ${heurNames.get(pc)}`);
+    if (abiNm.length) lines.push(`// names [heur: Anchor dispatcher / handler argument order (out, program_id, accounts, accounts_len, instruction data after the discriminator, its length)]: ${abiNm.join(', ')}`);
     if (dataNotes.length) lines.push(`// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: ${dataNotes.join(', ')}`);
     if (argNames.length) lines.push(`// names [idl: argument names and layout; which variable holds the instruction data is inferred]: ${argNames.join(', ')}`);
     if (an) {

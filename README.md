@@ -136,6 +136,13 @@ function accounts_set_fee_authority(…) {
 	const o = fee_authority.key
 ```
 
+**Anchor dispatcher and helpers** (`[heur]`, named only when unnamed): the function comparing the instruction
+data's first 8 bytes with the handlers' discriminators is `anchor_dispatch`; the values it passes the same way
+to every handler name the handlers' parameters after Anchor's handler ABI:
+`ix_swap(a, program_id, accounts, accounts_len, ix_args, ix_args_len)` (`ix_args` = the data after the
+discriminator). The account-name function is `Error_with_account_name`, and the callee most often given an
+`anchor_lang` error code `anchor_error_from` (`<Error as From<ErrorCode>>::from`).
+
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
 holding the instruction data (a parameter, or a copy of one, whose constant-offset loads all fit the fields)
