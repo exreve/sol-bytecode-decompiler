@@ -403,17 +403,19 @@ function ifPass(ns: Node[], cont: Cont): Node[] {
         let cond = n.c;
         if (!th.length && el.length) { th = el; el = []; cond = negate(cond); }
         // early exit: `if (c) { <cont-jump> } rest...` where rest continues to the same continuation
-        const rest = ns.slice(i + 1);
+        // (the rest of the list is only copied when used: endsInJump of a non-empty rest looks at
+        // its last node, the last node of ns)
+        const rest = () => ns.slice(i + 1);
         const toBlock = th.length === 1 && th[0].k === 'break' && !!th[0].label?.startsWith('B');
-        if (!el.length && th.length === 1 && rest.length && isJumpIn(th[0], cont) && (!endsInJump(rest) || toBlock)) {
+        if (!el.length && th.length === 1 && i + 1 < ns.length && isJumpIn(th[0], cont) && (!endsInJump(ns) || toBlock)) {
           // rest falls off the end -> same continuation; guard it instead
-          out.push({ k: 'if', c: negate(cond), then: ifPass(rest, cont), else: [] });
+          out.push({ k: 'if', c: negate(cond), then: ifPass(rest(), cont), else: [] });
           return out;
         }
         // inside a block B: `if (c) { A; break B } rest` (rest runs to the block end) -> `if (c) { A } else { rest }`
         const lastTh = th[th.length - 1];
         if (!el.length && th.length > 1 && lastTh.k === 'break' && lastTh.label?.startsWith('B') && isJumpIn(lastTh, cont) && !endsInJump(th.slice(0, -1))) {
-          out.push({ k: 'if', c: cond, then: th.slice(0, -1), else: ifPass(rest, cont) });
+          out.push({ k: 'if', c: cond, then: th.slice(0, -1), else: ifPass(rest(), cont) });
           return out;
         }
         if (el.length && endsInJump(th)) { out.push({ k: 'if', c: cond, then: th, else: [] }); out.push(...el); continue; }
@@ -552,11 +554,14 @@ function dupPass(ns: Node[]): Node[] {
       case 'switch': n = { ...n, cases: n.cases.map(c => ({ ...c, body: dupPass(c.body) })) }; break;
       case 'block': {
         let body = dupPass(n.body);
-        const rest = ns.slice(i + 1);
-        const sz = nodeSize(rest);
-        const refs = new Map<string, number>(); countRefs(body, refs);
-        const k = refs.get(n.label) ?? 0;
-        if (endsInJump(rest) && sz <= 4 && k * sz <= 8 && !rest.some(x => x.k === 'block' || x.k === 'loop' || x.k === 'switch')) {
+        // (checked cheapest first: a rest of more than 4 nodes has a size above 4; a non-empty rest
+        // ends in a jump when ns does; the breaks to the block are only counted for a small rest)
+        const restLen = ns.length - i - 1;
+        const rest = restLen > 0 && restLen <= 4 && endsInJump(ns) ? ns.slice(i + 1) : undefined;
+        const sz = rest ? nodeSize(rest) : Infinity;
+        let k = 0;
+        if (sz <= 4) { const refs = new Map<string, number>(); countRefs(body, refs); k = refs.get(n.label) ?? 0; }
+        if (rest && sz <= 4 && k * sz <= 8 && !rest.some(x => x.k === 'block' || x.k === 'loop' || x.k === 'switch')) {
           const label = n.label;
           const rep = (xs: Node[]): Node[] => xs.flatMap(x => {
             switch (x.k) {
