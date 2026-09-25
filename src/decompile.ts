@@ -16,8 +16,9 @@ import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
-import { Views } from './views.ts';
+import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, type AnchorFn } from './anchor.ts';
+import { accountViews, accountDataVars } from './state.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -167,6 +168,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
+  // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
+  const dataVars = opts.sugar !== false && opts.idl ? accountDataVars(built, accountViews(opts.idl, views), t => views.recordOf(t)) : new Map<number, Map<number, string>>();
   // Anchor: account names from the program's own account-error strings (see anchor.ts)
   const anchorInfo = new Map<number, AnchorFn>();
   const fnNotes = new Map<number, string[]>(); // extra header lines per function
@@ -301,9 +304,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         }
       }
     }
+    // account data pointers (IDL layouts): <account type>_data
+    for (const [v, t] of dataVars.get(pc) ?? []) {
+      if (!used.has(v) || argTypes.has(v) || f.vars[v]?.param === 10) continue;
+      names[v] = unique(t.replace(/Account$|Record$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() + (t.endsWith('Record') ? '_acc' : '_data'));
+    }
     if (an) {
       for (const [v, nm0] of [...an.varNames].sort((x, y) => x[0] - y[0])) {
-        if (!used.has(v) || f.vars[v]?.param === 10 || argTypes.has(v)) continue;
+        if (!used.has(v) || f.vars[v]?.param === 10 || argTypes.has(v) || dataVars.get(pc)?.has(v)) continue;
         const nm = unique(nm0);
         names[v] = nm;
         recovered.push(nm);
@@ -391,10 +399,21 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
     const varTypes = new Map<number, string>();
+    const dataNotes: string[] = [];
     if (opts.sugar !== false) {
       for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
       for (const v of an?.accountVars ?? []) if (!varTypes.has(v)) varTypes.set(v, 'AccountInfo');
       for (const [v, t] of argTypes) varTypes.set(v, t);
+      for (const [v, t] of dataVars.get(pc) ?? []) if ((!varTypes.has(v) || varTypes.get(v) === 'AccountRecord') && used.has(v)) { varTypes.set(v, t); dataNotes.push(`${names[v]}: ${t}`); }
+      // single-definition variables holding a typed object (x = acc.data): that object's view type
+      for (let it = 0, grew = true; grew && it < 4; it++) {
+        grew = false;
+        for (const b of f.blocks) for (const st of b.stmts) {
+          if (st.k !== 'set' || varTypes.has(st.dst) || !used.has(st.dst) || f.vars[st.dst]?.param >= 0 || defCount(f, st.dst) !== 1) continue;
+          const t = exprType(views, st.e, id => varTypes.get(id));
+          if (t && views.map.has(t)) { varTypes.set(st.dst, t); grew = true; }
+        }
+      }
       if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
       ctx.views = views;
       ctx.varType = id => varTypes.get(id);
@@ -454,6 +473,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const hdr = opts.sugar === false ? undefined : sem.funcComment(f);
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
+    if (dataNotes.length) lines.push(`// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: ${dataNotes.join(', ')}`);
     if (argNames.length) lines.push(`// names [idl: argument names and layout; which variable holds the instruction data is inferred]: ${argNames.join(', ')}`);
     if (an) {
       const checks = an.accounts.map(nm => { const c = an.checks.get(nm) ?? []; return c.length ? `${nm} (${c.join(', ')})` : nm; });

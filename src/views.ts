@@ -37,13 +37,33 @@ export const BUILTIN_VIEWS: View[] = [
 		name: 'AccountInfo', size: 0x30, doc: 'solana_program::account_info::AccountInfo (Rust struct, 0x30 bytes; `&[AccountInfo]` has stride 0x30)',
 		fields: [
 			{ name: 'key', off: 0x00, t: REF('Pubkey'), doc: '&Pubkey' },
-			{ name: 'lamports', off: 0x08, t: S(8), doc: 'Rc<RefCell<&mut u64>> (pointer to the Rc box)' },
-			{ name: 'data', off: 0x10, t: S(8), doc: 'Rc<RefCell<&mut [u8]>> (pointer to the Rc box)' },
+			{ name: 'lamports', off: 0x08, t: REF('LamportsCell'), doc: 'Rc<RefCell<&mut u64>>' },
+			{ name: 'data', off: 0x10, t: REF('DataCell'), doc: 'Rc<RefCell<&mut [u8]>>' },
 			{ name: 'owner', off: 0x18, t: REF('Pubkey'), doc: '&Pubkey' },
 			{ name: 'rent_epoch', off: 0x20, t: S(8) },
 			{ name: 'is_signer', off: 0x28, t: S(1) },
 			{ name: 'is_writable', off: 0x29, t: S(1) },
 			{ name: 'executable', off: 0x2a, t: S(1) },
+		],
+	},
+	{
+		name: 'LamportsCell', size: 0x20, doc: 'Rc<RefCell<&mut u64>> box of an AccountInfo: reference counts, RefCell borrow flag, the lamports pointer',
+		fields: [
+			{ name: 'strong', off: 0x00, t: S(8) },
+			{ name: 'weak', off: 0x08, t: S(8) },
+			{ name: 'borrow', off: 0x10, t: S(8), doc: 'RefCell flag: 0 free, > 0 shared borrows, -1 mutably borrowed' },
+			{ name: 'value', off: 0x18, t: REF('Lamports'), doc: '&mut u64' },
+		],
+	},
+	{ name: 'Lamports', size: 8, doc: 'the lamports of an account (in the input buffer)', fields: [{ name: 'amount', off: 0, t: S(8) }] },
+	{
+		name: 'DataCell', size: 0x28, doc: 'Rc<RefCell<&mut [u8]>> box of an AccountInfo: reference counts, RefCell borrow flag, the data slice',
+		fields: [
+			{ name: 'strong', off: 0x00, t: S(8) },
+			{ name: 'weak', off: 0x08, t: S(8) },
+			{ name: 'borrow', off: 0x10, t: S(8), doc: 'RefCell flag: 0 free, > 0 shared borrows, -1 mutably borrowed' },
+			{ name: 'ptr', off: 0x18, t: REF('bytes'), doc: 'data pointer' },
+			{ name: 'len', off: 0x20, t: S(8), doc: 'data length' },
 		],
 	},
 	{
@@ -87,6 +107,16 @@ export class Views {
 		if (o) return o.size ?? Infinity
 		const v = this.map.get(t.type)
 		return v?.size ?? Infinity
+	}
+
+	/** A serialized-account-record view whose data has the given layout: <Name>Record. */
+	recordOf(data: string): string {
+		const name = data.replace(/Account$/, '') + 'Record'
+		if (!this.map.has(name)) {
+			const base = this.map.get('AccountRecord')!
+			this.map.set(name, { name, doc: `serialized input account whose data is a ${data}`, fields: base.fields.map(f => (f.name === 'data' ? { ...f, t: { k: 'embed', type: data } } : f)) })
+		}
+		return name
 	}
 
 	/** an opaque fixed-size byte range type (Bytes16, ...) */
@@ -182,6 +212,27 @@ export const VIEW_NOTATION = [
 	'type ref<T> = T                        // view field holding a pointer (8 bytes) to a T',
 	'interface sized<Size extends number> {} // a view of that many bytes: x[k] is the k-th such object from x (at x + k * Size)',
 ]
+
+/**
+ * View type of an expression, given the variables' types: a typed variable, a ref field loaded through
+ * a typed object, or an embedded field's address (as the printer resolves them).
+ */
+export function exprType(V: Views, e: Expr, varType: (id: number) => string | undefined): string | undefined {
+	if (e.k === 'var') return varType(e.id)
+	const field = (addr: Expr) => {
+		let b: Expr = addr, off = 0n
+		if (addr.k === 'bin' && addr.op === 'add' && addr.b.k === 'const') { b = addr.a; off = BigInt.asIntN(64, addr.b.v) }
+		if (off < 0n || off > 0x10000n) return undefined
+		const t = exprType(V, b, varType)
+		if (!t) return undefined
+		const size = V.map.get(t)?.size
+		const rel = size && Number(off) >= size ? Number(off) % size : Number(off)
+		return V.resolve(t, rel)
+	}
+	if (e.k === 'load' && e.size === 8) { const r = field(e.addr); return r && !r.rest && r.last.k === 'ref' ? r.last.to : undefined }
+	if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const r = field(e); return r && !r.rest && r.last.k === 'embed' ? r.last.type : undefined }
+	return undefined
+}
 
 /** Base variable and constant offset of an address expression `v` or `v + c`. */
 export function baseOff(e: Expr): { id: number; off: bigint } | undefined {

@@ -70,9 +70,11 @@ function fn_10c18(a: u64, b: u64, c: u64, d: AccountInfo) {
 	st64(s180 + 0x28, d[1].is_signer)      // ld8(d + 0x30 + 0x28): the next AccountInfo
 ```
 
-Built-in views: `AccountInfo` (Rust), `AccountRecord` (serialized input account: `dup_marker`, `is_signer`,
-`is_writable`, `executable`, `key`, `owner` (embedded `Pubkey`s), `lamports`, `data_len`, `data`), `Input`
-(entrypoint parameter: `num_accounts`, `acc0`). A view is an exact alias whatever the variable holds; *which*
+Built-in views: `AccountInfo` (Rust; `lamports` / `data` point to `LamportsCell` / `DataCell`, the
+`Rc<RefCell<…>>` boxes: `acc.data.borrow`, `acc.data.ptr`, `acc.data.len`, `acc.lamports.value.amount`),
+`AccountRecord` (serialized input account: `dup_marker`, `is_signer`, `is_writable`, `executable`, `key`,
+`owner` (embedded `Pubkey`s), `lamports`, `data_len`, `data`), `Input` (entrypoint parameter: `num_accounts`,
+`acc0`). A variable defined once as such a field (`const j = acc.data`) gets the field's view type. A view is an exact alias whatever the variable holds; *which*
 variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
 
 ### Project layout (`-o dir/`)
@@ -137,6 +139,21 @@ is declared with it; variables that are exactly one argument are named after it:
 	const amount = args.amount
 	const u = ld64(args.sqrt_price_limit + 8)     // u128: embedded, 16 bytes
 	if (2 > amount_specified_is_input) { …        // bool validation
+```
+
+**Account data (IDL).** Each IDL account type becomes a view `<Name>Account` of its data: the 8-byte
+discriminator, then the fields in serialized order (Borsh prefix; zero-copy accounts are `Pod`, so laid out the
+same way). A pointer whose first 8 bytes are compared with the account's discriminator gets it (directly, or as
+`ld64(P)` for a slice `P` checked in a caller), and a serialized input record `r` whose `ld64(r + 0x58)` is
+compared (zero-copy `AccountLoader`) gets `<Name>Record`, whose `data` field is the layout:
+
+```ts
+// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: whirlpool_data: WhirlpoolAccount
+	const whirlpool_data: WhirlpoolAccount = ld64(b)
+	const k = whirlpool_data.tick_spacing
+	const an = ld64(whirlpool_data.sqrt_price)     // u128
+function fn_22210(a: u64, whirlpool_acc: WhirlpoolRecord, …)
+	if (ld64(whirlpool_acc.owner) != 0x5390908e5f68030e /* ORCA_WHIRLPOOL_PROGRAM */) { … AccountOwnedByWrongProgram … }
 ```
 
 A variable gets an account's name when a branch testing it fails with that account's name unconditionally
@@ -259,6 +276,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/accounts.ts` | AccountInfo / raw account pointer recognition (view types, field-name comments) |
 | `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
+| `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |

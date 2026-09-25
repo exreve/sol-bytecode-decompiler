@@ -10,6 +10,7 @@ export interface IdlInfo {
 	errors: Map<number, string>
 	discs: Map<bigint, string> // u64 (LE) discriminator -> "ix:x" / "account:X" / "event:X"
 	types: Map<string, any>    // defined type name -> { kind: 'struct', fields } | { kind: 'enum', variants } (IDL JSON)
+	accounts: { name: string; disc: bigint }[] // account types (data starts with the 8-byte discriminator)
 }
 
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toLowerCase()
@@ -40,7 +41,7 @@ function flattenAccounts(accs: any[], prefix = ''): string[] {
 }
 
 export function parseIdl(json: any): IdlInfo {
-	const info: IdlInfo = { name: json.metadata?.name ?? json.name, instructions: [], errors: new Map(), discs: new Map(), types: new Map() }
+	const info: IdlInfo = { name: json.metadata?.name ?? json.name, instructions: [], errors: new Map(), discs: new Map(), types: new Map(), accounts: [] }
 	for (const t of json.types ?? []) if (t?.name && t.type) info.types.set(t.name, t.type)
 	// legacy IDLs define account structs under `accounts` only
 	for (const a of json.accounts ?? []) if (a?.name && a.type && !info.types.has(a.name)) info.types.set(a.name, a.type)
@@ -50,7 +51,11 @@ export function parseIdl(json: any): IdlInfo {
 		info.discs.set(disc, `ix:${name}`)
 		info.instructions.push({ name, disc, args: (ix.args ?? []).map((a: any) => `${a.name}: ${typeStr(a.type)}`), accounts: flattenAccounts(ix.accounts), argDefs: (ix.args ?? []).map((a: any) => ({ name: snake(a.name), type: a.type })) })
 	}
-	for (const a of json.accounts ?? []) info.discs.set(Array.isArray(a.discriminator) ? le8(a.discriminator) : sha8(`account:${pascal(a.name)}`), `account:${pascal(a.name)}`)
+	for (const a of json.accounts ?? []) {
+		const disc = Array.isArray(a.discriminator) ? le8(a.discriminator) : sha8(`account:${pascal(a.name)}`)
+		info.discs.set(disc, `account:${pascal(a.name)}`)
+		info.accounts.push({ name: a.name, disc })
+	}
 	for (const e of json.events ?? []) info.discs.set(Array.isArray(e.discriminator) ? le8(e.discriminator) : sha8(`event:${pascal(e.name)}`), `event:${pascal(e.name)}`)
 	for (const e of json.errors ?? []) info.errors.set(e.code, e.name)
 	return info
