@@ -136,7 +136,7 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 	const single = (e: Expr): Expr => { if (e.k === 'var') { const d = defs.get(e.id); if (d?.length === 1) return d[0] } return e }
 	// per base expression: loads at layout offsets, and 32-byte uses of base + off / of ld64(base + off)
 	const loads = new Map<string, Map<number, number>>() // base -> offset -> size
-	const addrs = (fi.addrs ??= fieldAddrs(f))
+	const addrs = () => (fi.addrs ??= fieldAddrs(f)) // (only needed for some raw-record candidates)
 	const wide = new Set<string>() // keys of address expressions used as 32-byte values
 	const use32 = (e: Expr) => { const [b, o] = split(single(e)); wide.add(offKey(key(b), o)) }
 	// one walk per expression for the load offsets (note), the 32-byte uses (scan) and, in statements,
@@ -173,7 +173,7 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		const keyed = L.keyPtrs.some(o => wide.has(`L8(${offKey(bk, o)})`)) || L.keyAddrs.some(o => wide.has(offKey(bk, o)))
 		// without a 32-byte key/owner use, demand more layout fields (a Rust clone reads all eight;
 		// a raw record: lamports and data_len)
-		const many = kind === 'info' ? fit.length >= 4 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs.get(bk)?.size ?? 0) >= 2
+		const many = kind === 'info' ? fit.length >= 4 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs().get(bk)?.size ?? 0) >= 2
 		if (keyed || many) { if (!typed.has(bk)) typed.set(bk, kind); break }
 	}
 	propagate(typed, prop)
@@ -227,8 +227,13 @@ function fieldAddrs(f: VarFunc): Map<string, Set<number>> {
 export function accountField(typed: Typed | undefined, e: Expr): string | undefined {
 	if (!typed || e.k !== 'load') return undefined
 	const [b, o] = split(e.addr)
+	// (offset and size first: only a field of one of the layouts can be named, and the key of a
+	// large base expression is costly to build; the printer asks for every load)
+	if (o < 0n) return undefined
+	const inf = LAYOUTS.info.loads[Number(o % STRIDE)], raw = LAYOUTS.raw.loads[Number(o)]
+	if (!(inf && inf[0] === e.size) && !(raw && raw[0] === e.size) && !(o >= 8n && o < 0x48n && e.size === 8)) return undefined
 	const kind = typed.get(key(b))
-	if (!kind || o < 0n) return undefined
+	if (!kind) return undefined
 	const L = LAYOUTS[kind]
 	if (kind === 'raw') {
 		const fd = L.loads[Number(o)]
@@ -245,6 +250,9 @@ export function accountField(typed: Typed | undefined, e: Expr): string | undefi
 export function accountAddr(typed: Typed | undefined, e: Expr): string | undefined {
 	if (!typed) return undefined
 	const [b, o] = split(e)
-	if (typed.get(key(b)) !== 'raw') return undefined
-	return o === 8n ? '&key' : o === 0x28n ? '&owner' : o === 0x58n ? '&data' : undefined
+	const nm = o === 8n ? '&key' : o === 0x28n ? '&owner' : o === 0x58n ? '&data' : undefined
+	// (the offset first: the printer asks for every sum it prints, and the key of a large base
+	// expression is costly to build)
+	if (!nm || typed.get(key(b)) !== 'raw') return undefined
+	return nm
 }
