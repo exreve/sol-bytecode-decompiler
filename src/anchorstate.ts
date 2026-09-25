@@ -440,6 +440,26 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			return undefined
 		}
 		const fo = (e: Expr) => off(e, id => id === fp), oo = (e: Expr) => off(e, isOut)
+		// spill-like frame words: every access overlapping them is an 8-byte load or store of exactly that word
+		// (not a call argument, not in a copy): a call given a nearby frame object is taken not to write them
+		const own = new Map<number, boolean>()
+		{
+			const touch = (o: number, n: number, word: boolean) => {
+				for (let w = (o & ~7) - 8; w < o + n; w += 8) if (w + 8 > o) own.set(w, (own.get(w) ?? true) && word && w === o && n === 8)
+			}
+			const scan = (e: Expr) => walkExpr(e, x => { if (x.k === 'load') { const o = fo(x.addr); if (o !== undefined) touch(o, x.size, true) } })
+			for (const b of f.blocks) {
+				for (const st of b.stmts) {
+					stmtExprs(st).forEach(scan)
+					if (st.k === 'store') { const o = fo(st.addr); if (o !== undefined) touch(o, st.size, true) }
+					else if (st.k === 'stores') { const o = fo(st.addr); if (o !== undefined) st.vals.forEach((_, i) => touch(o + i * st.size, st.size, true)) }
+					else if (st.k === 'copy') { for (const e of [st.dst, st.src]) { const o = fo(e); if (o !== undefined) touch(o, st.n, false) } }
+					const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined
+					if (c) for (const a of c.args) { const o = fo(a); if (o !== undefined) touch(o, 1, false) }
+				}
+				if (b.term.k === 'br') scan(b.term.c)
+			}
+		}
 		interface Obj { type?: string; callee: number; view?: string; name?: string; embed?: boolean }
 		// the accounts slice (&mut &[AccountInfo], the third parameter): calls given it take the next account
 		const accountsP = f.vars.find(v => v.param === 3)?.id
@@ -456,7 +476,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			if (e.k === 'load' && e.size === 8) { const o = fo(e.addr); return o === undefined ? undefined : org.get(o) }
 			return undefined
 		}
-		const clobber = (o: number, n: number) => { for (const w of [...org.keys()]) if (w + 8 > o && w < o + n) org.delete(w) }
+		const clobber = (o: number, n: number, keepOwn = false) => { for (const w of [...org.keys()]) if (w + 8 > o && w < o + n && !(keepOwn && w !== o && own.get(w))) org.delete(w) }
 		const put = (dst: Expr, i: number, v: Org | undefined) => {
 			const g = fo(dst), k = oo(dst)
 			if (g !== undefined) { clobber(g + i, 8); if (v) org.set(g + i, v) }
@@ -501,7 +521,8 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			const isCopy = s.t.k === 'sys' ? s.t.name === 'sol_memcpy_' || s.t.name === 'sol_memmove_' : /^(memcpy|memmove)\d*_?$/.test(p.funcs.get(tpc)?.name ?? '')
 			if (isCopy && s.args.length >= 3 && s.args[2].k === 'const' && s.args[2].v < 0x10000n) { copy(s.args[0], s.args[1], Number(s.args[2].v)); return }
 			// another call writing through frame addresses
-			for (const a of s.args) { const g = fo(a); if (g !== undefined) clobber(g, 0x100) }
+			// (0x100 bytes from each frame address given, except the function's own spill-like words)
+			for (const a of s.args) { const g = fo(a); if (g !== undefined) clobber(g, 0x100, true) }
 			const out = s.args[0] && fo(s.args[0])
 			if (out !== undefined && tpc >= 0) {
 				const t = calleeType(tpc)
@@ -579,6 +600,9 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			if (!ob.name || base < 0 || key.endsWith(':-1') || outWords.get(base)?.off === -1) continue
 			if (!ob.view) { if (outWords.get(base)?.off === 0) infos.set(base, { name: ob.name, type: ob.type?.replace(/^spl:/, ''), embed: !!ob.embed }); continue }
 			if (n < 2 || !ob.type) continue
+			// (an account copied to several places of the struct: the most complete copy, then the first)
+			const prev = [...inline].find(([, a]) => a.name === ob.name)
+			if (prev) { const pn = bases.get(`${obj}:${prev[0]}`) ?? 0; if (pn > n || (pn === n && prev[0] < base)) continue; inline.delete(prev[0]) }
 			inline.set(base, { name: ob.name, view: ob.view, rust: ob.type.replace(/^spl:/, '') })
 		}
 		if (boxes.size || inline.size || infos.size || refs.size) res.set(pc, { boxes, inline, refs, infos })
