@@ -384,7 +384,10 @@ targets and code/rodata addresses abstracted):
 * `data/libsigs.json` — fingerprints occurring in ≥ 3 unrelated code families among 400+ deployed
   mainnet programs (forks/redeploys are clustered first so forked *user* code is not mistaken for a library);
 * `data/libnames.json` — Rust names from symbolized reference builds made with the real Solana
-  platform-tools (several toolchain / solana-program / anchor versions).
+  platform-tools (several toolchain / solana-program / anchor versions);
+* behavior (`src/builtins.ts`): an unnamed library function of 5 parameters without calls that, run on 31
+  operand pairs (edge cases and pseudo-random u128 values), writes exactly a * b, a / b or a % b (unsigned or
+  signed) to its first argument is `__multi3` / `__udivti3` / `__umodti3` / `__divti3` / `__modti3` (`[heur]`).
 
 Crate-aware policy: a crate is never elided from the program that *is* that crate (e.g. decompiling
 spl-token-2022 shows its own processor code; programs that merely depend on it get stubs).

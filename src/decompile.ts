@@ -15,6 +15,7 @@ import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
+import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
@@ -66,6 +67,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const sem = new Semantics(p, opts.idl);
   setFoldImage(DISABLED.has('rofold') ? null : p.image);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
+  // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior, see builtins.ts)
+  {
+    const taken = new Set([...libs.values()].map(i => i.name).filter(Boolean));
+    for (const [pc, info] of libs) {
+      if (!info.lib || info.name || info.hint || opts.sugar === false) continue;
+      const b = builtinName(p, pc);
+      if (!b) continue;
+      info.name = taken.has(b.name) ? `${b.name}_${(p.elf.text.addr + pc * 8).toString(16)}` : b.name;
+      taken.add(info.name);
+      info.hint = `${b.name} [heur] ${b.hint}`;
+    }
+  }
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
   nameThunks(p);
