@@ -117,24 +117,52 @@ export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } 
 	return { entry, ix: [...ix.values()], shared }
 }
 
+/**
+ * What the layout looks up in a function's text, found once per function (the single file, the
+ * modules, lib.d.ts and every bundle containing the function used to run the same regular
+ * expressions over it again): the names called `name(` (CALLED: each distinct name in order of
+ * first appearance), and the type names after `: ` / `as ` (VIEWS, same). A match never spans two
+ * functions' texts (they are joined with line breaks), so scanning the functions one by one finds
+ * what scanning their joined text finds, in the same order.
+ */
+const CALLED = /\b([A-Za-z_][A-Za-z0-9_]*)\(/g
+const scanned = new WeakMap<FuncOut, { called: string[]; views: string[] }>()
+function scan(f: FuncOut): { called: string[]; views: string[] } {
+	let r = scanned.get(f)
+	if (!r) {
+		r = { called: [...new Set([...f.text.matchAll(CALLED)].map(m => m[1]))], views: [...new Set([...f.text.matchAll(/(?::|\bas) ([A-Z][A-Za-z0-9_]*)\b/g)].map(m => m[1]))] }
+		scanned.set(f, r)
+	}
+	return r
+}
+/** Names called in these functions that match `re` (a subset of CALLED's names: see below). */
+function calledNames(funcs: FuncOut[], re: RegExp): Set<string> {
+	const names = new Set<string>()
+	for (const f of funcs) for (const n of scan(f).called) if (re.test(n)) names.add(n)
+	return names
+}
+// `\b([a-z_][a-z0-9_]*)\(` and `\b(sol_[a-z0-9_]+|abort)\(` (as used before) match exactly the
+// CALLED matches whose name has that form: a CALLED match is a whole identifier followed by `(`,
+// and so is every match of those (a shorter lowercase run inside a longer identifier is not
+// preceded by a word boundary, or not followed by `(`)
+const LOWER = /^[a-z_][a-z0-9_]*$/, SYSCALL = /^(sol_[a-z0-9_]+|abort)$/
+
 /** Declarations (with their one-line semantics) of the commented helper functions the output uses. */
 function usedHelpers(r: Result): string[] {
-	const names = new Set<string>()
-	for (const f of r.funcs) for (const m of f.text.matchAll(/\b([a-z_][a-z0-9_]*)\(/g)) names.add(m[1])
+	const names = calledNames(r.funcs, LOWER)
 	return TYPES.split('\n').filter(l => { const m = /^declare function (\w+)\(.*\/\/ /.exec(l); return m && names.has(m[1]) })
 }
 
 /** Declarations of the typed views the output uses (x.field notation), with the notation itself. */
 function usedViews(r: Result, funcs: FuncOut[] = r.funcs): string[] {
 	const names = new Set<string>()
-	for (const f of funcs) for (const m of f.text.matchAll(/(?::|\bas) ([A-Z][A-Za-z0-9_]*)\b/g)) if (r.views.map.has(m[1])) names.add(m[1])
+	for (const f of funcs) for (const n of scan(f).views) if (r.views.map.has(n)) names.add(n)
 	if (!names.size) return []
 	return ['// typed views: x.field is exactly the load / store / address given by the field declaration', ...VIEW_NOTATION, ...r.views.render(names)]
 }
 
 function usedSyscalls(r: Result): string[] {
-	const names = new Set<string>()
-	for (const f of r.funcs) for (const m of f.text.matchAll(/\b(sol_[a-z0-9_]+|abort)\(/g)) names.add(m[1])
+	const names = calledNames(r.funcs, SYSCALL)
 	const out: string[] = []
 	for (const sc of SYSCALLS) if (names.has(sc.alias)) out.push(`declare function ${sc.alias}(${sc.params.map(p => `${p}: u64`).join(', ')})${sc.noreturn ? ': never' : sc.ret ? ': u64' : ': void'} // ${sc.doc}`)
 	return out
@@ -188,10 +216,9 @@ export function renderProject(r: Result): Map<string, string> {
 	const mod = (grp: Group) => {
 		if (!grp.funcs.length) return
 		const imports = new Map<string, Set<string>>()
-		const text = grp.funcs.map(f => f.text).join('\n\n')
-		for (const m of text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\(/g)) {
-			const h = home.get(m[1])
-			if (h && h !== grp.key) { let s = imports.get(h); if (!s) imports.set(h, (s = new Set())); s.add(m[1]) }
+		for (const f of grp.funcs) for (const n of scan(f).called) {
+			const h = home.get(n)
+			if (h && h !== grp.key) { let s = imports.get(h); if (!s) imports.set(h, (s = new Set())); s.add(n) }
 		}
 		const rel = (to: string) => {
 			const depth = grp.key.split('/').length - 1
@@ -213,6 +240,7 @@ export function renderProject(r: Result): Map<string, string> {
 	// security slices: derived, unverified views (separate files); reachability through every direct
 	// call of the program, library code included (library functions call back into user code)
 	const { handlers } = handlerOwners(r)
+	const handlerPcs = new Set(handlers.map(y => y.pc))
 	const reach = new Map<number, Set<string>>()
 	for (const h of handlers) {
 		const seen = new Set<number>([h.pc]), q = [h.pc]
@@ -220,7 +248,7 @@ export function renderProject(r: Result): Map<string, string> {
 			const x = q.pop()!
 			let o = reach.get(x); if (!o) reach.set(x, (o = new Set())); o.add(h.name)
 			for (const b of r.program.funcs.get(x)?.blocks ?? []) for (const st of b.stmts)
-				if (st.k === 'call' && st.t.k === 'fn' && !seen.has(st.t.pc) && !handlers.some(y => y.pc === (st.t as { pc: number }).pc)) { seen.add(st.t.pc); q.push(st.t.pc) }
+				if (st.k === 'call' && st.t.k === 'fn' && !seen.has(st.t.pc) && !handlerPcs.has(st.t.pc)) { seen.add(st.t.pc); q.push(st.t.pc) }
 		}
 	}
 	const slices = renderSlices(r.funcs, f => [...(reach.get(f.pc) ?? [])].sort())
@@ -242,8 +270,10 @@ export function renderProject(r: Result): Map<string, string> {
 			if (size + g.text.length <= 150_000) { order.push(g); size += g.text.length } else decl.push(g)
 		}
 		const sig = (f: FuncOut) => f.text.split('\n').find(l => l.startsWith('function '))!.replace(/^function /, 'declare function ').replace(/ \{$/, '')
-		const text = order.map(f => f.text).join('\n\n') + (decl.length ? `\n\n// not included (size budget), see ${[...new Set(decl.map(f => (home.get(f.name) ?? 'entrypoint') + '.ts'))].join(', ')}:\n` + decl.map(sig).join('\n') : '')
-		const used = new Set([...text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\(/g)].map(m => m[1]))
+		const declText = decl.length ? `\n\n// not included (size budget), see ${[...new Set(decl.map(f => (home.get(f.name) ?? 'entrypoint') + '.ts'))].join(', ')}:\n` + decl.map(sig).join('\n') : ''
+		const text = order.map(f => f.text).join('\n\n') + declText
+		// (the calls in text: those of its functions and of the declarations part)
+		const used = new Set([...order.flatMap(f => scan(f).called), ...[...declText.matchAll(CALLED)].map(m => m[1])])
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls({ ...r, funcs: order })
 		files.set(`bundle/${h.name.slice(3)}.ts`, [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, '', text, ''].join('\n'))
