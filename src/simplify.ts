@@ -254,6 +254,13 @@ function defSites(f: VarFunc): { sites: DefSite[][]; } {
   return { sites };
 }
 
+/** Number of definitions of each variable (= defSites(f).sites[v].length). */
+function defCounts(f: VarFunc): Int32Array {
+  const nd = new Int32Array(f.vars.length);
+  for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) nd[s.dst]++;
+  return nd;
+}
+
 /** A var is "SSA-like" if it has exactly one definition and is not a parameter/implicit input. */
 function singleDef(f: VarFunc, sites: DefSite[][], v: number) {
   return sites[v].length === 1 && f.vars[v].param < 0 && !f.vars[v].undef;
@@ -343,15 +350,15 @@ function resolve(e: Expr, m: Map<number, Expr>, depth: number): Expr {
 /** Inline single-use definitions into their (same-block) use when no intervening statement interferes. */
 function inlineLocal(f: VarFunc): boolean {
   const uses = countUses(f);
-  const { sites } = defSites(f);
+  const nd = defCounts(f);
   let changed = false;
   for (const b of f.blocks) {
     for (let i = 0; i < b.stmts.length; i++) {
       const s = b.stmts[i];
-      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, sites)) { changed = true; i--; continue; }
+      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd)) { changed = true; i--; continue; }
       if (s.k !== 'set') continue;
       const v = s.dst;
-      if (!(uses[v] === 1 && sites[v].length === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
+      if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
       const fx = hasSideEffectsOrMem(s.e);
       const reads = new Set<number>(); varsIn(s.e, reads);
       // find use
@@ -383,9 +390,7 @@ function inlineLocal(f: VarFunc): boolean {
       else if (b.term.k === 'br') b.term.c = substVars(b.term.c, m);
       else if (b.term.k === 'ret' && b.term.e) b.term.e = substVars(b.term.e, m);
       b.stmts.splice(i, 1);
-      sites[v] = [];
-      // indices shift: recompute sites lazily by restarting this block
-      const r = defSites(f); for (let k = 0; k < sites.length; k++) sites[k] = r.sites[k];
+      nd[v]--; // the removed statement was a definition of v (the old code recomputed all def sites here)
       i--;
       changed = true;
     }
@@ -409,10 +414,10 @@ function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number,
 }
 
 /** `v = call(...)` immediately followed by the single use of v -> call expression at the use site. */
-function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses: Int32Array, sites: DefSite[][]): boolean {
+function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses: Int32Array, nd: Int32Array): boolean {
   const s = b.stmts[i] as Extract<Stmt, { k: 'call' }>;
   const v = s.dst;
-  if (!(uses[v] === 1 && sites[v].length === 1 && f.vars[v].param < 0) && localReach(b as any, i, v) !== 1) return false;
+  if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b as any, i, v) !== 1) return false;
   const next = i + 1 < b.stmts.length ? stmtExprs(b.stmts[i + 1]) : b.term.k === 'br' ? [b.term.c] : b.term.k === 'ret' && b.term.e ? [b.term.e] : null;
   if (!next) return false;
   let hit = false, impure = false;
@@ -425,7 +430,7 @@ function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses
   else if (b.term.k === 'br') b.term.c = substVars(b.term.c, m);
   else b.term.e = substVars(b.term.e, m);
   b.stmts.splice(i, 1);
-  const r = defSites(f); for (let k = 0; k < sites.length; k++) sites[k] = r.sites[k];
+  nd[v]--;
   return true;
 }
 

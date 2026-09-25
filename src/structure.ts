@@ -371,12 +371,32 @@ function dropLoopLabels(ns: Node[], refs: Map<string, number>): Node[] {
   });
 }
 
+/**
+ * Deep structural equality of plain data (what comparing JSON serializations checked, minus the
+ * sensitivity to property order; properties holding `undefined` count as absent). Shared
+ * subtrees (statements are never copied by the passes) compare in O(1).
+ */
+function sameTree(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameTree(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  let na = 0, nb = 0;
+  for (const k in a) { if (a[k] === undefined) continue; na++; if (!sameTree(a[k], b[k])) return false; }
+  for (const k in b) if (b[k] !== undefined) nb++;
+  return na === nb;
+}
+
 export function cleanup(s: Structured, returnsValue: boolean): Node[] {
   let body = s.body;
   if (process.env.SBPF_DISABLE?.includes('cleanup')) return body;
   const top: Cont = { breaks: new Set(), conts: new Set(), ret: !returnsValue };
   for (let i = 0; i < 12; i++) {
-    const before = JSON.stringify(body, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    const before = body;
     body = tailPass(body, top, []);
     let refs = new Map<string, number>(); countRefs(body, refs);
     body = labelPass(body, refs);
@@ -385,8 +405,9 @@ export function cleanup(s: Structured, returnsValue: boolean): Node[] {
     refs = new Map(); countRefs(body, refs);
     body = labelPass(body, refs);
     body = loopPass(body);
-    const after = JSON.stringify(body, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
-    if (after === before) break;
+    // fixpoint: the passes only look at the tree's values, so once a round leaves the tree
+    // structurally unchanged every further round would too
+    if (sameTree(body, before)) break;
   }
   body = unlabel(body, null, false);
   const refs = new Map<string, number>(); countRefs(body, refs);
