@@ -67,6 +67,18 @@ const MEM_V0 = new Uint8Array(256), MEM_V2 = new Uint8Array(256)
 for (const [o, k] of [[0x71, LD | 1], [0x69, LD | 2], [0x61, LD | 4], [0x79, LD | 8], [0x72, STI | 1], [0x6a, STI | 2], [0x62, STI | 4], [0x7a, STI | 8], [0x73, STX | 1], [0x6b, STX | 2], [0x63, STX | 4], [0x7b, STX | 8]]) MEM_V0[o] = k
 for (const [o, k] of [[0x2c, LD | 1], [0x3c, LD | 2], [0x8c, LD | 4], [0x9c, LD | 8], [0x27, STI | 1], [0x37, STI | 2], [0x87, STI | 4], [0x97, STI | 8], [0x2f, STX | 1], [0x3f, STX | 2], [0x8f, STX | 4], [0x9f, STX | 8]]) MEM_V2[o] = k
 
+// conditional jump codes (opc >> 4)
+const JCC_CODE = new Uint8Array(16)
+for (const c of [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd]) JCC_CODE[c] = 1
+
+/** Per program: each instruction's imm (signed and as u64) and off as BigInts, converted on first execution. */
+const bigOpsMemo = new WeakMap<Program, { imm: bigint[]; immU: bigint[]; off: bigint[] }>()
+function bigOps(p: Program) {
+	let o = bigOpsMemo.get(p)
+	if (!o) bigOpsMemo.set(p, (o = { imm: new Array(p.insns.length), immU: new Array(p.insns.length), off: new Array(p.insns.length) }))
+	return o
+}
+
 export interface CallHook { (target: string, args: bigint[], pc?: number): bigint }
 
 export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; alias?: boolean; retTaint?: number }
@@ -121,18 +133,24 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 		for (let i = 1; i <= 5; i++) r[i] = UNDEF // clobbered
 		for (let i = 0; i <= 5; i++) fr[i] = false
 	}
+	// the current instruction's registers, offset and register values (set per step, read by ld / st)
+	let dst = 0, src = 0, off = 0n, D = 0n, S = 0n
+	const ld = (size: number) => { const a = u64(S + off); checkFrame(src, a); r[dst] = mem.load(a, size) }
+	const st = (size: number, val: bigint) => { const a = u64(D + off); checkFrame(dst, a); mem.store(a, size, val) }
+	const divz = (x: bigint) => { if (x === 0n) throw new Abort('division by zero') }
+	const ops = bigOps(p)
 	try {
 		while (true) {
 			if (++steps > maxSteps) return { steps, limit: true }
 			if (pc < 0 || pc >= insns.length) throw new Abort('pc out of text')
 			const ins = insns[pc]
-			const dst = ins.dst, src = ins.src
-			const imm = BigInt(ins.imm), off = BigInt(ins.off)
-			const immU = u64(imm)
+			dst = ins.dst; src = ins.src
+			let imm = ops.imm[pc]
+			if (imm === undefined) { imm = ops.imm[pc] = BigInt(ins.imm); ops.immU[pc] = u64(imm); ops.off[pc] = BigInt(ins.off) }
+			const immU = ops.immU[pc]
+			off = ops.off[pc]
 			let next = pc + 1
-			const D = r[dst], S = r[src]
-			const ld = (size: number) => { checkFrame(src, u64(S + off)); r[dst] = mem.load(u64(S + off), size) }
-			const st = (size: number, val: bigint) => { checkFrame(dst, u64(D + off)); mem.store(u64(D + off), size, val) }
+			D = r[dst]; S = r[src]
 			// provenance update (computed before the instruction executes)
 			const cls0 = ins.opc & 7, op0 = ins.opc & 0xf0
 			const alu64 = cls0 === 7 && !movMem, isReg = (ins.opc & 8) !== 0
@@ -172,7 +190,6 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 			}
 			if (!handled) {
 				handled = true
-				const divz = (x: bigint) => { if (x === 0n) throw new Abort('division by zero') }
 				switch (ins.opc) {
 					case 0x18:
 						if (noLddw) { handled = false; break }
@@ -284,7 +301,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 				const cls = ins.opc & 7
 				const code = ins.opc >> 4
 				if (ins.opc === 0x05) next = pc + 1 + ins.off
-				else if (cls === 5 && [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd].includes(code) && ins.opc !== 0x85 && ins.opc !== 0x8d && ins.opc !== 0x95 && ins.opc !== 0x9d) {
+				else if (cls === 5 && JCC_CODE[code] && ins.opc !== 0x85 && ins.opc !== 0x8d && ins.opc !== 0x95 && ins.opc !== 0x9d) {
 					const b = ins.opc & 8 ? S : immU
 					let t: boolean
 					switch (code) {
@@ -302,7 +319,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 					}
 					if (branch) t = branch(pc, t, tt ? (rt[dst] | ((ins.opc & 8) ? rt[src] : 0)) !== 0 : false)
 					if (t) next = pc + 1 + ins.off
-				} else if (jmp32 && cls === 6 && [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd].includes(code)) {
+				} else if (jmp32 && cls === 6 && JCC_CODE[code]) {
 					const bb = ins.opc & 8 ? S : immU
 					const x = u32(D), y = u32(bb), sx32 = i32(D), sy32 = i32(bb)
 					let t: boolean
