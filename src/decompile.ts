@@ -100,26 +100,30 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // ---- phase 3: resolve discriminator-looking constants against the selector vocabulary ----
+  // (one walk over the expressions collects the constants and, for the Result layouts below, the
+  // compares: they visit the same expressions in the same order, and the niche / tag counts do not
+  // depend on the resolved names)
   const consts = new Set<bigint>();
-  for (const { f } of built.values()) for (const b of f.blocks) {
-    for (const s of b.stmts) stmtExprs(s).forEach(e => constsIn(e, consts));
-    if (b.term.k === 'br') constsIn(b.term.c, consts);
-  }
-  if (opts.sugar !== false) sem.resolveCandidates(consts);
   // Result<_, ProgramError> niche constants compared with == / != (see Semantics.noteResultCompares)
   const niche = new Map<bigint, number>();
-  const noteCmp = (e: Expr) => walkExpr(e, x => {
-    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const' && x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
-    // older layout: u32 variant tag (Ok = the number of ProgramError variants)
-    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.a.k === 'load' && x.a.size === 4 && x.b.k === 'const' && OK_TAGS.includes(x.b.v)) tags.set(x.b.v, (tags.get(x.b.v) ?? 0) + 1);
-  });
   const tags = new Map<bigint, number>();
   const tagStores = new Map<bigint, number>();
+  const note = (e: Expr) => walkExpr(e, x => {
+    if (x.k === 'const') consts.add(x.v);
+    else if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const') {
+      if (x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
+      // older layout: u32 variant tag (Ok = the number of ProgramError variants)
+      if (x.a.k === 'load' && x.a.size === 4 && OK_TAGS.includes(x.b.v)) tags.set(x.b.v, (tags.get(x.b.v) ?? 0) + 1);
+    }
+  });
   for (const { f } of built.values()) for (const b of f.blocks) {
-    for (const s of b.stmts) if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && OK_TAGS.includes(s.v.v)) tagStores.set(s.v.v, (tagStores.get(s.v.v) ?? 0) + 1);
-    for (const s of b.stmts) stmtExprs(s).forEach(noteCmp);
-    if (b.term.k === 'br') noteCmp(b.term.c);
+    for (const s of b.stmts) {
+      if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && OK_TAGS.includes(s.v.v)) tagStores.set(s.v.v, (tagStores.get(s.v.v) ?? 0) + 1);
+      stmtExprs(s).forEach(note);
+    }
+    if (b.term.k === 'br') note(b.term.c);
   }
+  if (opts.sugar !== false) sem.resolveCandidates(consts);
   sem.noteResultCompares(niche);
   sem.noteResultTags(tags, tagStores);
   const resultOut = sem.resultOkTag !== undefined && opts.sugar !== false ? resultOutParams(built, sem.resultOkTag) : new Set<number>();

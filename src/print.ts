@@ -188,10 +188,12 @@ export class Printer {
         if (e.op === 'set') return { t: `(${this.u(e.a, P.band)} & ${this.u(e.b, P.band + 1)}) != 0`, prec: P.eq };
         // print `<`/`<=` as `>`/`>=` with swapped operands (TS could read `a < b ... > (c)` as generics);
         // operand order only changes evaluation order, which matters only for calls
-        let hasCall = false;
-        walkExpr(e, x => { if (x.k === 'call') hasCall = true; });
         const SW: Record<string, CmpOp> = { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
-        if (SW[e.op] && !hasCall) e = { k: 'cmp', op: SW[e.op], a: e.b, b: e.a };
+        if (SW[e.op]) {
+          let hasCall = false;
+          walkExpr(e, x => { if (x.k === 'call') hasCall = true; });
+          if (!hasCall) e = { k: 'cmp', op: SW[e.op], a: e.b, b: e.a };
+        }
         const signed = e.op[0] === 's';
         const o = CMPS[e.op];
         const p = o === '==' || o === '!=' ? P.eq : P.rel;
@@ -279,8 +281,10 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
   const stmt = (s: Stmt, d: number) => {
     const n0 = out.length;
     stmt0(s, d);
-    const txt = out.slice(n0).join('\n');
-    if (/<<.*> \(/.test(txt)) { out.length = n0; pr.shlCall = true; stmt0(s, d); pr.shlCall = false; }
+    // (`.` stops at line ends: testing the new lines one by one is testing their joined text)
+    let risky = false;
+    for (let i = n0; i < out.length && !risky; i++) risky = out[i].includes('<<') && /<<.*> \(/.test(out[i]);
+    if (risky) { out.length = n0; pr.shlCall = true; stmt0(s, d); pr.shlCall = false; }
   };
   const stmt0 = (s: Stmt, d: number) => {
     switch (s.k) {

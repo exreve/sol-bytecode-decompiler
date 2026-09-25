@@ -344,7 +344,7 @@ export class Semantics {
 		if (len < 1n || len > 512n || ptr < 0x100n || !this.p.image.region(ptr, Number(len))) return undefined
 		const b = this.p.image.bytesAt(ptr, Number(len))
 		if (!b) return undefined
-		const s = new TextDecoder('utf-8', { fatal: false }).decode(b)
+		const s = UTF8.decode(b)
 		let printable = 0
 		for (const ch of s) if (ch >= ' ' && ch !== '\ufffd') printable++
 		return printable >= s.length * 0.9 ? s : undefined
@@ -374,10 +374,22 @@ export class Semantics {
 	header(): string { return '' }
 }
 
+// one decoder for all strAt calls (a non-streaming decode keeps no state between calls)
+const UTF8 = new TextDecoder('utf-8', { fatal: false })
+
 function looksRandom(v: bigint): boolean {
-	let pc = 0, x = v
-	while (x) { pc += Number(x & 1n); x >>= 1n }
-	return pc >= 18 && pc <= 46 && v > 0xffffffffffffn
+	// (the size test first: most constants are small; then the population count of the two 32-bit
+	// halves, the same count as bit by bit for values below 2^64)
+	if (!(v > 0xffffffffffffn)) return false
+	let pc = 0
+	if (v < 1n << 64n) pc = popcount32(Number(v & 0xffffffffn)) + popcount32(Number(v >> 32n))
+	else { let x = v; while (x) { pc += Number(x & 1n); x >>= 1n } }
+	return pc >= 18 && pc <= 46
+}
+function popcount32(x: number): number {
+	x = x - ((x >>> 1) & 0x55555555)
+	x = (x & 0x33333333) + ((x >>> 2) & 0x33333333)
+	return (Math.imul((x + (x >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24)
 }
 
 /** Address of the first occurrence of the UTF-8 bytes of `s` in program memory (regions in address order). */
