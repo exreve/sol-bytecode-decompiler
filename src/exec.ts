@@ -191,8 +191,13 @@ export class ExecMem extends TestMem {
 	}
 }
 
-export class Stop extends Error {}
-class Limit extends Error {}
+// (control flow only, caught by Exec.run: not Errors, whose stack traces are costly to capture)
+export class Stop {}
+class Limit {}
+
+/** A conditional branch of a run: the pc of its function's entry and its own pc, as one number. */
+export type BranchKey = number
+const branchKey = (fpc: number, pc: number): BranchKey => fpc * 0x400_0000 + pc
 
 export interface ExecResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; stopped?: boolean }
 
@@ -220,11 +225,11 @@ export class Exec {
 	 * flipped branch led to an error path (e.g. an Err return the caller then checks).
 	 */
 	flip = false
-	noFlip = new Set<string>()
+	noFlip = new Set<BranchKey>()
 	blamed = false
 	/** the branches flipped in the last run, in order */
-	flipped = new Set<string>()
-	private flipLog: string[] = []
+	flipped = new Set<BranchKey>()
+	private flipLog: BranchKey[] = []
 	/**
 	 * Control taint (bit 2, TaintHooks) from the branches whose other side is not explored: those in
 	 * noFlip, or every one ('all'), or those in noFlip in the run's function and every one in called
@@ -237,8 +242,8 @@ export class Exec {
 	 * such branches are sticky (what follows them is control-tainted).
 	 */
 	loopCap = 0
-	private branchCount = new Map<string, number>()
-	private capped = new Set<string>()
+	private branchCount = new Map<BranchKey, number>()
+	private capped = new Set<BranchKey>()
 	/** 1: the models of the PDA syscalls derive other bump seeds (so runs 0 and 1 disagree on them) */
 	variant = 0
 	private pdaCalls = 0
@@ -274,7 +279,7 @@ export class Exec {
 		const insns = this.p.insns
 		const forced = (pc: number) => !!reach && reach.has(pc + 1 + insns[pc].off) !== reach.has(pc + 1)
 		return {
-			sticky: pc => !forced(pc) && (this.sticky === 'all' || (this.sticky === 'callees' && depth > 0) || this.noFlip.has(`${fpc}:${pc}`) || this.capped.has(`${fpc}:${pc}`)),
+			sticky: pc => !forced(pc) && (this.sticky === 'all' || (this.sticky === 'callees' && depth > 0) || this.noFlip.has(branchKey(fpc, pc)) || this.capped.has(branchKey(fpc, pc))),
 			branch: (pc, taken, tainted) => {
 				if (forced(pc)) {
 					const dir = reach!.has(pc + 1 + insns[pc].off)
@@ -285,7 +290,7 @@ export class Exec {
 					}
 					return dir
 				}
-				const k = `${fpc}:${pc}`
+				const k = branchKey(fpc, pc)
 				if (this.loopCap && tainted) {
 					const n = (this.branchCount.get(k) ?? 0) + 1
 					this.branchCount.set(k, n)

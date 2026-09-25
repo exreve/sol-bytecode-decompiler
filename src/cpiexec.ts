@@ -15,7 +15,7 @@
 import type { Program } from './program.ts'
 import type { VarFunc } from './dataflow.ts'
 import { type Expr, exprEq } from './ir.ts'
-import { Exec, ExecMem, Stop } from './exec.ts'
+import { Exec, ExecMem, Stop, type BranchKey } from './exec.ts'
 import { KNOWN_KEYS, b58 } from './semantics.ts'
 import { type IxModel, type KeyText, type Acc, type CpiEnv } from './cpi.ts'
 
@@ -124,7 +124,7 @@ const eqBytes = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.eve
  * One run of the function at f.pc towards the call at sitePc; the instruction at the CPI syscall reached
  * from that call (undefined when none is reached, or it is malformed).
  */
-interface RunCtl { flip: boolean; noFlip: Set<string>; sticky: Exec['sticky']; blamed?: boolean; flipped?: string[]; flippedAfterCall?: string[]; limit?: boolean }
+interface RunCtl { flip: boolean; noFlip: Set<BranchKey>; sticky: Exec['sticky']; blamed?: boolean; flipped?: BranchKey[]; flippedAfterCall?: BranchKey[]; limit?: boolean }
 function runOnce0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl): Run | undefined {
 	const mem = new ExecMem(p, seed)
 	const sym = new Sym(mem)
@@ -259,7 +259,7 @@ function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteK
 	// B retried. Run A follows the inputs; values computed after branches whose other side B did not
 	// explore, and after any in called functions, are marked (taint bit 2: small numbers computed on two
 	// paths may still coincide, e.g. 0 from saturating arithmetic on the synthetic inputs).
-	let noFlip = new Set<string>()
+	let noFlip = new Set<BranchKey>()
 	let B: Run | undefined
 	for (let i = 0; i < 4 && !B; i++) {
 		const used = new Set(noFlip), c: RunCtl = { flip: true, noFlip: new Set(noFlip), sticky: 'noflip' }
