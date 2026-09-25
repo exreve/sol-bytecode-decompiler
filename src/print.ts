@@ -7,6 +7,14 @@ import { type Expr, type Stmt, type CallTarget, type CmpOp, walkExpr } from './i
 import type { Node } from './structure.ts';
 import type { VarFunc } from './dataflow.ts';
 import { maxBits } from './simplify.ts';
+import { b58 } from './semantics.ts';
+
+/** base58 of the 32-byte key whose little-endian 8-byte words are the given constants */
+export function keyB58(words: Expr[]): string {
+  const b = new Uint8Array(32);
+  words.forEach((w, i) => { const v = (w as { v: bigint }).v; for (let j = 0; j < 8; j++) b[i * 8 + j] = Number((v >> BigInt(8 * j)) & 0xffn); });
+  return b58(b);
+}
 
 export interface PrintCtx {
   fnName: (pc: number) => string;
@@ -14,6 +22,7 @@ export interface PrintCtx {
   sysName: (name: string) => string;
   constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
   strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
+  keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
   varName: (id: number) => string;
@@ -45,7 +54,6 @@ export class Printer {
   ctx: PrintCtx;
   addrDepth = 0;
   retTop: Expr | null = null;
-  ltCmp = 0; // > 0: print comparisons with `<`/`<=` (inside a shift amount, see 'cmp')
   constructor(ctx: PrintCtx) { this.ctx = ctx; }
 
   /** true if printing `e` yields a signed (possibly negative) intermediate value */
@@ -88,10 +96,9 @@ export class Printer {
         if (op === 'shl' || op === 'lshr') {
           const [o, p] = BIN[op];
           const amt = this.shiftAmt(e.b);
-          const l = this.u(e.a, p, false);
-          this.ltCmp++;
-          const r = this.u(amt, p + 1, false);
-          this.ltCmp--;
+          const l = this.u(e.a, p, false), r = this.u(amt, p + 1, false);
+          // `x << (… > (…))` can be misread by TypeScript as a generic call: use the function form
+          if (op === 'shl' && /[<>]/.test(r)) return { t: `shl(${this.u(e.a, P.assign, false)}, ${this.u(amt, P.assign, false)})`, prec: P.call };
           return { t: `${l} ${o} ${r}`, prec: p };
         }
         if (op === 'ashr') return { t: `sar(${joinArgs([this.u(e.a, 0), this.u(this.shiftAmt(e.b), 0)])})`, prec: P.call };
@@ -120,8 +127,7 @@ export class Printer {
         // operand order only changes evaluation order, which matters only for calls
         let hasCall = false;
         walkExpr(e, x => { if (x.k === 'call') hasCall = true; });
-        // (as a shift amount, `c << (5 > (y as i64))` would be misparsed the same way: use `<` there)
-        const SW: Record<string, CmpOp> = this.ltCmp ? { ugt: 'ult', uge: 'ule', sgt: 'slt', sge: 'sle' } : { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
+        const SW: Record<string, CmpOp> = { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
         if (SW[e.op] && !hasCall) e = { k: 'cmp', op: SW[e.op], a: e.b, b: e.a };
         const signed = e.op[0] === 's';
         const o = CMPS[e.op];
@@ -140,7 +146,12 @@ export class Printer {
       // arms in unsigned form: a signed literal/intermediate would compare mathematically in `x < (c ? -1 : y)`
       case 'sel': return { t: `${this.expr(e.c, P.cond + 1)} ? ${this.u(e.a, P.assign, false)} : ${this.u(e.b, P.assign, false)}`, prec: P.cond };
       case 'call': return { t: this.callText(e.t, e.args), prec: P.call };
-      case 'fn': return { t: `${e.name}(${joinArgs(e.args.map(x => this.u(x, P.assign)))})`, prec: P.call };
+      case 'fn':
+        if (e.name === 'keyeq') {
+          const nm = this.ctx.constComment((e.args[1] as { v: bigint }).v, 'value');
+          return { t: `keyeq(${this.u(e.args[0], P.assign)}, ${JSON.stringify(keyB58(e.args.slice(1)))}${nm && !nm.includes('[') ? ` /* ${nm} */` : ''})`, prec: P.call };
+        }
+        { const a = e.args.map(x => this.u(x, P.assign)); if (e.name === 'memeq') this.keyArgs(e.args, a); return { t: `${e.name}(${joinArgs(a)})`, prec: P.call }; }
     }
   }
 
@@ -158,6 +169,19 @@ export class Printer {
     return `(${this.expr(e, P.unary)} as i64)`;
   }
 
+  /** (rodata pointer, 32) argument pairs: show the 32 bytes as a base58 key (unless already named) */
+  keyArgs(args: Expr[], a: string[]) {
+    if (!this.ctx.keyAt) return;
+    for (let i = 0; i < args.length; i++) {
+      const x = args[i];
+      if (x.k !== 'const' || a[i].includes('/*') || a[i].startsWith('"')) continue;
+      const n = args[i + 1] ?? args[i + 2], m = args[i + 2];
+      if (!(n?.k === 'const' && n.v === 32n) && !(m?.k === 'const' && m.v === 32n)) continue;
+      const k = this.ctx.keyAt(x.v);
+      if (k) a[i] = `${a[i]} /* key ${k} */`;
+    }
+  }
+
   callText(t: CallTarget, args: Expr[]): string {
     if (this.ctx.dropUndefArgs) { let n = args.length; while (n > 0 && args[n - 1].k === 'undef') n--; args = args.slice(0, n); }
     const a = args.map(x => this.u(x, P.assign));
@@ -166,6 +190,7 @@ export class Printer {
       const x = args[i], y = args[i + 1];
       if (x.k === 'const' && y.k === 'const') { const str = this.ctx.strAt(x.v, y.v); if (str !== undefined) a[i] = JSON.stringify(str); }
     }
+    this.keyArgs(args, a);
     if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${joinArgs(a)})`;
     if (t.k === 'sys') return `${this.ctx.sysName(t.name)}(${joinArgs(a)})`;
     return `callx(${joinArgs([this.u(t.e, P.assign), ...a])})`;
@@ -195,8 +220,19 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         break;
       }
       case 'eval': out.push(`${I(d)}void ${pr.u(s.e, P.unary)}`); break;
-      case 'stores': { pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--; out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, ...s.vals.map(v => pr.u(v, P.assign))])})`); break; }
-      case 'copy': out.push(`${I(d)}copy${s.rev ? 'r' : ''}(${joinArgs([pr.u(s.dst, P.assign), pr.u(s.src, P.assign), fmtConst(BigInt(s.n))])})`); break;
+      case 'stores': {
+        pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--;
+        // four large constant words: a public key written in place
+        const key = pr.ctx.keyAt && s.size === 8 && s.vals.length === 4 && s.vals.every(v => v.k === 'const' && v.v > 1n << 48n) ? ` // key ${keyB58(s.vals)}` : '';
+        out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, ...s.vals.map(v => pr.u(v, P.assign))])})${key}`);
+        break;
+      }
+      case 'copy': {
+        const a = [pr.u(s.dst, P.assign), pr.u(s.src, P.assign), fmtConst(BigInt(s.n))];
+        pr.keyArgs([s.dst, s.src, { k: 'const', v: BigInt(s.n) }], a);
+        out.push(`${I(d)}copy${s.rev ? 'r' : ''}(${joinArgs(a)})`);
+        break;
+      }
       case 'trap': out.push(`${I(d)}trap(${JSON.stringify(s.msg)})`); break;
     }
   };

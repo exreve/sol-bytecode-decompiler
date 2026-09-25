@@ -138,12 +138,18 @@ export const INTRINSICS = {
   max: (a: bigint[]) => (a[0] > a[1] ? a[0] : a[1]),
   smin: (a: bigint[]) => (i64(a[0]) < i64(a[1]) ? a[0] : a[1]),
   smax: (a: bigint[]) => (i64(a[0]) > i64(a[1]) ? a[0] : a[1]),
+  sat_sub: (a: bigint[]) => (a[0] >= a[1] ? a[0] - a[1] : 0n),
 } satisfies Record<string, (a: bigint[]) => bigint>;
-/** Helpers that read memory (may fault like the loads they stand for): memeq(p, q, n) = the n bytes at p and q are
- *  equal, compared as ascending 8-byte words (word at p first), stopping at the first difference. */
-export type MemIntrinsic = 'memeq';
+/**
+ * Helpers that read memory (they may fault like the loads they stand for); both compare ascending
+ * 8-byte words, first word first, and stop at the first difference:
+ *   memeq(p, q, n)        the n bytes at p equal the n bytes at q
+ *   keyeq(p, c0, …, c3)   the 32 bytes at p equal the key whose little-endian words are c0..c3
+ *                         (printed as keyeq(p, "<base58>"))
+ */
+export type MemIntrinsic = 'memeq' | 'keyeq';
 export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic;
-export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq';
+export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq' || n === 'keyeq';
 const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
 
 export const NEG_CMP: Record<CmpOp, CmpOp | null> = {
@@ -191,7 +197,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
     else if (x.k === 'fn' && isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
-    else if (x.k === 'bin' && isDivOp(x.op) && !(x.b.k === 'const' && x.b.v !== 0n && !(x.op[0] === 's' && (x.b.v === M64 || BigInt.asIntN(32, x.b.v) === -1n)))) r.trap = true;
+    else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
   });
   return r;
 }
@@ -214,6 +220,13 @@ export function exprEq(a: Expr, b: Expr): boolean {
     case 'fn': { const c = b as typeof a; return a.name === c.name && a.args.length === c.args.length && a.args.every((x, i) => exprEq(x, c.args[i])); }
     case 'undef': return true;
   }
+}
+
+/** A constant divisor that can never trap (32-bit ops divide by the low 32 bits; signed ops trap on MIN / -1). */
+function safeDivisor(op: BinOp, b: Expr): boolean {
+  if (b.k !== 'const') return false;
+  if (op === 'sdiv32' || op === 'srem32') return BigInt.asUintN(32, b.v) !== 0n && BigInt.asIntN(32, b.v) !== -1n;
+  return b.v !== 0n && !(op[0] === 's' && b.v === M64);
 }
 
 export const isDivOp = (op: BinOp) => op === 'udiv' || op === 'urem' || op === 'sdiv' || op === 'srem' || op === 'sdiv32' || op === 'srem32';

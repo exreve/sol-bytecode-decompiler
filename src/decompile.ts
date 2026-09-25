@@ -4,8 +4,8 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr } from './ir.ts';
-import { Semantics, constsIn } from './semantics.ts';
+import { type Expr, type Stmt, walkExpr, INTRINSICS } from './ir.ts';
+import { Semantics, constsIn, NICHE } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
@@ -32,6 +32,9 @@ export interface Result {
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
+const HELPERS = new Set(['copy', 'copyr', 'sar', 'shl', 'sdiv', 'srem', 'sdiv32', 'srem32', 'mulhu', 'mulhs', 'trap', 'callx', 'undef', 'fp',
+  'memeq', 'keyeq', ...Object.keys(INTRINSICS)]);
+
 function* shortNames(): Generator<string> {
   const al = 'abcdefghijklmnopqrstuvwxyz';
   for (const c of 'fghijklmnopqrstuvwxyz') yield c;
@@ -50,6 +53,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   for (const [pc, info] of libs) if (info.lib && info.name) p.funcs.get(pc)!.name = info.name;
   for (const [pc, ix] of sem.ixNames) if (!libs.get(pc)?.lib) p.funcs.get(pc)!.name = `ix_${ix}`;
   nameThunks(p);
+  // names of the output language's own helpers stay unambiguous
+  for (const f of p.funcs.values()) if (HELPERS.has(f.name) || /^(ld|st)(8|16|32|64)$|^bswap(16|32|64)$/.test(f.name)) f.name += '_';
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
@@ -84,6 +89,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (b.term.k === 'br') constsIn(b.term.c, consts);
   }
   if (opts.sugar !== false) sem.resolveCandidates(consts);
+  // Result<_, ProgramError> niche constants compared with == / != (see Semantics.noteResultCompares)
+  const niche = new Map<bigint, number>();
+  const noteCmp = (e: Expr) => walkExpr(e, x => {
+    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const' && x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
+  });
+  for (const { f } of built.values()) for (const b of f.blocks) {
+    for (const s of b.stmts) stmtExprs(s).forEach(noteCmp);
+    if (b.term.k === 'br') noteCmp(b.term.c);
+  }
+  sem.noteResultCompares(niche);
 
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
@@ -155,6 +170,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
       strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
     };

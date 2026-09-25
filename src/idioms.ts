@@ -134,12 +134,14 @@ export function recognizeIdioms(f: VarFunc): boolean {
 //
 //   if (ld64(p) != ld64(q)) goto E; if (ld64(p + 8) != ld64(q + 8)) goto E; … (k words)
 //     ->  if (!memeq(p, q, 8k)) goto E
+//   if (ld64(p) != c0) goto E; … ; if (ld64(p + 24) != c3) goto E
+//     ->  if (!keyeq(p, "<base58 of c0..c3>")) goto E      (32-byte public key constant)
 //
-// (typically 32-byte public keys). memeq compares ascending 8-byte words and stops at the first
-// difference, so it performs the same loads as the chain, in the same order; the intermediate blocks
-// must be empty and reached only from the previous compare, and every exit must go to the same block
-// (or to an identical copy of it made by tail duplication). Address bases are call-free and are
-// evaluated once instead of once per word (nothing is stored in between).
+// memeq/keyeq compare ascending 8-byte words and stop at the first difference, so they perform the
+// same loads as the chain, in the same order; the intermediate blocks must be reached only from the
+// previous compare, and every exit must go to the same block (or to an identical copy of it made by
+// tail duplication). Address bases are call-free and are evaluated once instead of once per word
+// (nothing is stored in between).
 
 type Blk = VarFunc['blocks'][number]
 
@@ -154,14 +156,17 @@ const rep = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : 
 const body = (x: Blk) => JSON.stringify([x.stmts.map(s => ({ ...s, pc: 0 })), x.term], rep)
 const sameBody = (x: Blk, y: Blk) => x.id === y.id || body(x) === body(y)
 
-/** A word compare branch: [p, q, target if different, target if equal]. */
-function wordCompare(b: Blk): [Expr, Expr, number, number] | null {
+/** A word compare branch: ld64(p) against ld64(q) or a constant; targets if different / if equal. */
+interface WordCmp { p: Expr; q: Expr | null; c: bigint; differ: number; equal: number }
+function wordCompare(b: Blk): WordCmp | null {
 	const t = b.term
 	if (t.k !== 'br' || t.c.k !== 'cmp' || (t.c.op !== 'ne' && t.c.op !== 'eq') || t.t === t.f) return null
 	const { a, b: c } = t.c
-	if (a.k !== 'load' || c.k !== 'load' || a.size !== 8 || c.size !== 8) return null
-	if (hasSideEffectsOrMem(a.addr).call || hasSideEffectsOrMem(c.addr).call) return null
-	return t.c.op === 'ne' ? [a.addr, c.addr, t.t, t.f] : [a.addr, c.addr, t.f, t.t]
+	if (a.k !== 'load' || a.size !== 8 || hasSideEffectsOrMem(a.addr).call) return null
+	const [differ, equal] = t.c.op === 'ne' ? [t.t, t.f] : [t.f, t.t]
+	if (c.k === 'const') return { p: a.addr, q: null, c: c.v, differ, equal }
+	if (c.k !== 'load' || c.size !== 8 || hasSideEffectsOrMem(c.addr).call) return null
+	return { p: a.addr, q: c.addr, c: 0n, differ, equal }
 }
 
 function mergeWordCompares(f: VarFunc): boolean {
@@ -171,34 +176,36 @@ function mergeWordCompares(f: VarFunc): boolean {
 	for (const a of f.blocks) {
 		const w0 = wordCompare(a)
 		if (!w0) continue
-		const [p, q, err] = w0
-		const [pb, po] = splitAddr(p), [qb, qo] = splitAddr(q)
-		const chain: Blk[] = [a]
+		const err = w0.differ
+		const [pb, po] = splitAddr(w0.p), [qb, qo] = w0.q ? splitAddr(w0.q) : [null, 0n]
+		const chain: Blk[] = [a], consts = [w0.c]
 		const hoist: Stmt[] = [], errTargets = [err]
-		let ok = w0[3]
-		for (let k = 1; k < 8; k++) {
+		let ok = w0.equal
+		for (let k = 1; k < (w0.q ? 8 : 4); k++) {
 			const n = f.blocks[ok]
 			if (n.id === 0 || n.preds.length !== 1 || chain.includes(n)) break
 			const w = wordCompare(n)
-			if (!w || chain.some(c => c.id === w[2] || c.id === w[3]) || !sameBody(f.blocks[w[2]], f.blocks[err])) break
+			if (!w || !w.q !== !w0.q || chain.some(c => c.id === w.differ || c.id === w.equal) || !sameBody(f.blocks[w.differ], f.blocks[err])) break
 			const at = (x: Expr, base: Expr, off: bigint) => { const [b, o] = splitAddr(x); return exprEq(b, base) && o === BigInt.asUintN(64, off + BigInt(8 * k)) }
-			if (!(at(w[0], pb, po) && at(w[1], qb, qo))) break
+			if (!at(w.p, pb, po) || (qb && !at(w.q!, qb, qo))) break
 			// statements between compares (e.g. `flag = 0` before the last word) run before all loads
 			// instead: allowed when pure and assigning variables that no exit reads before redefining
 			// (so executing them on an early exit is unobservable) and that the addresses do not use
-			const errs = [...errTargets, w[2]]
-			const movable = (s: Stmt) => s.k === 'set' && isPureExpr(s.e) && !usesVar(pb, s.dst) && !usesVar(qb, s.dst) &&
+			const errs = [...errTargets, w.differ]
+			const movable = (s: Stmt) => s.k === 'set' && isPureExpr(s.e) && !usesVar(pb, s.dst) && !(qb && usesVar(qb, s.dst)) &&
 				!errs.some(e => isLive(e, s.dst))
 			if (!n.stmts.every(movable)) break
 			hoist.push(...n.stmts)
 			chain.push(n)
-			errTargets.push(w[2])
-			ok = w[3]
+			consts.push(w.c)
+			errTargets.push(w.differ)
+			ok = w.equal
 		}
-		if (chain.length < 2) continue
-		// a: memeq ? ok : err; the rest of the chain becomes unreachable
-		const last = chain[chain.length - 1]
-		const cond: Expr = { k: 'fn', name: 'memeq', args: [addAddr(pb, po), addAddr(qb, qo), { k: 'const', v: BigInt(8 * chain.length) }] }
+		if (chain.length < 2 || (!qb && chain.length !== 4)) continue
+		// a: memeq/keyeq ? ok : err; the rest of the chain becomes unreachable
+		const cond: Expr = qb
+			? { k: 'fn', name: 'memeq', args: [addAddr(pb, po), addAddr(qb, qo), { k: 'const', v: BigInt(8 * chain.length) }] }
+			: { k: 'fn', name: 'keyeq', args: [addAddr(pb, po), ...consts.map(v => ({ k: 'const', v }) as Expr)] }
 		for (const n of chain.slice(1)) {
 			const t = n.term as Extract<Blk['term'], { k: 'br' }>
 			for (const s of [t.t, t.f]) { const S = f.blocks[s]; const i = S.preds.indexOf(n.id); if (i >= 0) S.preds.splice(i, 1) }

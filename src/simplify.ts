@@ -36,9 +36,10 @@ export function maxBits(e: Expr): number {
     case 'fn':
       switch (e.name) {
         case 'popcount': case 'clz': case 'ctz': return 7;
-        case 'memeq': return 1;
+        case 'memeq': case 'keyeq': return 1;
         case 'min': return Math.min(maxBits(e.args[0]), maxBits(e.args[1]));
         case 'max': return Math.max(maxBits(e.args[0]), maxBits(e.args[1]));
+        case 'sat_sub': return maxBits(e.args[0]);
         default: return 64;
       }
     default: return 64;
@@ -46,7 +47,7 @@ export function maxBits(e: Expr): number {
 }
 
 const isPure = (e: Expr) => { const s = hasSideEffectsOrMem(e); return !s.load && !s.call && !s.trap; };
-const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n) || (e.k === 'fn' && e.name === 'memeq');
+const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n) || (e.k === 'fn' && (e.name === 'memeq' || e.name === 'keyeq'));
 
 export function negate(c: Expr): Expr {
   if (c.k === 'cmp') { const n = NEG_CMP[c.op]; if (n) return { ...c, op: n }; }
@@ -156,6 +157,8 @@ function simp1(e: Expr): Expr {
         }
       }
       if (op === 'set' && b.k === 'const' && ((b.v & (b.v - 1n)) === 0n) && a.k === 'bin' && a.op === 'and') return { k: 'cmp', op, a, b };
+      const cs = checkedSub(op, a, b);
+      if (cs) return cs;
       return { k: 'cmp', op, a, b };
     }
     case 'lnot': return negate(e.a);
@@ -171,6 +174,32 @@ function simp1(e: Expr): Expr {
       return e;
     default: return e;
   }
+}
+
+/**
+ * Borrow checks of a subtraction compare the difference with the minuend (`checked_sub`):
+ *   x - y > x   <=>  y > x     (the subtraction wraps exactly when y > x)
+ *   x - y <= x  <=>  y <= x
+ * and for a constant y = c != 0 (never equal to x then) also >= / <. Operands must be call-free
+ * (x is evaluated once instead of twice; a repeated load reads the same memory).
+ */
+function checkedSub(op: CmpOp, a: Expr, b: Expr): Expr | null {
+  // orient as (x - y) OP x
+  let d = a, x = b, o = op;
+  if (!subOf(d, x)) { d = b; x = a; o = SWAP_CMP[op]; }
+  const y = subOf(d, x);
+  if (!y || hasSideEffectsOrMem(d).call) return null;
+  const nz = y.k === 'const' && y.v !== 0n;
+  if (o === 'ugt' || (o === 'uge' && nz)) return { k: 'cmp', op: 'ugt', a: y, b: x };
+  if (o === 'ule' || (o === 'ult' && nz)) return { k: 'cmp', op: 'ule', a: y, b: x };
+  return null;
+}
+/** d = x - y: returns y (x - c appears as x + (-c)) */
+function subOf(d: Expr, x: Expr): Expr | null {
+  if (d.k !== 'bin' || !exprEq(d.a, x)) return null;
+  if (d.op === 'sub') return d.b;
+  if (d.op === 'add' && d.b.k === 'const' && BigInt.asIntN(64, d.b.v) < 0n) return C(u64(-d.b.v));
+  return null;
 }
 
 /**
@@ -201,6 +230,12 @@ function simpSel(e: Extract<Expr, { k: 'sel' }>): Expr {
     if (exprEq(a, x) && exprEq(b, y)) return { k: 'fn', name: mm[0], args: [x, y] };
     if (exprEq(a, y) && exprEq(b, x)) return { k: 'fn', name: mm[1], args: [x, y] };
   }
+  // y > x ? 0 : x - y  ->  sat_sub(x, y)   (x >= y ? x - y : 0 likewise)
+  const lt = op === 'ult' ? [x, y] : op === 'ugt' ? [y, x] : null;   // lt[0] < lt[1]
+  const ge = op === 'uge' ? [x, y] : op === 'ule' ? [y, x] : null;   // ge[0] >= ge[1]
+  const satArms = (d: Expr, z: Expr, m: Expr, s: Expr) => z.k === 'const' && z.v === 0n && subOf(d, m) !== null && exprEq(subOf(d, m)!, s);
+  if (lt && noCall(x) && noCall(y) && satArms(b, a, lt[0], lt[1])) return { k: 'fn', name: 'sat_sub', args: [lt[0], lt[1]] };
+  if (ge && noCall(x) && noCall(y) && satArms(a, b, ge[0], ge[1])) return { k: 'fn', name: 'sat_sub', args: [ge[0], ge[1]] };
   // x != 0 ? clz(x) : 64  ->  clz(x)   (clz/ctz of 0 is 64)
   if (op === 'ne' && y.k === 'const' && y.v === 0n && a.k === 'fn' && (a.name === 'clz' || a.name === 'ctz') && exprEq(a.args[0], x) &&
     b.k === 'const' && b.v === 64n && isPure(x)) return a;

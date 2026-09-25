@@ -38,6 +38,7 @@ declare function st64(a: u64, ...v: u64[]): void
 declare function copy(dst: u64, src: u64, n: u64): void
 declare function copyr(dst: u64, src: u64, n: u64): void
 declare function sar(x: u64, n: u64): u64
+declare function shl(x: u64, n: u64): u64 // x << n (function form, used where `<<` would parse ambiguously)
 declare function popcount(x: u64): u64 // number of 1 bits
 declare function clz(x: u64): u64 // leading zero bits of the 64-bit value (64 for 0)
 declare function ctz(x: u64): u64 // trailing zero bits (64 for 0)
@@ -46,7 +47,9 @@ declare function min(a: u64, b: u64): u64 // unsigned
 declare function max(a: u64, b: u64): u64 // unsigned
 declare function smin(a: u64, b: u64): u64 // signed (i64) minimum
 declare function smax(a: u64, b: u64): u64 // signed (i64) maximum
+declare function sat_sub(a: u64, b: u64): u64 // a >= b ? a - b : 0
 declare function memeq(p: u64, q: u64, n: u64): boolean // n bytes at p == n bytes at q (ascending 8-byte words, stops at first difference)
+declare function keyeq(p: u64, key: string): boolean // 32 bytes at p == the base58 public key (same word-wise comparison)
 declare function sdiv(a: u64, b: u64): u64
 declare function srem(a: u64, b: u64): u64
 declare function trap(msg: string): never

@@ -38,9 +38,13 @@ function randExpr(R: () => bigint, depth: number): Expr {
 		if (m === 0n) return { k: 'sel', c: randExpr(R, depth + 1), a: randExpr(R, depth + 1), b: randExpr(R, depth + 1) }
 		if (m === 1n) { // select shapes the simplifier rewrites (min/max, flags, clz guards)
 			const x = randExpr(R, depth + 2), y = R() % 2n ? randExpr(R, depth + 2) : { k: 'const', v: [0n, 1n, 64n][Number(R() % 3n)] } as Expr
-			const c: Expr = { k: 'cmp', op: CMPS[Number(R() % BigInt(CMPS.length))], a: x, b: y }
-			const arms: Expr[] = [x, y, { k: 'const', v: 0n }, { k: 'const', v: 1n }, { k: 'const', v: 64n }, { k: 'fn', name: 'clz', args: [x] }, { k: 'fn', name: 'ctz', args: [x] }]
-			return { k: 'sel', c, a: arms[Number(R() % 7n)], b: arms[Number(R() % 7n)] }
+			const d: Expr = { k: 'bin', op: 'sub', a: x, b: y }
+			const sides = [[x, y], [y, x], [d, x], [x, d]]
+			const [ca, cb] = sides[Number(R() % 4n)]
+			const c: Expr = { k: 'cmp', op: CMPS[Number(R() % BigInt(CMPS.length))], a: ca, b: cb }
+			const arms: Expr[] = [x, y, { k: 'const', v: 0n }, { k: 'const', v: 1n }, { k: 'const', v: 64n }, { k: 'fn', name: 'clz', args: [x] }, { k: 'fn', name: 'ctz', args: [x] }, d]
+			if (R() % 3n === 0n) return c
+			return { k: 'sel', c, a: arms[Number(R() % 8n)], b: arms[Number(R() % 8n)] }
 		}
 		const name = FNS[Number(R() % BigInt(FNS.length))]
 		return { k: 'fn', name, args: INTRINSIC_ARITY[name] === 1 ? [randExpr(R, depth + 1)] : [randExpr(R, depth + 1), randExpr(R, depth + 1)] }
@@ -96,6 +100,30 @@ function fuzz(seed: number) {
 	}
 	assert.ok(checked > 5000)
 }
+
+test('keyeq / memeq print and evaluate as word-wise memory comparisons', () => {
+	const R = rng(7)
+	const pr = new Printer({ fnName: () => 'f', fnAddrName: () => undefined, sysName: n => n, constComment: () => undefined, varName: id => 'abc'[id] })
+	for (let i = 0; i < 200; i++) {
+		// keys with leading zero bytes exercise base58 '1' prefixes
+		const words = [0, 1, 2, 3].map(k => (k === 0 && i % 4 === 0 ? R() >> BigInt(8 * (1 + (i % 7))) : R()))
+		const p = 0x3_0000_0000n + (R() % 0x100n) * 8n, q = p + 0x1000n
+		const flip = i % 5 === 4 ? -1 : i % 5 // byte group to corrupt (-1: none)
+		const mem = new TestMem(new Image([]), 1, [])
+		words.forEach((w, k) => { mem.store(p + BigInt(8 * k), 8, w); mem.store(q + BigInt(8 * k), 8, w) })
+		if (flip >= 0) mem.store(q + BigInt(8 * flip + (i % 8)), 1, (mem.load(q + BigInt(8 * flip + (i % 8)), 1) + 1n) & 0xffn)
+		const want = flip < 0 ? 1n : 0n
+		const exprs: Expr[] = [
+			{ k: 'fn', name: 'keyeq', args: [{ k: 'var', id: 1 }, ...words.map(v => ({ k: 'const', v }) as Expr)] },
+			{ k: 'fn', name: 'memeq', args: [{ k: 'var', id: 0 }, { k: 'var', id: 1 }, { k: 'const', v: 32n }] },
+		]
+		for (const e of exprs) {
+			const src = `function t(a: u64, b: u64, c: u64): u64 {\n\treturn ${pr.u(e, 2)}\n}`
+			const r = runFunction(parseFunctions(src).get('t')!, [p, q, 0n], { mem, onCall: () => 0n, fp: 0n, fnAddr: new Map(), fnTarget: new Map(), sysTarget: new Map(), maxSteps: 100 })
+			assert.equal(r.ret, want, src)
+		}
+	}
+})
 
 for (const f of ['memo', 'token', 'ata']) {
 	test(`decompiled ${f}.so is equivalent to the bytecode (random differential testing)`, () => {

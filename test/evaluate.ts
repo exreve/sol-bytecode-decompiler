@@ -21,6 +21,20 @@ export interface EvalEnv {
 	maxSteps: number
 }
 
+/** 32 bytes denoted by a base58 string (leading '1's are leading zero bytes). */
+function base58Decode(s: string): number[] {
+	const A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+	let n = 0n
+	for (const ch of s) { const d = A.indexOf(ch); if (d < 0) throw new EvalError('bad base58 ' + s); n = n * 58n + BigInt(d) }
+	const out: number[] = []
+	for (let i = 0; i < 32; i++) { out.unshift(Number(n & 0xffn)); n >>= 8n }
+	if (n !== 0n) throw new EvalError('base58 key longer than 32 bytes: ' + s)
+	let zeros = 0
+	while (s[zeros] === '1') zeros++
+	for (let i = 0; i < zeros; i++) if (out[i] !== 0) throw new EvalError('bad base58 leading zeros: ' + s)
+	return out
+}
+
 export function parseFunctions(src: string): Map<string, ts.FunctionDeclaration> {
 	const sf = ts.createSourceFile('out.ts', src, ts.ScriptTarget.ES2022, true)
 	const diags = (sf as any).parseDiagnostics as ts.Diagnostic[]
@@ -92,6 +106,8 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 			case 'max': return W(a[0]) > W(a[1]) ? W(a[0]) : W(a[1])
 			case 'smin': return BigInt.asIntN(64, a[0]) < BigInt.asIntN(64, a[1]) ? W(a[0]) : W(a[1])
 			case 'smax': return BigInt.asIntN(64, a[0]) > BigInt.asIntN(64, a[1]) ? W(a[0]) : W(a[1])
+			case 'sat_sub': return W(a[0]) >= W(a[1]) ? W(a[0]) - W(a[1]) : 0n
+			case 'shl': if (W(a[1]) > 63n) throw new EvalError('shift amount out of range'); return W(a[0] << W(a[1]))
 			case 'memeq': {
 				for (let o = 0n; o < W(a[2]); o += 8n) if (env.mem.load(W(a[0] + o), 8) !== env.mem.load(W(a[1] + o), 8)) return 0n
 				return 1n
@@ -133,6 +149,18 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 		}
 		if (ts.isCallExpression(e)) {
 			const name = e.expression.getText()
+			if (name === 'keyeq') {
+				// keyeq(p, "<base58>"): 32 bytes at p == the key, compared as ascending 8-byte words
+				const p = ev(e.arguments[0]), lit = e.arguments[1]
+				if (!ts.isStringLiteral(lit)) throw new EvalError('keyeq needs a base58 literal')
+				const key = base58Decode(lit.text)
+				for (let i = 0; i < 4; i++) {
+					let w = 0n
+					for (let j = 7; j >= 0; j--) w = (w << 8n) | BigInt(key[i * 8 + j])
+					if (env.mem.load(W(p + BigInt(8 * i)), 8) !== w) return 0n
+				}
+				return 1n
+			}
 			return call(name, e.arguments.map(ev))
 		}
 		if (ts.isConditionalExpression(e)) return truth(ev(e.condition)) ? ev(e.whenTrue) : ev(e.whenFalse)
