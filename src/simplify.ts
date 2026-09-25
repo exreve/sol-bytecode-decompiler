@@ -204,8 +204,6 @@ export function simplifyCond(e: Expr): Expr {
 
 // ---------------- function-level passes ----------------
 
-interface DefSite { b: number; i: number } // i = stmt index
-
 function substVars(e: Expr, m: Map<number, Expr>): Expr {
   let hit = false;
   walkExpr(e, x => { if (x.k === 'var' && m.has(x.id)) hit = true; });
@@ -312,24 +310,11 @@ function countUses(f: VarFunc): Int32Array {
   return uses;
 }
 
-function defSites(f: VarFunc): { sites: DefSite[][]; } {
-  const sites: DefSite[][] = f.vars.map(() => []);
-  for (const b of f.blocks) b.stmts.forEach((s, i) => {
-    if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) sites[s.dst].push({ b: b.id, i });
-  });
-  return { sites };
-}
-
-/** Number of definitions of each variable (= defSites(f).sites[v].length). */
+/** Number of definitions of each variable. */
 function defCounts(f: VarFunc): Int32Array {
   const nd = new Int32Array(f.vars.length);
   for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) nd[s.dst]++;
   return nd;
-}
-
-/** A var is "SSA-like" if it has exactly one definition and is not a parameter/implicit input. */
-function singleDef(f: VarFunc, sites: DefSite[][], v: number) {
-  return sites[v].length === 1 && f.vars[v].param < 0 && !f.vars[v].undef;
 }
 
 const isCheap = (e: Expr) => exprSize(e) <= 3 && isPure(e);
@@ -376,27 +361,32 @@ export function optimizeFunc(f: VarFunc) {
 
 /** Substitute single-def vars whose definition is a cheap pure expression over single-def vars / constants. */
 function propagateGlobal(f: VarFunc, st: { real: boolean }): boolean {
-  const { sites } = defSites(f);
+  // definition count and first definition of each variable (all that was used of its def sites)
+  const nd = new Int32Array(f.vars.length);
+  const firstDef: (Stmt | undefined)[] = new Array(f.vars.length);
+  for (const b of f.blocks) for (const s of b.stmts) {
+    if ((s.k === 'set' || s.k === 'call') && s.dst >= 0 && nd[s.dst]++ === 0) firstDef[s.dst] = s;
+  }
+  // "SSA-like": exactly one definition and not a parameter/implicit input
+  const singleDef = (v: number) => nd[v] === 1 && f.vars[v].param < 0 && !f.vars[v].undef;
   const m = new Map<number, Expr>();
   // iterate to allow chains
   const candidates: number[] = [];
   for (let v = 0; v < f.vars.length; v++) {
-    if (!singleDef(f, sites, v)) continue;
-    const { b, i } = sites[v][0];
-    const s = f.blocks[b].stmts[i];
+    if (!singleDef(v)) continue;
+    const s = firstDef[v]!;
     if (s.k !== 'set' || !isCheap(s.e)) continue;
     candidates.push(v);
   }
   const ok = (e: Expr): boolean => {
     let good = true;
     walkExpr(e, x => {
-      if (x.k === 'var' && !(singleDef(f, sites, x.id) || f.vars[x.id].param >= 0 && sites[x.id].length === 0)) good = false;
+      if (x.k === 'var' && !(singleDef(x.id) || f.vars[x.id].param >= 0 && nd[x.id] === 0)) good = false;
     });
     return good;
   };
   for (const v of candidates) {
-    const { b, i } = sites[v][0];
-    const s = f.blocks[b].stmts[i] as Extract<Stmt, { k: 'set' }>;
+    const s = firstDef[v] as Extract<Stmt, { k: 'set' }>;
     if (ok(s.e)) m.set(v, s.e);
   }
   if (!m.size) return false;
