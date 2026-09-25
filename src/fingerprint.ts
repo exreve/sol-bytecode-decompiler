@@ -2,6 +2,7 @@
 // many unrelated programs (Rust core/alloc, solana-program, borsh, anchor-lang, spl, ...).
 import { createHash } from 'node:crypto'
 import type { Program, Func } from './program.ts'
+import { b58 } from './semantics.ts'
 
 export interface FnPrint { hash: string; insns: number; strings: string[] }
 
@@ -62,4 +63,142 @@ export function previewString(p: Program, addr: bigint, max = 48): string | unde
 		s += String.fromCharCode(c)
 	}
 	return s.length >= 4 ? s : undefined
+}
+
+// ---- function signatures for program diffing (src/diff.ts) and security/fingerprints.json ----
+
+/**
+ * Per-function signature, computed from the bytecode alone:
+ *   hash     address-independent code hash: call targets (internal -> F, syscalls by name), text and
+ *            rodata addresses (-> T / A) normalized; jump offsets (relative) and other immediates kept
+ *   regfree  the same with registers renamed in order of first use (register allocation-insensitive)
+ *   data     hash of the constants at the rodata addresses the code refers to (see constantAt)
+ *   fuzzy    coarse shape: instructions, blocks, CFG edges and an opcode-class histogram (OP_CLASSES)
+ */
+export interface FnSig { pc: number; insns: number; toks: string[]; consts: string[]; hash: string; regfree: string; data: string; fuzzy: string; hist: number[]; blocks: number; edges: number; calls: number[]; sys: string[] }
+
+/** Opcode classes of the fuzzy histogram. */
+export const OP_CLASSES = ['ldx', 'st', 'lddw', 'addsub', 'muldiv', 'bitop', 'shift', 'mov', 'alu_other', 'jeq', 'jcc', 'ja', 'call', 'syscall', 'callx', 'exit']
+function opClass(opc: number, sys: boolean): number {
+	if (opc === 0x18) return 2
+	if (opc === 0x85) return sys ? 13 : 12
+	if (opc === 0x8d) return 14
+	if (opc === 0x95) return 15
+	const cls = opc & 7, op = opc >> 4
+	if (cls === 0 || cls === 1) return 0
+	if (cls === 2 || cls === 3) return 1
+	if (cls === 5 || cls === 6) return op === 0 ? 11 : op === 1 || op === 5 ? 9 : 10
+	switch (op) {
+		case 0: case 1: return 3
+		case 2: case 3: case 9: return 4
+		case 4: case 5: case 10: return 5
+		case 6: case 7: case 12: return 6
+		case 11: return 7
+		default: return 8
+	}
+}
+/**
+ * The constant a rodata reference designates, as far as it is layout-independent: the first 16
+ * characters of a text, or 32 raw bytes (a key, a table); nothing for structured data holding
+ * pointers (panic locations, vtables: they change with the layout).
+ */
+function constantAt(p: Program, bytes: Uint8Array, o: number): string {
+	const w = bytes.subarray(o, o + 32)
+	let txt = 0
+	while (txt < w.length && w[txt] >= 0x20 && w[txt] < 0x7f) txt++
+	if (txt >= 4) return JSON.stringify(Buffer.from(w.subarray(0, Math.min(txt, 16))).toString('latin1'))
+	for (let k = 0; k + 8 <= w.length; k += 8) {
+		const v = Buffer.from(w.buffer, w.byteOffset + k, 8).readBigUInt64LE(0)
+		if (v >> 32n >= 1n && v >> 32n <= 4n && p.image.region(v)) return ''
+	}
+	return w.length === 32 ? b58(w) : Buffer.from(w).toString('hex')
+}
+/** Instructions that read a source register (ldx, stx, register-operand alu/jmp). */
+const usesSrc = (opc: number) => { const cls = opc & 7; return cls === 1 || cls === 3 || (cls >= 4 && (opc & 8) !== 0 && opc !== 0x85 && opc !== 0x8d && opc !== 0x95) }
+
+export function signature(p: Program, f: Func): FnSig {
+	const pcs = funcPcs(f)
+	const targets = new Map<number, { k: string; name?: string; pc?: number }>()
+	let edges = 0
+	for (const b of f.blocks) {
+		edges += b.succs.length
+		for (const s of b.stmts) if (s.k === 'call') targets.set(s.pc, s.t)
+	}
+	const textLo = p.textVaddr, textHi = p.textVaddr + BigInt(p.insns.length * 8)
+	const lddw = p.version !== 2
+	const toks: string[] = [], rf: string[] = [], consts: string[] = []
+	const hist = new Array<number>(OP_CLASSES.length).fill(0)
+	const ren = new Map<number, number>([[10, 10]])
+	const reg = (r: number) => { let x = ren.get(r); if (x === undefined) ren.set(r, (x = ren.size - 1)); return x }
+	const calls: number[] = [], sys = new Set<string>()
+	let n = 0
+	for (let k = 0; k < pcs.length; k++) {
+		const pc = pcs[k], i = p.insns[pc]
+		let imm: string | number = i.imm, hi = 0
+		const t = i.opc === 0x85 ? targets.get(pc) : undefined
+		if (i.opc === 0x85) {
+			if (t?.k === 'sys') { imm = 'S:' + t.name; sys.add(t.name!) }
+			else if (t?.k === 'fn') { imm = 'F'; calls.push(t.pc!) }
+		} else if (i.opc === 0x18 && lddw) {
+			const nx = p.insns[pc + 1]
+			const v = nx ? (BigInt(nx.imm >>> 0) << 32n) | BigInt(i.imm >>> 0) : 0n
+			if (v >= textLo && v < textHi) imm = 'T'
+			else {
+				const r = p.image.region(v)
+				if (r && !r.exec) {
+					imm = 'A'
+					const c = constantAt(p, r.bytes, Number(v - r.vaddr))
+					if (c) consts.push(c)
+				} else hi = nx?.imm ?? 0
+			}
+			if (pcs[k + 1] === pc + 1) k++ // second slot of lddw
+		}
+		hist[opClass(i.opc, t?.k === 'sys')]++
+		n++
+		const off = i.opc === 0x85 ? 0 : i.off
+		toks.push(`${i.opc},${i.dst},${i.src},${off},${imm},${hi}`)
+		const dst = i.opc === 0x85 || i.opc === 0x95 || i.opc === 0x05 ? i.dst : reg(i.dst)
+		rf.push(`${i.opc},${dst},${usesSrc(i.opc) ? reg(i.src) : i.src},${off},${imm},${hi}`)
+	}
+	const h = (a: string[]) => createHash('sha1').update(a.join(';')).digest('hex').slice(0, 16)
+	return {
+		pc: f.pc, insns: n, hash: h(toks), regfree: h(rf), data: consts.length ? h(consts) : '', toks, consts,
+		fuzzy: `${n}i ${f.blocks.length}b ${edges}e ${hist.join('.')}`, hist, blocks: f.blocks.length, edges, calls, sys: [...sys].sort(),
+	}
+}
+
+/** Similarity of two functions' coarse shapes, 0..1 (1: same opcode-class histogram, CFG size and syscalls). */
+export function fuzzySim(a: FnSig, b: FnSig): number {
+	let d = 0, t = 0
+	for (let k = 0; k < a.hist.length; k++) { d += Math.abs(a.hist[k] - b.hist[k]); t += a.hist[k] + b.hist[k] }
+	const ratio = (x: number, y: number) => (x === y ? 1 : Math.min(x, y) / Math.max(x, y))
+	return (t ? 1 - d / t : 1) * 0.6 + ratio(a.blocks, b.blocks) * 0.15 + ratio(a.edges, b.edges) * 0.15 + (a.sys.join() === b.sys.join() ? 0.1 : 0.05)
+}
+
+/** Program-level hash: the multiset of (code hash, constants hash) of the given functions. */
+export function codeHash(sigs: Iterable<FnSig>): string {
+	return createHash('sha1').update([...sigs].map(s => `${s.hash}:${s.data}`).sort().join('\n')).digest('hex').slice(0, 16)
+}
+
+/** security/fingerprints.json: one line per function, in address order. */
+export function renderFingerprints(p: Program, sigs: Map<number, FnSig>, lib: Set<number>, instructions: (pc: number) => string[]): string {
+	const all = [...sigs.values()].sort((a, b) => a.pc - b.pc)
+	const user = all.filter(s => !lib.has(s.pc))
+	const head = {
+		sbpf: p.version, functions: all.length, library: all.length - user.length,
+		codeHash: codeHash(all), userCodeHash: codeHash(user),
+		about: 'address-independent function hashes (bytecode only): hash = code with call targets, text/rodata addresses normalized; regfree = same, registers renamed; data = constants the code refers to in rodata (texts, 32-byte keys/tables; absent: none); fuzzy = "<insns>i <blocks>b <edges>e <opcode-class histogram: ' + OP_CLASSES.join('.') + '>"; codeHash = hash of the set of (hash, data). Compare programs with src/diff.ts',
+	}
+	const rows = all.map(s => JSON.stringify({
+		pc: s.pc, addr: '0x' + (p.textVaddr + BigInt(s.pc * 8)).toString(16), name: p.funcs.get(s.pc)?.name, lib: lib.has(s.pc) || undefined,
+		instructions: instructions(s.pc).length ? instructions(s.pc) : undefined, hash: s.hash, regfree: s.regfree, data: s.data || undefined, fuzzy: s.fuzzy, size: s.insns,
+	}))
+	return `{"program": ${JSON.stringify(head)},\n"functions": [\n${rows.join(',\n')}\n]}\n`
+}
+
+/** Signatures of every function of the program, by entry pc. */
+export function signatures(p: Program): Map<number, FnSig> {
+	const out = new Map<number, FnSig>()
+	for (const f of p.funcs.values()) out.set(f.pc, signature(p, f))
+	return out
 }

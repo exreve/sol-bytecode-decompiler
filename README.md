@@ -49,6 +49,20 @@ node src/selector.ts 0xc88775e1919ec6f8     # discriminator -> name   (i:swap)
 node src/selector.ts open_position          # name -> instruction / account / event discriminators
 ```
 
+Program diff / fork matching (bytecode only, no decompilation: ~0.2 s for 10k instructions, ~2 s for 250k):
+
+```
+node src/diff.ts old.so new.so [--idl-a a.json --idl-b b.json] [--all]
+```
+
+It prints a verdict (`same code (e.g. redeployed at a new address)`, `same program code; toolchain/library version
+changed`, `same program, modified`, `related programs (fork family / shared code base)`, `different programs`), the
+share of user code identical / near-identical, instruction arms added / removed (instruction logs, Anchor
+discriminators, IDL), library differences as one line, and the user functions changed / added / removed with the
+instructions whose handlers reach them. Functions are matched by address-independent hash, then register-renamed
+hash, handler/symbol name, then coarse shape + call-graph neighbourhood; "constants only" changes show the
+differing rodata constants (keys in base58, texts).
+
 Speed (8-core VM): memo 0.6 s, token-2022 2.2 s, whirlpool (173k instructions) 3.7 s,
 jupiter (258k instructions) 5.6 s.
 
@@ -147,7 +161,8 @@ ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
 bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
-security/       program analysis: summary.md (read first), <ix>.md per instruction, analysis.json (see below)
+security/       program analysis: summary.md (read first), <ix>.md per instruction, analysis.json (see below);
+                fingerprints.json: per-function address-independent hashes (see Program diff)
 ```
 
 **Security analysis** (`security/`, phase 1 of [docs/ANALYSIS_SPEC.md](docs/ANALYSIS_SPEC.md)), computed from the
@@ -477,5 +492,6 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/exec.ts`, `src/cpiexec.ts` | concrete runs with every call followed and input taint (analysis only); CPIs described from them |
 | `src/compact.ts` | store/copy run compaction |
 | `src/print.ts`, `src/layout.ts` | TypeScript printer, output layout |
-| `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition |
+| `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition, function signatures (hash / register-free hash / constants / fuzzy shape) |
+| `src/diff.ts` | program diff and fork matching from function signatures |
 | `src/builtins.ts` | u128 compiler builtins named by behavior (library stubs) |

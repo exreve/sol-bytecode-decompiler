@@ -14,6 +14,7 @@ import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
+import { signatures, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
@@ -48,6 +49,8 @@ export interface Result {
   facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
   tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
   programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
+  sigs: Map<number, FnSig>;        // per-function signatures of the lifted bytecode (fingerprint.ts), by function pc
+  libPcs: Set<number>;             // recognized library functions
 }
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
@@ -71,6 +74,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const sem = new Semantics(p, opts.idl);
   setFoldImage(DISABLED.has('rofold') ? null : p.image);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
+  const sigs = signatures(p); // (before the later phases reshape the blocks)
   // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior, see builtins.ts)
   {
     const taken = new Set([...libs.values()].map(i => i.name).filter(Boolean));
@@ -1105,7 +1109,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)) };
   res.text = renderSingle(res);
   return res;
 }
