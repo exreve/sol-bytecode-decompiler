@@ -165,15 +165,18 @@ security/       program analysis: summary.md (read first), <ix>.md per instructi
                 fingerprints.json: per-function address-independent hashes (see Program diff)
 ```
 
-**Security analysis** (`security/`, phases 1–2 of [docs/ANALYSIS_SPEC.md](docs/ANALYSIS_SPEC.md)), computed from the
+**Security analysis** (`security/`, phases 1–3 of [docs/ANALYSIS_SPEC.md](docs/ANALYSIS_SPEC.md)), computed from the
 same IR in the same run: `summary.md` starts with ranked findings of a small rule engine, then ranks the instructions by sensitivity (value movement, PDA signing, CPIs to
 account-supplied programs, authority / state writes, closes) with their effects and what to look at first;
 `<ix>.md` has the account privilege matrix (signer / writable / owner / executable / address: what the IDL
 expects, and whether the code checks it), the constraints per account, CPIs (program, instruction, accounts,
 signer seeds), PDAs, account writes, which checks dominate each sensitive operation (and paths around the ones
 that do not), who enables it (signers, stored authority fields and the instructions writing them, PDA
-signatures), key/field relations, caller-controlled vs validated values, and every recognized check, each linked
-to `bundle/<ix>.ts:<line>`;
+signatures), key/field relations, caller-controlled vs validated values, per-operation proof trees (the properties
+expected for the operation's kind, each found / not found), path conditions, authorization chains back to the
+signers, checked vs wrapping arithmetic on value paths and divisions by supply-like values, and every recognized
+check, each linked to `bundle/<ix>.ts:<line>`; `summary.md` also has a state-machine table (status-like fields:
+which instructions set them, which check them);
 `analysis.json` has all of it (schema in `src/analysis/report.ts`). Statuses: `found` (dominates every
 sensitive operation; else on every non-failing path), `partial` (some), `not_found` (none recognized — not a proof of absence), `runtime` (enforced by
 Solana, e.g. a written account must be writable). Derived and over-approximate: the `.ts` code is the verified
@@ -491,6 +494,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/analysis/report.ts` | per-instruction analysis (privileges, constraints, operations, ranking) and the security/ files |
 | `src/analysis/flow.ts` | IR-level analysis: CFG dominators, Anchor exit writes, native dispatch split and accounts, function pointers |
 | `src/analysis/phase2.ts` | dominance across calls, trust, parameter sources, relations, authority graph, rule engine |
+| `src/analysis/phase3.ts` | path conditions, authorization chains, arithmetic, divisions, proof trees, state machine (bounded, read off the printed code) |
 | `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |

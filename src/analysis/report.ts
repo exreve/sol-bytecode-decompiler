@@ -41,7 +41,14 @@
 //     trust:     [ { value (<account>.key | <account>.data | ix.<arg>), trust ('caller-controlled' | 'validated' | 'partially-validated' | 'runtime'), evidence } ],
 //     relations: [ { a, b, kind ('key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'), status, at } ],
 //     authority: [ { operation (index), kind, enabled_by: [ { kind ('signer' | 'stored' | 'pda' | 'none'), what, status?, writtenBy? } ] } ],
+//     path_conditions: [ { operation (index), conditions: [ { at, cond, holds (false: the path needs it not to hold), how ('branch' | 'exit-check' | 'loop'), check? (id) } ],
+//                          not_required: [ { check, path? } ] (relevant checks some path to it does not make), truncated? } ]            (phase3.ts)
+//     auth_chains: [ { operation, chains: [ [ { kind ('op' | 'signer' | 'pda' | 'stored' | 'writer' | 'none'), what, status? } ] ] } ]
+//     arithmetic: [ { at, operation?, target, expr, kind ('add' | 'sub'), status ('checked' | 'saturating' | 'unchecked'), guard?: { at, cond }, caller_controlled?, unnamed_field? } ]
+//     divisions:  [ { at, expr, divisor (with its definitions), status ('checked' | 'not_found'), guard? } ]
+//     proof:      [ { operation, kind, properties: [ { prop, status, evidence } ] } ]   (per-operation property checklist)
 //   } ]
+//   state_machine [ { field (account.field), set_by: [ { ix, value, at } ], checked_by: [ { ix, cond, at } ] } ]: status-like fields
 //   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low'), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
 //   authority_fields [ { field, writtenBy: [ix] } ]: stored fields written by an AUTHORITY_WRITE
 //   pdas         [ { seeds, program, derived_in: [ix], signs_in: [ix], accounts: [ix.account with a seeds constraint], compared: status } ]
@@ -57,6 +64,7 @@ import { refOf } from './facts.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup } from './flow.ts'
 import type { Expr } from '../ir.ts'
+import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -95,6 +103,11 @@ export interface IxOut {
 	trust?: TrustRow[]
 	relations?: Relation[]
 	authority?: AuthorityRow[]
+	paths?: PathInfo[]   // phase 3 (phase3.ts)
+	chains?: Chain[]
+	arith?: ArithSite[]
+	divs?: DivSite[]
+	proof?: Proof[]
 }
 export interface IxCtx { handler: number; parents: Map<number, { fn: number; pc?: number; ret?: Expr }>; allowed?: (fn: number, b: number) => boolean; restricted?: Set<number> }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
@@ -107,6 +120,7 @@ export interface Analysis {
 	unattributed: OpOut[] // operations in functions no instruction handler reaches through direct calls
 	findings?: Finding[]  // phase 2 rule engine (phase2.ts)
 	authorityFields?: { field: string; writtenBy: string[] }[]
+	states?: StateField[] // phase 3 state machine (phase3.ts)
 }
 
 /** Sensitivity weights (ranking of the instruction surface). */
@@ -400,7 +414,13 @@ export function renderJson(a: Analysis, where: Where): string {
 				guarded_by: o.guards, bypass: o.bypass?.map(b => ({ check: b.check, path: b.path.map(x => L(ix.name, x)) })), sources: o.sources,
 			})),
 			trust: ix.trust, relations: ix.relations?.map(x => ({ ...x, at: L(ix.name, x.at) })), authority: ix.authority?.map(x => ({ operation: x.op, kind: x.kind, enabled_by: x.enabledBy })),
+			path_conditions: ix.paths?.map(p => ({ operation: p.op, conditions: p.conds.map(c => ({ at: L(ix.name, c.at), cond: c.cond, holds: c.holds, how: c.how, check: c.check })), not_required: p.notRequired.map(x => ({ check: x.check, path: x.path?.map(y => L(ix.name, y)) })), truncated: p.truncated })),
+			auth_chains: ix.chains?.map(c => ({ operation: c.op, chains: c.steps })),
+			arithmetic: ix.arith?.map(x => ({ at: L(ix.name, x.at), operation: x.op, target: x.target, expr: x.expr, kind: x.kind, status: x.status, guard: x.guard && { at: L(ix.name, x.guard.at), cond: x.guard.cond }, caller_controlled: x.caller, unnamed_field: x.unnamed })),
+			divisions: ix.divs?.map(x => ({ at: L(ix.name, x.at), expr: x.expr, divisor: x.divisor, status: x.status, guard: x.guard && { at: L(ix.name, x.guard.at), cond: x.guard.cond } })),
+			proof: ix.proof?.map(p => ({ operation: p.op, kind: p.kind, properties: p.props })),
 		})),
+		state_machine: a.states?.map(s => ({ field: s.field, set_by: s.setBy.map(x => ({ ix: x.ix, value: x.value, at: L(x.ix, x.at) })), checked_by: s.checkedBy.map(x => ({ ix: x.ix, cond: x.cond, at: L(x.ix, x.at) })) })),
 		pdas: a.pdas.map(x => ({ seeds: x.seeds, program: x.program, derived_in: x.derivedIn, signs_in: x.signsIn, accounts: x.accounts, compared: x.compared })),
 		state_writes: a.stateWrites.map(s => ({ target: s.target, writes: s.writes.map(w => ({ ix: w.ix, how: w.how, at: L(w.ix, w.at) })) })),
 		dependencies: a.deps.map(d => ({ target: d.target, read_by: d.readBy, written_by: d.writtenBy })),
@@ -480,6 +500,11 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		out.push('', '## Authority fields (stored authorities and the instructions writing them)', '')
 		for (const x of a.authorityFields.slice(0, 30)) out.push(`- ${x.field} ← ${x.writtenBy.join(', ')}`)
 	}
+	if (a.states?.length) {
+		out.push('', '## State machine (status-like fields: set by → checked by; details in analysis.json state_machine)', '')
+		for (const x of a.states.slice(0, 8)) out.push(`- ${x.field}: set by ${x.setBy.map(w => `${w.ix} (= ${w.value})`).join(', ') || 'none found'}; checked by ${[...new Set(x.checkedBy.map(c => c.ix))].join(', ') || 'none found'}`)
+		if (a.states.length > 8) out.push(`- … ${a.states.length - 8} more in analysis.json`)
+	}
 	if (a.deps.length) {
 		out.push('', '## Read/write dependencies (field checked by X, written by Y)', '')
 		for (const d of a.deps) out.push(`- ${d.target}: checked in ${d.readBy.join(', ')}; written in ${d.writtenBy.join(', ')}`)
@@ -557,6 +582,33 @@ export function renderIx(ix: IxOut, where: Where, a?: Analysis): string {
 	if (ix.authority?.length) {
 		out.push('', '## Authority (who enables each value movement / authority change)', '')
 		for (const x of ix.authority.slice(0, 12)) out.push(`- ${W(ix.ops[x.op].at)} ${x.kind}: ${x.enabledBy.map(e => `${e.kind} ${e.what}${e.status ? ` (${ST[e.status as Status] ?? e.status})` : ''}${e.writtenBy?.length ? ` — written by ${e.writtenBy.join(', ')}` : ''}`).join('; ')}`)
+	}
+	const opName = (i: number) => { const o = ix.ops[i]; return `${W(o.at)} ${o.kinds.filter(k => k !== 'CPI').join(', ') || 'CPI'}${o.target ? ` ${o.target}` : o.cpi?.ix ? ` ${o.cpi.program}.${o.cpi.ix}` : ''}` }
+	const P: Record<Status, string> = { found: 'found', partial: 'PARTIAL', not_found: 'NOT FOUND', runtime: 'runtime' }
+	if (ix.proof?.length) {
+		out.push('', '## Proof trees (expected properties per operation: found / PARTIAL / NOT FOUND / runtime)', '')
+		for (const p of ix.proof) {
+			out.push(`- ${opName(p.op)} [${p.kind}]`)
+			for (const x of p.props) out.push(`  - [${P[x.status]}] ${x.prop} — ${md(x.evidence)}`)
+		}
+	}
+	if (ix.chains?.length) {
+		out.push('', '## Authorization chains (operation ⇐ … ⇐ signer)', '')
+		for (const c of ix.chains.slice(0, 12)) for (const alt of c.steps) out.push(`- ${opName(c.op)} ⇐ ${alt.slice(1).map(s => `${s.kind} ${s.what}${s.status ? ` (${ST[s.status as Status] ?? s.status})` : ''}`).join(' ⇐ ')}`)
+	}
+	const pcs = (ix.paths ?? []).filter(p => p.conds.length || p.notRequired.length)
+	if (pcs.length) {
+		out.push('', '## Path conditions (on every path to the operation; ✗ = must not hold; #n = check n)', '')
+		for (const p of pcs.slice(0, 16)) {
+			const cs = p.conds.filter(c => c.how !== 'loop').slice(0, 10).map(c => `${c.holds ? '' : '✗ '}\`${md(c.cond).slice(0, 70)}\`${c.check !== undefined ? ` #${c.check}` : ''}`)
+			out.push(`- ${opName(p.op)}: ${cs.join(' · ') || 'no conditions found'}${p.conds.length > 10 ? ` · … ${p.conds.length - 10} more` : ''}${p.truncated ? ' (budget reached)' : ''}`)
+			if (p.notRequired.length) out.push(`  - not required on some path: ${p.notRequired.map(x => `#${x.check} (${ix.checks[x.check].kinds.join(', ')}${ix.checks[x.check].account ? ` ${ix.checks[x.check].account}` : ''})${x.path ? ` via ${x.path.map(W).join(' → ')}` : ''}`).join('; ')}`)
+		}
+	}
+	if (ix.arith?.length || ix.divs?.length) {
+		out.push('', '## Arithmetic on value paths', '')
+		for (const x of ix.arith ?? []) out.push(`- ${W(x.at)} ${x.target} ← \`${md(x.expr)}\`: ${x.status === 'unchecked' ? 'UNCHECKED (wraps)' : x.status}${x.guard ? ` — guard \`${md(x.guard.cond)}\` (${W(x.guard.at)})` : ''}${x.caller ? ' — instruction data' : ''}`)
+		for (const x of ix.divs ?? []) out.push(`- ${W(x.at)} division by ${md(x.divisor)}: ${x.status === 'checked' ? `checked — \`${md(x.guard!.cond)}\` (${W(x.guard!.at)})` : 'NO zero / minimum check found'}`)
 	}
 	if (ix.relations?.length) {
 		out.push('', '## Relations (equalities the checks establish)', '')
