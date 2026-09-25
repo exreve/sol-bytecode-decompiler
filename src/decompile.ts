@@ -412,8 +412,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // recovered names (see anchor.ts), unique and distinct from every other identifier of the output
     const an = anchorInfo.get(pc);
     const recovered: string[] = [];
-    const taken = new Set([...names.filter(Boolean), ...globalIdents(p), ...views.map.keys(), ...views.opaque.keys()]);
-    const unique = (nm0: string) => { let nm = nm0, k = 2; while (taken.has(nm) || RESERVED_TS.has(nm)) nm = `${nm0}_${k++}`; taken.add(nm); return nm; };
+    let taken: Set<string> | undefined; // names of this function (built on first use)
+    const isTaken = (nm: string) => { taken ??= new Set(names.filter(Boolean)); return taken.has(nm) || globalIdents(p).has(nm) || views.map.has(nm) || views.opaque.has(nm) || RESERVED_TS.has(nm); };
+    const unique = (nm0: string) => { let nm = nm0, k = 2; while (isTaken(nm)) nm = `${nm0}_${k++}`; taken!.add(nm); return nm; };
     // IDL: the instruction data of a handler, as a view of its arguments (Borsh layout)
     const argTypes = new Map<number, string>();
     const argNames: string[] = [];
@@ -760,10 +761,16 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
   return { decls, hoisted: hoisted.sort((a, b) => a - b) };
 }
 
+/** Number of definitions (assignments, call results) of variable v in f (counted once per function, cached). */
+const defCounts = new WeakMap<VarFunc, Map<number, number>>();
 function defCount(f: VarFunc, v: number): number {
-  let n = 0;
-  for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === v) n++;
-  return n;
+  let m = defCounts.get(f);
+  if (!m) {
+    m = new Map();
+    for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) m.set(s.dst, (m.get(s.dst) ?? 0) + 1);
+    defCounts.set(f, m);
+  }
+  return m.get(v) ?? 0;
 }
 
 /**
