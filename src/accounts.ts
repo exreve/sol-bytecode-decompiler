@@ -62,7 +62,7 @@ const splitKey = (e: Expr): Split => { const [b, o] = split(e); return { bk: key
 interface Static {
 	defs: Map<number, Expr[]>                                  // var -> its definitions (x = e; call results: undef)
 	prop: { v: string; def: Split; lk: string | undefined }[] // single-definition vars (defs order): key, definition, key of the definition if a load
-	calls: { t: number; args: (Split | null)[] }[]            // direct calls (forEachCall order): arguments (null: a constant)
+	calls: { t: number; args: (Split | null)[] }[]            // direct calls (per statement: its own, then those in its expressions): arguments (null: a constant)
 }
 
 interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>>; st?: Static } // params: var id -> register
@@ -103,14 +103,6 @@ function kindOf(typed: Typed, { bk, o }: Split): Kind | undefined {
 	return k && (o === 0n || (k === 'info' && o > 0n && o % STRIDE === 0n)) ? k : undefined
 }
 
-function forEachCall(f: VarFunc, cb: (target: number, args: Expr[]) => void) {
-	const visit = (e: Expr) => walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') cb(x.t.pc, x.args) })
-	for (const b of f.blocks) for (const s of b.stmts) {
-		if (s.k === 'call' && s.t.k === 'fn') cb(s.t.pc, s.args)
-		stmtExprs(s).forEach(visit)
-	}
-}
-
 /**
  * Local evidence; returns true if the typed set grew.
  *
@@ -136,29 +128,33 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 	}
 	const prop: Static['prop'] = []
 	for (const [v, es] of defs) if (es.length === 1) prop.push({ v: `v${v}`, def: splitKey(es[0]), lk: es[0].k === 'load' ? key(es[0]) : undefined })
+	// direct calls, per statement its own then those in its expressions (collected by the walk below)
 	const calls: Static['calls'] = []
-	forEachCall(f, (t, args) => calls.push({ t, args: args.map(a => (a.k === 'const' ? null : splitKey(a))) }))
+	const call = (t: number, args: Expr[]) => calls.push({ t, args: args.map(a => (a.k === 'const' ? null : splitKey(a))) })
 	fi.st = { defs, prop, calls }
 	for (const [v, r] of fi.params) { const k = typedParams?.get(r); if (k && !defs.has(v)) add({ k: 'var', id: v }, k) }
 	const single = (e: Expr): Expr => { if (e.k === 'var') { const d = defs.get(e.id); if (d?.length === 1) return d[0] } return e }
 	// per base expression: loads at layout offsets, and 32-byte uses of base + off / of ld64(base + off)
 	const loads = new Map<string, Map<number, number>>() // base -> offset -> size
-	const note = (e: Expr) => walkExpr(e, x => {
-		if (x.k !== 'load') return
-		const [b, o] = split(x.addr)
-		let m = loads.get(key(b)); if (!m) loads.set(key(b), (m = new Map())); m.set(Number(o), x.size)
-	})
 	const addrs = (fi.addrs ??= fieldAddrs(f))
 	const wide = new Set<string>() // keys of address expressions used as 32-byte values
 	const use32 = (e: Expr) => { const [b, o] = split(single(e)); wide.add(offKey(key(b), o)) }
-	const scan = (e: Expr) => walkExpr(e, x => {
-		if (x.k === 'fn' && (x.name === 'memeq' || x.name === 'keyeq')) { use32(x.args[0]); if (x.name === 'memeq') use32(x.args[1]) }
-		if (x.k === 'load' && x.size === 8) { const [b] = split(x.addr); const sb = single(b); if (sb.k === 'load') use32(sb) }
-	})
+	// one walk per expression for the load offsets (note), the 32-byte uses (scan) and, in statements,
+	// the calls: they fill separate collections, each in the same order as separate walks would
+	const noteLoad = (x: Extract<Expr, { k: 'load' }>, b: Expr, o: bigint) => { const bk = key(b); let m = loads.get(bk); if (!m) loads.set(bk, (m = new Map())); m.set(Number(o), x.size) }
+	const visit = (x: Expr, scan: boolean, calls: boolean) => {
+		if (x.k === 'load') {
+			const [b, o] = split(x.addr)
+			noteLoad(x, b, o)
+			if (scan && x.size === 8) { const sb = single(b); if (sb.k === 'load') use32(sb) }
+		} else if (scan && x.k === 'fn' && (x.name === 'memeq' || x.name === 'keyeq')) { use32(x.args[0]); if (x.name === 'memeq') use32(x.args[1]) }
+		else if (calls && x.k === 'call' && x.t.k === 'fn') call(x.t.pc, x.args)
+	}
+	const inStmt = (x: Expr) => visit(x, true, true), inBr = (x: Expr) => visit(x, true, false), inRet = (x: Expr) => visit(x, false, false)
 	for (const b of f.blocks) {
 		for (const s of b.stmts) {
-			stmtExprs(s).forEach(note)
-			stmtExprs(s).forEach(scan)
+			if (s.k === 'call' && s.t.k === 'fn') call(s.t.pc, s.args)
+			for (const e of stmtExprs(s)) walkExpr(e, inStmt)
 			if (s.k === 'copy' && s.n === 32) { use32(s.src); use32(s.dst) }
 			// slice cursor: st64(P, x + 0x30) with x = ld64(P)
 			if (s.k === 'store' && s.size === 8) {
@@ -167,8 +163,8 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 				if (o === STRIDE && key(single(x)) === key(cur)) { add(cur, 'info'); add(x, 'info') }
 			}
 		}
-		if (b.term.k === 'br') { note(b.term.c); scan(b.term.c) }
-		else if (b.term.k === 'ret' && b.term.e) note(b.term.e)
+		if (b.term.k === 'br') walkExpr(b.term.c, inBr)
+		else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, inRet)
 	}
 	for (const [bk, m] of loads) for (const kind of ['info', 'raw'] as Kind[]) {
 		const L = LAYOUTS[kind]
