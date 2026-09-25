@@ -11,6 +11,7 @@ import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
+import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 
 export interface Options {
@@ -136,6 +137,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // ---- phase 4: print ----
+  const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
@@ -185,6 +187,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const fld = off >= 0 ? inputField(off, e.size) : undefined;
           if (fld) return `ld${e.size * 8}(${pr(a, 0)} /* ${fld} */)`;
         }
+        return prev?.(e, pr);
+      };
+    }
+    // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
+    const accTyped = accountInfos?.get(pc);
+    let inAddr = false; // printing the address of an annotated load
+    if (accTyped?.size) {
+      const prev = ctx.exprHook;
+      ctx.exprHook = (e, pr) => {
+        const fld = accountField(accTyped, e);
+        if (fld && e.k === 'load') { inAddr = true; const a = pr(e.addr, 0); inAddr = false; return `ld${e.size * 8}(${a} /* ${fld} */)`; }
+        const adr = e.k === 'bin' && !inAddr ? accountAddr(accTyped, e) : undefined;
+        if (adr && e.k === 'bin') return `(${pr(e.a, 13)} + ${pr(e.b, 14)} /* ${adr} */)`;
         return prev?.(e, pr);
       };
     }

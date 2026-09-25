@@ -66,7 +66,7 @@ function refEval(e: Expr, env: bigint[]): bigint {
 		case 'land': return refEval(e.a, env) && refEval(e.b, env) ? 1n : 0n
 		case 'lor': return refEval(e.a, env) || refEval(e.b, env) ? 1n : 0n
 		case 'sel': return refEval(e.c, env) ? refEval(e.a, env) : refEval(e.b, env)
-		case 'fn': return INTRINSICS[e.name](e.args.map(a => refEval(a, env)))
+		case 'fn': return INTRINSICS[e.name as keyof typeof INTRINSICS](e.args.map(a => refEval(a, env)))
 		default: throw new Error('unexpected ' + e.k)
 	}
 }

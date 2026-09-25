@@ -37,8 +37,8 @@ declare function st32(a: u64, ...v: u64[]): void
 declare function st64(a: u64, ...v: u64[]): void
 declare function copy(dst: u64, src: u64, n: u64): void
 declare function copyr(dst: u64, src: u64, n: u64): void
-declare function sar(x: u64, n: u64): u64
-declare function shl(x: u64, n: u64): u64 // x << n (function form, used where `<<` would parse ambiguously)
+declare function sar(x: u64, n: u64): u64 // arithmetic (sign-filling) shift right
+declare function shl(x: u64, n: u64): u64 // x << n (function form, used where the << operator would parse ambiguously)
 declare function popcount(x: u64): u64 // number of 1 bits
 declare function clz(x: u64): u64 // leading zero bits of the 64-bit value (64 for 0)
 declare function ctz(x: u64): u64 // trailing zero bits (64 for 0)
@@ -50,8 +50,15 @@ declare function smax(a: u64, b: u64): u64 // signed (i64) maximum
 declare function sat_sub(a: u64, b: u64): u64 // a >= b ? a - b : 0
 declare function memeq(p: u64, q: u64, n: u64): boolean // n bytes at p == n bytes at q (ascending 8-byte words, stops at first difference)
 declare function keyeq(p: u64, key: string): boolean // 32 bytes at p == the base58 public key (same word-wise comparison)
-declare function sdiv(a: u64, b: u64): u64
-declare function srem(a: u64, b: u64): u64
+declare function sdiv(a: u64, b: u64): u64 // signed (i64) division (traps on 0 and MIN / -1)
+declare function sdiv32(a: u64, b: u64): u64 // signed division of the low 32 bits, zero-extended result
+declare function srem32(a: u64, b: u64): u64 // signed remainder of the low 32 bits, zero-extended result
+declare function mulhu(a: u64, b: u64): u64 // high 64 bits of the unsigned 128-bit product
+declare function mulhs(a: u64, b: u64): u64 // high 64 bits of the signed 128-bit product
+declare function bswap16(x: u64): u64 // byte swap of the low 16 bits
+declare function bswap32(x: u64): u64 // byte swap of the low 32 bits
+declare function bswap64(x: u64): u64 // byte swap
+declare function srem(a: u64, b: u64): u64 // signed (i64) remainder
 declare function trap(msg: string): never
 declare function callx(fn: u64, ...args: u64[]): u64`
 
@@ -93,6 +100,13 @@ export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } 
 	return { entry, ix: [...ix.values()], shared }
 }
 
+/** Declarations (with their one-line semantics) of the commented helper functions the output uses. */
+function usedHelpers(r: Result): string[] {
+	const names = new Set<string>()
+	for (const f of r.funcs) for (const m of f.text.matchAll(/\b([a-z_][a-z0-9_]*)\(/g)) names.add(m[1])
+	return TYPES.split('\n').filter(l => { const m = /^declare function (\w+)\(.*\/\/ /.exec(l); return m && names.has(m[1]) })
+}
+
 function usedSyscalls(r: Result): string[] {
 	const names = new Set<string>()
 	for (const f of r.funcs) for (const m of f.text.matchAll(/\b(sol_[a-z0-9_]+|abort)\(/g)) names.add(m[1])
@@ -114,6 +128,8 @@ function summary(r: Result): string[] {
 export function renderSingle(r: Result): string {
 	const g = groups(r)
 	const out: string[] = [PRELUDE, ...summary(r), '']
+	const helpers = usedHelpers(r)
+	if (helpers.length) out.push(`// helpers:`, ...helpers, '')
 	const sys = usedSyscalls(r)
 	if (sys.length) out.push(...sys, '')
 	if (r.stubs.length) out.push(`// library functions (recognized, not decompiled):`, ...r.stubs, '')

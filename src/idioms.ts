@@ -70,9 +70,8 @@ export function recognizeIdioms(f: VarFunc): boolean {
 	/** commutative binary match */
 	const both = <T>(x: Bin, f2: (l: Expr, r: Expr) => T | null): T | null => f2(x.a, x.b) ?? f2(x.b, x.a)
 
-	const popcount = (e: Expr): Expr | null => {
-		// (s * 0x0101…) >> 56
-		const m = shr(e, 56n); if (!m) return null
+	/** m = s * 0x0101… with s the byte-sum stage of a popcount: returns the popcount's operand */
+	const popcountOf = (m: Expr): Expr | null => {
 		const mul = bin(m, 'mul'); if (!mul || !isC(mul.b, M01)) return null
 		// s = (r + (r >> 4)) & 0x0f0f…
 		const s = masked(mul.a, 0n, M0F); if (!s) return null
@@ -81,10 +80,13 @@ export function recognizeIdioms(f: VarFunc): boolean {
 		// r = (q & 0x3333…) + ((q >> 2) & 0x3333…)
 		const radd = bin(r, 'add'); if (!radd) return null
 		const q = both(radd, (l, x) => { const a = masked(l, 0n, M33), b = masked(x, 2n, M33); return a && b && same(a, b) ? a : null }); if (!q) return null
-		// q = p - ((p >> 1) & 0x5555…)
+		// q = p - ((p >> 1) & 0x5555…), or (p & -2) - ((p >> 1) & 0x5555…) = the same for p & -2
 		const sub = bin(q, 'sub'); if (!sub) return null
 		const p = masked(sub.b, 1n, M55)
-		return p && same(p, sub.a) ? sub.a : null
+		if (!p) return null
+		if (same(p, sub.a)) return sub.a
+		const lo = bin(sub.a, 'and')
+		return lo && isC(lo.b, 0xfffffffffffffffen) && same(lo.a, p) ? { k: 'bin', op: 'and', a: lo.a, b: lo.b } : null
 	}
 	/** x | x >> 1 | x >> 2 | … | x >> 32 (each step on the previous result), returns x */
 	const smear = (e: Expr): Expr | null => {
@@ -96,27 +98,42 @@ export function recognizeIdioms(f: VarFunc): boolean {
 		}
 		return cur
 	}
-	const rewrite = (e: Expr): Expr => {
-		if (e.k !== 'bin' || e.op !== 'lshr') return e
-		trail.length = 0
-		const p = popcount(e)
-		if (!p) return e
-		// popcount(~smear(x)) = clz(x); popcount(~x & (x - 1)) = ctz(x)
+	/** helper call for popcount(p), recognizing clz / ctz forms of p */
+	const helperFor = (p: Expr): Expr | null => {
 		const n = see(p)
+		// popcount(~smear(x)) = clz(x)
 		if (n.k === 'not') {
 			const x = smear(n.a)
 			if (x && argOk(x)) return { k: 'fn', name: 'clz', args: [x] }
 		}
 		const a = n.k === 'bin' && n.op === 'and' ? n : null
 		if (a) {
+			// popcount(~smear(x) & -2) = clz(x | 1): bit 0 of ~smear(x) is set only for x = 0
+			const nl = see(a.a)
+			if (isC(a.b, 0xfffffffffffffffen) && nl.k === 'not') {
+				const x = smear(nl.a)
+				if (x && argOk(x)) return { k: 'fn', name: 'clz', args: [{ k: 'bin', op: 'or', a: x, b: { k: 'const', v: 1n } }] }
+			}
+			// popcount(~x & (x - 1)) = ctz(x)
 			const x = both(a, (l, r) => {
 				const nl = see(l), dec = bin(r, 'add')
 				return nl.k === 'not' && dec && isC(dec.b, 0xffffffffffffffffn) && same(nl.a, dec.a) ? nl.a : null
 			})
 			if (x && argOk(x)) return { k: 'fn', name: 'ctz', args: [x] }
 		}
-		if (!argOk(p)) return e
-		return { k: 'fn', name: 'popcount', args: [p] }
+		return argOk(p) ? { k: 'fn', name: 'popcount', args: [p] } : null
+	}
+	const rewrite = (e: Expr): Expr => {
+		if (e.k !== 'bin') return e
+		trail.length = 0
+		// (s * 0x0101…) >> 56 = popcount
+		if (e.op === 'lshr' && isC(e.b, 56n)) { const p = popcountOf(e.a); return (p && helperFor(p)) || e }
+		// (s * 0x0101…) >> 55 & 0x1fe = popcount << 1
+		if (e.op === 'and' && isC(e.b, 0x1fen)) {
+			const m = shr(e.a, 55n), p = m && popcountOf(m), h = p && helperFor(p)
+			if (h) return { k: 'bin', op: 'shl', a: h, b: { k: 'const', v: 1n } }
+		}
+		return e
 	}
 	let changed = merged
 	const rw = (e: Expr) => { const n = mapExpr(e, rewrite); if (n !== e && !exprEq(n, e)) changed = true; return n }
