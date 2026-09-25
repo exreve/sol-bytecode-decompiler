@@ -270,13 +270,34 @@ export function stmtExprs(s: Stmt): Expr[] {
   }
 }
 
-function varsIn(e: Expr, out: Set<number>) { walkExpr(e, x => { if (x.k === 'var') out.add(x.id); }); }
+/**
+ * Per-statement summary of stmtExprs(s): every variable occurrence (with multiplicity) and the
+ * union of hasSideEffectsOrMem over the expressions. Cached by statement object, which is sound
+ * because statements are never mutated in place after variable recovery (rewrites create new ones).
+ */
+interface StmtInfo { vars: number[]; load: boolean; call: boolean; trap: boolean }
+const infoCache = new WeakMap<Stmt, StmtInfo>();
+function stmtInfo(s: Stmt): StmtInfo {
+  let r = infoCache.get(s);
+  if (r) return r;
+  const vars: number[] = [];
+  let load = false, call = false, trap = false;
+  for (const e of stmtExprs(s)) {
+    walkExpr(e, x => { if (x.k === 'var') vars.push(x.id); });
+    const fx = hasSideEffectsOrMem(e);
+    load ||= fx.load; call ||= fx.call; trap ||= fx.trap;
+  }
+  r = { vars, load, call, trap };
+  infoCache.set(s, r);
+  return r;
+}
+const countIn = (vars: number[], v: number) => { let n = 0; for (let k = 0; k < vars.length; k++) if (vars[k] === v) n++; return n; };
 
 function countUses(f: VarFunc): Int32Array {
   const uses = new Int32Array(f.vars.length);
   const cnt = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') uses[x.id]++; });
   for (const b of f.blocks) {
-    for (const s of b.stmts) stmtExprs(s).forEach(cnt);
+    for (const s of b.stmts) for (const v of stmtInfo(s).vars) uses[v]++;
     if (b.term.k === 'br') cnt(b.term.c);
     else if (b.term.k === 'ret' && b.term.e) cnt(b.term.e);
   }
@@ -433,26 +454,27 @@ function inlineLocal(f: VarFunc): boolean {
       if (s.k !== 'set') continue;
       const v = s.dst;
       if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && localReach(b, i, v) !== 1) continue;
-      const fx = hasSideEffectsOrMem(s.e);
-      const reads = new Set<number>(); varsIn(s.e, reads);
+      const fx = stmtInfo(s); // stmtExprs(set) = [s.e]
+      const reads = new Set<number>(fx.vars);
       // find use
       let j = i + 1;
       let found = -1;
       for (; j <= b.stmts.length; j++) {
-        const exprs = j < b.stmts.length ? stmtExprs(b.stmts[j]) : b.term.k === 'br' ? [b.term.c] : b.term.k === 'ret' && b.term.e ? [b.term.e] : [];
-        let hit = false;
-        for (const e of exprs) walkExpr(e, x => { if (x.k === 'var' && x.id === v) hit = true; });
-        if (hit) { found = j; break; }
-        if (j === b.stmts.length) break;
+        if (j === b.stmts.length) {
+          const te = b.term.k === 'br' ? b.term.c : b.term.k === 'ret' && b.term.e ? b.term.e : null;
+          if (te) { let hit = false; walkExpr(te, x => { if (x.k === 'var' && x.id === v) hit = true; }); if (hit) found = j; }
+          break;
+        }
         const t = b.stmts[j];
+        const ti = stmtInfo(t);
+        if (ti.vars.includes(v)) { found = j; break; }
         if ((t.k === 'set' || t.k === 'call') && t.dst >= 0 && reads.has(t.dst)) break;
         // effects of the statement we would move past
-        const te = stmtExprs(t).map(hasSideEffectsOrMem);
-        const tLoads = te.some(g => g.load), tCalls = t.k === 'call' || te.some(g => g.call);
+        const tLoads = ti.load, tCalls = t.k === 'call' || ti.call;
         const tWrites = t.k === 'store' || t.k === 'stores' || t.k === 'copy' || t.k === 'trap' || tCalls;
         if ((fx.load || fx.trap || fx.call) && tWrites) break;
         // a call may write memory that t reads, and may trap before t's own traps
-        if (fx.call && (tLoads || te.some(g => g.trap))) break;
+        if (fx.call && (tLoads || ti.trap)) break;
         if (t.k === 'set' || t.k === 'eval') {
           // moving a trapping expression past another trapping expression is fine (both abort)
         }
@@ -479,7 +501,7 @@ function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number,
   const cnt = (e: Expr) => walkExpr(e, x => { if (x.k === 'var' && x.id === v) n++; });
   for (let j = i + 1; j < b.stmts.length; j++) {
     const t = b.stmts[j];
-    stmtExprs(t).forEach(cnt);
+    n += countIn(stmtInfo(t).vars, v);
     if ((t.k === 'set' || t.k === 'call') && t.dst === v) return n;
   }
   if (b.term.k === 'br') cnt(b.term.c);
