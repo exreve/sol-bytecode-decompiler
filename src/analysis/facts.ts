@@ -339,6 +339,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const la = span(a), lb = span(b)
 		if (!strict && la * 4 <= lb && la <= 40) return 'then'
 		if (!strict && lb * 4 <= la && lb <= 40) return 'rest'
+		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")
+		if (!strict && inp.anchor && la <= 60 && la * 2 <= lb && inlineString(a)) return 'then'
 		// (the failing side raises its error first thing; the passing side, if at all, after further checks)
 		const fa = firstMark(a), fb = firstMark(b)
 		if (fa !== fb && Math.min(fa, fb) + 8 < Math.max(fa, fb)) return fa < fb ? 'then' : 'rest'
