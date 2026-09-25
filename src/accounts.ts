@@ -50,7 +50,7 @@ const offKey = (k: string, o: bigint) => (o === 0n ? k : `(add ${k} #${BigInt.as
 
 export type Typed = Map<string, Kind> // expression key -> layout it points to
 
-interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number> } // params: var id -> register
+interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>> } // params: var id -> register
 
 /** Per function: expressions (variables, loads) that point to an account. */
 export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Typed> {
@@ -117,6 +117,7 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		const [b, o] = split(x.addr)
 		let m = loads.get(key(b)); if (!m) loads.set(key(b), (m = new Map())); m.set(Number(o), x.size)
 	})
+	const addrs = (fi.addrs ??= fieldAddrs(f))
 	const wide = new Set<string>() // keys of address expressions used as 32-byte values
 	const use32 = (e: Expr) => { const [b, o] = split(single(e)); wide.add(offKey(key(b), o)) }
 	const scan = (e: Expr) => walkExpr(e, x => {
@@ -145,7 +146,7 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		const keyed = L.keyPtrs.some(o => wide.has(`L8(${offKey(bk, o)})`)) || L.keyAddrs.some(o => wide.has(offKey(bk, o)))
 		// without a 32-byte key/owner use, demand more layout fields (a Rust clone reads all eight;
 		// a raw record: lamports and data_len)
-		const many = kind === 'info' ? fit.length >= 4 : m.get(0x48) === 8 && m.get(0x50) === 8
+		const many = kind === 'info' ? fit.length >= 4 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs.get(bk)?.size ?? 0) >= 2
 		if (keyed || many) { if (!typed.has(bk)) typed.set(bk, kind); break }
 	}
 	// propagate through single-definition copies, loads of typed cursors and whole-element strides
@@ -155,6 +156,32 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		if (k) add({ k: 'var', id: v }, k)
 	}
 	return typed.size !== n0
+}
+
+/**
+ * Raw records: field addresses (key / owner / lamports / data) of variables taken as values, e.g. in a
+ * C-ABI SolAccountInfo build: variable key -> offsets.
+ */
+function fieldAddrs(f: VarFunc): Map<string, Set<number>> {
+	const addrs = new Map<string, Set<number>>()
+	const visit = (x: Expr, isAddr: boolean) => {
+		if (!isAddr && x.k === 'bin' && x.op === 'add' && x.a.k === 'var' && x.b.k === 'const' && (x.b.v === 8n || x.b.v === 0x28n || x.b.v === 0x48n || x.b.v === 0x58n)) {
+			const k = `v${x.a.id}`; let m = addrs.get(k); if (!m) addrs.set(k, (m = new Set())); m.add(Number(x.b.v))
+		}
+		switch (x.k) {
+			case 'load': visit(x.addr, true); break
+			case 'bin': case 'cmp': case 'land': case 'lor': visit(x.a, false); visit(x.b, false); break
+			case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(x.a, false); break
+			case 'sel': visit(x.c, false); visit(x.a, false); visit(x.b, false); break
+			case 'call': case 'fn': x.args.forEach(a => visit(a, false)); break
+		}
+	}
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'store' || s.k === 'stores') (s.k === 'store' ? [s.v] : s.vals).forEach(v => visit(v, false))
+		else if (s.k === 'call') s.args.forEach(v => visit(v, false))
+		else if (s.k === 'set') visit(s.e, false)
+	}
+	return addrs
 }
 
 /** Field name for a load through a known account pointer, e.g. `is_signer`. */

@@ -77,13 +77,32 @@ jupiter (258k instructions) 12 s.
 
 ```ts
 // instruction handler: swap (discriminator sha256("global:swap")[..8] = 0xc88775e1919ec6f8)
-export function ix_swap(a: u64, b: u64, c: u64, d: u64, p5: u64, p6: u64): u64 {
-	const s70 = fp - 0x70, sd8 = fp - 0xd8
+// accounts [idl]: 0 token_program [= TokenkegQ…], 1 token_authority [signer], 2 whirlpool [mut], …
+// args [idl]: amount: u64, other_amount_threshold: u64, sqrt_price_limit: u128, amount_specified_is_input: bool, a_to_b: bool
+// names [heur: Anchor dispatcher / handler argument order (…)]: program_id, accounts, accounts_len, ix_args, ix_args_len
+// names [idl: argument names and layout; which variable holds the instruction data is inferred]: args, amount, …
+function ix_swap(a: u64, program_id: u64, accounts: u64, accounts_len: u64, ix_args: u64, ix_args_len: u64): u64 {
 	sol_log("Instruction: Swap", 0x11)
-	if (memcmp(f, 0x10015380d /* &ORCA_WHIRLPOOL_PROGRAM */, 0x20) != 0) { ... }
-	...
-}
+	…
+	const args: SwapArgs = ix_args
+	const amount = args.amount
+	const u = ld64(args.sqrt_price_limit + 8)
+	if (2 > amount_specified_is_input) { …
+	t = accounts_swap(s70, program_id, s10, other_amount_threshold, fp)
+
+// account checks: account (errors raised when a check on it fails) [str: …]: whirlpools_config (ConstraintMut), …
+function accounts_set_fee_authority(a: u64, b: u64, c: u64, d: u64, e: u64): u64 {
+	const whirlpools_config: AccountInfo = ld64(s108)
+	if (whirlpools_config.is_writable == 0) { …anchor::ConstraintMut… }
+
+// elsewhere: CPIs and PDA derivations described from the frame contents at the call
+	// CPI TOKEN_PROGRAM.Transfer { source: q + 8 (w), destination: r + 8 (w), authority: s + 8 (s), amount: ah }
+	// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2) [ix data?]], program *(ld64(s2b0)))
 ```
+
+Everything printed is executable under the runtime model below and verified against the bytecode
+(`test/equiv.ts`); names, view types and comments carry their provenance (`[idl]`, `[str]`, `[known]`,
+`[heur]`, see "Recovered names"). Security slices (`slices/*.txt`) are separate, unverified views.
 
 Runtime model (also emitted as the file prelude / `lib.d.ts`):
 
@@ -100,13 +119,41 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
 | `rc_inc(p[, x])` | Rc count increment: `x = ld64(p)` (unless given); `st64(p, x + 1)`; `abort()` if x was `-1` |
 | `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
+| | (`rc_inc` also replaces the nested form `st64(p, x + 1); if (x != -1) { …never falls through… } abort()`; for both, assignments moved before the helper may read the current frame) |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
-| `undef` | a register value left over by a callee (unspecified) |
-| `"text"` argument | address of those rodata bytes (next argument is the length) |
+| `undef` | a register value left over by a callee (unspecified); a variable read before any assignment and call arguments omitted at the end of the list are `undef` too |
+| `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length); text found elsewhere is shown as `0x100001234 /* "text" */` |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
+| `x: AccountInfo`, `x.is_signer` | typed view (below): `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
+| `x[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice |
 
 Style: tabs, no semicolons, short variable names (`a..e` = register arguments r1..r5, then `f, g, …`).
+
+### Typed views
+
+Variables (and parameters) known to point to a structure are declared with a view type, and memory
+accesses through them print as fields. Views are declared with the output (`lib.d.ts` / file header):
+
+```ts
+type at<Offset extends number, T> = T  // field: a T at byte Offset (scalar: loaded; ref<U>: loaded pointer; other: address)
+interface AccountInfo extends sized<0x30> {   // solana_program::account_info::AccountInfo
+	key:       at<0x00, ref<Pubkey>>
+	is_signer: at<0x28, u8>
+	...
+}
+function fn_10c18(a: u64, b: u64, c: u64, d: AccountInfo) {
+	if (d.is_signer == 0) { ... }          // ld8(d + 0x28)
+	fn_67d68(s3c8, d.owner)                // ld64(d + 0x18)
+	st64(s180 + 0x28, d[1].is_signer)      // ld8(d + 0x30 + 0x28): the next AccountInfo
+```
+
+Built-in views: `AccountInfo` (Rust; `lamports` / `data` point to `LamportsCell` / `DataCell`, the
+`Rc<RefCell<…>>` boxes: `acc.data.borrow`, `acc.data.ptr`, `acc.data.len`, `acc.lamports.value.amount`),
+`AccountRecord` (serialized input account: `dup_marker`, `is_signer`, `is_writable`, `executable`, `key`,
+`owner` (embedded `Pubkey`s), `lamports`, `data_len`, `data`), `Input` (entrypoint parameter: `num_accounts`,
+`acc0`). A variable defined once as such a field (`const j = acc.data`) gets the field's view type. A view is an exact alias whatever the variable holds; *which*
+variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
 
 ### Project layout (`-o dir/`)
 
@@ -120,15 +167,111 @@ ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
 bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
+slices/*.txt    security slices: UNVERIFIED views derived from the code above (see below)
 ```
+
+**Slices** (`slices/cpi.txt`, `pda.txt`, `account_checks.txt`, `account_writes.txt`) index the security-relevant
+lines: for each CPI, PDA derivation, condition on an account flag / owner / key (or Anchor constraint error),
+and write to account data or lamports, they list the instruction handlers reaching the function (direct calls,
+through library code too), the conditions the line runs under (enclosing blocks and earlier early exits), the
+definitions of the variables it uses (same function), and the line. They are read off the printed code and
+leave everything else out: an index for review, not verified code (never mixed into the `.ts` files).
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.
 
+### Recovered names and their provenance
+
+Every recovered name says where it comes from, so a reader knows what to double-check:
+
+| tag | source |
+|---|---|
+| `[idl]` | the Anchor IDL (`--idl` / `--program-id`) |
+| `[str]` | the program's own strings: `"Instruction: X"` logs, Anchor account-error names |
+| `[known]` | well-known program ids, sysvars, SPL layouts |
+| `[heur]` | structural inference: verify before relying on it |
+
+Names without a tag are plain temporaries (`a..e` parameters, `f, g, …` locals, `s30` stack objects,
+`fn_<addr>` unnamed functions). Per function, `// names …` / `// accounts …` lines list what was recovered.
+
+**Anchor accounts.** Generated `Accounts::try_accounts` code maps each field's failure to
+`Error::with_account_name("<field>")`, so the program's strings name its accounts (the function is found
+as the callee most often given an identifier string as its last argument pair). From it:
+
+```ts
+// ===== instruction set_fee_authority =====
+// instruction handler: set_fee_authority (discriminator …)
+// accounts [idl]: 0 whirlpools_config [mut], 1 fee_authority [signer], 2 new_fee_authority    (with an IDL; else, from the strings:)
+// accounts [str: the program's account-error strings, in order of first use]: whirlpools_config, new_fee_authority, fee_authority
+function ix_set_fee_authority(…)
+
+// Anchor Accounts::try_accounts of instruction set_fee_authority (called by ix_set_fee_authority; …; was fn_c7d08)
+// account checks: account (errors raised when a check on it fails) […]: whirlpools_config (ConstraintMut), new_fee_authority (AccountNotEnoughKeys), fee_authority (ConstraintAddress)
+// names [str: account-error string on the failing branch; which variable holds the account is inferred]: whirlpools_config, fee_authority
+function accounts_set_fee_authority(…) {
+	const whirlpools_config: AccountInfo = ld64(s108)
+	…
+	if (whirlpools_config.is_writable == 0) { … 0x7d0 /* anchor::ConstraintMut */ … "whirlpools_config" … }
+	const o = fee_authority.key
+```
+
+**Anchor dispatcher and helpers** (`[heur]`, named only when unnamed): the function comparing the instruction
+data's first 8 bytes with the handlers' discriminators is `anchor_dispatch`; the values it passes the same way
+to every handler name the handlers' parameters after Anchor's handler ABI:
+`ix_swap(a, program_id, accounts, accounts_len, ix_args, ix_args_len)` (`ix_args` = the data after the
+discriminator). The account-name function is `Error_with_account_name`, and the callee most often given an
+`anchor_lang` error code `anchor_error_from` (`<Error as From<ErrorCode>>::from`).
+
+**Accounts struct and Context** (`[heur]`): each instruction's try_accounts function stores the named account
+pointers into the struct it returns; those offsets give a view `<Ix>Accounts` (fields `&AccountInfo`), and
+`<Ix>Context` = (`program_id`, `accounts`). A function the handler passes a frame object holding exactly that —
+word 0 the handler's `program_id`, word 8 the address of a copy of the try_accounts result, checked on the frame
+contents at the call — gets the Context type for that parameter:
+
+```ts
+// types [heur]: b: InitializeRewardContext (the handler ix_initialize_reward passes a frame object holding …)
+function fn_32bc0(a: u64, b: InitializeRewardContext, c: u64): u64 {
+	const f: InitializeRewardAccounts = b.accounts
+```
+
+Coverage is partial: boxed accounts (`Box<Account<T>>`) are stored as the box pointer, and logic inlined into
+the handler has no Context parameter.
+
+**Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
+Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
+holding the instruction data (a parameter, or a copy of one, whose constant-offset loads all fit the fields)
+is declared with it; variables that are exactly one argument are named after it:
+
+```ts
+// names [idl: argument names and layout; which variable holds the instruction data is inferred]: args, amount, …
+	const args: SwapArgs = p5
+	const amount = args.amount
+	const u = ld64(args.sqrt_price_limit + 8)     // u128: embedded, 16 bytes
+	if (2 > amount_specified_is_input) { …        // bool validation
+```
+
+**Account data (IDL).** Each IDL account type becomes a view `<Name>Account` of its data: the 8-byte
+discriminator, then the fields in serialized order (Borsh prefix; zero-copy accounts are `Pod`, so laid out the
+same way). A pointer whose first 8 bytes are compared with the account's discriminator gets it (directly, or as
+`ld64(P)` for a slice `P` checked in a caller), and a serialized input record `r` whose `ld64(r + 0x58)` is
+compared (zero-copy `AccountLoader`) gets `<Name>Record`, whose `data` field is the layout:
+
+```ts
+// account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: whirlpool_data: WhirlpoolAccount
+	const whirlpool_data: WhirlpoolAccount = ld64(b)
+	const k = whirlpool_data.tick_spacing
+	const an = ld64(whirlpool_data.sqrt_price)     // u128
+function fn_22210(a: u64, whirlpool_acc: WhirlpoolRecord, …)
+	if (ld64(whirlpool_acc.owner) != 0x5390908e5f68030e /* ORCA_WHIRLPOOL_PROGRAM */) { … AccountOwnedByWrongProgram … }
+```
+
+A variable gets an account's name when a branch testing it fails with that account's name unconditionally
+(or it is the AccountInfo pointer loaded from the same try-result as such a variable), and it is used like
+an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte key).
+
 ### Annotations (comments only)
 
-* account fields: loads through pointers recognized as a Rust `AccountInfo` (slice iteration with stride
-  0x30, typical field accesses, parameters receiving one) or as a raw serialized account record
-  (pinocchio style) name the field: `ld8(c + 0x28 /* is_signer */)`, `ld64(x + 0x50 /* data_len */)`;
+* account fields through recognized account pointers that are not a variable (e.g. a loaded pointer)
+  name the field in a comment: `ld8(ld64(s30) + 0x28 /* is_signer */)` (through variables: typed views, above);
 * `Result<_, ProgramError>` niche values: `0x8000000000000007 /* Err(ProgramError::MissingRequiredSignature) */`,
   the `Ok` value being inferred per program (it depends on the solana-program version);
 * public keys: known program ids, 32-byte rodata keys compared/copied by address (`/* key <base58> */`),
@@ -139,9 +282,25 @@ Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<
 * `Result<(), ProgramError>` with a u32 variant tag (older toolchains; Ok tag inferred per program): constant tag
   stores into such a result get `// Err(ProgramError::InvalidSeeds)`, `// Err(ProgramError::Custom(6008))`, `// Ok`;
 * cross-program invocations (`sol_invoke_signed_c/_rust` and thin wrappers) whose instruction is built in the
-  frame get a line describing it, read back from the stores along straight-line code:
-  `// CPI: program *(n + 8), accounts [h + 8 (w), g + 8 (w), f + 8 (s)], data 9 bytes [u8 3 (Token Transfer if the program is SPL Token), u64 ld64(a + 0x20)]`
-  (known program ids by name, signer seeds as strings/keys when constant);
+  frame get a line describing it, read back from the stores along straight-line code. Instructions of well-known
+  programs (SPL Token / Token-2022 incl. p-token, System, Associated Token Account, Compute Budget) are decoded,
+  accounts by role and data fields by name:
+  `// CPI TOKEN_PROGRAM.Transfer { source: f.key (w), destination: g.key (w), authority: h.key (s), amount: ld64(a + 0x20) }, no signer seeds`.
+  When the program id is not a constant, the comment says whether it is compared with a known program id in the
+  same function, and a data/account shape matching SPL Token or System is decoded as such, marked as a guess:
+  `// CPI program *(q + 8) (id not a constant, and not compared with a known program id in this function) — data and accounts match SPL Token TransferChecked; if it is SPL Token: { source: i.key (w), mint: h.key, … }`.
+  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`.
+  Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
+  is a constant, `[heur]` when only the data shape matches);
+* PDA derivations (`sol_try_find_program_address` / `sol_create_program_address`, thin wrappers, and
+  `Pubkey::find/create_program_address`) whose seed list is built in the frame:
+  `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`
+  (string seeds, known keys, `*src` for 32 bytes copied from `src`, `u16 v` for small values);
+* instruction-data taint (`[heur]`): from the handlers' `ix_args`, values that may derive from the instruction
+  data are followed through arithmetic, frame slots and call arguments (flow-insensitive, interprocedural;
+  call results and callee writes are not followed). CPI data fields and PDA seeds that may derive from it are
+  marked `[ix data?]` (a program id: `[id from ix data]`), and functions list the parameters it may reach:
+  `// instruction data may reach [heur: …]: c (points to it), d (value)`;
 * calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
 
 ## Library code
@@ -199,8 +358,10 @@ Traps (division by zero, memory faults) are never dropped or reordered across si
   arguments, stores outside the frame, frame state at every call, return value, abort — must match.
 
 ```
-node test/equiv.ts samples/token22.so 3      # 545 functions, 1632 trials, 0 failing
-npm test                                     # unit tests, printer/simplifier fuzzer, samples
+node test/equiv.ts samples/token22.so 3            # --raw form: 545 functions, 0 failing
+SUGAR=1 node test/equiv.ts samples/token22.so 3    # the readable output (CLI default: names, strings, typed views)
+IDL=corpus/idl/<id>.json node test/equiv.ts corpus/<id>.so 3   # readable output with an Anchor IDL's names
+npm test                                           # unit tests, printer/simplifier fuzzer, samples
 ```
 
 Checked on all bundled samples (memo, token, ata, stake-pool, token-2022, whirlpool, jupiter);
@@ -229,7 +390,12 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/dataflow.ts` | liveness, interprocedural params/returns/noreturn, variable recovery |
 | `src/simplify.ts`, `src/cfgopt.ts` | exact expression simplification, propagation, tail duplication, DSE, jump threading |
 | `src/ifconv.ts`, `src/idioms.ts` | if-conversion to selects; bit-trick and multi-word compare idioms (popcount/clz/ctz, memeq/keyeq) |
-| `src/accounts.ts` | AccountInfo / raw account pointer recognition (field-name comments) |
+| `src/accounts.ts` | AccountInfo / raw account pointer recognition (view types, field-name comments) |
+| `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
+| `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
+| `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
+| `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
+| `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |

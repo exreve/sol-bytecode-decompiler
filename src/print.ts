@@ -8,6 +8,7 @@ import type { Node } from './structure.ts';
 import type { VarFunc } from './dataflow.ts';
 import { maxBits } from './simplify.ts';
 import { b58 } from './semantics.ts';
+import type { Views } from './views.ts';
 
 /** base58 of the 32-byte key whose little-endian 8-byte words are the given constants */
 export function keyB58(words: Expr[]): string {
@@ -22,6 +23,7 @@ export interface PrintCtx {
   sysName: (name: string) => string;
   constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
   strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
+  strNote?: (ptr: bigint, len: bigint) => string | undefined; // rodata text for (ptr, len) pairs not printable as a literal (shown in a comment)
   keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
@@ -30,6 +32,8 @@ export interface PrintCtx {
   nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
   storeField?: (size: number, addr: Expr) => string | undefined; // field name of a store's destination
   stmtTail?: (s: Stmt, prev?: Stmt) => string | undefined; // comment at the end of a statement's line (prev: statement printed just before, same list)
+  views?: Views;                                  // typed views (src/views.ts): x.field for loads/stores/addresses through typed variables
+  varType?: (id: number) => string | undefined;   // view type of a variable
 }
 
 const P = { assign: 2, cond: 3, lor: 4, land: 5, bor: 6, bxor: 7, band: 8, eq: 9, rel: 10, shift: 11, add: 12, mul: 13, unary: 15, as: 3, call: 20, prim: 21 };
@@ -74,7 +78,61 @@ export class Printer {
     return s.prec < prec ? `(${s.t})` : s.t;
   }
 
+  /** A typed object: a variable with a view type, or a field of one that is itself an object (ref / embedded). */
+  typedObj(e: Expr): { t: string; type: string } | undefined {
+    const V = this.ctx.views;
+    if (!V) return undefined;
+    if (e.k === 'var') { const type = this.ctx.varType?.(e.id); return type ? { t: this.ctx.varName(e.id), type } : undefined; }
+    const f = e.k === 'load' && e.size === 8 ? this.viewField(e.addr) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? this.viewField(e) : undefined;
+    if (!f || f.rest) return undefined;
+    if (e.k === 'load' && f.last.k === 'ref') return { t: f.t, type: f.last.to };
+    if (e.k === 'bin' && f.last.k === 'embed') return { t: f.t, type: f.last.type };
+    return undefined;
+  }
+
+  /** `obj.path` for an address expression obj + c (c inside a declared field), with the byte offset left over. */
+  viewField(addr: Expr): { t: string; rest: number; last: import('./views.ts').FieldType } | undefined {
+    let b: Expr = addr, off = 0n;
+    if (addr.k === 'bin' && addr.op === 'add' && addr.b.k === 'const') { b = addr.a; off = BigInt.asIntN(64, addr.b.v); }
+    if (off < 0n || off > 0x10000n) return undefined;
+    const o = this.typedObj(b);
+    if (!o) return undefined;
+    // objects of a sized view in a row (e.g. a slice of AccountInfo): x[k]
+    const size = this.ctx.views!.map.get(o.type)?.size;
+    let t = o.t, rel = Number(off);
+    if (size && rel >= size) { t = `${o.t}[${Math.floor(rel / size)}]`; rel %= size; }
+    const r = this.ctx.views!.resolve(o.type, rel);
+    if (!r) return undefined;
+    return { t: `${t}.${r.path.join('.')}`, rest: r.rest, last: r.last };
+  }
+
+  /** Typed-view rendering of a load or an address, if any. */
+  viewExpr(e: Expr): { t: string; prec: number } | undefined {
+    if (!this.ctx.views) return undefined;
+    if (e.k === 'load') {
+      const f = this.viewField(e.addr);
+      if (!f) return undefined;
+      if (!f.rest && ((f.last.k === 'scalar' && f.last.size === e.size) || (f.last.k === 'ref' && e.size === 8))) return { t: f.t, prec: P.prim };
+      if (f.last.k === 'embed') return { t: `ld${e.size * 8}(${f.rest ? `${f.t} + ${fmtConst(BigInt(f.rest))}` : f.t})`, prec: P.call };
+      return undefined;
+    }
+    if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') {
+      const f = this.viewField(e);
+      if (!f || f.last.k !== 'embed') return undefined;
+      return f.rest ? { t: `${f.t} + ${fmtConst(BigInt(f.rest))}`, prec: P.add } : { t: f.t, prec: P.prim };
+    }
+    return undefined;
+  }
+
+  /** Store destination as a view field (`x.is_writable`), if the store writes exactly that scalar field. */
+  viewLvalue(size: number, addr: Expr): string | undefined {
+    const f = this.viewField(addr);
+    return f && !f.rest && f.last.k === 'scalar' && f.last.size === size ? f.t : undefined;
+  }
+
   expr0(e: Expr): { t: string; prec: number } {
+    const view = this.viewExpr(e);
+    if (view) return view;
     const hook = this.ctx.exprHook?.(e, (x, p) => this.expr(x, p));
     if (hook !== undefined) return { t: hook, prec: P.call };
     switch (e.k) {
@@ -193,7 +251,11 @@ export class Printer {
     // (pointer, length) pairs into rodata render as the string they denote
     if (this.ctx.strAt) for (let i = 0; i + 1 < args.length; i++) {
       const x = args[i], y = args[i + 1];
-      if (x.k === 'const' && y.k === 'const') { const str = this.ctx.strAt(x.v, y.v); if (str !== undefined) a[i] = JSON.stringify(str); }
+      if (x.k === 'const' && y.k === 'const') {
+        const str = this.ctx.strAt(x.v, y.v);
+        if (str !== undefined) a[i] = JSON.stringify(str);
+        else { const n = this.ctx.strNote?.(x.v, y.v); if (n !== undefined && !a[i].includes('/*')) a[i] = `${a[i]} /* ${JSON.stringify(n).replaceAll('*/', '*\\/')} */`; }
+      }
     }
     this.keyArgs(args, a);
     if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${joinArgs(a)})`;
@@ -209,7 +271,11 @@ export interface Decl { kind: 'let' | 'const'; hoist: boolean }
 export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string, decls: Map<Stmt, 'let' | 'const'>, hoisted: number[]): string[] {
   const out: string[] = [];
   const I = (d: number) => indent + '\t'.repeat(d);
-  if (hoisted.length) out.push(`${I(0)}let ${hoisted.map(v => pr.ctx.varName(v)).join(', ')}: u64`);
+  const vt = (v: number) => pr.ctx.varType?.(v);
+  const plain = hoisted.filter(v => !vt(v)), typed = hoisted.filter(v => vt(v));
+  if (plain.length) out.push(`${I(0)}let ${plain.map(v => pr.ctx.varName(v)).join(', ')}: u64`);
+  for (const v of typed) out.push(`${I(0)}let ${pr.ctx.varName(v)}: ${vt(v)}`);
+  const declName = (v: number, kw: string | undefined) => `${kw ? kw + ' ' : ''}${pr.ctx.varName(v)}${kw && vt(v) ? `: ${vt(v)}` : ''}`;
   const stmt = (s: Stmt, d: number) => {
     const n0 = out.length;
     stmt0(s, d);
@@ -220,10 +286,16 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
     switch (s.k) {
       case 'set': {
         const kw = decls.get(s);
-        out.push(`${I(d)}${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ${pr.u(s.e, P.assign)}`);
+        out.push(`${I(d)}${declName(s.dst, kw)} = ${pr.u(s.e, P.assign)}`);
         break;
       }
       case 'store': {
+        const lv = pr.viewLvalue(s.size, s.addr);
+        if (lv) {
+          const tail = pr.ctx.stmtTail?.(s, prevStmt);
+          out.push(`${I(d)}${lv} = ${pr.u(s.v, P.assign)}${tail ? ` // ${tail}` : ''}`);
+          break;
+        }
         pr.addrDepth++; let a = pr.u(s.addr, P.assign); pr.addrDepth--;
         const fld = pr.ctx.storeField?.(s.size, s.addr);
         if (fld && !a.includes('/*')) a += ` /* ${fld} */`;
@@ -234,7 +306,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
       case 'call': {
         const kw = decls.get(s);
         const txt = pr.callText(s.t, [...s.args, ...(s.extra ?? [])]);
-        out.push(`${I(d)}${s.dst >= 0 ? `${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ` : ''}${txt}`);
+        out.push(`${I(d)}${s.dst >= 0 ? `${declName(s.dst, kw)} = ` : ''}${txt}`);
         break;
       }
       case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && (s.e.name === 'rc_inc' || s.e.name === 'rc_dec') ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;

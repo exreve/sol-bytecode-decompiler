@@ -130,9 +130,9 @@ test('keyeq / memeq print and evaluate as word-wise memory comparisons', () => {
 	}
 })
 
-for (const f of ['memo', 'token', 'ata']) {
-	test(`decompiled ${f}.so is equivalent to the bytecode (random differential testing)`, () => {
-		const r = checkProgram(new Uint8Array(readFileSync(`samples/${f}.so`)), 3)
+for (const f of ['memo', 'token', 'ata']) for (const sugar of [false, true]) {
+	test(`decompiled ${f}.so (${sugar ? 'readable' : 'raw'} output) is equivalent to the bytecode (random differential testing)`, () => {
+		const r = checkProgram(new Uint8Array(readFileSync(`samples/${f}.so`)), 3, Infinity, undefined, false, undefined, sugar)
 		assert.equal(r.errors.length, 0, JSON.stringify(r.errors.slice(0, 3)))
 		assert.equal(r.failures.length, 0, JSON.stringify(r.failures.slice(0, 3)))
 		assert.ok(r.funcs > 0)
@@ -166,6 +166,11 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(1) }, pc: 0 } }, ...dec(V(0)),
 			{ k: 'return', e: { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: V(0), b: C(8n) } } }],
+		// inverted: st64(a, x + 1); if (x != -1) { …; return } abort()   -> rc_inc(a); …; return
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } },
+			inc(V(0))[0],
+			{ k: 'if', c: { k: 'cmp', op: 'ne', a: V(3), b: C(M) }, then: [{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, { k: 'return', e: V(4) }], else: [] },
+			...abort],
 		// a pure assignment between the store and the check
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, dec(V(0))[0],
 			{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, dec(V(0))[1],
@@ -192,4 +197,31 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 			assert.equal(run(after), run(before), `${before}\n${after}`)
 		}
 	}
+})
+
+test('typed views: x.field / x[k].field / nested embedded fields print and evaluate as the loads and stores they replace', async () => {
+	const { Views, VIEW_NOTATION } = await import('../src/views.ts')
+	const V = new Views()
+	const R = rng(11)
+	const types = ['AccountInfo', 'AccountRecord', 'Input']
+	const decls = [...VIEW_NOTATION, ...V.render(types)].join('\n')
+	let viewed = 0
+	for (let i = 0; i < 400; i++) {
+		const ty = types[i % 3]
+		const size = ([1, 2, 4, 8] as const)[Number(R() % 4n)]
+		const off = BigInt(Number(R() % 0xa0n))
+		const addr: Expr = { k: 'bin', op: 'add', a: { k: 'var', id: 0 }, b: { k: 'const', v: off } }
+		const pr = new Printer({ fnName: () => 'f', fnAddrName: () => undefined, sysName: n => n, constComment: () => undefined, varName: id => 'abc'[id], views: V, varType: id => (id === 0 ? ty : undefined) })
+		const load = pr.u({ k: 'load', size, addr }, 2)
+		const lv = pr.viewLvalue(size, addr)
+		if (/\.\w/.test(load)) viewed++
+		const src = `${decls}\nfunction t(a: ${ty}, b: u64, c: u64): u64 {\n\t${lv ? `${lv} = b` : `st${size * 8}(${pr.u(addr, 2)}, b)`}\n\treturn ${load} + ${pr.u(addr, 12)}\n}`
+		const mem = new TestMem(new Image([]), i, [])
+		const base = 0x3_0000_0000n + (R() % 0x100n) * 8n
+		const val = R()
+		const r = runFunction(parseFunctions(src).get('t')!, [base, val, 0n], { mem, onCall: () => 0n, fp: 0n, fnAddr: new Map(), fnTarget: new Map(), sysTarget: new Map(), maxSteps: 100 })
+		const want = (val & ((1n << BigInt(size * 8)) - 1n)) + base + off
+		assert.equal(r.ret, want & ((1n << 64n) - 1n), src)
+	}
+	assert.ok(viewed > 100, `only ${viewed} loads printed as views`)
 })
