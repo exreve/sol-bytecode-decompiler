@@ -326,7 +326,9 @@ export function pruneUnreachable(f: Func) {
     else if (t.k === 'br') { t.t = remap[t.t]; t.f = remap[t.f]; }
   }
   f.blocks = nb;
-  f.blockAt = new Map([...f.blockAt].filter(([, id]) => remap[id] >= 0).map(([pc, id]) => [pc, remap[id]]));
+  const blockAt = new Map<number, number>();
+  for (const [pc, id] of f.blockAt) if (remap[id] >= 0) blockAt.set(pc, remap[id]);
+  f.blockAt = blockAt;
 }
 
 // ---------------- variable recovery ----------------
