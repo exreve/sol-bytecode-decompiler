@@ -4,8 +4,8 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, INTRINSICS } from './ir.ts';
-import { Semantics, constsIn, NICHE } from './semantics.ts';
+import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
+import { Semantics, constsIn, NICHE, OK_TAGS } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
@@ -102,12 +102,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const niche = new Map<bigint, number>();
   const noteCmp = (e: Expr) => walkExpr(e, x => {
     if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const' && x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
+    // older layout: u32 variant tag (Ok = the number of ProgramError variants)
+    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.a.k === 'load' && x.a.size === 4 && x.b.k === 'const' && OK_TAGS.includes(x.b.v)) tags.set(x.b.v, (tags.get(x.b.v) ?? 0) + 1);
   });
+  const tags = new Map<bigint, number>();
+  const tagStores = new Map<bigint, number>();
   for (const { f } of built.values()) for (const b of f.blocks) {
+    for (const s of b.stmts) if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && OK_TAGS.includes(s.v.v)) tagStores.set(s.v.v, (tagStores.get(s.v.v) ?? 0) + 1);
     for (const s of b.stmts) stmtExprs(s).forEach(noteCmp);
     if (b.term.k === 'br') noteCmp(b.term.c);
   }
   sem.noteResultCompares(niche);
+  sem.noteResultTags(tags, tagStores);
+  const resultOut = sem.resultOkTag !== undefined && opts.sugar !== false ? resultOutParams(built, sem.resultOkTag) : new Set<number>();
 
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
@@ -210,6 +217,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
     const accTyped = accountInfos?.get(pc);
+    if (opts.sugar !== false) ctx.storeField = (size, addr) => {
+      const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr });
+      if (fld || inputVar === undefined) return fld;
+      const off = addr.k === 'var' && addr.id === inputVar ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === inputVar && addr.b.k === 'const' ? Number(addr.b.v) : -1;
+      return off >= 0 ? inputField(off, size) : undefined;
+    };
     let inAddr = false; // printing the address of an annotated load
     if (accTyped?.size) {
       const prev = ctx.exprHook;
@@ -248,6 +261,27 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
     const pr = new Printer(ctx);
+    // Result<(), ProgramError> tags (u32 layout): stores of constants where the Ok tag is stored too
+    if (opts.sugar !== false && sem.resultOkTag !== undefined) {
+      const okAt: Expr[] = [];
+      for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && s.v.v === sem.resultOkTag && !okAt.some(x => exprEq(x, s.addr))) okAt.push(s.addr);
+      const a = resultOut.has(pc) ? f.vars.find(v => v.param === 1)?.id : undefined;
+      if (a !== undefined) okAt.push({ k: 'var', id: a });
+      const custom = (c: bigint) => { const n = c >= 100n ? sem.constComment(c, 'value') : undefined; return `Err(ProgramError::Custom(${c}${n ? ` ${n}` : ''}))`; };
+      if (okAt.length) ctx.stmtTail = (s, prev) => {
+        if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && okAt.some(x => exprEq(x, s.addr))) {
+          // st32(p + 4, code); st32(p, 0): Custom(code)
+          const c = prev?.k === 'store' && prev.size === 4 && prev.v.k === 'const' && exprEq(prev.addr, { k: 'bin', op: 'add', a: s.addr, b: { k: 'const', v: 4n } }) ? prev.v.v : undefined;
+          return s.v.v === 0n && c !== undefined ? custom(c) : sem.resultTagName(s.v.v);
+        }
+        // st32(p, 0, code): Custom(code)
+        if (s.k === 'stores' && s.size === 4 && s.vals[0].k === 'const' && okAt.some(x => exprEq(x, s.addr))) {
+          const c = s.vals[1];
+          return s.vals[0].v === 0n && c?.k === 'const' ? custom(c.v) : sem.resultTagName(s.vals[0].v);
+        }
+        return undefined;
+      };
+    }
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
@@ -288,6 +322,54 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
   res.text = renderSingle(res);
   return res;
+}
+
+/**
+ * Functions whose first parameter points to a u32-tagged Result<(), ProgramError> (Ok tag `ok`):
+ * they store the Ok tag through it, or a caller passes a slot whose tag it compares with the Ok tag,
+ * or a function known to have one passes its own (unmodified) parameter on.
+ */
+function resultOutParams(built: Map<number, Built>, ok: bigint): Set<number> {
+  const out = new Set<number>();
+  const param1 = (f: VarFunc) => {
+    const id = f.vars.find(v => v.param === 1)?.id;
+    if (id === undefined) return undefined;
+    for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === id) return undefined;
+    return id;
+  };
+  /** direct calls (statements and call expressions): target pc and arguments */
+  const calls = (f: VarFunc) => {
+    const r: { t: number; args: Expr[] }[] = [];
+    const visit = (e: Expr) => walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') r.push({ t: x.t.pc, args: x.args }); });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) { if (s.k === 'call' && s.t.k === 'fn') r.push({ t: s.t.pc, args: s.args }); stmtExprs(s).forEach(visit); }
+      if (b.term.k === 'br') visit(b.term.c); else if (b.term.k === 'ret' && b.term.e) visit(b.term.e);
+    }
+    return r;
+  };
+  for (const [pc, { f }] of built) {
+    const a = param1(f);
+    const compared: Expr[] = [];
+    const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.a.k === 'load' && x.a.size === 4 && x.b.k === 'const' && x.b.v === ok) compared.push(x.a.addr); });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) {
+        if (a !== undefined && s.k === 'store' && s.size === 4 && s.v.k === 'const' && s.v.v === ok && s.addr.k === 'var' && s.addr.id === a) out.add(pc);
+        stmtExprs(s).forEach(note);
+      }
+      if (b.term.k === 'br') note(b.term.c);
+    }
+    for (const c of calls(f)) if (c.args[0] && compared.some(x => exprEq(x, c.args[0]))) out.add(c.t);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const pc of [...out]) {
+      const bt = built.get(pc);
+      const a = bt && param1(bt.f);
+      if (a === undefined) continue;
+      for (const c of calls(bt!.f)) if (c.args[0]?.k === 'var' && c.args[0].id === a && !out.has(c.t)) { out.add(c.t); changed = true; }
+    }
+  }
+  return out;
 }
 
 function invokeAbi(sys: string): 'c' | 'rust' | null {

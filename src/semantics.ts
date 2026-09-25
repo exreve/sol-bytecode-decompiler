@@ -89,6 +89,8 @@ export const KNOWN_KEYS: Record<string, string> = {
 
 /** 0x8000_0000_0000_0000: first niche value of Result<_, ProgramError> (see noteResultCompares) */
 export const NICHE = 0x8000000000000000n
+/** Ok tags of the u32-tagged Result<(), ProgramError> (variant counts of ProgramError over versions) */
+export const OK_TAGS = [0x12n, 0x14n, 0x15n, 0x16n, 0x18n, 0x1an]
 const HEAP_CURSOR = 0x300000000n // the bump allocator keeps its current (downward-growing) pointer here
 
 const PROGRAM_ERRORS = ['', 'Custom(0)', 'InvalidArgument', 'InvalidInstructionData', 'InvalidAccountData', 'AccountDataTooSmall',
@@ -277,6 +279,25 @@ export class Semantics {
 		let best: bigint | undefined, n = 0
 		for (const [v, c] of counts) if (c > n || (c === n && best !== undefined && v > best)) { best = v; n = c }
 		if (best !== undefined && n >= 3 && best >= NICHE + 0x10n && best < NICHE + BigInt(PROGRAM_ERRORS.length)) this.resultOk = best
+	}
+
+	/**
+	 * Result<(), ProgramError> before the niche layout: a u32 variant tag at +0 (ProgramError variant
+	 * index; Custom(code) = 0 with the code at +4) and Ok = the number of variants, which depends on
+	 * the solana-program version: the most frequent such constant compared with a 32-bit load.
+	 */
+	resultOkTag?: bigint
+	noteResultTags(compares: Map<bigint, number>, stores: Map<bigint, number>) {
+		let best: bigint | undefined, n = 0
+		for (const [v, c] of compares) if (c > n) { best = v; n = c }
+		// compared and stored as a u32 somewhere
+		if (best !== undefined && stores.has(best)) this.resultOkTag = best
+	}
+	/** name of u32 tag v stored where the Ok tag is stored too */
+	resultTagName(v: bigint): string | undefined {
+		const ok = this.resultOkTag
+		if (ok === undefined || v > ok) return undefined
+		return v === ok ? 'Ok' : v === 0n ? 'Err(ProgramError::Custom(u32 at +4))' : `Err(ProgramError::${PROGRAM_ERRORS[Number(v) + 1]})`
 	}
 
 	constComment(v: bigint, role: 'value' | 'addr' | 'ret' = 'value'): string | undefined {
