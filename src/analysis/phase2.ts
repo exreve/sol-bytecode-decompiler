@@ -14,6 +14,7 @@ import type { Result } from '../decompile.ts'
 import type { OpKind } from './facts.ts'
 import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
 import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
+import { dominators } from '../structure.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'; status: 'found' | 'partial'; at: Loc; negated?: boolean }
@@ -59,24 +60,23 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 		}
 		return out
 	}
-	// (restricted to the blocks the instruction's tags reach: blocks reachable from the entry avoiding a)
-	const avoidMemo = new Map<string, Uint8Array>()
+	// (in a native dispatcher: dominators of the part of its CFG the instruction's tags reach)
+	const rMemo = new Map<number, Int32Array>()
 	const dom = (fn: number, a: Site, b: Site): boolean => {
 		const g = cfg(fn)!
 		if (a.b === b.b) return a.pc < b.pc
-		if (!ctx.allowed) return dominates(g, a.b, b.b)
-		const k = `${fn}:${a.b}`
-		let seen = avoidMemo.get(k)
-		if (!seen) {
-			const blocks = g.fo.f.blocks
-			seen = new Uint8Array(blocks.length)
-			if (a.b !== 0) {
-				const q = [0]; seen[0] = 1
-				while (q.length) { const x = q.pop()!; for (const s of blocks[x].succs) if (!seen[s] && s !== a.b && ctx.allowed(fn, s)) { seen[s] = 1; q.push(s) } }
-			}
-			avoidMemo.set(k, seen)
+		if (!ctx.restricted?.has(fn)) return dominates(g, a.b, b.b)
+		let idom = rMemo.get(fn)
+		if (!idom) {
+			const blocks = g.fo.f.blocks, ok = (x: number) => ctx.allowed!(fn, x)
+			const order = [...blocks.keys()].filter(x => g.rpo[x] >= 0 && ok(x)).sort((x, y) => g.rpo[x] - g.rpo[y])
+			idom = dominators({ blocks: blocks.map((bl, i) => ({ preds: ok(i) ? bl.preds.filter(ok) : [] })) } as never, order, g.rpo)
+			rMemo.set(fn, idom)
 		}
-		return !seen[b.b]
+		if (idom[b.b] < 0) return true // (not reached with these tags)
+		let x = b.b
+		for (let k = 0; k < 100000; k++) { if (x === a.b) return true; if (x === 0 || idom[x] < 0) return false; x = idom[x] }
+		return false
 	}
 	const siteOf = checks.map(c => {
 		const g = cfg(c.fnPc)

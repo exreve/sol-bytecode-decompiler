@@ -419,6 +419,7 @@ function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
 	const order = [...f.blocks.keys()].filter(b => g.rpo[b] >= 0).sort((a, b) => g.rpo[a] - g.rpo[b])
 	const inS: (Tags | undefined)[] = new Array(f.blocks.length)
 	inS[0] = newTags(true)
+	const maskMemo = new Map<Expr, Record<string, Tags | null>>()
 	const narrow = (c: Expr, truth: boolean, t: Tags): Tags => {
 		if (c.k === 'lnot') return narrow(c.a, !truth, t)
 		if (c.k === 'land' || c.k === 'lor') {
@@ -426,25 +427,45 @@ function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
 			const o = narrow(c.a, truth, t); orInto(o, narrow(c.b, truth, t)); return o
 		}
 		if (c.k !== 'cmp' || c.op === 'set') return t
-		const [x, k, swap] = c.b.k === 'const' ? [c.a, c.b.v, false] : c.a.k === 'const' ? [c.b, c.a.v, true] : [undefined, 0n, false]
-		const v = x && leafVar(x)
-		if (v === undefined || !family.has(v)) return t
-		const ext = x!.k === 'ext' ? x as Extract<Expr, { k: 'ext' }> : undefined
-		return filterTags(t, n => {
-			let a = BigInt(n)
-			if (ext) { const m = (1n << BigInt(ext.bits)) - 1n; a &= m; if (ext.signed && a >> BigInt(ext.bits - 1)) a = BigInt.asUintN(64, a - (1n << BigInt(ext.bits))) }
-			return (swap ? evalCmpN(c.op, k, a) : evalCmpN(c.op, a, k)) === truth
-		})
+		// (the tags a comparison lets through, computed once per condition and side)
+		const mk = `${truth ? 1 : 0}`
+		let ms = maskMemo.get(c)
+		if (!ms) maskMemo.set(c, (ms = {}))
+		let mask = ms[mk]
+		if (mask === undefined) {
+			const [x, k, swap] = c.b.k === 'const' ? [c.a, c.b.v, false] : c.a.k === 'const' ? [c.b, c.a.v, true] : [undefined, 0n, false]
+			const v = x && leafVar(x)
+			if (v === undefined || !family.has(v)) mask = null
+			else {
+				const ext = x!.k === 'ext' ? x as Extract<Expr, { k: 'ext' }> : undefined
+				mask = filterTags(newTags(true), n => {
+					let a = BigInt(n)
+					if (ext) { const m = (1n << BigInt(ext.bits)) - 1n; a &= m; if (ext.signed && a >> BigInt(ext.bits - 1)) a = BigInt.asUintN(64, a - (1n << BigInt(ext.bits))) }
+					return (swap ? evalCmpN(c.op, k, a) : evalCmpN(c.op, a, k)) === truth
+				})
+			}
+			ms[mk] = mask
+		}
+		if (!mask) return t
+		const o = new Uint32Array(9)
+		for (let i = 0; i < 9; i++) o[i] = t[i] & mask[i]
+		return o
 	}
-	for (let changed = true, it = 0; changed && it < 50; it++) {
-		changed = false
+	// (sweeps in reverse postorder over the blocks whose tags grew; a block setting a family variable to a
+	// constant goes on with that tag)
+	const setTo = f.blocks.map(bl => { let v: number | undefined; for (const s of bl.stmts) if (s.k === 'set' && family.has(s.dst) && s.e.k === 'const') v = Number(s.e.v > 256n ? 256n : s.e.v); return v })
+	const dirty = new Uint8Array(f.blocks.length)
+	dirty[0] = 1
+	for (let any = true, sweep = 0; any && sweep < 60; sweep++) {
+		any = false
 		for (const b of order) {
-			const s0 = inS[b]
-			if (!s0) continue
-			let t = s0
-			for (const s of f.blocks[b].stmts) if (s.k === 'set' && family.has(s.dst) && s.e.k === 'const') { t = newTags(false); const v = Number(s.e.v > 256n ? 256n : s.e.v); t[v >> 5] |= 1 << (v & 31) }
+			if (!dirty[b]) continue
+			dirty[b] = 0
+			let t = inS[b]!
+			const sv = setTo[b]
+			if (sv !== undefined) { t = newTags(false); t[sv >> 5] |= 1 << (sv & 31) }
 			const term = f.blocks[b].term
-			const succ = (x: number, tt: Tags) => { const cur = inS[x]; if (!cur) { inS[x] = Uint32Array.from(tt); changed = true } else if (orInto(cur, tt)) changed = true }
+			const succ = (x: number, tt: Tags) => { const cur = inS[x]; if (!cur) inS[x] = Uint32Array.from(tt); else if (!orInto(cur, tt)) return; dirty[x] = 1; any = true }
 			if (term.k === 'br') { succ(term.t, narrow(term.c, true, t)); succ(term.f, narrow(term.c, false, t)) }
 			else for (const x of f.blocks[b].succs) succ(x, t)
 		}
@@ -474,27 +495,32 @@ export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): Dis
 	if (!first) return undefined
 	// nested dispatchers: callees the tag is passed to
 	const ds: TagStates[] = [first]
+	const tried = new Set([first.fo.pc])
 	for (let i = 0; i < ds.length && ds.length < 4; i++) {
 		const d = ds[i]
 		for (const b of d.fo.f.blocks) for (const s of b.stmts) {
 			const c = callOf(s)
-			if (c?.t.k !== 'fn' || ds.some(x => x.fo.pc === (c.t as { pc: number }).pc)) continue
+			if (c?.t.k !== 'fn' || tried.has(c.t.pc)) continue
 			const k = c.args.findIndex(a => { const v = a.k === 'var' ? a.id : a.k === 'ext' && a.a.k === 'var' ? a.a.id : -1; return d.family.has(v) })
 			const callee = byPc.get(c.t.pc)
 			const pv = k < 0 || !callee ? undefined : callee.f.vars.find(v => v.param === k + 1)?.id
+			if (pv !== undefined) tried.add(c.t.pc)
 			const t = pv === undefined ? undefined : tagStates(callee!, pv)
 			if (t) ds.push(t)
 		}
 	}
 	// per tag: the blocks specific to some tags it reaches, in every dispatcher
+	const perTag: string[][] = Array.from({ length: NT }, () => [])
+	ds.forEach((d, i) => d.inS.forEach((t, b) => {
+		if (!t || isAll(t)) return
+		for (let w = 0; w < 9; w++) for (let x = t[w]; x; x &= x - 1) perTag[w * 32 + 31 - Math.clz32(x & -x)].push(`${i}:${b}`)
+	}))
 	const sig = new Map<string, number[]>()
-	for (let v = 0; v < NT; v++) {
-		const parts: string[] = []
-		ds.forEach((d, i) => d.inS.forEach((t, b) => { if (t && !isAll(t) && has(t, v)) parts.push(`${i}:${b}`) }))
-		if (!parts.length) continue
+	perTag.forEach((parts, v) => {
+		if (!parts.length) return
 		const k = parts.join(',')
 		let l = sig.get(k); if (!l) sig.set(k, (l = [])); l.push(v)
-	}
+	})
 	const dIdx = new Map(ds.map((d, i) => [d.fo.pc, i]))
 	// (blocks reached with any tag that never lead to the matching: paths leaving before the dispatch)
 	const before = ds.map(d => {
