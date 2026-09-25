@@ -5,6 +5,8 @@
 //   x = ld64(p); …; st64(p, x - 1); if (x == 1) { st64(p + 8, ld64(p + 8) - 1) }   ->   rc_dec(p)  (or rc_dec(p, x))
 //   …; st64(p, x + 1); if (x != -1) { B } abort()   ->   rc_inc(p); B   when B never falls through (the
 //       abort after the if is reached only when x == -1: it is the abort of rc_inc)
+//   x = ld64(p); …; st64(p, x - 1); if (x == 1) { A } else { B }   ->   if (rc_release(p)) { A } else { B }
+//       (x != 1: if (!rc_release(p)); the Rc drop whose last reference calls drop_slow / drops the value)
 //
 // (Rc::clone / Rc strong-count increment: *p += 1, aborting when the count was u64::MAX; Rc drop:
 // strong count -= 1 and, when it reaches 0, weak count -= 1 — the bump allocator frees nothing.)
@@ -148,15 +150,21 @@ function rewrite(ns: Node[], uses: Map<number, number>, fp?: number): Node[] {
 		while (k < out.length && isPureSet(out[k], x, pv, pIsFrame ? undefined : fp)) k++
 		const br = out[k]
 		if (!br) continue
-		if (br.k !== 'if' || br.else.length || uses.get(x) !== 3) continue
+		if (br.k !== 'if' || uses.get(x) !== 3) continue
 		const c = br.c
 		// inverted: if (x != -1) { B } abort(), B never falling through
 		const abortEnd = out[k + 2]?.k === 'trap' ? k + 3 : k + 2
-		const inverted = inc && c.k === 'cmp' && c.op === 'ne' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === M64
+		const inverted = inc && !br.else.length && c.k === 'cmp' && c.op === 'ne' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === M64
 			&& noFallThrough(br.then) && isAbort(out.slice(k + 1, abortEnd))
+		// release: st64(p, x - 1); if (x == 1) { A } else { B }  ->  if (rc_release(p)) { A } else { B }  (x != 1: negated)
+		let release = false
 		if (!inverted) {
-			if (!(c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === (inc ? M64 : 1n))) continue
-			if (inc ? !isAbort(br.then) : !isWeakDec(br.then, p)) continue
+			const plain = !br.else.length && c.k === 'cmp' && c.op === 'eq' && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === (inc ? M64 : 1n)
+				&& (inc ? isAbort(br.then) : isWeakDec(br.then, p))
+			if (!plain) {
+				if (inc || !(c.k === 'cmp' && (c.op === 'eq' || c.op === 'ne') && c.a.k === 'var' && c.a.id === x && c.b.k === 'const' && c.b.v === 1n)) continue
+				release = true
+			}
 		}
 		// the load of x: in this list, followed only by variable assignments that keep p and x
 		let i = j - 1
@@ -169,10 +177,18 @@ function rewrite(ns: Node[], uses: Map<number, number>, fp?: number): Node[] {
 		const def = i >= 0 ? out[i] : undefined
 		const adjacent = def?.k === 'stmt' && def.s.k === 'set' && def.s.e.k === 'load' && def.s.e.size === 8 && exprEq(def.s.e.addr, p)
 		const args = adjacent ? [p] : [p, { k: 'var', id: x } as Expr]
-		const call: Node = { k: 'stmt', s: { k: 'eval', e: { k: 'fn', name: inc ? 'rc_inc' : 'rc_dec', args }, pc: st.s.pc } }
 		const moved = out.slice(j + 1, k)
-		// inverted form: the if's body follows the helper; the abort after it is the helper's
-		const after = inverted ? [...br.then, ...out.slice(abortEnd)] : out.slice(k + 1)
+		let call: Node, after: Node[]
+		if (release) {
+			// the helper's result is the condition: the branch keeps its place after the moved assignments
+			const r: Expr = { k: 'fn', name: 'rc_release', args }
+			call = { ...br, c: c.k === 'cmp' && c.op === 'ne' ? { k: 'lnot', a: r } : r }
+			after = out.slice(k + 1)
+		} else {
+			call = { k: 'stmt', s: { k: 'eval', e: { k: 'fn', name: inc ? 'rc_inc' : 'rc_dec', args }, pc: st.s.pc } }
+			// inverted form: the if's body follows the helper; the abort after it is the helper's
+			after = inverted ? [...br.then, ...out.slice(abortEnd)] : out.slice(k + 1)
+		}
 		if (adjacent) { out = [...out.slice(0, i), ...out.slice(i + 1, j), ...moved, call, ...after]; j += moved.length - 1 }
 		else { out = [...out.slice(0, j), ...moved, call, ...after]; j += moved.length }
 	}

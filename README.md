@@ -98,6 +98,7 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
 | `rc_inc(p[, x])` | Rc count increment: `x = ld64(p)` (unless given); `st64(p, x + 1)`; `abort()` if x was `-1` |
 | `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
+| `rc_release(p[, x])` | Rc strong-count release: `x = ld64(p)` (unless given); `st64(p, x - 1)`; true when x was 1 (last reference: the caller drops the value) |
 | | (`rc_inc` also replaces the nested form `st64(p, x + 1); if (x != -1) { …never falls through… } abort()`; for both, assignments moved before the helper may read the current frame) |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
@@ -446,7 +447,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
-| `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |
+| `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec / rc_release) |
 | `src/cpi.ts` | CPI and format-string descriptions (comments) |
 | `src/exec.ts`, `src/cpiexec.ts` | concrete runs with every call followed and input taint (analysis only); CPIs described from them |
 | `src/compact.ts` | store/copy run compaction |

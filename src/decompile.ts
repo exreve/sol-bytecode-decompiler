@@ -48,7 +48,7 @@ export interface Result {
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
 const HELPERS = new Set(['copy', 'copyr', 'sar', 'shl', 'sdiv', 'srem', 'sdiv32', 'srem32', 'mulhu', 'mulhs', 'trap', 'callx', 'undef', 'fp',
-  'memeq', 'keyeq', 'rc_inc', 'rc_dec', ...Object.keys(INTRINSICS)]);
+  'memeq', 'keyeq', 'rc_inc', 'rc_dec', 'rc_release', ...Object.keys(INTRINSICS)]);
 
 function* shortNames(): Generator<string> {
   const al = 'abcdefghijklmnopqrstuvwxyz';

@@ -139,7 +139,7 @@ for (const f of ['memo', 'token', 'ata']) for (const sugar of [false, true]) {
 	})
 }
 
-test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as the statements they replace', () => {
+test('rc_inc / rc_dec / rc_release statement idioms: same loads, stores, abort and result as the statements they replace', () => {
 	const V = (id: number): Expr => ({ k: 'var', id })
 	const C = (v: bigint): Expr => ({ k: 'const', v })
 	const M = (1n << 64n) - 1n
@@ -175,6 +175,15 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, dec(V(0))[0],
 			{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } }, dec(V(0))[1],
 			{ k: 'return', e: { k: 'bin', op: 'add', a: V(4), b: { k: 'load', size: 8, addr: a8 } } }],
+		// x = ld64(a); st64(a, x - 1); if (x == 1) { st64(b, 7) } else { st64(b, 9) }; return ld64(b)   -> if (rc_release(a)) …
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(0) }, pc: 0 } }, dec(V(0))[0],
+			{ k: 'if', c: { k: 'cmp', op: 'eq', a: V(3), b: C(1n) }, then: [{ k: 'stmt', s: { k: 'store', size: 8, addr: V(1), v: C(7n), pc: 0 } }], else: [{ k: 'stmt', s: { k: 'store', size: 8, addr: V(1), v: C(9n), pc: 0 } }] },
+			{ k: 'return', e: { k: 'load', size: 8, addr: V(1) } }],
+		// the count loaded from elsewhere, a pure assignment in between, negated: if (!rc_release(a, x)) { return y }; return 5
+		[{ k: 'stmt', s: { k: 'set', dst: 3, e: { k: 'load', size: 8, addr: V(1) }, pc: 0 } }, dec(V(0))[0],
+			{ k: 'stmt', s: { k: 'set', dst: 4, e: { k: 'bin', op: 'add', a: V(1), b: C(1n) }, pc: 0 } },
+			{ k: 'if', c: { k: 'cmp', op: 'ne', a: V(3), b: C(1n) }, then: [{ k: 'return', e: V(4) }], else: [] },
+			{ k: 'return', e: C(5n) }],
 	]
 	const names = ['a', 'b', 'c', 'x', 'y']
 	const pr = new Printer({ fnName: () => 'f', fnAddrName: () => undefined, sysName: n => n, constComment: () => undefined, varName: id => names[id] })
@@ -182,7 +191,7 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 	for (const body of bodies) {
 		const src = (b: Node[]) => `function t(a: u64, b: u64, c: u64): u64 {\n${printBody(pr, f, b, '\t', new Map(), [3, 4]).join('\n')}\n}`
 		const before = src(body), after = src(statementIdioms(body))
-		assert.ok(/rc_(inc|dec)\(/.test(after) && !after.includes('abort') && !after.includes('if'), after)
+		assert.ok(/rc_(inc|dec|release)\(/.test(after) && !after.includes('abort') && (after.includes('if (rc_release(') || after.includes('if (!rc_release(') || !after.includes('if')), after)
 		for (const v of [0n, 1n, 2n, 5n, M, M - 1n]) {
 			const run = (text: string) => {
 				const mem = new TestMem(new Image([]), 1, [])

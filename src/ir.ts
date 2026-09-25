@@ -152,8 +152,9 @@ export type MemIntrinsic = 'memeq' | 'keyeq';
  * Statement helpers with effects, introduced only on the final structured body (src/stmtidioms.ts):
  *   rc_inc(p[, x])   x = ld64(p) (unless given); st64(p, x + 1); if (x == u64::MAX) abort()
  *   rc_dec(p[, x])   x = ld64(p) (unless given); st64(p, x - 1); if (x == 1) st64(p + 8, ld64(p + 8) - 1)
+ *   rc_release(p[, x])   x = ld64(p) (unless given); st64(p, x - 1); value x == 1 (only as an if condition)
  */
-export type EffIntrinsic = 'rc_inc' | 'rc_dec';
+export type EffIntrinsic = 'rc_inc' | 'rc_dec' | 'rc_release';
 export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic | EffIntrinsic;
 export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq' || n === 'keyeq';
 const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
@@ -222,7 +223,7 @@ function sideEffects(x: Expr, r: { load: boolean; call: boolean; trap: boolean }
     case 'sel': sideEffects(x.c, r); sideEffects(x.a, r); sideEffects(x.b, r); return;
     case 'fn':
       if (isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
-      else if (x.name === 'rc_inc' || x.name === 'rc_dec') { r.load = true; r.trap = true; r.call = true; }
+      else if (x.name === 'rc_inc' || x.name === 'rc_dec' || x.name === 'rc_release') { r.load = true; r.trap = true; r.call = true; }
       for (const a of x.args) sideEffects(a, r); return;
   }
 }

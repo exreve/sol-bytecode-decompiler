@@ -37,7 +37,7 @@ export function maxBits(e: Expr): number {
     case 'fn':
       switch (e.name) {
         case 'popcount': case 'clz': case 'ctz': return 7;
-        case 'memeq': case 'keyeq': return 1;
+        case 'memeq': case 'keyeq': case 'rc_release': return 1;
         case 'min': return Math.min(maxBits(e.args[0]), maxBits(e.args[1]));
         case 'max': return Math.max(maxBits(e.args[0]), maxBits(e.args[1]));
         case 'sat_sub': return maxBits(e.args[0]);
@@ -48,7 +48,7 @@ export function maxBits(e: Expr): number {
 }
 
 const isPure = (e: Expr) => { const s = hasSideEffectsOrMem(e); return !s.load && !s.call && !s.trap; };
-const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n) || (e.k === 'fn' && (e.name === 'memeq' || e.name === 'keyeq'));
+const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n) || (e.k === 'fn' && (e.name === 'memeq' || e.name === 'keyeq' || e.name === 'rc_release'));
 
 export function negate(c: Expr): Expr {
   if (c.k === 'cmp') { const n = NEG_CMP[c.op]; if (n) return { ...c, op: n }; }
@@ -381,7 +381,7 @@ function scanInfo(e: Expr, r: StmtInfo): void {
     case 'sel': scanInfo(e.c, r); scanInfo(e.a, r); scanInfo(e.b, r); return;
     case 'fn':
       if (isMemIntrinsic(e.name)) { r.load = true; r.trap = true; }
-      else if (e.name === 'rc_inc' || e.name === 'rc_dec') { r.load = true; r.trap = true; r.call = true; }
+      else if (e.name === 'rc_inc' || e.name === 'rc_dec' || e.name === 'rc_release') { r.load = true; r.trap = true; r.call = true; }
       for (const a of e.args) scanInfo(a, r); return;
   }
 }

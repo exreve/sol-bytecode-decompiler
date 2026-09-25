@@ -56,6 +56,7 @@ declare function memeq(p: u64, q: u64, n: u64): boolean // n bytes at p == n byt
 declare function keyeq(p: u64, key: string): boolean // 32 bytes at p == the base58 public key (same word-wise comparison)
 declare function rc_inc(p: u64, x?: u64): void // Rc count increment: x = ld64(p) (unless given); st64(p, x + 1); if (x == -1) abort()
 declare function rc_dec(p: u64, x?: u64): void // Rc drop: x = ld64(p) (unless given); st64(p, x - 1); if (x == 1) st64(p + 8, ld64(p + 8) - 1)
+declare function rc_release(p: u64, x?: u64): boolean // Rc strong-count release: x = ld64(p) (unless given); st64(p, x - 1); result x == 1 (the last reference: the caller then drops the value)
 declare function sdiv(a: u64, b: u64): u64 // signed (i64) division (traps on 0 and MIN / -1)
 declare function sdiv32(a: u64, b: u64): u64 // signed division of the low 32 bits, zero-extended result
 declare function srem32(a: u64, b: u64): u64 // signed remainder of the low 32 bits, zero-extended result
