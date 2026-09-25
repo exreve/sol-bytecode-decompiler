@@ -1,0 +1,44 @@
+{
+	"kind": "anchor",
+	"idl": "a_escrow.json",
+	"instructions": {
+		"make": {
+			"accounts": {
+				"maker": ["signer", "writable"], "mint_a": ["owner", "discriminator?"], "mint_b": ["owner", "discriminator?"],
+				"escrow": ["writable", "pda"], "vault": ["writable", "pda"], "maker_ata_a": ["owner", "discriminator?", "writable", "token_mint", "token_owner"],
+				"token_program": ["address"], "system_program": ["address"]
+			},
+			"relations": [["vault", "mint_a"], ["vault", "escrow"], ["maker_ata_a", "mint_a"], ["maker_ata_a", "maker"]],
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?", "TOKEN_PROGRAM.InitializeAccount3", "TOKEN_PROGRAM.Transfer"],
+			"writes": ["escrow.maker", "escrow.mint_a", "escrow.mint_b", "escrow.amount_b", "escrow.bump"],
+			"pdas": ["escrow/*", "vault/*"]
+		},
+		"take": {
+			"accounts": {
+				"taker": ["signer"], "maker": ["writable"], "escrow": ["owner", "discriminator", "writable", "has_one", "pda", "close"],
+				"mint_a": ["owner", "discriminator?"], "mint_b": ["owner", "discriminator?"], "vault": ["owner", "discriminator?", "writable", "pda"],
+				"taker_ata_a": ["owner", "discriminator?", "writable", "token_mint", "token_owner"], "taker_ata_b": ["owner", "discriminator?", "writable", "token_mint", "token_owner"],
+				"maker_ata_b": ["owner", "discriminator?", "writable", "token_mint", "token_owner"], "token_program": ["address"]
+			},
+			"relations": [["escrow", "maker"], ["escrow", "mint_a"], ["escrow", "mint_b"], ["taker_ata_a", "mint_a"], ["taker_ata_a", "taker"],
+				["taker_ata_b", "mint_b"], ["taker_ata_b", "taker"], ["maker_ata_b", "mint_b"], ["maker_ata_b", "maker"]],
+			"cpis": ["TOKEN_PROGRAM.Transfer", "TOKEN_PROGRAM.CloseAccount"],
+			"writes": ["escrow.lamports", "maker.lamports"],
+			"pdas": ["escrow/*", "vault/*"]
+		},
+		"cancel": {
+			"accounts": {
+				"maker": ["signer", "writable"], "escrow": ["owner", "discriminator", "writable", "has_one", "close"], "vault": ["owner", "discriminator?", "writable", "pda"],
+				"maker_ata_a": ["owner", "discriminator?", "writable", "token_mint", "token_owner"], "token_program": ["address"]
+			},
+			"relations": [["escrow", "maker"], ["maker_ata_a", "escrow"], ["maker_ata_a", "maker"]],
+			"cpis": ["TOKEN_PROGRAM.Transfer", "TOKEN_PROGRAM.CloseAccount"],
+			"writes": ["escrow.lamports", "maker.lamports"],
+			"pdas": ["escrow/*", "vault/*"]
+		}
+	},
+	"variants": {
+		"no_has_one": { "ix": "cancel", "rules": ["signer-not-related-to-authority"] },
+		"recipient_unbound": { "ix": "take", "rules": ["recipient-unbound", "token-mint-unrelated"] }
+	}
+}

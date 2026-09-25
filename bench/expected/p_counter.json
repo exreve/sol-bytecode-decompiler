@@ -1,0 +1,31 @@
+{
+	"kind": "native",
+	"instructions": {
+		"init": {
+			"tag": 0,
+			"accounts": { "admin": ["signer"], "counter": ["owner"] },
+			"writes": ["counter.data[0..32]"]
+		},
+		"bump": {
+			"tag": 1,
+			"accounts": { "admin": ["signer"], "counter": ["owner"] },
+			"relations": [["counter", "admin"]],
+			"writes": ["counter.data[32..40]"]
+		},
+		"tip": {
+			"tag": 2,
+			"accounts": { "payer": [], "counter": [], "system_program": [] },
+			"cpis": ["SYSTEM_PROGRAM.Transfer"]
+		},
+		"withdraw": {
+			"tag": 3,
+			"accounts": { "admin": ["signer"], "counter": ["owner"] },
+			"relations": [["counter", "admin"]],
+			"writes": ["counter.lamports", "admin.lamports"]
+		}
+	},
+	"variants": {
+		"no_signer": { "ix": "withdraw", "rules": ["value-move-no-signer"] },
+		"ungated": { "ix": "bump", "rules": ["state-write-ungated"] }
+	}
+}

@@ -1,0 +1,48 @@
+{
+	"kind": "anchor",
+	"idl": "a_staking.json",
+	"instructions": {
+		"init_pool": {
+			"accounts": {
+				"pool": ["writable", "pda"], "mint": ["owner", "discriminator?"], "vault": ["writable", "pda"],
+				"admin": ["signer", "writable"], "token_program": ["address"], "system_program": ["address"]
+			},
+			"relations": [["vault", "mint"], ["vault", "pool"]],
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?", "TOKEN_PROGRAM.InitializeAccount3"],
+			"writes": ["pool.admin", "pool.mint", "pool.vault", "pool.total_staked", "pool.total_shares", "pool.bump"],
+			"pdas": ["pool/*", "vault/*"]
+		},
+		"open_stake": {
+			"accounts": { "pool": ["owner", "discriminator"], "user_stake": ["writable", "pda"], "user": ["signer", "writable"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?"],
+			"writes": ["user_stake.owner", "user_stake.pool", "user_stake.shares"],
+			"pdas": ["stake/*/*"]
+		},
+		"stake": {
+			"accounts": {
+				"pool": ["owner", "discriminator", "writable", "has_one"], "user_stake": ["owner", "discriminator", "writable", "has_one"],
+				"vault": ["owner", "discriminator?", "writable"], "user_token": ["owner", "discriminator?", "writable", "token_mint", "token_owner"],
+				"owner": ["signer"], "token_program": ["address"]
+			},
+			"relations": [["pool", "vault"], ["user_stake", "owner"], ["user_stake", "pool"], ["user_token", "pool"], ["user_token", "owner"]],
+			"cpis": ["TOKEN_PROGRAM.Transfer"],
+			"writes": ["pool.total_staked", "pool.total_shares", "user_stake.shares"]
+		},
+		"unstake": {
+			"accounts": {
+				"pool": ["owner", "discriminator", "writable", "has_one"], "user_stake": ["owner", "discriminator", "writable", "has_one"],
+				"vault": ["owner", "discriminator?", "writable"], "user_token": ["owner", "discriminator?", "writable", "token_mint", "token_owner"],
+				"owner": ["signer"], "token_program": ["address"]
+			},
+			"relations": [["pool", "vault"], ["user_stake", "owner"], ["user_stake", "pool"], ["user_token", "pool"], ["user_token", "owner"]],
+			"cpis": ["TOKEN_PROGRAM.Transfer"],
+			"writes": ["pool.total_staked", "pool.total_shares", "user_stake.shares"],
+			"pdas": ["pool/*"]
+		}
+	},
+	"variants": {
+		"div_no_zero": { "ix": "stake", "rules": ["share-price-zero-supply"] },
+		"recipient_unbound": { "ix": "unstake", "rules": ["recipient-unbound", "token-mint-unrelated"] },
+		"no_has_one": { "ix": "unstake", "rules": ["signer-not-related-to-authority"] }
+	}
+}

@@ -1,0 +1,29 @@
+{
+	"kind": "native",
+	"instructions": {
+		"payout": {
+			"tag": 0,
+			"accounts": { "admin": ["signer"], "config": ["owner"], "vault": [], "dest": ["owner"], "authority": ["pda"], "token_program": ["address"] },
+			"relations": [["config", "admin"], ["dest", "config"]],
+			"cpis": ["TOKEN_PROGRAM.Transfer"],
+			"pdas": ["auth/*"]
+		},
+		"mint": {
+			"tag": 1,
+			"accounts": { "admin": ["signer"], "config": ["owner"], "mint": [], "dest": [], "authority": ["pda"], "token_program": ["address"] },
+			"relations": [["config", "admin"], ["config", "mint"]],
+			"cpis": ["TOKEN_PROGRAM.MintTo"],
+			"pdas": ["auth/*"]
+		},
+		"burn": {
+			"tag": 2,
+			"accounts": { "owner": ["signer"], "source": [], "mint": [], "token_program": ["address"] },
+			"cpis": ["TOKEN_PROGRAM.Burn"]
+		}
+	},
+	"variants": {
+		"cpi_unchecked": { "ix": "payout", "rules": ["cpi-unchecked-program"] },
+		"recipient_unbound": { "ix": "payout", "rules": ["recipient-unbound", "token-mint-unrelated"] },
+		"no_signer": { "ix": "payout", "rules": ["value-move-no-signer"] }
+	}
+}

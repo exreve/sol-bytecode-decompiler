@@ -1,0 +1,36 @@
+{
+	"kind": "anchor",
+	"idl": "a_mint.json",
+	"instructions": {
+		"init_config": {
+			"accounts": { "config": ["writable", "pda"], "mint": ["writable", "signer?"], "admin": ["signer", "writable"], "token_program": ["address"], "system_program": ["address"] },
+			"relations": [["mint", "config"]],
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?", "TOKEN_PROGRAM.InitializeMint2"],
+			"writes": ["config.admin", "config.mint", "config.bump", "config.minted"],
+			"pdas": ["config/*"]
+		},
+		"mint_tokens": {
+			"accounts": {
+				"config": ["owner", "discriminator", "writable", "has_one", "pda"], "mint": ["owner", "discriminator?", "writable"],
+				"dest": ["owner", "discriminator?", "writable", "token_mint"], "admin": ["signer"], "token_program": ["address"]
+			},
+			"relations": [["config", "admin"], ["config", "mint"], ["dest", "mint"]],
+			"cpis": ["TOKEN_PROGRAM.MintTo"],
+			"writes": ["config.minted"],
+			"pdas": ["config/*"]
+		},
+		"burn_tokens": {
+			"accounts": {
+				"config": ["owner", "discriminator", "writable", "has_one"], "mint": ["owner", "discriminator?", "writable"],
+				"from": ["owner", "discriminator?", "writable", "token_mint", "token_owner"], "owner": ["signer"], "token_program": ["address"]
+			},
+			"relations": [["config", "mint"], ["from", "mint"], ["from", "owner"]],
+			"cpis": ["TOKEN_PROGRAM.Burn"],
+			"writes": ["config.minted"]
+		}
+	},
+	"variants": {
+		"no_signer": { "ix": "mint_tokens", "rules": ["value-move-no-signer"], "idl": { "mint_tokens": "config:w mint:w dest:w admin token_program" } },
+		"no_has_one": { "ix": "mint_tokens", "rules": ["signer-not-related-to-authority"] }
+	}
+}

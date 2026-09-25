@@ -1,0 +1,39 @@
+{
+	"kind": "native",
+	"instructions": {
+		"init": {
+			"tag": 0,
+			"accounts": { "owner": ["signer"], "state": ["pda"], "vault": ["pda"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount"],
+			"writes": ["state.data[0..32]", "state.data[32..33]", "state.data[33..41]"],
+			"pdas": ["state/*", "vault/*"]
+		},
+		"deposit": {
+			"tag": 1,
+			"accounts": { "payer": ["signer"], "state": ["owner"], "vault": ["pda"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.Transfer"],
+			"writes": ["state.data[33..41]"],
+			"pdas": ["vault/*"]
+		},
+		"withdraw": {
+			"tag": 2,
+			"accounts": { "owner": ["signer"], "state": ["owner"], "vault": ["pda"], "dest": [] },
+			"relations": [["state", "owner"]],
+			"writes": ["state.data[33..41]", "vault.lamports", "dest.lamports"],
+			"pdas": ["vault/*"]
+		},
+		"close": {
+			"tag": 3,
+			"accounts": { "owner": ["signer"], "state": ["owner"], "dest": [] },
+			"relations": [["state", "owner"]],
+			"writes": ["state.lamports", "dest.lamports", "state.data[0..41]?"]
+		}
+	},
+	"variants": {
+		"no_signer": { "ix": "withdraw", "rules": ["value-move-no-signer"] },
+		"no_owner": { "ix": "withdraw", "rules": ["unverified-account-data"] },
+		"no_key": { "ix": "withdraw", "rules": ["signer-not-related-to-authority"] },
+		"wrapping_sub": { "ix": "withdraw", "rules": ["unchecked-arithmetic"] },
+		"close_no_zero": { "ix": "close", "rules": ["close-without-zeroing"] }
+	}
+}

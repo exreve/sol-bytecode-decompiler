@@ -1,0 +1,23 @@
+{
+	"kind": "native",
+	"instructions": {
+		"deposit": {
+			"tag": 0,
+			"accounts": { "user": ["signer"], "pool": ["owner"], "record": ["owner"], "system_program": ["address"] },
+			"relations": [["record", "user"]],
+			"cpis": ["SYSTEM_PROGRAM.Transfer"],
+			"writes": ["pool.data[0..8]", "pool.data[8..16]", "record.data[32..40]"]
+		},
+		"redeem": {
+			"tag": 1,
+			"accounts": { "user": ["signer"], "pool": ["owner"], "record": ["owner"] },
+			"relations": [["record", "user"]],
+			"writes": ["pool.data[0..8]", "pool.data[8..16]", "record.data[32..40]", "pool.lamports", "user.lamports"]
+		}
+	},
+	"variants": {
+		"div_no_zero": { "ix": "redeem", "rules": ["share-price-zero-supply"] },
+		"no_owner": { "ix": "redeem", "rules": ["unverified-account-data"] },
+		"wrapping_sub": { "ix": "redeem", "rules": ["unchecked-arithmetic"] }
+	}
+}

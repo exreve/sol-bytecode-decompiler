@@ -1,0 +1,140 @@
+{
+	"address": "BFeed11111111111111111111111111111111111111",
+	"metadata": {
+		"name": "a_oracle",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_feed",
+			"discriminator": [
+				203,
+				50,
+				143,
+				146,
+				170,
+				34,
+				46,
+				93
+			],
+			"accounts": [
+				{
+					"name": "feed",
+					"writable": true
+				},
+				{
+					"name": "authority",
+					"signer": true
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "update",
+			"discriminator": [
+				219,
+				200,
+				88,
+				176,
+				158,
+				63,
+				253,
+				127
+			],
+			"accounts": [
+				{
+					"name": "feed",
+					"writable": true
+				},
+				{
+					"name": "authority",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "price",
+					"type": "u64"
+				},
+				{
+					"name": "conf",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "set_authority",
+			"discriminator": [
+				133,
+				250,
+				37,
+				21,
+				110,
+				163,
+				26,
+				121
+			],
+			"accounts": [
+				{
+					"name": "feed",
+					"writable": true
+				},
+				{
+					"name": "authority",
+					"signer": true
+				},
+				{
+					"name": "new_authority"
+				}
+			],
+			"args": []
+		}
+	],
+	"accounts": [
+		{
+			"name": "Feed",
+			"discriminator": [
+				69,
+				191,
+				16,
+				227,
+				132,
+				187,
+				84,
+				227
+			]
+		}
+	],
+	"errors": [],
+	"types": [
+		{
+			"name": "Feed",
+			"serialization": "bytemuckunsafe",
+			"repr": {
+				"kind": "c"
+			},
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "authority",
+						"type": "pubkey"
+					},
+					{
+						"name": "price",
+						"type": "u64"
+					},
+					{
+						"name": "conf",
+						"type": "u64"
+					},
+					{
+						"name": "slot",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}

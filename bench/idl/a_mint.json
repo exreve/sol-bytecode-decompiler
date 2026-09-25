@@ -1,0 +1,173 @@
+{
+	"address": "BMint11111111111111111111111111111111111111",
+	"metadata": {
+		"name": "a_mint",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_config",
+			"discriminator": [
+				23,
+				235,
+				115,
+				232,
+				168,
+				96,
+				1,
+				231
+			],
+			"accounts": [
+				{
+					"name": "config",
+					"writable": true
+				},
+				{
+					"name": "mint",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "mint_tokens",
+			"discriminator": [
+				59,
+				132,
+				24,
+				246,
+				122,
+				39,
+				8,
+				243
+			],
+			"accounts": [
+				{
+					"name": "config",
+					"writable": true
+				},
+				{
+					"name": "mint",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "burn_tokens",
+			"discriminator": [
+				76,
+				15,
+				51,
+				254,
+				229,
+				215,
+				121,
+				66
+			],
+			"accounts": [
+				{
+					"name": "config",
+					"writable": true
+				},
+				{
+					"name": "mint",
+					"writable": true
+				},
+				{
+					"name": "from",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		}
+	],
+	"accounts": [
+		{
+			"name": "Config",
+			"discriminator": [
+				155,
+				12,
+				170,
+				224,
+				30,
+				250,
+				204,
+				130
+			]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "overflow"
+		}
+	],
+	"types": [
+		{
+			"name": "Config",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "minted",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		}
+	]
+}

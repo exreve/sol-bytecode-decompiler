@@ -1,0 +1,35 @@
+{
+	"kind": "anchor",
+	"idl": "a_vault.json",
+	"instructions": {
+		"initialize": {
+			"accounts": { "vault": ["writable", "pda"], "owner": ["signer", "writable"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?"],
+			"writes": ["vault.owner", "vault.balance", "vault.bump"],
+			"pdas": ["vault/*"]
+		},
+		"deposit": {
+			"accounts": { "vault": ["owner", "discriminator", "writable", "pda"], "owner": ["signer", "writable"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.Transfer"],
+			"writes": ["vault.balance"],
+			"pdas": ["vault/*"]
+		},
+		"withdraw": {
+			"accounts": { "vault": ["owner", "discriminator", "writable", "pda", "has_one"], "owner": ["signer", "writable"] },
+			"relations": [["vault", "owner"]],
+			"writes": ["vault.balance", "vault.lamports", "owner.lamports"],
+			"pdas": ["vault/*"]
+		},
+		"close_vault": {
+			"accounts": { "vault": ["owner", "discriminator", "writable", "has_one", "close"], "owner": ["signer", "writable"] },
+			"relations": [["vault", "owner"]],
+			"writes": ["vault.lamports", "owner.lamports"]
+		}
+	},
+	"variants": {
+		"no_signer": { "ix": "withdraw", "rules": ["value-move-no-signer"], "idl": { "withdraw": "vault:w owner:w" } },
+		"no_has_one": { "ix": "withdraw", "rules": ["signer-not-related-to-authority"] },
+		"wrapping_sub": { "ix": "withdraw", "rules": ["unchecked-arithmetic"] },
+		"close_no_zero": { "ix": "close_vault", "rules": ["close-without-zeroing"] }
+	}
+}

@@ -1,0 +1,263 @@
+{
+	"address": "BStake1111111111111111111111111111111111111",
+	"metadata": {
+		"name": "a_staking",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_pool",
+			"discriminator": [
+				116,
+				233,
+				199,
+				204,
+				115,
+				159,
+				171,
+				36
+			],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "open_stake",
+			"discriminator": [
+				136,
+				215,
+				163,
+				130,
+				234,
+				194,
+				229,
+				229
+			],
+			"accounts": [
+				{
+					"name": "pool"
+				},
+				{
+					"name": "user_stake",
+					"writable": true
+				},
+				{
+					"name": "user",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "stake",
+			"discriminator": [
+				206,
+				176,
+				202,
+				18,
+				200,
+				209,
+				179,
+				108
+			],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "user_stake",
+					"writable": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "user_token",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "unstake",
+			"discriminator": [
+				90,
+				95,
+				107,
+				42,
+				205,
+				124,
+				50,
+				225
+			],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "user_stake",
+					"writable": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "user_token",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "shares",
+					"type": "u64"
+				}
+			]
+		}
+	],
+	"accounts": [
+		{
+			"name": "Pool",
+			"discriminator": [
+				241,
+				154,
+				109,
+				4,
+				17,
+				177,
+				109,
+				188
+			]
+		},
+		{
+			"name": "UserStake",
+			"discriminator": [
+				102,
+				53,
+				163,
+				107,
+				9,
+				138,
+				87,
+				153
+			]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "overflow"
+		},
+		{
+			"code": 6001,
+			"name": "insufficient"
+		},
+		{
+			"code": 6002,
+			"name": "emptyPool"
+		}
+	],
+	"types": [
+		{
+			"name": "Pool",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "vault",
+						"type": "pubkey"
+					},
+					{
+						"name": "total_staked",
+						"type": "u64"
+					},
+					{
+						"name": "total_shares",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "UserStake",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "pool",
+						"type": "pubkey"
+					},
+					{
+						"name": "shares",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}

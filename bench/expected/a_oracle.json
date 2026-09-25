@@ -1,0 +1,23 @@
+{
+	"kind": "anchor",
+	"idl": "a_oracle.json",
+	"instructions": {
+		"init_feed": {
+			"accounts": { "feed": ["owner", "discriminator", "writable"], "authority": ["signer"] },
+			"writes": ["feed.authority"]
+		},
+		"update": {
+			"accounts": { "feed": ["owner", "discriminator", "writable", "has_one"], "authority": ["signer"] },
+			"relations": [["feed", "authority"]],
+			"writes": ["feed.price", "feed.conf", "feed.slot"]
+		},
+		"set_authority": {
+			"accounts": { "feed": ["owner", "discriminator", "writable", "has_one"], "authority": ["signer"], "new_authority": [] },
+			"relations": [["feed", "authority"]],
+			"writes": ["feed.authority"]
+		}
+	},
+	"variants": {
+		"ungated": { "ix": "update", "rules": ["state-write-ungated"], "idl": { "update": "feed:w" } }
+	}
+}

@@ -1,0 +1,37 @@
+{
+	"kind": "anchor",
+	"idl": "a_counter.json",
+	"instructions": {
+		"init_counter": {
+			"accounts": { "counter": ["writable", "pda"], "admin": ["signer", "writable"], "system_program": ["address"] },
+			"cpis": ["SYSTEM_PROGRAM.CreateAccount", "SYSTEM_PROGRAM.Transfer?", "SYSTEM_PROGRAM.Allocate?", "SYSTEM_PROGRAM.Assign?"],
+			"writes": ["counter.admin", "counter.count", "counter.bump"],
+			"pdas": ["counter/*"]
+		},
+		"increment": {
+			"accounts": { "counter": ["owner", "discriminator", "writable", "has_one"], "admin": ["signer"] },
+			"relations": [["counter", "admin"]],
+			"writes": ["counter.count"]
+		},
+		"set_admin": {
+			"accounts": { "counter": ["owner", "discriminator", "writable", "has_one"], "admin": ["signer"] },
+			"relations": [["counter", "admin"]],
+			"writes": ["counter.admin"]
+		},
+		"resize_notes": {
+			"accounts": { "counter": ["owner", "discriminator", "has_one"], "notes": ["owner", "discriminator", "writable", "has_one"], "admin": ["signer", "writable"], "system_program": ["address"] },
+			"relations": [["counter", "admin"], ["notes", "counter"]],
+			"cpis": ["SYSTEM_PROGRAM.Transfer"],
+			"writes": ["notes.data", "notes.lamports?", "admin.lamports?"]
+		},
+		"close_counter": {
+			"accounts": { "counter": ["owner", "discriminator", "writable", "has_one", "close"], "admin": ["signer", "writable"] },
+			"relations": [["counter", "admin"]],
+			"writes": ["counter.lamports", "admin.lamports"]
+		}
+	},
+	"variants": {
+		"ungated": { "ix": "set_admin", "rules": ["state-write-ungated", "value-move-no-signer"], "idl": { "set_admin": "counter:w" } },
+		"no_signer": { "ix": "increment", "rules": ["state-write-ungated"], "idl": { "increment": "counter:w admin" } }
+	}
+}
