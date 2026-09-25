@@ -53,13 +53,29 @@ class Sym {
 	small: { addr: bigint; size: number; v: bigint }[] = []
 	bases: bigint[] = []
 	mem: ExecMem
+	// the loads in order, indexed (loads8, small) only by finish(): most runs do not reach the CPI and
+	// never need them. Per load: address, size (0: the 8-byte words of a memcpy source) and value (bytes).
+	private logA: bigint[] = []
+	private logS: number[] = []
+	private logV: (bigint | Uint8Array)[] = []
 	constructor(mem: ExecMem) { this.mem = mem }
-	note(addr: bigint, size: number, v: bigint) {
+	log(addr: bigint, size: number, v: bigint | Uint8Array) { this.logA.push(addr); this.logS.push(size); this.logV.push(v) }
+	private note(addr: bigint, size: number, v: bigint) {
 		if (addr >= TOP_FP - 0x1000n && addr < TOP_FP + 0x100000n) return // the function's own frame and callees' frames: copies, not sources
 		if (size === 8) { const l = this.loads8.get(v); if (!l) this.loads8.set(v, [addr]); else if (l.length < 4) l.push(addr) }
 		else if (this.small.length < 20000) this.small.push({ addr, size, v })
 	}
-	finish() { this.bases = [...this.markers.keys(), ...this.loads8.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) }
+	finish() {
+		const { logA, logS, logV } = this
+		for (let i = 0; i < logA.length; i++) {
+			const v = logV[i]
+			if (typeof v === 'bigint') { this.note(logA[i], logS[i], v); continue }
+			const dv = new DataView(v.buffer, v.byteOffset, v.length)
+			for (let j = 0; j + 8 <= v.length; j += 8) this.note((logA[i] + BigInt(j)) & M, 8, dv.getBigUint64(j, true))
+		}
+		this.logA = []; this.logS = []; this.logV = []
+		this.bases = [...this.markers.keys(), ...this.loads8.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+	}
 	/** an address as an expression of the inputs */
 	addr(a: bigint, depth = 0): Expr | undefined {
 		if (depth > 6) return undefined
@@ -132,7 +148,8 @@ function runOnce0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, se
 		}
 	}
 	const extra = [0, 6, 7, 8, 9].map((r, i) => { const v = marker(8 + i); const id = f.extraIn.includes(r) ? param(r) : undefined; if (id !== undefined) sym.markers.set(v, id); return v })
-	mem.onLoad = (a, size, v) => sym.note(a, size, v)
+	mem.onLoad = (a, size, v) => sym.log(a, size, v)
+	mem.onCopy = (a, b) => sym.log(a, 0, b)
 	let reached = false, infos: bigint | undefined
 	let cap: Captured | undefined
 	let flipsAtCall = 0

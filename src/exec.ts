@@ -39,6 +39,8 @@ export class ExecMem extends TestMem {
 	fillSeed: number
 	pages = new Map<number, Page>() // (page number as a Number: exact below 2^53, and faster to hash than a BigInt)
 	onLoad?: (addr: bigint, size: number, v: bigint) => void
+	/** the bytes a memcpy reads (else they are observed as 8-byte loads, see onLoad) */
+	onCopy?: (addr: bigint, bytes: Uint8Array) => void
 	constructor(p: Program, seed = 0) { super(p.image, 0, []); this.fillSeed = seed }
 	// the two pages accessed last (stack and data alternate)
 	private lastK = -1n
@@ -337,7 +339,8 @@ export class Exec {
 			case 'sol_memcpy_': case 'sol_memmove_': {
 				if (n > 1 << 20) throw new Abort('memcpy size')
 				const bytes = m.read(a[1], n)
-				if (m.onLoad) { const dv = new DataView(bytes.buffer, bytes.byteOffset, n); for (let i = 0; i + 8 <= n; i += 8) m.onLoad((a[1] + BigInt(i)) & M, 8, dv.getBigUint64(i, true)) }
+				if (m.onCopy) m.onCopy(a[1] & M, bytes)
+				else if (m.onLoad) { const dv = new DataView(bytes.buffer, bytes.byteOffset, n); for (let i = 0; i + 8 <= n; i += 8) m.onLoad((a[1] + BigInt(i)) & M, 8, dv.getBigUint64(i, true)) }
 				const t = m.taintArr(a[1], n), x = at[1] | at[2]
 				if (x) for (let i = 0; i < n; i++) t[i] |= x
 				m.write(a[0], bytes, t)
