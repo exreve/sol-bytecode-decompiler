@@ -18,21 +18,43 @@ const M = (1n << 64n) - 1n
  * (TaintHooks): unwritten bytes are inputs except the image and the heap (fresh memory the program
  * allocates). Loads can be observed (see onLoad).
  */
-interface Page { b: Uint8Array; dv: DataView; t: Uint8Array; ro?: Uint8Array }
+// (t: per-byte taint, allocated on the first byte that differs from the page's default t0)
+interface Page { b: Uint8Array; dv: DataView; t?: Uint8Array; t0: number; ro?: Uint8Array }
 const PAGE = 4096n
+/** page numbers the program image maps (any byte) */
+const imagePagesMemo = new WeakMap<object, Set<number>>()
+function imagePages(image: { regions: { vaddr: bigint; bytes: Uint8Array }[] }): Set<number> {
+	let s = imagePagesMemo.get(image)
+	if (!s) {
+		s = new Set()
+		for (const r of image.regions) if (r.bytes.length) for (let k = r.vaddr >> 12n; k <= (r.vaddr + BigInt(r.bytes.length) - 1n) >> 12n; k++) s.add(Number(k))
+		imagePagesMemo.set(image, s)
+	}
+	return s
+}
+/** page buffers of released memories (ExecMem.release) */
+const bufPool: ArrayBuffer[] = []
+const tArr = (pg: Page) => (pg.t ??= new Uint8Array(4096).fill(pg.t0))
 export class ExecMem extends TestMem {
 	fillSeed: number
-	pages = new Map<bigint, Page>()
+	pages = new Map<number, Page>() // (page number as a Number: exact below 2^53, and faster to hash than a BigInt)
 	onLoad?: (addr: bigint, size: number, v: bigint) => void
 	constructor(p: Program, seed = 0) { super(p.image, 0, []); this.fillSeed = seed }
+	// the two pages accessed last (stack and data alternate)
 	private lastK = -1n
 	private lastPg?: Page
+	private prevK = -1n
+	private prevPg?: Page
 	private page(k: bigint): Page {
 		if (k === this.lastK) return this.lastPg!
-		let pg = this.pages.get(k)
-		if (pg) { this.lastK = k; this.lastPg = pg; return pg }
+		if (k === this.prevK) { const pg = this.prevPg!; this.prevK = this.lastK; this.prevPg = this.lastPg; this.lastK = k; this.lastPg = pg; return pg }
+		let pg = this.pages.get(Number(k))
+		if (pg) { this.prevK = this.lastK; this.prevPg = this.lastPg; this.lastK = k; this.lastPg = pg; return pg }
 		const base = k * PAGE
-		const b = new Uint8Array(4096), t = new Uint8Array(4096).fill(base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1)
+		const pooled = bufPool.pop()
+		const b = pooled ? new Uint8Array(pooled) : new Uint8Array(4096), t0 = base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1
+		if (pooled && !this.fillSeed) b.fill(0)
+		let t: Uint8Array | undefined
 		if (this.fillSeed) {
 			// xorshift32 stream per page (little-endian words)
 			let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(this.fillSeed, 0x85ebca6b)) | 0
@@ -42,19 +64,26 @@ export class ExecMem extends TestMem {
 		}
 		if (base === 0x3_0000_0000n) b.fill(0, 0, 8)
 		let ro: Uint8Array | undefined
-		for (const r of this.image.regions) {
+		if (imagePages(this.image).has(Number(k))) for (const r of this.image.regions) {
 			const rend = r.vaddr + BigInt(r.bytes.length)
 			const lo = r.vaddr > base ? r.vaddr : base, hi = rend < base + PAGE ? rend : base + PAGE
 			if (lo >= hi) continue
 			ro ??= new Uint8Array(4096)
 			const o = Number(lo - base), n = Number(hi - lo)
 			b.set(r.bytes.subarray(Number(lo - r.vaddr), Number(lo - r.vaddr) + n), o)
+			t ??= new Uint8Array(4096).fill(t0)
 			t.fill(0, o, o + n); ro.fill(1, o, o + n)
 		}
-		pg = { b, dv: new DataView(b.buffer), t, ro }
-		this.pages.set(k, pg)
+		pg = { b, dv: new DataView(b.buffer), t, t0, ro }
+		this.pages.set(Number(k), pg)
+		this.prevK = this.lastK; this.prevPg = this.lastPg
 		this.lastK = k; this.lastPg = pg
 		return pg
+	}
+	/** give the pages' buffers back for reuse by later memories (this one must not be used afterwards) */
+	release() {
+		for (const pg of this.pages.values()) if (!pg.ro && bufPool.length < 1024) bufPool.push(pg.b.buffer as ArrayBuffer)
+		this.pages.clear(); this.lastK = this.prevK = -1n; this.lastPg = this.prevPg = undefined
 	}
 	byte(a: bigint): number { a &= M; return this.page(a >> 12n).b[Number(a & 0xfffn)] }
 	load(addr: bigint, size: number): bigint {
@@ -102,27 +131,27 @@ export class ExecMem extends TestMem {
 		for (let i = 0; i < b.length; i++) {
 			const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n), k = Number(a & 0xfffn)
 			pg.b[k] = b[i]
-			if (taint !== undefined) pg.t[k] = typeof taint === 'number' ? taint : taint[i]
+			if (taint !== undefined) tArr(pg)[k] = typeof taint === 'number' ? taint : taint[i]
 		}
 	}
 	tainted(addr: bigint, n: number): number {
 		addr &= M
 		let t = 0
 		const o = Number(addr & 0xfffn)
-		if (o + n <= 4096) { const tt = this.page(addr >> 12n).t; for (let i = o; i < o + n; i++) t |= tt[i]; return t }
-		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; t |= this.page(a >> 12n).t[Number(a & 0xfffn)] }
+		if (o + n <= 4096) { const pg = this.page(addr >> 12n), tt = pg.t; if (!tt) return pg.t0; for (let i = o; i < o + n; i++) t |= tt[i]; return t }
+		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n); t |= pg.t ? pg.t[Number(a & 0xfffn)] : pg.t0 }
 		return t
 	}
 	setTaint(addr: bigint, n: number, t: number) {
 		addr &= M
 		const o = Number(addr & 0xfffn)
-		if (o + n <= 4096) { this.page(addr >> 12n).t.fill(t, o, o + n); return }
-		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; this.page(a >> 12n).t[Number(a & 0xfffn)] = t }
+		if (o + n <= 4096) { const pg = this.page(addr >> 12n); if (pg.t || t !== pg.t0) tArr(pg).fill(t, o, o + n); return }
+		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n); if (pg.t || t !== pg.t0) tArr(pg)[Number(a & 0xfffn)] = t }
 	}
 	taintBytes(addr: bigint, n: number): number[] {
 		addr &= M
 		const o = Number(addr & 0xfffn)
-		if (o + n <= 4096) return Array.from(this.page(addr >> 12n).t.subarray(o, o + n))
+		if (o + n <= 4096) { const pg = this.page(addr >> 12n); return pg.t ? Array.from(pg.t.subarray(o, o + n)) : new Array<number>(n).fill(pg.t0) }
 		return Array.from({ length: n }, (_, i) => this.tainted(addr + BigInt(i), 1))
 	}
 }
@@ -167,6 +196,14 @@ export class Exec {
 	 * functions ('callees').
 	 */
 	sticky: 'noflip' | 'all' | 'callees' = 'noflip'
+	/**
+	 * With `loopCap`: an input-dependent branch not forced towards the target and executed more than
+	 * loopCap times in a run takes the other side from then on (a loop over a pseudo-random count exits);
+	 * such branches are sticky (what follows them is control-tainted).
+	 */
+	loopCap = 0
+	private branchCount = new Map<string, number>()
+	private capped = new Set<string>()
 	/** 1: the models of the PDA syscalls derive other bump seeds (so runs 0 and 1 disagree on them) */
 	variant = 0
 	private pdaCalls = 0
@@ -185,6 +222,7 @@ export class Exec {
 		const reach = target === undefined ? undefined : reaching(this.p, pc, target)
 		this.force = reach ? { reach, target: target! } : undefined
 		this.flipped.clear(); this.flipLog = []; this.blamed = false
+		this.branchCount.clear(); this.capped.clear()
 		try {
 			const r = this.frame(pc, args, fp, 0, extraIn, Array.from({ length: 11 }, (_, i) => (i === 10 ? 0 : 1)))
 			return { ret: r.ret, steps: this.steps - start }
@@ -201,7 +239,7 @@ export class Exec {
 		const insns = this.p.insns
 		const forced = (pc: number) => !!reach && reach.has(pc + 1 + insns[pc].off) !== reach.has(pc + 1)
 		return {
-			sticky: pc => !forced(pc) && (this.sticky === 'all' || (this.sticky === 'callees' && depth > 0) || this.noFlip.has(`${fpc}:${pc}`)),
+			sticky: pc => !forced(pc) && (this.sticky === 'all' || (this.sticky === 'callees' && depth > 0) || this.noFlip.has(`${fpc}:${pc}`) || this.capped.has(`${fpc}:${pc}`)),
 			branch: (pc, taken, tainted) => {
 				if (forced(pc)) {
 					const dir = reach!.has(pc + 1 + insns[pc].off)
@@ -213,6 +251,11 @@ export class Exec {
 					return dir
 				}
 				const k = `${fpc}:${pc}`
+				if (this.loopCap && tainted) {
+					const n = (this.branchCount.get(k) ?? 0) + 1
+					this.branchCount.set(k, n)
+					if (n > this.loopCap) { this.capped.add(k); return !taken }
+				}
 				if (this.flip && tainted && !this.flipped.has(k) && !this.noFlip.has(k)) { this.flipped.add(k); this.flipLog.push(k); return !taken }
 				return taken
 			},

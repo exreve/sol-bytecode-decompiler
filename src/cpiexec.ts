@@ -23,6 +23,8 @@ const M = (1n << 64n) - 1n
 const HEAP_CURSOR = 0x3_0000_0000n
 const TOP_FP = 0x2_0000_3000n, CALLER_FP = 0x2_0000_1000n
 const MAX_STEPS = 5_000
+/** input-dependent branches executed more often than this take the other side (see Exec.loopCap) */
+const LOOP_CAP = 40
 /** steps of all runs (statistics) */
 export const execStats = { runs: 0, steps: 0 }
 
@@ -107,11 +109,12 @@ const eqBytes = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.eve
  * from that call (undefined when none is reached, or it is malformed).
  */
 interface RunCtl { flip: boolean; noFlip: Set<string>; sticky: Exec['sticky']; blamed?: boolean; flipped?: string[]; flippedAfterCall?: string[]; limit?: boolean }
-function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl): Run | undefined {
+function runOnce0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl): Run | undefined {
 	const mem = new ExecMem(p, seed)
 	const sym = new Sym(mem)
 	const x = new Exec(p, mem, { maxSteps: MAX_STEPS, taint: true })
 	x.noPanic = true
+	x.loopCap = LOOP_CAP
 	x.variant = seed === 2 ? 1 : 0
 	x.flip = ctl.flip; x.noFlip = ctl.noFlip; x.sticky = ctl.sticky
 	const base = 0x4_1000_0000n + BigInt(seed) * 0x2000_0000n
@@ -154,7 +157,7 @@ function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, see
 	ctl.flipped = [...x.flipped]
 	ctl.flippedAfterCall = reached ? ctl.flipped.slice(flipsAtCall) : []
 	execStats.runs++; execStats.steps += r.steps
-	if (!cap) return undefined
+	if (!cap) { mem.release(); return undefined }
 	sym.finish()
 	return { cap, sym }
 }
@@ -226,9 +229,14 @@ export interface ExecEnv {
 export interface ExecBudget { steps: number }
 export function describeByExec(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv, budget: ExecBudget): IxModel | undefined {
 	const before = execStats.steps
-	try { return describeByExec0(p, f, sitePc, kind, env) } finally { budget.steps -= execStats.steps - before }
+	const runs: Run[] = []
+	try { return describeByExec0(p, f, sitePc, kind, env, runs) } finally {
+		budget.steps -= execStats.steps - before
+		for (const r of runs) r.sym.mem.release()
+	}
 }
-function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv): IxModel | undefined {
+function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, env: CpiEnv, runs: Run[]): IxModel | undefined {
+	const runOnce = (p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl) => { const r = runOnce0(p, f, sitePc, kind, seed, ctl); if (r) runs.push(r); return r }
 	// run B takes the other side of input-dependent branches until the site's call (values they select
 	// then differ between the runs); flips after which it does not reach the CPI syscall are dropped and
 	// B retried. Run A follows the inputs; values computed after branches whose other side B did not

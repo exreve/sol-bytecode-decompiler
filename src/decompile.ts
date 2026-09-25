@@ -879,6 +879,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
             const at = sitePc(n, s);
             if (at !== undefined) {
+              const b0 = execBudget.steps, t0 = Date.now();
               const m = describeByExec(p, f, at, kind, env, execBudget);
               const x = m && formatIx(m, env);
               if (x) return x.text;
