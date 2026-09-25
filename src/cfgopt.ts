@@ -202,74 +202,91 @@ function solveLiveIn(f: VarFunc, W: number, gen: Uint32Array, kill: Uint32Array)
   return liveIn;
 }
 
-/** gen (variables read before written) and kill (written) of every block, as W-word rows. */
-function genKill(f: VarFunc, W: number): { gen: Uint32Array; kill: Uint32Array } {
+/**
+ * gen (variables read before written) and kill (written) of every block, as W-word rows over bit
+ * indices: the variable ids, or with `compact` a dense numbering of the variables that occur in the
+ * function (after the first rounds most of f.vars no longer does; a variable that occurs nowhere is
+ * never live, so leaving it out changes no answer while the rows get several times shorter).
+ */
+function genKill(f: VarFunc, compact: boolean): { W: number; ix: Int32Array | null; gen: Uint32Array; kill: Uint32Array } {
   const nb = f.blocks.length;
+  let ix: Int32Array | null = null, n = f.vars.length;
+  if (compact) {
+    const m = ix = new Int32Array(f.vars.length).fill(-1);
+    n = 0;
+    const see = (v: number) => { if (m[v] < 0) m[v] = n++; };
+    for (const b of f.blocks) {
+      for (const s of b.stmts) { for (const v of stmtInfo(s).vars) see(v); if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) see(s.dst); }
+      if (b.term.k === 'br') walkExpr(b.term.c, x => { if (x.k === 'var') see(x.id); });
+      else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, x => { if (x.k === 'var') see(x.id); });
+    }
+  }
+  const W = (n + 31) >>> 5;
   const gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
   for (let id = 0; id < nb; id++) {
     const b = f.blocks[id], base = id * W;
-    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') gen[base + (x.id >>> 5)] |= 1 << (x.id & 31); });
+    const set = (v: number) => { const i = ix ? ix[v] : v; gen[base + (i >>> 5)] |= 1 << (i & 31); };
+    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') set(x.id); });
     if (b.term.k === 'br') uses(b.term.c);
     else if (b.term.k === 'ret' && b.term.e) uses(b.term.e);
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
-      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { gen[base + (s.dst >>> 5)] &= ~(1 << (s.dst & 31)); kill[base + (s.dst >>> 5)] |= 1 << (s.dst & 31); }
-      for (const v of stmtInfo(s).vars) gen[base + (v >>> 5)] |= 1 << (v & 31); // = walking stmtExprs(s)
+      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { const d = ix ? ix[s.dst] : s.dst; gen[base + (d >>> 5)] &= ~(1 << (d & 31)); kill[base + (d >>> 5)] |= 1 << (d & 31); }
+      for (const v of stmtInfo(s).vars) set(v); // = walking stmtExprs(s)
     }
   }
-  return { gen, kill };
+  return { W, ix, gen, kill };
 }
 
 /** Variables live at the entry of each block (bitsets indexed by variable id). */
 export function liveInSets(f: VarFunc): Uint32Array[] {
-  const W = (f.vars.length + 31) >>> 5;
-  const { gen, kill } = genKill(f, W);
+  const { W, gen, kill } = genKill(f, false);
   const liveIn = solveLiveIn(f, W, gen, kill);
   return f.blocks.map((_, b) => liveIn.subarray(b * W, b * W + W));
 }
 
 /** Backward variable liveness; removes dead pure assignments (multi-def variables included). */
 export function deadStores(f: VarFunc): boolean {
-  const nv = f.vars.length, W = (nv + 31) >>> 5;
-  // bitsets are W-word rows of flat arrays (row id = block id): no per-block allocations
-  const setBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] |= 1 << (v & 31); };
-  const clrBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] &= ~(1 << (v & 31)); };
-  const uses = (e: Expr, a: Uint32Array, base: number) => walkExpr(e, x => { if (x.k === 'var') setBit(a, base, x.id); });
-  // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
-  const usesS = (s: Stmt, a: Uint32Array, base: number) => { for (const v of stmtInfo(s).vars) setBit(a, base, v); };
   // The non-applying transfer is liveIn = gen | (out & ~kill), solved once (see solveLiveIn) from
-  // gen/kill computed once per block.
-  const { gen, kill } = genKill(f, W);
+  // gen/kill computed once per block. Bitsets are W-word rows of flat arrays (row id = block id)
+  // over the compact numbering of the variables (see genKill).
+  const { W, ix, gen, kill } = genKill(f, true);
   const liveIn = solveLiveIn(f, W, gen, kill);
+  const x = ix!;
+  const setBit = (a: Uint32Array, v: number) => { const i = x[v]; a[i >>> 5] |= 1 << (i & 31); };
+  const clrBit = (a: Uint32Array, v: number) => { const i = x[v]; a[i >>> 5] &= ~(1 << (i & 31)); };
+  const uses = (e: Expr, a: Uint32Array) => walkExpr(e, y => { if (y.k === 'var') setBit(a, y.id); });
+  // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
+  const usesS = (s: Stmt, a: Uint32Array) => { for (const v of stmtInfo(s).vars) setBit(a, v); };
   // apply: walk each block backwards from its live-out (liveIn is not updated while applying)
   const live = new Uint32Array(W);
-  const has = (v: number) => (live[v >>> 5] >>> (v & 31)) & 1;
+  const has = (v: number) => { const i = x[v]; return (live[i >>> 5] >>> (i & 31)) & 1; };
   let any = false;
   for (const b of f.blocks) {
     live.fill(0);
     for (const s of b.succs) for (let k = 0; k < W; k++) live[k] |= liveIn[s * W + k];
     const t = b.term;
-    if (t.k === 'br') uses(t.c, live, 0);
-    else if (t.k === 'ret' && t.e) uses(t.e, live, 0);
+    if (t.k === 'br') uses(t.c, live);
+    else if (t.k === 'ret' && t.e) uses(t.e, live);
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
       if (s.k === 'set') {
         if (!has(s.dst)) {
           const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
-          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live, 0); }
+          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live); }
           else b.stmts.splice(i, 1);
           any = true;
           continue;
         }
-        clrBit(live, 0, s.dst);
-        usesS(s, live, 0);
+        clrBit(live, s.dst);
+        usesS(s, live);
       } else if (s.k === 'call') {
         if (s.dst >= 0) {
           if (!has(s.dst)) { b.stmts[i] = { ...s, dst: -1 }; any = true; }
-          else clrBit(live, 0, s.dst);
+          else clrBit(live, s.dst);
         }
-        usesS(s, live, 0);
-      } else usesS(s, live, 0);
+        usesS(s, live);
+      } else usesS(s, live);
     }
   }
   return any;
