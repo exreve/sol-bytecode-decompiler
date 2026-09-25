@@ -619,23 +619,30 @@ function inlineLocal(f: VarFunc, exactCounts?: (uses: Int32Array) => void): bool
   // rem[v]: occurrences of v in the current block from statement i on (terminator included), kept
   // exact like `cur`: statements before i are no longer changed (they are subtracted once passed),
   // and an inline only moves occurrences forward within the block, except the one of the inlined
-  // variable, which disappears. Zero again at the end of each block.
+  // variable, which disappears. Zero again at the end of each block. Counted from the first
+  // statement of the block that asks for it on (`active`; many blocks never do).
   const rem = new Int32Array(f.vars.length);
   const termExpr = (b: { term: any }): Expr | null => (b.term.k === 'br' ? b.term.c : b.term.k === 'ret' && b.term.e ? b.term.e : null);
   for (const b of f.blocks) {
-    for (const s of b.stmts) for (const v of stmtInfo(s).vars) rem[v]++;
-    { const te = termExpr(b); if (te) walkExpr(te, x => { if (x.k === 'var') rem[x.id]++; }); }
-    let passed = 0;
+    let passed = 0, active = false;
     for (let i = 0; i < b.stmts.length; i++) {
-      for (; passed < i; passed++) for (const v of stmtInfo(b.stmts[passed]).vars) rem[v]--;
+      if (active) for (; passed < i; passed++) for (const v of stmtInfo(b.stmts[passed]).vars) rem[v]--;
       const s = b.stmts[i];
-      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd, cur)) { cur[s.dst]--; rem[s.dst]--; changed = true; i--; continue; }
+      if (s.k === 'call' && s.dst >= 0 && inlineCall(f, b, i, uses, nd, cur)) { cur[s.dst]--; if (active) rem[s.dst]--; changed = true; i--; continue; }
       if (s.k !== 'set') continue;
       const v = s.dst;
       // localReach(b, i, v) counts the uses of v after statement i: none when v occurs nowhere
       // (cur[v] = 0; e.g. the many dead definitions of large straight-line code) or nowhere later in
       // the block, and then it cannot be the one use needed (it would scan the rest of the block)
-      if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0) && (cur[v] === 0 || rem[v] === countIn(stmtInfo(s).vars, v) || localReach(b, i, v) !== 1)) continue;
+      if (!(uses[v] === 1 && nd[v] === 1 && f.vars[v].param < 0)) {
+        if (cur[v] === 0) continue;
+        if (!active) {
+          for (let k = i; k < b.stmts.length; k++) for (const x of stmtInfo(b.stmts[k]).vars) rem[x]++;
+          const te = termExpr(b); if (te) walkExpr(te, x => { if (x.k === 'var') rem[x.id]++; });
+          passed = i; active = true;
+        }
+        if (rem[v] === countIn(stmtInfo(s).vars, v) || localReach(b, i, v) !== 1) continue;
+      }
       const fx = stmtInfo(s); // stmtExprs(set) = [s.e]
       const reads = new Set<number>(fx.vars);
       // find use
@@ -671,10 +678,11 @@ function inlineLocal(f: VarFunc, exactCounts?: (uses: Int32Array) => void): bool
       b.stmts.splice(i, 1);
       nd[v]--; // the removed statement was a definition of v (the old code recomputed all def sites here)
       cur[v]--;
-      rem[v]--;
+      if (active) rem[v]--;
       i--;
       changed = true;
     }
+    if (!active) continue;
     for (; passed < b.stmts.length; passed++) for (const v of stmtInfo(b.stmts[passed]).vars) rem[v]--;
     { const te = termExpr(b); if (te) walkExpr(te, x => { if (x.k === 'var') rem[x.id]--; }); }
   }
