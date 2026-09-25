@@ -215,6 +215,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         return prev?.(e, pr);
       };
     }
+    // serialized input: p + data_len(p) + 10 KiB realloc room + rent_epoch, 8-aligned = the next account record
+    if (opts.sugar !== false) {
+      const prev = ctx.exprHook;
+      ctx.exprHook = (e, pr) => {
+        if (e.k === 'bin' && e.op === 'and' && e.b.k === 'const' && e.b.v === 0xfffffffffffffff8n && e.a.k === 'bin' && e.a.op === 'add' && e.a.b.k === 'const' && e.a.b.v === 0x2867n) {
+          const s1 = e.a.a;
+          if (s1.k === 'bin' && s1.op === 'add' && s1.b.k === 'load' && s1.b.size === 8 && exprEq(s1.b.addr, { k: 'bin', op: 'add', a: s1.a, b: { k: 'const', v: 0x50n } }))
+            return `(${pr(e.a, 9)} & -8 /* next account record */)`;
+        }
+        return prev?.(e, pr);
+      };
+    }
     // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
     const accTyped = accountInfos?.get(pc);
     if (opts.sugar !== false) ctx.storeField = (size, addr) => {
