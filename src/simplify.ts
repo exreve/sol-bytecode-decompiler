@@ -430,6 +430,16 @@ function simplifyStmt(s: Stmt): Stmt {
   return n;
 }
 
+/**
+ * Functions whose IR the last optimizeFunc call left at a fixpoint: its last round (one of rounds
+ * 0..5, where tail duplication runs) modified nothing and the final simplification changed nothing.
+ * Calling optimizeFunc again on that same IR would repeat that round in its round 0 (all passes are
+ * deterministic functions of the IR), stop there, and change nothing: callers may skip the call
+ * while the IR is unchanged (see recognizeIdioms in decompile.ts).
+ */
+const settled = new WeakSet<VarFunc>();
+export const isSettled = (f: VarFunc) => settled.has(f);
+
 export function optimizeFunc(f: VarFunc) {
   // simplify all expressions first
   // `changed` keeps the historical per-pass flags (propagateGlobal and localCopyProp over-report),
@@ -437,6 +447,7 @@ export function optimizeFunc(f: VarFunc) {
   // round that modifies nothing leaves the IR identical, so every later round would repeat it
   // exactly (all passes are deterministic functions of the IR; tail duplication only runs in
   // rounds < 6, and it did nothing in this round either) and stopping early gives the same result.
+  let fixed = false;
   for (let round = 0; round < 8; round++) {
     let changed = false;
     const st = { real: false };
@@ -461,15 +472,16 @@ export function optimizeFunc(f: VarFunc) {
     if (!off('ifconv') && ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; st.real = true; }
     if (!off('dse')) exact(deadStores(f));
     if (!off('taildup') && round < 6 && tailDuplicate(f)) { changed = true; st.real = true; }
-    if (!changed || !st.real) break;
+    if (!changed || !st.real) { fixed = !st.real && round < 6; break; }
   }
   // expressions created by the last round's passes (e.g. selects from if-conversion) still get simplified
   for (const b of f.blocks) {
     const ss = b.stmts;
-    for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) ss[i] = n; }
-    if (b.term.k === 'br') b.term.c = simplifyExpr(b.term.c);
-    else if (b.term.k === 'ret' && b.term.e) b.term.e = simplifyExpr(b.term.e);
+    for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) { ss[i] = n; fixed = false; } }
+    if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) fixed = false; b.term.c = c; }
+    else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) fixed = false; b.term.e = c; }
   }
+  if (fixed) settled.add(f); else settled.delete(f);
 }
 
 /** Substitute single-def vars whose definition is a cheap pure expression over single-def vars / constants. */

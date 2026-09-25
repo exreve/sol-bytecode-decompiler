@@ -1,7 +1,7 @@
 // End-to-end pipeline: ELF -> functions -> IR -> variables -> simplified -> structured -> TypeScript.
 import { loadProgram, type Program, fnAddr } from './program.ts';
 import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
-import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
+import { optimizeFunc, stmtExprs, DISABLED, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
@@ -82,7 +82,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (!opts.exactMemory && !DISABLED.has('promote') && promoteStack(f)) optimizeFunc(f);
-    if (!DISABLED.has('idioms') && recognizeIdioms(f)) optimizeFunc(f);
+    // (a function whose IR idioms did not actually modify and that optimizeFunc left at a fixpoint
+    // would come out of optimizeFunc unchanged: the call is skipped, see isSettled)
+    const idi = { real: false };
+    if (!DISABLED.has('idioms') && recognizeIdioms(f, idi) && (idi.real || !isSettled(f))) optimizeFunc(f);
     built.set(f.pc, { f, body: [], irreducible: false });
   }
 

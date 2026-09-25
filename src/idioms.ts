@@ -21,8 +21,14 @@ const M55 = 0x5555555555555555n, M33 = 0x3333333333333333n, M0F = 0x0f0f0f0f0f0f
 
 type Bin = Extract<Expr, { k: 'bin' }>
 
-export function recognizeIdioms(f: VarFunc): boolean {
+/**
+ * Returns whether the function should be optimized again. `out.real` tells whether the IR was
+ * actually modified: the result is also true when only structurally equal copies of expressions
+ * holding a call were made (exprEq never equates calls), which is kept as it was.
+ */
+export function recognizeIdioms(f: VarFunc, out?: { real: boolean }): boolean {
 	const merged = mergeWordCompares(f) // (changes block ids: first)
+	let real = merged
 	// single pure definitions
 	const defs = new Map<number, Expr>()
 	const where = new Map<number, [number, number]>() // var -> [block, stmt index] of its definition
@@ -147,7 +153,9 @@ export function recognizeIdioms(f: VarFunc): boolean {
 			else if (x.k === 'bin' && x.b.k === 'const' && ((x.op === 'lshr' && x.b.v === 56n) || (x.op === 'and' && x.b.v === 0x1fen))) cand = true
 		})
 		if (!cand) { if (call) changed = true; return e }
-		const n = mapExpr(e, rewrite); if (n !== e && !exprEq(n, e)) changed = true; return n
+		const n = mapExpr(e, rewrite)
+		if (n !== e && !exprEq(n, e)) { changed = true; real = true } // (maybe only a copy with a call: counted as real, which only costs a re-optimization)
+		return n
 	}
 	for (const b of f.blocks) {
 		curB = b.id
@@ -156,6 +164,7 @@ export function recognizeIdioms(f: VarFunc): boolean {
 		if (b.term.k === 'br') b.term.c = rw(b.term.c)
 		else if (b.term.k === 'ret' && b.term.e) b.term.e = rw(b.term.e)
 	}
+	if (out) out.real = real
 	return changed
 }
 
