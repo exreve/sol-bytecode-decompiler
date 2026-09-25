@@ -64,6 +64,16 @@ export function computeIndClobber(p: Program, f: Func) {
 
 /** use/def masks of one statement in register form. */
 function stmtUseDef(p: Program, s: Stmt): { use: number; def: number } {
+  if (s.k === 'call') return stmtUseDef0(p, s);
+  // only call statements depend on (changing) callee signatures; statements are not mutated in
+  // place (except calls, in recoverVars), so the others' masks are cached per statement object
+  let r = udCache.get(s);
+  if (!r) { r = stmtUseDef0(p, s); udCache.set(s, r); }
+  return r;
+}
+const udCache = new WeakMap<Stmt, { use: number; def: number }>();
+
+function stmtUseDef0(p: Program, s: Stmt): { use: number; def: number } {
   switch (s.k) {
     case 'set': return { use: regsOf(s.e), def: 1 << s.dst };
     case 'store': return { use: regsOf(s.addr) | regsOf(s.v), def: 0 };
@@ -152,7 +162,7 @@ function definesR0(f: Func): boolean {
 }
 
 /** Mark callees whose r0 result is read by a caller (r0 live right after the call). */
-function markUsedResults(p: Program, f: Func, liveOut: Int32Array): boolean {
+function markUsedResults(p: Program, f: Func, liveOut: Int32Array, onMarked: (cf: Func) => void): boolean {
   let changed = false;
   for (const b of f.blocks) {
     let live = liveOut[b.id] | termUse(f, b);
@@ -160,7 +170,7 @@ function markUsedResults(p: Program, f: Func, liveOut: Int32Array): boolean {
       const s = b.stmts[i];
       if (s.k === 'call' && s.t.k === 'fn' && (live & 1)) {
         const cf = p.funcs.get(s.t.pc);
-        if (cf && !cf.returns && !cf.noreturn) { cf.returns = true; changed = true; }
+        if (cf && !cf.returns && !cf.noreturn) { cf.returns = true; changed = true; onMarked(cf); }
       }
       const { use, def } = stmtUseDef(p, s);
       live = (live & ~def) | use;
@@ -191,18 +201,35 @@ export function inferSignatures(p: Program) {
     // entrypoint and address-taken functions have unknown callers: they return r0 if they ever set it
     f.returns = !f.noreturn && (f.isEntry || p.addressTaken.has(f.pc) || !p.funcs.size) && (f.isEntry || definesR0(f));
   }
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const f of funcs) {
-      const { liveIn, liveOut } = liveness(p, f);
-      if (markUsedResults(p, f, liveOut)) changed = true;
-      const li = liveIn[0];
-      let k = 0;
-      for (let r = 1; r <= 5; r++) if (li & (1 << r)) k = r;
-      const extra = [0, 6, 7, 8, 9].filter(r => li & (1 << r));
-      const np = Math.max(k, f.nparams);
-      const ex = [...new Set([...f.extraIn, ...extra])].sort((a, b) => a - b);
-      if (np !== f.nparams || ex.join() !== f.extraIn.join()) { f.nparams = np; f.extraIn = ex; changed = true; }
+  // Worklist fixed point. Every update only grows nparams / extraIn / returns (monotone), so the
+  // result is the least fixed point above the initial state whatever the evaluation order; a
+  // function is re-evaluated only when an input of its liveness changed: its own `returns`
+  // (set by a caller's markUsedResults) or a callee's nparams/extraIn.
+  const callers = new Map<number, Func[]>();
+  for (const f of funcs) {
+    const seen = new Set<number>();
+    for (const b of f.blocks) for (const s of b.stmts) {
+      if (s.k !== 'call' || s.t.k !== 'fn' || seen.has(s.t.pc)) continue;
+      seen.add(s.t.pc);
+      let l = callers.get(s.t.pc); if (!l) callers.set(s.t.pc, (l = [])); l.push(f);
+    }
+  }
+  const queue = [...funcs], queued = new Set(funcs);
+  const enqueue = (g: Func) => { if (!queued.has(g)) { queued.add(g); queue.push(g); } };
+  for (let qi = 0; qi < queue.length; qi++) {
+    const f = queue[qi];
+    queued.delete(f);
+    const { liveIn, liveOut } = liveness(p, f);
+    markUsedResults(p, f, liveOut, enqueue);
+    const li = liveIn[0];
+    let k = 0;
+    for (let r = 1; r <= 5; r++) if (li & (1 << r)) k = r;
+    const extra = [0, 6, 7, 8, 9].filter(r => li & (1 << r));
+    const np = Math.max(k, f.nparams);
+    const ex = [...new Set([...f.extraIn, ...extra])].sort((a, b) => a - b);
+    if (np !== f.nparams || ex.join() !== f.extraIn.join()) {
+      f.nparams = np; f.extraIn = ex;
+      for (const c of callers.get(f.pc) ?? []) enqueue(c);
     }
   }
 }
