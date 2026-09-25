@@ -25,7 +25,9 @@ import { type Expr, type Stmt, walkExpr, exprEq } from './ir.ts'
 import { KNOWN_KEYS, b58 } from './semantics.ts'
 
 interface Fact { off: number; size: number; e: Expr }
-export type SiteKind = 'c' | 'rust' | 'call' // CPI (C / Rust ABI), or another call taking a frame address
+// CPI (C / Rust ABI); PDA derivation: syscall argument order (seeds, n, program_id, out[, bump]) or
+// Pubkey::find/create_program_address (out, seeds, n, program_id); or another call taking a frame address
+export type SiteKind = 'c' | 'rust' | 'pda_find' | 'pda_create' | 'pda_find_out' | 'pda_create_out' | 'call'
 export interface CpiSite { abi: SiteKind; args: Expr[]; facts: Fact[] }
 
 /** CPI call sites of a structured body, keyed by the node (statement / return) containing the call. */
@@ -46,7 +48,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 		walkExpr(e, x => {
 			if (x.k !== 'call' || x.t.k === 'ind') return
 			const abi = abiOf(x.t)
-			if (abi && !sites.has(n) && (abi !== 'call' || x.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: x.args, facts: [...facts] })
+			if (abi && !sites.has(n) && ((abi !== 'call' && !abi.startsWith('pda')) || x.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: x.args, facts: [...facts] })
 		})
 	}
 	const run = (ns: Node[], facts0: Fact[]): Fact[] => {
@@ -56,7 +58,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 				case 'stmt': {
 					const s = n.s
 					if (s.k === 'call') {
-						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi && (abi !== 'call' || s.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: s.args, facts: [...facts] }) }
+						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi && ((abi !== 'call' && !abi.startsWith('pda')) || s.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: s.args, facts: [...facts] }) }
 						facts = []
 					} else if (s.k === 'set') {
 						note(n, s.e, facts)
@@ -68,10 +70,15 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 						if (o === null || vals.some(hasCall)) facts = []
 						else vals.forEach((v, i) => { facts = kill(facts, o + i * s.size, s.size); facts.push({ off: o + i * s.size, size: s.size, e: v }) })
 					} else if (s.k === 'copy') {
-						const o = fo(s.dst)
+						const o = fo(s.dst), so = fo(s.src)
+						// frame to frame: the source's facts move along (read before the destination is overwritten)
+						const moved = o !== null && so !== null && (so + s.n <= o || o + s.n <= so)
+							? facts.filter(f => f.off >= so && f.off + f.size <= so + s.n).map(f => ({ ...f, off: f.off - so + o })) : []
 						facts = o === null ? [] : kill(facts, o, s.n)
-						// the copied words, as loads of the source (dropped with the facts reading it)
-						if (o !== null && !s.rev && fo(s.src) === null && !hasCall(s.src)) for (let i = 0; i < s.n; i += 8) facts.push({ off: o + i, size: 8, e: { k: 'load', size: 8, addr: addOff(s.src, i) } })
+						facts.push(...moved)
+						// the copied words, as loads of the source (dropped with the facts reading it); a descending
+						// copy (copyr) leaves the same contents when the source is outside the frame
+						if (o !== null && so === null && !hasCall(s.src)) for (let i = 0; i < s.n; i += 8) facts.push({ off: o + i, size: 8, e: { k: 'load', size: 8, addr: addOff(s.src, i) } })
 					} else if (s.k === 'eval') {
 						note(n, s.e, facts)
 						if (hasCall(s.e)) facts = []
@@ -197,6 +204,7 @@ export function describeCpi(site: CpiSite, env: CpiEnv): string | undefined { re
 
 export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 	if (site.abi === 'call') { const t = describeFmt(site, env); return t ? { text: t } : undefined }
+	if (site.abi.startsWith('pda')) { const t = describePda(site, env); return t ? { text: t } : undefined }
 	const { facts, args } = site
 	const fo = (e: Expr) => frameOff(e, env.fp)
 	const at = (o: number, size: number): Expr | undefined => {
@@ -345,6 +353,69 @@ function describeData(ptr: Expr, len: number, at: (o: number, size: number) => E
 	return items.length ? ` [${items.join(', ')}]` : ''
 }
 
+type At = (o: number, size: number) => Expr | undefined
+
+/** One seed (ptr, len): a string, a known key, a key copied into the frame (`*src`), a small value (`u8 v`), or the bytes. */
+function seedText(p: Expr, l: Expr, at: At, fo: (e: Expr) => number | null, env: CpiEnv): string {
+	if (p.k === 'const' && l.k === 'const') {
+		const s = env.strAt?.(p.v, l.v)
+		if (s !== undefined) return JSON.stringify(s)
+		if (l.v === 32n) { const k = env.keyAt?.(p.v); if (k) return KNOWN_KEYS[k] ?? `key ${k}` }
+	}
+	const o = fo(p)
+	if (o !== null && l.k === 'const') {
+		if (l.v === 32n) {
+			// 32 bytes copied into the frame from one place: *src
+			const w0 = at(o, 8)
+			if (w0?.k === 'load' && [1, 2, 3].every(i => { const w = at(o + 8 * i, 8); return w?.k === 'load' && exprEq(w.addr, addOff(w0.addr, 8 * i)) })) return `*${wrap(env.expr(w0.addr))}`
+		}
+		if (l.v === 1n || l.v === 2n || l.v === 4n || l.v === 8n) { const v = at(o, Number(l.v)); if (v) return `u${Number(l.v) * 8} ${env.expr(v)}` }
+	}
+	return l.k === 'const' && l.v === 32n ? `*${wrap(env.expr(p))}` : `${wrap(env.expr(p))}[..${env.expr(l)}]`
+}
+
+/** Seeds of a PDA derivation (ptr: &[&[u8]] built in the frame, n seeds). */
+function seedList(ptr: Expr, n: Expr, at: At, fo: (e: Expr) => number | null, env: CpiEnv): string | undefined {
+	const o = fo(ptr)
+	if (o === null || n?.k !== 'const' || n.v > 16n) return undefined
+	const seeds: string[] = []
+	for (let i = 0; i < Number(n.v); i++) {
+		const p = at(o + 16 * i, 8), l = at(o + 16 * i + 8, 8)
+		seeds.push(p && l ? seedText(p, l, at, fo, env) : '?')
+	}
+	return `[${seeds.join(', ')}]`
+}
+
+/** `PDA find_program_address([seeds], program)` for a PDA derivation whose seed list is built in the frame. */
+function describePda(site: CpiSite, env: CpiEnv): string | undefined {
+	const out = site.abi === 'pda_find_out' || site.abi === 'pda_create_out'
+	const [seeds, n, prog] = out ? site.args.slice(1, 4) : site.args.slice(0, 3)
+	if (!seeds || !n || !prog) return undefined
+	const at = atFacts(site.facts)
+	const fo = (e: Expr) => frameOff(e, env.fp)
+	const list = seedList(seeds, n, at, fo, env)
+	if (!list) return undefined
+	let program = `*${wrap(env.expr(prog))}`
+	if (prog.k === 'const') { const k = env.keyAt?.(prog.v); if (k) program = KNOWN_KEYS[k] ?? `key ${k}` }
+	const kind = site.abi === 'pda_find' || site.abi === 'pda_find_out' ? 'find_program_address' : 'create_program_address'
+	return `PDA ${kind}(${list}, program ${program})`
+}
+
+/** Frame contents at the site: exact facts, or constant bytes covering the range. */
+function atFacts(facts: Fact[]): At {
+	return (o, size) => {
+		const f = facts.find(x => x.off === o && x.size === size)
+		if (f) return f.e
+		let v = 0n
+		for (let i = size - 1; i >= 0; i--) {
+			const b = facts.find(x => x.off <= o + i && o + i < x.off + x.size && x.e.k === 'const')
+			if (b?.e.k !== 'const') return undefined
+			v = (v << 8n) | ((b.e.v >> BigInt(8 * (o + i - b.off))) & 0xffn)
+		}
+		return { k: 'const', v }
+	}
+}
+
 function describeSeeds(ptr: Expr, n: Expr, at: (o: number, size: number) => Expr | undefined, fo: (e: Expr) => number | null, env: CpiEnv): string | undefined {
 	if (n?.k !== 'const') return undefined
 	if (n.v === 0n) return 'no signer seeds'
@@ -358,13 +429,7 @@ function describeSeeds(ptr: Expr, n: Expr, at: (o: number, size: number) => Expr
 		const seeds: string[] = []
 		for (let i = 0; i < Number(sl.v); i++) {
 			const p = at(so + 16 * i, 8), l = at(so + 16 * i + 8, 8)
-			if (!p || !l) { seeds.push('?'); continue }
-			if (p.k === 'const' && l.k === 'const') {
-				const s = env.strAt?.(p.v, l.v)
-				if (s !== undefined) { seeds.push(JSON.stringify(s)); continue }
-				if (l.v === 32n) { const k = env.keyAt?.(p.v); if (k) { seeds.push(KNOWN_KEYS[k] ?? `key ${k}`); continue } }
-			}
-			seeds.push(l.k === 'const' && l.v === 32n ? `*${wrap(env.expr(p))}` : `${wrap(env.expr(p))}[..${env.expr(l)}]`)
+			seeds.push(p && l ? seedText(p, l, at, fo, env) : '?')
 		}
 		signers.push(`[${seeds.join(', ')}]`)
 	}

@@ -126,6 +126,19 @@ function accounts_set_fee_authority(…) {
 	const o = fee_authority.key
 ```
 
+**Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
+Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
+holding the instruction data (a parameter, or a copy of one, whose constant-offset loads all fit the fields)
+is declared with it; variables that are exactly one argument are named after it:
+
+```ts
+// names [idl: argument names and layout; which variable holds the instruction data is inferred]: args, amount, …
+	const args: SwapArgs = p5
+	const amount = args.amount
+	const u = ld64(args.sqrt_price_limit + 8)     // u128: embedded, 16 bytes
+	if (2 > amount_specified_is_input) { …        // bool validation
+```
+
 A variable gets an account's name when a branch testing it fails with that account's name unconditionally
 (or it is the AccountInfo pointer loaded from the same try-result as such a variable), and it is used like
 an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte key).
@@ -154,6 +167,10 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`.
   Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
   is a constant, `[heur]` when only the data shape matches);
+* PDA derivations (`sol_try_find_program_address` / `sol_create_program_address`, thin wrappers, and
+  `Pubkey::find/create_program_address`) whose seed list is built in the frame:
+  `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`
+  (string seeds, known keys, `*src` for 32 bytes copied from `src`, `u16 v` for small values);
 * calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
 
 ## Library code

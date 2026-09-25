@@ -13,6 +13,7 @@
 // accounts.ts); what `x.field` denotes is not: it is defined by the declaration alone, so the output
 // stays exact whatever x holds.
 import type { Expr } from './ir.ts'
+import { borshPrefix, structFields, type BorshField } from './idl.ts'
 
 export type FieldType =
 	| { k: 'scalar'; size: 1 | 2 | 4 | 8 }
@@ -74,6 +75,7 @@ const TS_SCALAR: Record<number, string> = { 1: 'u8', 2: 'u16', 4: 'u32', 8: 'u64
 
 export class Views {
 	map = new Map<string, View>()
+	opaque = new Map<string, { size?: number; doc: string }>(Object.entries(OPAQUE))
 	constructor(views: View[] = BUILTIN_VIEWS) { for (const v of views) this.map.set(v.name, v) }
 	add(v: View) { this.map.set(v.name, v) }
 
@@ -81,10 +83,47 @@ export class Views {
 	width(t: FieldType): number {
 		if (t.k === 'scalar') return t.size
 		if (t.k === 'ref') return 8
-		const o = OPAQUE[t.type]
+		const o = this.opaque.get(t.type)
 		if (o) return o.size ?? Infinity
 		const v = this.map.get(t.type)
 		return v?.size ?? Infinity
+	}
+
+	/** an opaque fixed-size byte range type (Bytes16, ...) */
+	bytes(n: number): string {
+		const name = n === 32 ? 'Pubkey' : `Bytes${n}`
+		if (!this.opaque.has(name)) this.opaque.set(name, { size: n, doc: `${n} bytes in place (value = their address)` })
+		return name
+	}
+
+	/**
+	 * A view of Borsh-serialized fields (an Anchor IDL argument list or account): the fixed-offset
+	 * prefix, starting at byte `base`. Nested fixed-size structs get their own views. Returns the view
+	 * (undefined when no field has a fixed offset).
+	 */
+	borshView(name: string, doc: string, fields: { name: string; type: any }[], types: Map<string, any>, base = 0): View | undefined {
+		const pre = borshPrefix(fields, types)
+		if (!pre.length) return undefined
+		const vf: Field[] = pre.map(f => ({ name: f.name, off: base + f.off, t: this.fieldType(f, types), doc: undefined }))
+		const v: View = { name, doc, fields: vf }
+		const last = pre[pre.length - 1]
+		if (pre.length === fields.length) v.size = base + last.off + last.size
+		this.map.set(name, v)
+		return v
+	}
+
+	private fieldType(f: BorshField, types: Map<string, any>): FieldType {
+		if (f.kind === 'scalar' && (f.size === 1 || f.size === 2 || f.size === 4 || f.size === 8)) return { k: 'scalar', size: f.size }
+		if (f.kind === 'key') return { k: 'embed', type: 'Pubkey' }
+		if (f.kind === 'struct' && f.type) {
+			const nm = `${f.type}`
+			if (this.map.has(nm) || OPAQUE[nm]) return { k: 'embed', type: nm }
+			const fs = structFields(f.type, types)
+			if (fs && this.borshView(nm, `IDL type ${f.type} (Borsh layout)`, fs, types)?.size === f.size) return { k: 'embed', type: nm }
+			this.map.delete(nm)
+		}
+		if (f.size === 16 && f.kind === 'bytes') { if (!this.opaque.has('u128')) this.opaque.set('u128', { size: 16, doc: '128-bit integer in place (value = its address)' }); return { k: 'embed', type: 'u128' } }
+		return { k: 'embed', type: this.bytes(f.size) }
 	}
 
 	/** field of view `type` covering byte offset off (the last one with off <= o that still covers it) */
@@ -122,7 +161,7 @@ export class Views {
 		}
 		for (const n of names) visit(n)
 		const out: string[] = []
-		for (const [n, o] of Object.entries(OPAQUE)) if (want.has(n)) out.push(`interface ${n} {} // ${o.doc}`)
+		for (const [n, o] of this.opaque) if (want.has(n)) out.push(`interface ${n} {} // ${o.doc}`)
 		for (const v of this.map.values()) {
 			if (!want.has(v.name)) continue
 			out.push(`interface ${v.name}${v.size ? ` extends sized<${hex(v.size)}>` : ''} { // ${v.doc}`)

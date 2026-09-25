@@ -32,7 +32,7 @@ export interface Result {
   program: Program;
   funcs: FuncOut[];
   stubs: string[];                 // `declare function` lines for referenced library functions
-  instructions: { name: string; pc: number; disc: bigint; args?: string[]; accounts?: string[] }[];
+  instructions: { name: string; pc: number; disc: bigint; args?: string[]; accounts?: string[]; strAccounts?: string[] }[];
   views: Views;                    // typed views available to the output (declared with it)
   processors: { fn: string; names: string[] }[];  // functions handling several instructions inline (native programs)
   anchor: boolean;
@@ -156,7 +156,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 
   // ---- phase 4: print ----
   // thin wrappers of the CPI syscalls (same arguments)
-  const invokeThunks = new Map<number, 'c' | 'rust'>();
+  const invokeThunks = new Map<number, 'c' | 'rust' | 'pda_find' | 'pda_create'>();
   for (const fn of p.funcs.values()) {
     if (fn.blocks.length > 2) continue;
     let n = 0; for (const b of fn.blocks) n += b.end - b.start + 1;
@@ -170,6 +170,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // Anchor: account names from the program's own account-error strings (see anchor.ts)
   const anchorInfo = new Map<number, AnchorFn>();
   const fnNotes = new Map<number, string[]>(); // extra header lines per function
+  const strAccounts = new Map<number, string[]>(); // handler pc -> account names from strings
   // IDL: accounts and arguments of each handler
   if (opts.sugar !== false && opts.idl) for (const [hpc, ix] of sem.ixNames) {
     const d = opts.idl.instructions.find(i => i.name === ix);
@@ -212,6 +213,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           (fnNotes.get(tpc) ?? fnNotes.set(tpc, []).get(tpc)!).push(`Anchor Accounts::try_accounts of instruction ${ix} (called by ix_${ix}; name [str]: from the handler's "Instruction: …" log; was ${old})`);
         }
         if (!opts.idl?.instructions.some(i => i.name === ix)) (fnNotes.get(hpc) ?? fnNotes.set(hpc, []).get(hpc)!).push(`accounts [str: the program's account-error strings, in order of first use]: ${a.accounts.join(', ')}`);
+        strAccounts.set(hpc, a.accounts);
       }
     }
   }
@@ -226,7 +228,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       let size = 0;
       for (const b of bt.f.blocks) size += b.stmts.length;
       if (size > 120) continue;
-      const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? invokeAbi(t.name) : t.k === 'fn' ? invokeThunks.get(t.pc) ?? null : null));
+      const cpiOnly = (a: string | null | undefined) => (a === 'c' || a === 'rust' ? a : null);
+      const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? cpiOnly(invokeAbi(t.name)) : t.k === 'fn' ? cpiOnly(invokeThunks.get(t.pc)) : null));
       if (sites.size !== 1) continue;
       const d = cpiDesc([...sites.values()][0], { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) });
       if (!d?.ix) continue;
@@ -274,13 +277,34 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // recovered names (see anchor.ts), unique and distinct from every other identifier of the output
     const an = anchorInfo.get(pc);
     const recovered: string[] = [];
+    const taken = new Set([...names.filter(Boolean), ...globalIdents(p), ...views.map.keys(), ...views.opaque.keys()]);
+    const unique = (nm0: string) => { let nm = nm0, k = 2; while (taken.has(nm) || RESERVED_TS.has(nm)) nm = `${nm0}_${k++}`; taken.add(nm); return nm; };
+    // IDL: the instruction data of a handler, as a view of its arguments (Borsh layout)
+    const argTypes = new Map<number, string>();
+    const argNames: string[] = [];
+    const ixName = sem.ixNames.get(pc);
+    const ixDef = opts.sugar !== false && ixName ? opts.idl?.instructions.find(i => i.name === ixName) : undefined;
+    if (ixDef && ixDef.argDefs.length) {
+      const vname = ixName!.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('') + 'Args';
+      const view = views.map.get(vname) ?? views.borshView(vname, `arguments of instruction ${ixName} (Anchor IDL, Borsh layout; after the 8-byte discriminator)`, ixDef.argDefs, opts.idl!.types);
+      const found = view && argsVar(f, view.name, views);
+      if (found !== undefined && used.has(found)) {
+        argTypes.set(found, view!.name);
+        names[found] = unique('args'); argNames.push(names[found]);
+        // variables that are exactly one argument: named after it
+        for (const b of f.blocks) for (const st of b.stmts) {
+          if (st.k !== 'set' || st.e.k !== 'load' || !used.has(st.dst) || f.vars[st.dst]?.param >= 0) continue;
+          const a = st.e.addr, off = a.k === 'var' && a.id === found ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === found && a.b.k === 'const' ? Number(a.b.v) : -1;
+          const fd = off >= 0 ? view!.fields.find(x => x.off === off && x.t.k === 'scalar' && x.t.size === (st.e as { size: number }).size) : undefined;
+          if (!fd || defCount(f, st.dst) !== 1) continue;
+          names[st.dst] = unique(fd.name); argNames.push(names[st.dst]);
+        }
+      }
+    }
     if (an) {
-      const taken = new Set([...names.filter(Boolean), ...globalIdents(p)]);
       for (const [v, nm0] of [...an.varNames].sort((x, y) => x[0] - y[0])) {
-        if (!used.has(v) || f.vars[v]?.param === 10) continue;
-        let nm = nm0, k = 2;
-        while (taken.has(nm) || RESERVED_TS.has(nm)) nm = `${nm0}_${k++}`;
-        taken.add(nm);
+        if (!used.has(v) || f.vars[v]?.param === 10 || argTypes.has(v)) continue;
+        const nm = unique(nm0);
         names[v] = nm;
         recovered.push(nm);
       }
@@ -370,6 +394,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false) {
       for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
       for (const v of an?.accountVars ?? []) if (!varTypes.has(v)) varTypes.set(v, 'AccountInfo');
+      for (const [v, t] of argTypes) varTypes.set(v, t);
       if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
       ctx.views = views;
       ctx.varType = id => varTypes.get(id);
@@ -404,7 +429,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
-      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? 'call' : null));
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? 'call' : null));
       if (sites.size) {
         const env: CpiEnv = {
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
@@ -417,17 +442,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
+    const paramNm = (reg: number, dflt: string) => { const v = f.vars.find(x => x.param === reg); return (v && names[v.id]) ?? dflt; };
     if (f.isEntry) params.push(`input: ${paramType(1)}`);
     else {
-      for (let r = 1; r <= (f.stackArgs ? 4 : f.nparams); r++) params.push(`${paramName[r]}: ${paramType(r)}`);
-      for (let k = 0; k < (f.stackArgs ?? 0); k++) params.push(`p${5 + k}: ${paramType(100 + k)}`);
-      for (const r of f.extraIn) params.push(`${paramName[r]}: ${paramType(r)}`);
+      for (let r = 1; r <= (f.stackArgs ? 4 : f.nparams); r++) params.push(`${paramNm(r, paramName[r])}: ${paramType(r)}`);
+      for (let k = 0; k < (f.stackArgs ?? 0); k++) params.push(`${paramNm(100 + k, `p${5 + k}`)}: ${paramType(100 + k)}`);
+      for (const r of f.extraIn) params.push(`${paramNm(r, paramName[r])}: ${paramType(r)}`);
     }
     const lines: string[] = [];
     const sig = `function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ''}`;
     const hdr = opts.sugar === false ? undefined : sem.funcComment(f);
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
+    if (argNames.length) lines.push(`// names [idl: argument names and layout; which variable holds the instruction data is inferred]: ${argNames.join(', ')}`);
     if (an) {
       const checks = an.accounts.map(nm => { const c = an.checks.get(nm) ?? []; return c.length ? `${nm} (${c.join(', ')})` : nm; });
       lines.push(`// account checks: account (errors raised when a check on it fails) [str: account-error names, Anchor error codes]: ${checks.join(', ')}`);
@@ -447,7 +474,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
   const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => {
     const d = opts.idl?.instructions.find(i => i.name === name);
-    return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts };
+    return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views };
@@ -503,8 +530,16 @@ function resultOutParams(built: Map<number, Built>, ok: bigint): Set<number> {
   return out;
 }
 
-function invokeAbi(sys: string): 'c' | 'rust' | null {
-  return sys === 'sol_invoke_signed_c' ? 'c' : sys === 'sol_invoke_signed_rust' ? 'rust' : null;
+function invokeAbi(sys: string): 'c' | 'rust' | 'pda_find' | 'pda_create' | null {
+  return sys === 'sol_invoke_signed_c' ? 'c' : sys === 'sol_invoke_signed_rust' ? 'rust'
+    : sys === 'sol_try_find_program_address' ? 'pda_find' : sys === 'sol_create_program_address' ? 'pda_create' : null;
+}
+
+/** PDA derivation functions by name: Pubkey::find/create_program_address (out first), thin syscall wrappers (syscall order). */
+function pdaAbi(name: string): 'pda_find' | 'pda_create' | 'pda_find_out' | 'pda_create_out' | undefined {
+  if (/^Pubkey_find_program_address(_[0-9a-f]+)?$/.test(name)) return 'pda_find_out';
+  if (/^Pubkey_create_program_address(_[0-9a-f]+)?$/.test(name)) return 'pda_create_out';
+  return undefined;
 }
 
 /** Decide where each variable is declared (see README: "declarations"). */
@@ -557,6 +592,48 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
     } else hoisted.push(v);
   }
   return { decls, hoisted: hoisted.sort((a, b) => a - b) };
+}
+
+function defCount(f: VarFunc, v: number): number {
+  let n = 0;
+  for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === v) n++;
+  return n;
+}
+
+/**
+ * The variable holding a handler's instruction data, for an argument view: a parameter (or a copy of
+ * one) through which every constant-offset load fits the view's fields, touching at least two of them
+ * (one when the view has a single field).
+ */
+function argsVar(f: VarFunc, view: string, views: Views): number | undefined {
+  const v = views.map.get(view)!;
+  const cands = new Set<number>();
+  for (const x of f.vars) if (x.param >= 1 && x.param !== 10) cands.add(x.id);
+  for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' && s.e.k === 'var' && cands.has(s.e.id) && defCount(f, s.dst) === 1) cands.add(s.dst);
+  const loads = new Map<number, [number, number][]>();
+  const bad = new Set<number>();
+  const visit = (e: Expr) => walkExpr(e, x => {
+    if (x.k === 'var' && cands.has(x.id)) return;
+    if (x.k !== 'load') return;
+    const a = x.addr;
+    const [id, off] = a.k === 'var' ? [a.id, 0] : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? [a.a.id, Number(BigInt.asIntN(64, a.b.v))] : [-1, 0];
+    if (!cands.has(id)) return;
+    let l = loads.get(id); if (!l) loads.set(id, (l = [])); l.push([off, x.size]);
+  });
+  for (const b of f.blocks) { for (const s of b.stmts) stmtExprs(s).forEach(visit); if (b.term.k === 'br') visit(b.term.c); else if (b.term.k === 'ret' && b.term.e) visit(b.term.e); }
+  let best: number | undefined, score = 0;
+  for (const [id, ls] of loads) {
+    if (bad.has(id)) continue;
+    const hit = new Set<string>();
+    let ok = true;
+    for (const [off, size] of ls) {
+      const fd = v.fields.find(x => x.off <= off && off + size <= x.off + views.width(x.t));
+      if (!fd || (fd.t.k === 'scalar' && (fd.off !== off || fd.t.size !== size))) { ok = false; break; }
+      hit.add(fd.name);
+    }
+    if (ok && hit.size > score) { best = id; score = hit.size; }
+  }
+  return score >= Math.min(2, v.fields.length) ? best : undefined;
 }
 
 /** Known keys (program ids by name) that the 32 bytes at `ptr` are compared with somewhere in f (keyeq, memeq, memcmp-style calls). */
