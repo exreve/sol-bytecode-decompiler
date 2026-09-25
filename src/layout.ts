@@ -9,6 +9,7 @@
 import type { Result, FuncOut } from './decompile.ts'
 import { SYSCALLS } from './syscalls.ts'
 import { VIEW_NOTATION } from './views.ts'
+import { renderFingerprints } from './fingerprint.ts'
 import { analyze, renderJson, renderSummary, renderIx, renderSummaryComment, type Where } from './analysis/report.ts'
 
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
@@ -209,6 +210,15 @@ export function renderSingle(r: Result): string {
 	return out.join('\n')
 }
 
+/** security/fingerprints.json, functions tagged with the instructions whose handlers reach them (as grouped in ix/). */
+function fingerprints(r: Result): string {
+	const { owners } = handlerOwners(r)
+	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
+	const inline = new Map(r.processors.map(x => [x.fn, x.names]))
+	const ixs = (pc: number) => [...new Set([...owners.get(pc) ?? []].flatMap(h => { const n = byPc.get(h)!.name; return n.startsWith('ix_') ? [n.slice(3)] : inline.get(n) ?? [] }))].sort()
+	return renderFingerprints(r.program, r.sigs, r.libPcs, ixs)
+}
+
 /** Multi-file project: path -> content. */
 export function renderProject(r: Result): Map<string, string> {
 	const g = groups(r)
@@ -282,6 +292,7 @@ export function renderProject(r: Result): Map<string, string> {
 	files.set('security/analysis.json', renderJson(a, where))
 	files.set('security/summary.md', renderSummary(a, where, ixFile))
 	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, renderIx(ix, where))
+	files.set('security/fingerprints.json', fingerprints(r))
 	files.set('index.ts', files.get('index.ts')! + `// security/summary.md: read first — instructions ranked by sensitivity, their effects, privileges and checks (derived, over-approximate views; security/<ix>.md per instruction, security/analysis.json)\n`)
 	return files
 }
