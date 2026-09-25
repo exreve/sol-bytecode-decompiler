@@ -27,6 +27,9 @@ export interface PrintCtx {
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
+  nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
+  storeField?: (size: number, addr: Expr) => string | undefined; // field name of a store's destination
+  stmtTail?: (s: Stmt, prev?: Stmt) => string | undefined; // comment at the end of a statement's line (prev: statement printed just before, same list)
 }
 
 const P = { assign: 2, cond: 3, lor: 4, land: 5, bor: 6, bxor: 7, band: 8, eq: 9, rel: 10, shift: 11, add: 12, mul: 13, unary: 15, as: 3, call: 20, prim: 21 };
@@ -220,18 +223,26 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         out.push(`${I(d)}${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ${pr.u(s.e, P.assign)}`);
         break;
       }
-      case 'store': { pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--; out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, pr.u(s.v, P.assign)])})`); break; }
+      case 'store': {
+        pr.addrDepth++; let a = pr.u(s.addr, P.assign); pr.addrDepth--;
+        const fld = pr.ctx.storeField?.(s.size, s.addr);
+        if (fld && !a.includes('/*')) a += ` /* ${fld} */`;
+        const tail = pr.ctx.stmtTail?.(s, prevStmt);
+        out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, pr.u(s.v, P.assign)])})${tail ? ` // ${tail}` : ''}`);
+        break;
+      }
       case 'call': {
         const kw = decls.get(s);
         const txt = pr.callText(s.t, [...s.args, ...(s.extra ?? [])]);
         out.push(`${I(d)}${s.dst >= 0 ? `${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ` : ''}${txt}`);
         break;
       }
-      case 'eval': out.push(`${I(d)}void ${pr.u(s.e, P.unary)}`); break;
+      case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && (s.e.name === 'rc_inc' || s.e.name === 'rc_dec') ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;
       case 'stores': {
         pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--;
         // four large constant words: a public key written in place
-        const key = pr.ctx.keyAt && s.size === 8 && s.vals.length === 4 && s.vals.every(v => v.k === 'const' && v.v > 1n << 48n) ? ` // key ${keyB58(s.vals)}` : '';
+        const key = pr.ctx.keyAt && s.size === 8 && s.vals.length === 4 && s.vals.every(v => v.k === 'const' && v.v > 1n << 48n) ? ` // key ${keyB58(s.vals)}`
+          : pr.ctx.stmtTail?.(s, prevStmt) ? ` // ${pr.ctx.stmtTail(s, prevStmt)}` : '';
         out.push(`${I(d)}st${s.size * 8}(${joinArgs([a, ...s.vals.map(v => pr.u(v, P.assign))])})${key}`);
         break;
       }
@@ -244,10 +255,15 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
       case 'trap': out.push(`${I(d)}trap(${JSON.stringify(s.msg)})`); break;
     }
   };
+  let prevStmt: Stmt | undefined;
   const rec = (ns: Node[], d: number) => {
     for (const n of ns) {
+      const prev = prevStmt;
+      prevStmt = undefined;
+      const note = pr.ctx.nodeNote?.(n);
+      if (note) out.push(`${I(d)}// ${note}`);
       switch (n.k) {
-        case 'stmt': stmt(n.s, d); break;
+        case 'stmt': prevStmt = prev; stmt(n.s, d); prevStmt = n.s; break;
         case 'if': {
           out.push(`${I(d)}if (${pr.expr(n.c, 0)}) {`);
           rec(n.then, d + 1);

@@ -4,8 +4,8 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, INTRINSICS } from './ir.ts';
-import { Semantics, constsIn, NICHE } from './semantics.ts';
+import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
+import { Semantics, constsIn, NICHE, OK_TAGS } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
@@ -14,6 +14,8 @@ import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
+import { statementIdioms } from './stmtidioms.ts';
+import { findCpiSites, describeCpi, type CpiEnv } from './cpi.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -38,7 +40,7 @@ export interface Result {
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
 const HELPERS = new Set(['copy', 'copyr', 'sar', 'shl', 'sdiv', 'srem', 'sdiv32', 'srem32', 'mulhu', 'mulhs', 'trap', 'callx', 'undef', 'fp',
-  'memeq', 'keyeq', ...Object.keys(INTRINSICS)]);
+  'memeq', 'keyeq', 'rc_inc', 'rc_dec', ...Object.keys(INTRINSICS)]);
 
 function* shortNames(): Generator<string> {
   const al = 'abcdefghijklmnopqrstuvwxyz';
@@ -85,6 +87,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (!DISABLED.has('compact')) compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
+    if (!DISABLED.has('stmtidioms')) bt.body = statementIdioms(bt.body);
     bt.irreducible = st.irreducible;
   }
 
@@ -99,12 +102,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const niche = new Map<bigint, number>();
   const noteCmp = (e: Expr) => walkExpr(e, x => {
     if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.b.k === 'const' && x.b.v > NICHE && x.b.v < NICHE + 0x40n) niche.set(x.b.v, (niche.get(x.b.v) ?? 0) + 1);
+    // older layout: u32 variant tag (Ok = the number of ProgramError variants)
+    if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.a.k === 'load' && x.a.size === 4 && x.b.k === 'const' && OK_TAGS.includes(x.b.v)) tags.set(x.b.v, (tags.get(x.b.v) ?? 0) + 1);
   });
+  const tags = new Map<bigint, number>();
+  const tagStores = new Map<bigint, number>();
   for (const { f } of built.values()) for (const b of f.blocks) {
+    for (const s of b.stmts) if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && OK_TAGS.includes(s.v.v)) tagStores.set(s.v.v, (tagStores.get(s.v.v) ?? 0) + 1);
     for (const s of b.stmts) stmtExprs(s).forEach(noteCmp);
     if (b.term.k === 'br') noteCmp(b.term.c);
   }
   sem.noteResultCompares(niche);
+  sem.noteResultTags(tags, tagStores);
+  const resultOut = sem.resultOkTag !== undefined && opts.sugar !== false ? resultOutParams(built, sem.resultOkTag) : new Set<number>();
 
   // ---- library stubs referenced from user code ----
   const callsOf = (f: VarFunc) => {
@@ -142,6 +152,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // ---- phase 4: print ----
+  // thin wrappers of the CPI syscalls (same arguments)
+  const invokeThunks = new Map<number, 'c' | 'rust'>();
+  for (const fn of p.funcs.values()) {
+    if (fn.blocks.length > 2) continue;
+    let n = 0; for (const b of fn.blocks) n += b.end - b.start + 1;
+    const calls = fn.blocks.flatMap(b => b.stmts.filter(s => s.k === 'call'));
+    const t = calls[0]?.k === 'call' ? calls[0].t : undefined;
+    const abi = calls.length === 1 && t?.k === 'sys' ? invokeAbi(t.name) : null;
+    if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
+  }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
@@ -195,8 +215,26 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         return prev?.(e, pr);
       };
     }
+    // serialized input: p + data_len(p) + 10 KiB realloc room + rent_epoch, 8-aligned = the next account record
+    if (opts.sugar !== false) {
+      const prev = ctx.exprHook;
+      ctx.exprHook = (e, pr) => {
+        if (e.k === 'bin' && e.op === 'and' && e.b.k === 'const' && e.b.v === 0xfffffffffffffff8n && e.a.k === 'bin' && e.a.op === 'add' && e.a.b.k === 'const' && e.a.b.v === 0x2867n) {
+          const s1 = e.a.a;
+          if (s1.k === 'bin' && s1.op === 'add' && s1.b.k === 'load' && s1.b.size === 8 && exprEq(s1.b.addr, { k: 'bin', op: 'add', a: s1.a, b: { k: 'const', v: 0x50n } }))
+            return `(${pr(e.a, 9)} & -8 /* next account record */)`;
+        }
+        return prev?.(e, pr);
+      };
+    }
     // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
     const accTyped = accountInfos?.get(pc);
+    if (opts.sugar !== false) ctx.storeField = (size, addr) => {
+      const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr });
+      if (fld || inputVar === undefined) return fld;
+      const off = addr.k === 'var' && addr.id === inputVar ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === inputVar && addr.b.k === 'const' ? Number(addr.b.v) : -1;
+      return off >= 0 ? inputField(off, size) : undefined;
+    };
     let inAddr = false; // printing the address of an annotated load
     if (accTyped?.size) {
       const prev = ctx.exprHook;
@@ -235,6 +273,44 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
     const pr = new Printer(ctx);
+    // Result<(), ProgramError> tags (u32 layout): stores of constants where the Ok tag is stored too
+    if (opts.sugar !== false && sem.resultOkTag !== undefined) {
+      const okAt: Expr[] = [];
+      for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && s.v.v === sem.resultOkTag && !okAt.some(x => exprEq(x, s.addr))) okAt.push(s.addr);
+      const a = resultOut.has(pc) ? f.vars.find(v => v.param === 1)?.id : undefined;
+      if (a !== undefined) okAt.push({ k: 'var', id: a });
+      const custom = (c: bigint) => { const n = c >= 100n ? sem.constComment(c, 'value') : undefined; return `Err(ProgramError::Custom(${c}${n ? ` ${n}` : ''}))`; };
+      if (okAt.length) ctx.stmtTail = (s, prev) => {
+        if (s.k === 'store' && s.size === 4 && s.v.k === 'const' && okAt.some(x => exprEq(x, s.addr))) {
+          // st32(p + 4, code); st32(p, 0): Custom(code)
+          const c = prev?.k === 'store' && prev.size === 4 && prev.v.k === 'const' && exprEq(prev.addr, { k: 'bin', op: 'add', a: s.addr, b: { k: 'const', v: 4n } }) ? prev.v.v : undefined;
+          return s.v.v === 0n && c !== undefined ? custom(c) : sem.resultTagName(s.v.v);
+        }
+        // st64(p, code << 32): tag and code in one store
+        if (s.k === 'store' && s.size === 8 && s.v.k === 'const' && s.v.v !== 0n && okAt.some(x => exprEq(x, s.addr))) {
+          const tag = s.v.v & 0xffffffffn, code = s.v.v >> 32n;
+          return tag === 0n ? custom(code) : code === 0n ? sem.resultTagName(tag) : undefined;
+        }
+        // st32(p, 0, code): Custom(code)
+        if (s.k === 'stores' && s.size === 4 && s.vals[0].k === 'const' && okAt.some(x => exprEq(x, s.addr))) {
+          const c = s.vals[1];
+          return s.vals[0].v === 0n && c?.k === 'const' ? custom(c.v) : sem.resultTagName(s.vals[0].v);
+        }
+        return undefined;
+      };
+    }
+    // cross-program invocations: what is invoked (comment before the call)
+    const fpVar = f.vars.find(v => v.param === 10)?.id;
+    if (opts.sugar !== false && fpVar !== undefined) {
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? 'call' : null));
+      if (sites.size) {
+        const env: CpiEnv = {
+          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: ctx.strAt,
+          constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
+        };
+        ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
+      }
+    }
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     if (f.isEntry) params.push('input: u64');
@@ -263,6 +339,58 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
   res.text = renderSingle(res);
   return res;
+}
+
+/**
+ * Functions whose first parameter points to a u32-tagged Result<(), ProgramError> (Ok tag `ok`):
+ * they store the Ok tag through it, or a caller passes a slot whose tag it compares with the Ok tag,
+ * or a function known to have one passes its own (unmodified) parameter on.
+ */
+function resultOutParams(built: Map<number, Built>, ok: bigint): Set<number> {
+  const out = new Set<number>();
+  const param1 = (f: VarFunc) => {
+    const id = f.vars.find(v => v.param === 1)?.id;
+    if (id === undefined) return undefined;
+    for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === id) return undefined;
+    return id;
+  };
+  /** direct calls (statements and call expressions): target pc and arguments */
+  const calls = (f: VarFunc) => {
+    const r: { t: number; args: Expr[] }[] = [];
+    const visit = (e: Expr) => walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') r.push({ t: x.t.pc, args: x.args }); });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) { if (s.k === 'call' && s.t.k === 'fn') r.push({ t: s.t.pc, args: s.args }); stmtExprs(s).forEach(visit); }
+      if (b.term.k === 'br') visit(b.term.c); else if (b.term.k === 'ret' && b.term.e) visit(b.term.e);
+    }
+    return r;
+  };
+  for (const [pc, { f }] of built) {
+    const a = param1(f);
+    const compared: Expr[] = [];
+    const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne') && x.a.k === 'load' && x.a.size === 4 && x.b.k === 'const' && x.b.v === ok) compared.push(x.a.addr); });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) {
+        if (a !== undefined && s.k === 'store' && s.size === 4 && s.v.k === 'const' && s.v.v === ok && s.addr.k === 'var' && s.addr.id === a) out.add(pc);
+        stmtExprs(s).forEach(note);
+      }
+      if (b.term.k === 'br') note(b.term.c);
+    }
+    for (const c of calls(f)) if (c.args[0] && compared.some(x => exprEq(x, c.args[0]))) out.add(c.t);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const pc of [...out]) {
+      const bt = built.get(pc);
+      const a = bt && param1(bt.f);
+      if (a === undefined) continue;
+      for (const c of calls(bt!.f)) if (c.args[0]?.k === 'var' && c.args[0].id === a && !out.has(c.t)) { out.add(c.t); changed = true; }
+    }
+  }
+  return out;
+}
+
+function invokeAbi(sys: string): 'c' | 'rust' | null {
+  return sys === 'sol_invoke_signed_c' ? 'c' : sys === 'sol_invoke_signed_rust' ? 'rust' : null;
 }
 
 /** Decide where each variable is declared (see README: "declarations"). */

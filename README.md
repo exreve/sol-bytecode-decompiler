@@ -40,6 +40,8 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `popcount clz ctz min max smin smax sat_sub` | pure helpers recognized from bit tricks / branches (`clz(0) = 64`, `sat_sub(a, b) = a >= b ? a - b : 0`) |
 | `memeq(p, q, n)` | n bytes at p equal n bytes at q, compared as ascending 8-byte words, stopping at the first difference |
 | `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
+| `rc_inc(p[, x])` | Rc count increment: `x = ld64(p)` (unless given); `st64(p, x + 1)`; `abort()` if x was `-1` |
+| `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
 | `undef` | a register value left over by a callee (unspecified) |
@@ -73,7 +75,16 @@ Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<
   the `Ok` value being inferred per program (it depends on the solana-program version);
 * public keys: known program ids, 32-byte rodata keys compared/copied by address (`/* key <base58> */`),
   keys written as four constant words; Anchor error codes, discriminators, `ProgramError` return codes;
-* `ld64(0x300000000 /* heap bump-allocator cursor */)`.
+* `ld64(0x300000000 /* heap bump-allocator cursor */)`; `(p + ld64(p + 0x50) + 0x2867 & -8 /* next account record */)`
+  in input parsing loops;
+* stores through recognized account pointers name the field too: `st64(f + 0x48 /* lamports */, v)`;
+* `Result<(), ProgramError>` with a u32 variant tag (older toolchains; Ok tag inferred per program): constant tag
+  stores into such a result get `// Err(ProgramError::InvalidSeeds)`, `// Err(ProgramError::Custom(6008))`, `// Ok`;
+* cross-program invocations (`sol_invoke_signed_c/_rust` and thin wrappers) whose instruction is built in the
+  frame get a line describing it, read back from the stores along straight-line code:
+  `// CPI: program *(n + 8), accounts [h + 8 (w), g + 8 (w), f + 8 (s)], data 9 bytes [u8 3 (Token Transfer if the program is SPL Token), u64 ld64(a + 0x20)]`
+  (known program ids by name, signer seeds as strings/keys when constant);
+* calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
 
 ## Library code
 
@@ -158,7 +169,9 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/ifconv.ts`, `src/idioms.ts` | if-conversion to selects; bit-trick and multi-word compare idioms (popcount/clz/ctz, memeq/keyeq) |
 | `src/accounts.ts` | AccountInfo / raw account pointer recognition (field-name comments) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
-| `src/structure.ts` | structuring (stackifier: correct by construction; state machine for irreducible CFGs) |
+| `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
+| `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |
+| `src/cpi.ts` | CPI and format-string descriptions (comments) |
 | `src/compact.ts` | store/copy run compaction |
 | `src/print.ts`, `src/layout.ts` | TypeScript printer, output layout |
 | `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition |

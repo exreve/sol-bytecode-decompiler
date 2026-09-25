@@ -171,7 +171,7 @@ function simp1(e: Expr): Expr {
       return e;
     case 'sel': return simpSel(e);
     case 'fn':
-      if (!isMemIntrinsic(e.name) && e.args.every(a => a.k === 'const')) return C(INTRINSICS[e.name](e.args.map(a => (a as { v: bigint }).v)));
+      if (e.name in INTRINSICS && e.args.every(a => a.k === 'const')) return C(INTRINSICS[e.name](e.args.map(a => (a as { v: bigint }).v)));
       return e;
     default: return e;
   }
@@ -379,7 +379,10 @@ function scanInfo(e: Expr, r: StmtInfo): void {
     case 'cmp': case 'land': case 'lor': scanInfo(e.a, r); scanInfo(e.b, r); return;
     case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': scanInfo(e.a, r); return;
     case 'sel': scanInfo(e.c, r); scanInfo(e.a, r); scanInfo(e.b, r); return;
-    case 'fn': if (isMemIntrinsic(e.name)) { r.load = true; r.trap = true; } for (const a of e.args) scanInfo(a, r); return;
+    case 'fn':
+      if (isMemIntrinsic(e.name)) { r.load = true; r.trap = true; }
+      else if (e.name === 'rc_inc' || e.name === 'rc_dec') { r.load = true; r.trap = true; r.call = true; }
+      for (const a of e.args) scanInfo(a, r); return;
   }
 }
 const countIn = (vars: number[], v: number) => { let n = 0; for (let k = 0; k < vars.length; k++) if (vars[k] === v) n++; return n; };
