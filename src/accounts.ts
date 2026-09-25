@@ -50,7 +50,22 @@ const offKey = (k: string, o: bigint) => (o === 0n ? k : `(add ${k} #${BigInt.as
 
 export type Typed = Map<string, Kind> // expression key -> layout it points to
 
-interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>> } // params: var id -> register
+/** An expression as (key of its base, constant offset), see split(). */
+interface Split { bk: string; o: bigint }
+const splitKey = (e: Expr): Split => { const [b, o] = split(e); return { bk: key(b), o } }
+
+/**
+ * What the rounds of findAccounts need from a function, computed once: the IR does not change
+ * during account recognition, so these are the same in every round (the former version rebuilt
+ * them, and the expression keys, in every round).
+ */
+interface Static {
+	defs: Map<number, Expr[]>                                  // var -> its definitions (x = e; call results: undef)
+	prop: { v: string; def: Split; lk: string | undefined }[] // single-definition vars (defs order): key, definition, key of the definition if a load
+	calls: { t: number; args: (Split | null)[] }[]            // direct calls (forEachCall order): arguments (null: a constant)
+}
+
+interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>>; st?: Static } // params: var id -> register
 
 /** Per function: expressions (variables, loads) that point to an account. */
 export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Typed> {
@@ -66,16 +81,16 @@ export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Ty
 		let changed = false
 		for (const [pc, fi] of info) if (local(fi, paramTyped.get(pc))) changed = true
 		// call sites vote for callee parameters
-		for (const [, fi] of info) forEachCall(fi.f, (t, args) => {
+		for (const [, fi] of info) for (const { t, args } of fi.st!.calls) {
 			args.forEach((a, i) => {
 				const r = i + 1
-				if (a.k === 'const') { let s = blocked.get(t); if (!s) blocked.set(t, (s = new Set())); s.add(r); return }
+				if (a === null) { let s = blocked.get(t); if (!s) blocked.set(t, (s = new Set())); s.add(r); return }
 				const k = kindOf(fi.typed, a)
 				if (!k) return
 				let s = paramTyped.get(t); if (!s) paramTyped.set(t, (s = new Map()))
 				if (!s.has(r)) { s.set(r, k); changed = true }
 			})
-		})
+		}
 		for (const [t, s] of blocked) for (const r of s) paramTyped.get(t)?.delete(r)
 		if (!changed) break
 	}
@@ -83,9 +98,8 @@ export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Ty
 }
 
 /** Kind of account `e` points to (a Rust AccountInfo pointer may be offset by whole elements). */
-function kindOf(typed: Typed, e: Expr): Kind | undefined {
-	const [b, o] = split(e)
-	const k = typed.get(key(b))
+function kindOf(typed: Typed, { bk, o }: Split): Kind | undefined {
+	const k = typed.get(bk)
 	return k && (o === 0n || (k === 'info' && o > 0n && o % STRIDE === 0n)) ? k : undefined
 }
 
@@ -97,10 +111,22 @@ function forEachCall(f: VarFunc, cb: (target: number, args: Expr[]) => void) {
 	}
 }
 
-/** Local evidence; returns true if the typed set grew. */
+/**
+ * Local evidence; returns true if the typed set grew.
+ *
+ * Only the first call looks at the code (slice cursors, layout evidence) and records what later
+ * rounds need (Static). In later rounds that evidence adds nothing: it depends on the code alone,
+ * so every key it would add was added (or already present) in the first call, and `typed` only
+ * grows. What can still change is parameter typing (new call-site votes) and the propagation.
+ */
 function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean {
 	const { f, typed } = fi
 	const n0 = typed.size
+	if (fi.st) {
+		for (const [v, r] of fi.params) { const k = typedParams?.get(r); if (k && !fi.st.defs.has(v)) { const vk = `v${v}`; if (!typed.has(vk)) typed.set(vk, k) } }
+		propagate(typed, fi.st.prop)
+		return typed.size !== n0
+	}
 	const add = (e: Expr, k: Kind) => { if (!typed.has(key(e))) typed.set(key(e), k) }
 	// definitions of variables (x = expr)
 	const defs = new Map<number, Expr[]>()
@@ -108,6 +134,11 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		if (s.k === 'set') { let a = defs.get(s.dst); if (!a) defs.set(s.dst, (a = [])); a.push(s.e) }
 		else if (s.k === 'call' && s.dst >= 0) { let a = defs.get(s.dst); if (!a) defs.set(s.dst, (a = [])); a.push({ k: 'undef' }) }
 	}
+	const prop: Static['prop'] = []
+	for (const [v, es] of defs) if (es.length === 1) prop.push({ v: `v${v}`, def: splitKey(es[0]), lk: es[0].k === 'load' ? key(es[0]) : undefined })
+	const calls: Static['calls'] = []
+	forEachCall(f, (t, args) => calls.push({ t, args: args.map(a => (a.k === 'const' ? null : splitKey(a))) }))
+	fi.st = { defs, prop, calls }
 	for (const [v, r] of fi.params) { const k = typedParams?.get(r); if (k && !defs.has(v)) add({ k: 'var', id: v }, k) }
 	const single = (e: Expr): Expr => { if (e.k === 'var') { const d = defs.get(e.id); if (d?.length === 1) return d[0] } return e }
 	// per base expression: loads at layout offsets, and 32-byte uses of base + off / of ld64(base + off)
@@ -149,13 +180,25 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		const many = kind === 'info' ? fit.length >= 4 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs.get(bk)?.size ?? 0) >= 2
 		if (keyed || many) { if (!typed.has(bk)) typed.set(bk, kind); break }
 	}
-	// propagate through single-definition copies, loads of typed cursors and whole-element strides
-	for (let it = 0; it < 4; it++) for (const [v, es] of defs) {
-		if (es.length !== 1) continue
-		const k = kindOf(typed, es[0]) ?? (es[0].k === 'load' ? typed.get(key(es[0])) : undefined)
-		if (k) add({ k: 'var', id: v }, k)
-	}
+	propagate(typed, prop)
 	return typed.size !== n0
+}
+
+/**
+ * Propagate through single-definition copies, loads of typed cursors and whole-element strides
+ * (4 passes per call). A pass that adds nothing leaves `typed` as it was, so the remaining passes
+ * would add nothing either: stopping there gives the same result.
+ */
+function propagate(typed: Typed, prop: Static['prop']) {
+	for (let it = 0; it < 4; it++) {
+		const n = typed.size
+		for (const { v, def, lk } of prop) {
+			if (typed.has(v)) continue
+			const k = kindOf(typed, def) ?? (lk !== undefined ? typed.get(lk) : undefined)
+			if (k) typed.set(v, k)
+		}
+		if (typed.size === n) break
+	}
 }
 
 /**
