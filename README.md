@@ -105,7 +105,7 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length); text found elsewhere is shown as `0x100001234 /* "text" */` |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
 | `x: AccountInfo`, `x.is_signer` | typed view (below): `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
-| `x[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice |
+| `x[k]`, `x.f[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice; `x.f[k]` for a field that is an array of such objects (`// [count]`) |
 
 Style: tabs, no semicolons, short variable names (`a..e` = register arguments r1..r5, then `f, g, …`).
 
@@ -203,8 +203,9 @@ discriminator). The account-name function is `Error_with_account_name`, and the 
 **Accounts struct and Context** (`[heur]`): each instruction's try_accounts function stores the named account
 pointers into the struct it returns; those offsets give a view `<Ix>Accounts` (fields `&AccountInfo`), and
 `<Ix>Context` = (`program_id`, `accounts`). A function the handler passes a frame object holding exactly that —
-word 0 the handler's `program_id`, word 8 the address of a copy of the try_accounts result, checked on the frame
-contents at the call — gets the Context type for that parameter:
+word 0 the handler's `program_id` (its second parameter when the dispatcher did not name it; also through a frame
+slot holding only it), word 8 the address of a copy of the try_accounts result, checked on the frame contents at the
+call — gets the Context type for that parameter:
 
 ```ts
 // types [heur]: b: InitializeRewardContext (the handler ix_initialize_reward passes a frame object holding …)
@@ -214,9 +215,12 @@ function fn_32bc0(a: u64, b: InitializeRewardContext, c: u64): u64 {
 
 Logic inlined into the handler has no Context parameter.
 
-**Deserialized accounts** (`Box<Account<T>>`): try_accounts gets each account from a callee (`<Account<T> as
-Accounts>::try_accounts`) into a frame object and copies it to the heap; the box pointer is the Accounts struct
-field. The account type is the IDL account whose discriminator the callee's code (or a callee's, within 3 calls)
+**Deserialized accounts** (`Account<T>`, `Box<Account<T>>`): try_accounts gets each account from a callee
+(`<Account<T> as Accounts>::try_accounts`, given the accounts slice) into a frame object; the object is followed
+through the frame word by word (stores of loaded words, memcpy) in statement order — branches that end in an error
+return do not change what the frame holds after them — into the struct try_accounts returns, in place, or as a box
+(a heap copy, or a box the callee returns). The account's name is the one the account-name error carries when its
+payload is the callee's error result. The account type is the IDL account whose discriminator the callee's code (or a callee's, within 3 calls)
 holds, or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
 an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`src/exec.ts`)
 on an account whose data is a sample of that type (Borsh from the IDL, or the SPL layout) with pseudo-random
@@ -224,7 +228,8 @@ values and whose owner is the program id (IDL `address`) or the Token program: e
 (values of 4+ bytes by their bytes, smaller ones by changing them in another run). That gives a view named after
 the type, `info` being the `&AccountInfo`, arrays of structs as element views (`x.reward_infos[1].vault`), the
 IDL type in a comment where the view type does not say it (`// i32`); the box variable (`<account>_box`) and the
-Accounts field get it (`src/anchorstate.ts`):
+Accounts field get it (`src/anchorstate.ts`). Other account kinds (Signer, AccountLoader, Program, …) give the
+field holding their `&AccountInfo` (found by a run of the callee too):
 
 ```ts
 interface Whirlpool { // Account<Whirlpool> as deserialized in memory (… [idl names; offsets from exec] …)
@@ -236,8 +241,13 @@ interface Whirlpool { // Account<Whirlpool> as deserialized in memory (… [idl 
 	tick_current_index:   at<0x280, u32> // i32
 	…
 interface SwapAccounts {
+	token_authority:       at<0x08, ref<AccountInfo>>
 	whirlpool:             at<0x10, ref<Whirlpool>> // Box<Account<Whirlpool>>
-	token_owner_account_a: at<0x18, ref<TokenAccount_2>> // Box<Account<TokenAccount>>
+	token_owner_account_a: at<0x18, ref<TokenAccount>> // Box<Account<TokenAccount>>
+…
+interface ChangeWhitelistAccounts {
+	admin:     at<0x00, ref<AccountInfo>>
+	conf:      at<0x08, Conf> // Account<Conf> in place
 …
 	if ((memcmp(af + 8, whirlpool_box.token_mint_a, 0x20) as u32) == 0) {   // has_one / address constraint
 …

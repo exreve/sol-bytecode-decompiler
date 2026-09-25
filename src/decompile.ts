@@ -21,7 +21,7 @@ import { callTargetName } from './emu.ts';
 import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
-import { accountObjects, type AccountObj } from './anchorstate.ts';
+import { accountObjects, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 
 export interface Options {
@@ -288,7 +288,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return out;
   };
   // CPI sites described by execution (cpiexec.ts): interpreter steps per program (deterministic)
-  const execBudget = { steps: 600_000 };
+  const execBudget = { steps: 250_000 };
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
@@ -348,25 +348,39 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // boxed accounts deserialized by try_accounts (IDL types, SPL Token accounts), with their in-memory layouts (see anchorstate.ts)
   const objVars = opts.sugar !== false && nameFn !== undefined && tryOf.size
     ? accountObjects(p, opts.idl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
-    : new Map<number, Map<number, AccountObj>>();
+    : new Map<number, AccountObjs>();
   // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
   for (const [hpc, tpc] of tryOf) {
     const ix = sem.ixNames.get(hpc)!;
     const objs = objVars.get(tpc);
     const named = new Map(anchorInfo.get(tpc)!.varNames);
-    for (const [v, o] of objs ?? []) named.set(v, o.name);
-    const objView = new Map([...(objs?.values() ?? [])].map(o => [o.name, o]));
+    for (const [v, o] of objs?.boxes ?? []) named.set(v, o.name);
+    const objView = new Map([...(objs?.boxes.values() ?? [])].map(o => [o.name, o]));
     const layout = accountsLayout(built.get(tpc)!.f, named);
-    if (!layout.size) continue;
+    // accounts copied in place into the struct (Account<T> not boxed): their words replace any single-word field
+    const fields: import('./views.ts').Field[] = [];
+    const inl = [...(objs?.inline ?? [])];
+    const covered = (off: number) => inl.some(([o, a]) => off >= o && off < o + (views.map.get(a.view)?.size ?? 8));
+    // boxed accounts (words holding a box of a deserialized account)
+    for (const [off, a] of objs?.refs ?? []) if (!covered(off)) fields.push({ name: a.name, off, t: { k: 'ref', to: a.view }, doc: `Box<Account<${a.rust}>>` });
+    for (const [off, nm] of layout) if (!covered(off) && !inl.some(([, a]) => a.name === nm) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: objView.get(nm)?.view ?? 'AccountInfo' }, doc: objView.has(nm) ? `Box<Account<${objView.get(nm)!.rust}>>` : undefined });
+    for (const [off, a] of inl) fields.push({ name: a.name, off, t: { k: 'embed', type: a.view }, doc: `Account<${a.rust}> in place` });
+    // other accounts' &AccountInfo words (named by the error following the call that took the account)
+    for (const [off, nt] of objs?.infos ?? []) {
+      const [nm, ty] = nt.split(':');
+      if (!covered(off) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' }, doc: ty ? `the &AccountInfo of an account of type ${ty} (e.g. AccountLoader<${ty}>: data not deserialized)` : undefined });
+    }
+    if (!fields.length) continue;
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
     if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
-    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo, or the boxed deserialized account) at the offsets it stores them [str names; offsets inferred]`, fields: [...layout].sort((x, y) => x[0] - y[0]).map(([off, nm]) => ({ name: nm, off, t: { k: 'ref', to: objView.get(nm)?.view ?? 'AccountInfo' }, doc: objView.has(nm) ? `Box<Account<${objView.get(nm)!.rust}>>` : undefined })) });
+    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: fields.sort((x, y) => x.off - y.off) });
     views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts), as the handler builds it [layout from the handler's stores]`, fields: [{ name: 'program_id', off: 0, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: 8, t: { k: 'ref', to: `${P}Accounts` } }] });
     // the handler: the frame object R receiving try_accounts' result, and a call passing a frame object
     // whose word 0 is program_id and word 8 the address of a copy of R
     const hb = built.get(hpc)!, hf = hb.f;
     const fpv = hf.vars.find(v => v.param === 10)?.id;
-    const prog = [...(abiNames.get(hpc) ?? [])].find(([, n]) => n === 'program_id')?.[0];
+    // (Anchor's handler ABI: (out, program_id, accounts, …) when the dispatcher did not name them)
+    const prog = [...(abiNames.get(hpc) ?? [])].find(([, n]) => n === 'program_id')?.[0] ?? hf.vars.find(v => v.param === 2)?.id;
     if (fpv === undefined || prog === undefined) continue;
     const fo = (e: Expr | undefined): number | undefined => (e && e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : e?.k === 'var' && e.id === fpv ? 0 : undefined);
     const defs = new Map<number, Expr[]>();
@@ -378,6 +392,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (e.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
       return e.k === 'load' && e.size === 8 && fo(e.addr) === R! + k;
     };
+    // program_id, or a variable loaded from the frame slot it alone was stored in
+    const slotVals = new Map<number, Expr[]>();
+    for (const b of hf.blocks) for (const st of b.stmts) {
+      if (st.k === 'store' && st.size === 8) { const o = fo(st.addr); if (o !== undefined) { let l = slotVals.get(o); if (!l) slotVals.set(o, (l = [])); l.push(st.v); } }
+      else if (st.k === 'stores' && st.size === 8) { const o = fo(st.addr); if (o !== undefined) st.vals.forEach((v, i) => { let l = slotVals.get(o + 8 * i); if (!l) slotVals.set(o + 8 * i, (l = [])); l.push(v); }); }
+    }
+    const isProg = (e: Expr | undefined): boolean => {
+      if (e?.k !== 'var') return false;
+      if (e.id === prog) return true;
+      const d = defs.get(e.id);
+      if (d?.length !== 1 || d[0].k !== 'load' || d[0].size !== 8) return false;
+      const o = fo(d[0].addr), vals = o === undefined ? undefined : slotVals.get(o);
+      return !!vals && vals.length === 1 && vals[0].k === 'var' && vals[0].id === prog;
+    };
     const sites = findCpiSites(hb.body, fpv, t => (t.k === 'fn' && t.pc !== tpc && built.has(t.pc) ? 'call' : null));
     for (const site of sites.values()) {
       if (site.t?.k !== 'fn') continue;
@@ -388,7 +416,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (F === undefined) return;
         const w0 = site.facts.find(x => x.off === F && x.size === 8)?.e, w1 = site.facts.find(x => x.off === F + 8 && x.size === 8)?.e;
         const G = fo(w1);
-        if (w0?.k !== 'var' || w0.id !== prog || G === undefined) return;
+        if (!isProg(w0) || G === undefined) return;
         if (!site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) return;
         const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
         const pv = callee.f.vars.find(v => v.param === reg);
@@ -435,7 +463,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const f = built.get(pc)!.f, t = new Map<number, string>();
     for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
     for (const v of anchorInfo.get(pc)?.accountVars ?? []) if (!t.has(v)) t.set(v, 'AccountInfo');
-    for (const [v, o] of objVars.get(pc) ?? []) if (!t.has(v)) t.set(v, o.view);
+    for (const [v, o] of objVars.get(pc)?.boxes ?? []) if (!t.has(v)) t.set(v, o.view);
     for (const [v, [ty]] of paramTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
     for (const [v, ty] of dataVars.get(pc) ?? []) if (!t.has(v) || t.get(v) === 'AccountRecord') t.set(v, ty);
     for (let it = 0, grew = true; grew && it < 4; it++) {
@@ -450,47 +478,50 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   };
   if (opts.sugar !== false) {
     for (const pc of built.keys()) baseTypes.set(pc, computeTypes(pc));
+    // direct calls once: callee -> (caller, param var of the callee, argument), for parameters never reassigned
+    const callArgs = new Map<number, { caller: number; v: number; a: Expr }[]>();
+    for (const [pc, bt] of built) {
+      const visit = (args: Expr[], cpc: number) => {
+        const callee = built.get(cpc);
+        if (!callee || cpc === pc) return;
+        args.forEach((a, i) => {
+          const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
+          const pv = callee.f.vars.find(v => v.param === reg);
+          if (!pv || defCount(callee.f, pv.id) !== 0 || a.k === 'const') return;
+          let l = callArgs.get(cpc); if (!l) callArgs.set(cpc, (l = [])); l.push({ caller: pc, v: pv.id, a });
+        });
+      };
+      for (const b of bt.f.blocks) for (const st of b.stmts) {
+        if (st.k === 'call' && st.t.k === 'fn') visit(st.args, st.t.pc);
+        if (st.k === 'set' && st.e.k === 'call' && st.e.t.k === 'fn') visit(st.e.args, st.e.t.pc);
+      }
+    }
     for (let round = 0; round < 3; round++) {
-      // param var of the callee -> the view type its direct calls pass (null: two types), how many calls do, of how many
-      const seen = new Map<number, Map<number, { ty: string | null | undefined; n: number; of: number }>>();
-      const sites = new Map<number, Map<number, string[]>>(); // callee -> param -> callers passing a typed object
-      for (const [pc, bt] of built) {
-        const t = baseTypes.get(pc)!;
-        const visit = (args: Expr[], cpc: number) => {
-          const callee = built.get(cpc);
-          if (!callee || cpc === pc) return;
-          args.forEach((a, i) => {
-            const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
-            const pv = callee.f.vars.find(v => v.param === reg);
-            if (!pv || defCount(callee.f, pv.id) !== 0) return;
-            const ty = exprType(views, a, id => t.get(id));
-            let m = seen.get(cpc); if (!m) seen.set(cpc, (m = new Map()));
-            let r = m.get(pv.id); if (!r) m.set(pv.id, (r = { ty: undefined, n: 0, of: 0 }));
-            r.of++;
-            if (!ty) return;
-            r.n++;
-            r.ty = r.ty === undefined || r.ty === ty ? ty : null;
-            let sm = sites.get(cpc); if (!sm) sites.set(cpc, (sm = new Map()));
-            let l = sm.get(pv.id); if (!l) sm.set(pv.id, (l = [])); if (!l.includes(p.funcs.get(pc)!.name)) l.push(p.funcs.get(pc)!.name);
-          });
-        };
-        for (const b of bt.f.blocks) for (const st of b.stmts) {
-          if (st.k === 'call' && st.t.k === 'fn') visit(st.args, st.t.pc);
-          stmtExprs(st).forEach(e => walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') visit(x.args, x.t.pc); }));
+      let changed: number[] = [];
+      for (const [cpc, sites] of callArgs) {
+        // param var -> the view type the calls pass (null: two types), how many calls do, of how many, callers passing one
+        const seen = new Map<number, { ty: string | null | undefined; n: number; of: number; callers: string[] }>();
+        for (const { caller, v, a } of sites) {
+          const ty = exprType(views, a, id => baseTypes.get(caller)!.get(id));
+          let r = seen.get(v); if (!r) seen.set(v, (r = { ty: undefined, n: 0, of: 0, callers: [] }));
+          r.of++;
+          if (!ty) continue;
+          r.n++;
+          r.ty = r.ty === undefined || r.ty === ty ? ty : null;
+          const nm = p.funcs.get(caller)!.name;
+          if (!r.callers.includes(nm)) r.callers.push(nm);
+        }
+        for (const [v, { ty, n, of, callers }] of seen) {
+          if (!ty || !views.map.has(ty) || ['AccountRecord', 'Input'].includes(ty)) continue;
+          let pt = paramTypes.get(cpc); if (!pt) paramTypes.set(cpc, (pt = new Map()));
+          if (pt.has(v) || baseTypes.get(cpc)!.has(v)) continue;
+          if (n * 2 < of && !fitsView(built.get(cpc)!.f, v, ty)) continue;
+          pt.set(v, [ty, `${n === of ? 'every call passes one' : `${n} of ${of} calls pass one, the others an untyped value${n * 2 < of ? '; its loads and stores through it all hit fields of the view' : ''}`}: ${callers.slice(0, 3).join(', ')}${callers.length > 3 ? ', …' : ''}`]);
+          changed.push(cpc);
         }
       }
-      let grew = false;
-      for (const [cpc, m] of seen) for (const [v, { ty, n, of }] of m) {
-        if (!ty || !views.map.has(ty) || ['AccountRecord', 'Input'].includes(ty)) continue;
-        if (n * 2 < of && !fitsView(built.get(cpc)!.f, v, ty)) continue;
-        let pt = paramTypes.get(cpc); if (!pt) paramTypes.set(cpc, (pt = new Map()));
-        if (pt.has(v) || baseTypes.get(cpc)!.has(v)) continue;
-        const callers = sites.get(cpc)!.get(v)!;
-        pt.set(v, [ty, `${n === of ? 'every call passes one' : `${n} of ${of} calls pass one, the others an untyped value${n * 2 < of ? '; its loads and stores through it all hit fields of the view' : ''}`}: ${callers.slice(0, 3).join(', ')}${callers.length > 3 ? ', …' : ''}`]);
-        grew = true;
-      }
-      if (!grew) break;
-      for (const pc of built.keys()) baseTypes.set(pc, computeTypes(pc));
+      if (!changed.length) break;
+      for (const pc of new Set(changed)) baseTypes.set(pc, computeTypes(pc));
     }
   }
   /**
@@ -582,7 +613,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       names[v] = unique(t.replace(/Account$|Record$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() + (t.endsWith('Record') ? '_acc' : '_data'));
     }
     const objs = objVars.get(pc);
-    for (const [v, o] of objs ?? []) if (used.has(v) && f.vars[v]?.param !== 10 && !argTypes.has(v)) { names[v] = unique(`${o.name}_box`); recovered.push(names[v]); }
+    for (const [v, o] of objs?.boxes ?? []) if (used.has(v) && f.vars[v]?.param !== 10 && !argTypes.has(v)) { names[v] = unique(`${o.name}_box`); recovered.push(names[v]); }
     if (an) {
       for (const [v, nm0] of [...an.varNames].sort((x, y) => x[0] - y[0])) {
         if (!used.has(v) || f.vars[v]?.param === 10 || argTypes.has(v) || dataVars.get(pc)?.has(v)) continue;

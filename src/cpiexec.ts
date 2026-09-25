@@ -22,7 +22,7 @@ import { type IxModel, type KeyText, type Acc, type CpiEnv } from './cpi.ts'
 const M = (1n << 64n) - 1n
 const HEAP_CURSOR = 0x3_0000_0000n
 const TOP_FP = 0x2_0000_3000n, CALLER_FP = 0x2_0000_1000n
-const MAX_STEPS = 20_000
+const MAX_STEPS = 5_000
 /** steps of all runs (statistics) */
 export const execStats = { runs: 0, steps: 0 }
 
@@ -106,7 +106,7 @@ const eqBytes = (x: Uint8Array, y: Uint8Array) => x.length === y.length && x.eve
  * One run of the function at f.pc towards the call at sitePc; the instruction at the CPI syscall reached
  * from that call (undefined when none is reached, or it is malformed).
  */
-interface RunCtl { flip: boolean; noFlip: Set<string>; sticky: Exec['sticky']; blamed?: boolean; flipped?: string[]; flippedAfterCall?: string[] }
+interface RunCtl { flip: boolean; noFlip: Set<string>; sticky: Exec['sticky']; blamed?: boolean; flipped?: string[]; flippedAfterCall?: string[]; limit?: boolean }
 function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, seed: number, ctl: RunCtl): Run | undefined {
 	const mem = new ExecMem(p, seed)
 	const sym = new Sym(mem)
@@ -150,6 +150,7 @@ function runOnce(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteKind, see
 	}
 	const r = x.run(f.pc, regs, TOP_FP, sitePc, extra)
 	ctl.blamed = x.blamed
+	ctl.limit = r.limit
 	ctl.flipped = [...x.flipped]
 	ctl.flippedAfterCall = reached ? ctl.flipped.slice(flipsAtCall) : []
 	execStats.runs++; execStats.steps += r.steps
@@ -239,6 +240,7 @@ function describeByExec0(p: Program, f: VarFunc, sitePc: number, kind: ExecSiteK
 		const used = new Set(noFlip), c: RunCtl = { flip: true, noFlip: new Set(noFlip), sticky: 'noflip' }
 		B = runOnce(p, f, sitePc, kind, 2, c)
 		if (B) { noFlip = used; break } // (flips B was blamed for were still explored)
+		if (c.limit) return undefined // (out of steps: another try would be too)
 		if (!c.flipped!.length) break
 		for (const k of c.flipped!) noFlip.add(k)
 	}

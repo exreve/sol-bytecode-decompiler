@@ -61,6 +61,12 @@ export class TestMem {
 	}
 }
 
+// memory instructions by opcode (taint): kind bits | access size (low 4 bits); v2 moves them to other opcodes
+const LD = 16, STI = 32, STX = 64
+const MEM_V0 = new Uint8Array(256), MEM_V2 = new Uint8Array(256)
+for (const [o, k] of [[0x71, LD | 1], [0x69, LD | 2], [0x61, LD | 4], [0x79, LD | 8], [0x72, STI | 1], [0x6a, STI | 2], [0x62, STI | 4], [0x7a, STI | 8], [0x73, STX | 1], [0x6b, STX | 2], [0x63, STX | 4], [0x7b, STX | 8]]) MEM_V0[o] = k
+for (const [o, k] of [[0x2c, LD | 1], [0x3c, LD | 2], [0x8c, LD | 4], [0x9c, LD | 8], [0x27, STI | 1], [0x37, STI | 2], [0x87, STI | 4], [0x97, STI | 8], [0x2f, STX | 1], [0x3f, STX | 2], [0x8f, STX | 4], [0x9f, STX | 8]]) MEM_V2[o] = k
+
 export interface CallHook { (target: string, args: bigint[], pc?: number): bigint }
 
 export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; alias?: boolean; retTaint?: number }
@@ -138,14 +144,10 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 			// input taint of the value written to dst (analysis runs only)
 			let tv: number | null = null
 			if (tt) {
-				const o = ins.opc
-				const size = (x: number) => (x === 0x71 || x === 0x72 || x === 0x73 || x === 0x2c || x === 0x27 || x === 0x2f ? 1 : x === 0x69 || x === 0x6a || x === 0x6b || x === 0x3c || x === 0x37 || x === 0x3f ? 2 : x === 0x61 || x === 0x62 || x === 0x63 || x === 0x8c || x === 0x87 || x === 0x8f ? 4 : 8)
-				const isLd = movMem ? o === 0x2c || o === 0x3c || o === 0x8c || o === 0x9c : o === 0x61 || o === 0x69 || o === 0x71 || o === 0x79
-				const isStI = movMem ? o === 0x27 || o === 0x37 || o === 0x87 || o === 0x97 : o === 0x62 || o === 0x6a || o === 0x72 || o === 0x7a
-				const isStX = movMem ? o === 0x2f || o === 0x3f || o === 0x8f || o === 0x9f : o === 0x63 || o === 0x6b || o === 0x73 || o === 0x7b
-				if (isLd) tv = tt.mem(u64(S + off), size(o)) | rt[src] | ctl
-				else if (isStI) tt.set(u64(D + off), size(o), ctl)
-				else if (isStX) tt.set(u64(D + off), size(o), rt[src] | ctl)
+				const o = ins.opc, m = (movMem ? MEM_V2 : MEM_V0)[o]
+				if (m & LD) tv = tt.mem(u64(S + off), m & 15) | rt[src] | ctl
+				else if (m & STI) tt.set(u64(D + off), m & 15, ctl)
+				else if (m & STX) tt.set(u64(D + off), m & 15, rt[src] | ctl)
 				else if (o === 0x18 && !noLddw) tv = ctl
 				else if (pqr && cls0 === 6) tv = rt[dst] | (isReg ? rt[src] : 0) | ctl
 				else if (cls0 === 4 || cls0 === 7) tv = (op0 === 0xb0 ? (isReg ? rt[src] : 0) : op0 === 0x80 || op0 === 0xd0 ? rt[dst] : rt[dst] | (isReg ? rt[src] : 0)) | ctl

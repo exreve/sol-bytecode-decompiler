@@ -25,19 +25,20 @@ export class ExecMem extends TestMem {
 	pages = new Map<bigint, Page>()
 	onLoad?: (addr: bigint, size: number, v: bigint) => void
 	constructor(p: Program, seed = 0) { super(p.image, 0, []); this.fillSeed = seed }
+	private lastK = -1n
+	private lastPg?: Page
 	private page(k: bigint): Page {
+		if (k === this.lastK) return this.lastPg!
 		let pg = this.pages.get(k)
-		if (pg) return pg
+		if (pg) { this.lastK = k; this.lastPg = pg; return pg }
 		const base = k * PAGE
 		const b = new Uint8Array(4096), t = new Uint8Array(4096).fill(base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1)
 		if (this.fillSeed) {
-			// xorshift32 stream per page
+			// xorshift32 stream per page (little-endian words)
 			let x = (Number(k & 0xffffffffn) ^ Math.imul(Number((k >> 32n) & 0xffffffffn), 0x9e3779b9) ^ Math.imul(this.fillSeed, 0x85ebca6b)) | 0
 			x = x || 1
-			for (let i = 0; i < 4096; i += 4) {
-				x ^= x << 13; x ^= x >>> 17; x ^= x << 5
-				b[i] = x & 0xff; b[i + 1] = (x >>> 8) & 0xff; b[i + 2] = (x >>> 16) & 0xff; b[i + 3] = (x >>> 24) & 0xff
-			}
+			const u = new Uint32Array(b.buffer)
+			for (let i = 0; i < 1024; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; u[i] = x }
 		}
 		if (base === 0x3_0000_0000n) b.fill(0, 0, 8)
 		let ro: Uint8Array | undefined
@@ -52,6 +53,7 @@ export class ExecMem extends TestMem {
 		}
 		pg = { b, dv: new DataView(b.buffer), t, ro }
 		this.pages.set(k, pg)
+		this.lastK = k; this.lastPg = pg
 		return pg
 	}
 	byte(a: bigint): number { a &= M; return this.page(a >> 12n).b[Number(a & 0xfffn)] }
@@ -84,6 +86,9 @@ export class ExecMem extends TestMem {
 	}
 	/** raw bytes (no load observation) */
 	read(addr: bigint, n: number): Uint8Array {
+		addr &= M
+		const o = Number(addr & 0xfffn)
+		if (o + n <= 4096) return this.page(addr >> 12n).b.slice(o, o + n)
 		const out = new Uint8Array(n)
 		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; out[i] = this.page(a >> 12n).b[Number(a & 0xfffn)] }
 		return out
@@ -101,7 +106,10 @@ export class ExecMem extends TestMem {
 		}
 	}
 	tainted(addr: bigint, n: number): number {
+		addr &= M
 		let t = 0
+		const o = Number(addr & 0xfffn)
+		if (o + n <= 4096) { const tt = this.page(addr >> 12n).t; for (let i = o; i < o + n; i++) t |= tt[i]; return t }
 		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; t |= this.page(a >> 12n).t[Number(a & 0xfffn)] }
 		return t
 	}
@@ -111,7 +119,12 @@ export class ExecMem extends TestMem {
 		if (o + n <= 4096) { this.page(addr >> 12n).t.fill(t, o, o + n); return }
 		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; this.page(a >> 12n).t[Number(a & 0xfffn)] = t }
 	}
-	taintBytes(addr: bigint, n: number): number[] { return Array.from({ length: n }, (_, i) => this.tainted(addr + BigInt(i), 1)) }
+	taintBytes(addr: bigint, n: number): number[] {
+		addr &= M
+		const o = Number(addr & 0xfffn)
+		if (o + n <= 4096) return Array.from(this.page(addr >> 12n).t.subarray(o, o + n))
+		return Array.from({ length: n }, (_, i) => this.tainted(addr + BigInt(i), 1))
+	}
 }
 
 export class Stop extends Error {}
