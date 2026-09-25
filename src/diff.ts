@@ -12,6 +12,8 @@ import { Semantics } from './semantics.ts'
 import { classify } from './library.ts'
 import { signatures, fuzzySim, codeHash, type FnSig } from './fingerprint.ts'
 import { parseIdl, type IdlInfo } from './idl.ts'
+import { decompile, type Result } from './decompile.ts'
+import { analyze } from './analysis/report.ts'
 
 export interface Profile {
 	p: Program
@@ -19,7 +21,7 @@ export interface Profile {
 	lib: Set<number>
 	names: Map<number, string>        // pc -> display name (ix_<name>, library name, symbol, fn_<addr>)
 	owners: Map<number, string[]>     // pc -> instructions whose handler reaches the function
-	arms: Map<string, string>         // instruction name -> where it was found (log / disc / idl)
+	arms: Map<string, string>         // instruction name -> where it was found (log / disc / idl / tag: native dispatch split)
 	callers: Map<number, number[]>
 	codeHash: string                  // hash of the multiset of (function hash, data hash)
 }
@@ -48,9 +50,29 @@ export function profile(bytes: Uint8Array, idl?: IdlInfo): Profile {
 		if (n?.startsWith('ix:') && !arms.has(n.slice(3))) arms.set(n.slice(3), 'disc')
 	}
 	for (const ix of idl?.instructions ?? []) if (!arms.has(ix.name)) arms.set(ix.name, 'idl')
+	// native programs (no names from logs / discriminators): the per-instruction split on the tag dispatch
+	// (security analysis, src/analysis/flow.ts), which needs the full decompilation
+	if (!arms.size) nativeArms(bytes, idl, arms, owners)
 	const callers = new Map<number, number[]>()
 	for (const s of sigs.values()) for (const t of new Set(s.calls)) { let l = callers.get(t); if (!l) callers.set(t, (l = [])); l.push(s.pc) }
 	return { p, sigs, lib, names, owners, arms, callers, codeHash: codeHash(sigs.values()) }
+}
+
+/** Instruction arms of a native program from the analysis' tag-dispatch split (and the functions each reaches). */
+function nativeArms(bytes: Uint8Array, idl: IdlInfo | undefined, arms: Map<string, string>, owners: Map<number, string[]>) {
+	let r: Result
+	try { r = decompile(bytes, { idl }) } catch { return }
+	const byName = new Map(r.funcs.map(f => [f.name, f.pc]))
+	for (const ix of analyze(r).ixs) {
+		if (ix.kind !== 'native') continue
+		arms.set(ix.name, 'tag')
+		for (const fn of ix.functions) {
+			const pc = byName.get(fn)
+			if (pc === undefined) continue
+			const o = owners.get(pc) ?? []
+			if (!o.includes(ix.name)) owners.set(pc, [...o, ix.name])
+		}
+	}
 }
 
 /** Instruction handlers reaching each function through direct calls (not through library code or other handlers). */

@@ -15,6 +15,7 @@ import type { OpKind } from './facts.ts'
 import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
 import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
+import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'; status: 'found' | 'partial'; at: Loc; negated?: boolean }
@@ -25,6 +26,7 @@ export interface Finding { rule: string; title: string; ix: string; accounts: st
 const VALUE: OpKind[] = ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'BURN', 'ACCOUNT_CLOSE', 'OWNER_ASSIGN', 'PROGRAM_UPGRADE']
 const isSensitive = (o: OpOut) => o.kinds.some(k => k !== 'PDA_DERIVE')
 const isValueOrAuth = (o: OpOut) => o.kinds.some(k => VALUE.includes(k) || k === 'AUTHORITY_WRITE') || (o.kinds.includes('LAMPORT_WRITE') && o.how === '-=')
+const GATE = ['signer', 'has_one', 'key', 'address', 'pda', 'custom', 'state', 'raw', 'token_owner', 'associated']
 const GUARD_KINDS = ['signer', 'owner', 'key', 'address', 'has_one', 'pda', 'custom', 'discriminator', 'state']
 
 // ---- dominance ----
@@ -200,7 +202,7 @@ export function phase2(a: Analysis, r: Result) {
 		const rel: Relation[] = []
 		for (const c of ix.checks) {
 			// (Anchor has_one on account T: T.<f> == f.key; the error names T, not f: each signer is a candidate)
-			if (c.kinds.includes('has_one') && c.account) for (const sgn of ix.accounts) if (sgn.name !== c.account && sgn.constraints.signer && sgn.constraints.signer.status !== 'not_found') rel.push({ a: `${c.account}.${sgn.name}?`, b: `${sgn.name}.key`, kind: 'has_one', status: c.status, at: c.at })
+			if (c.kinds.includes('has_one') && c.account) for (const sgn of ix.accounts) if (sgn.name !== c.account && sgn.constraints.signer && sgn.constraints.signer.status !== 'not_found') rel.push({ a: hasOneField(c.account, sgn.name, c.cond, a), b: `${sgn.name}.key`, kind: 'has_one', status: c.status, at: c.at })
 			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
 			const sides = eqSides(c.cond)
 			if (!sides) continue
@@ -229,7 +231,7 @@ export function phase2(a: Analysis, r: Result) {
 				for (const x of rel) {
 					const other = x.a === `${s.name}.key` ? x.b : x.b === `${s.name}.key` ? x.a : undefined
 					if (!other || other.endsWith('.key') && x.kind !== 'has_one') continue
-					const field = x.kind === 'has_one' ? [...authFields.keys()].find(f => f.endsWith(`.${s.name}`)) ?? other.replace(/\?$/, '') : other
+					const field = x.kind === 'has_one' && other.endsWith('?') ? [...authFields.keys()].find(f => f.endsWith(`.${s.name}`)) ?? other.replace(/\?$/, '') : other
 					en.push({ kind: 'stored', what: `${s.name}.key == ${field}`, status: x.status, writtenBy: authFields.get(field) ?? a.stateWrites.find(w => w.target === field)?.writes.map(w => w.ix) })
 				}
 			}
@@ -238,12 +240,28 @@ export function phase2(a: Analysis, r: Result) {
 			auth.push({ op: oi, kind: o.kinds.filter(k => k !== 'CPI').join(', ') || 'CPI', enabledBy: en })
 		})
 		ix.authority = auth
+	}
+	// phase 3 views (after every instruction's authority rows: the chains follow the writers), then the rules
+	for (const ix of a.ixs) phase3Ix(r, ix, a)
+	a.states = stateMachine(a)
+	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
 	const rank = { high: 3, medium: 2, low: 1 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
+}
+
+/**
+ * The stored field an Anchor has_one on account T compares with signer S's key: a field of T the condition
+ * reads, else a stored field of T named after S (state writes / authority fields), else `T.S?` (guessed).
+ */
+function hasOneField(t: string, s: string, cond: string, a: Analysis): string {
+	const m = new RegExp(`\\b${t}\\.([a-z_][a-z0-9_]*)\\b`).exec(cond)
+	if (m && !/^(key|owner|lamports|data|is_signer|is_writable)$/.test(m[1])) return `${t}.${m[1]}`
+	const known = a.stateWrites.map(w => w.target).find(f => f === `${t}.${s}` || (f.startsWith(`${t}.`) && f.endsWith(`_${s}`)))
+	return known ?? `${t}.${s}?`
 }
 
 /** the two sides of an (in)equality condition: a == b, a != b, memeq/keyeq/memcmp(a, b, 0x20) */
@@ -321,6 +339,85 @@ const RULES: Rule[] = [
 		run: ix => ix.ops.flatMap(o => (o.sources ?? []).filter(s => !/\.key$/.test(s.source) && s.source !== 'instruction data' && !s.source.startsWith('ix.') && s.trust === 'caller-controlled' && isValueOrAuth(o)).slice(0, 1).map(s => ({
 			accounts: [s.source.split('.')[0]], path: [L(o.at)], evidence: [`${s.param} ← ${s.source}: the account's owner is not verified (no check found)`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
+	},
+	// ---- phase 3 pattern rules (phase3.ts facts) ----
+	{
+		id: 'state-write-ungated', title: 'Instruction writes program state with no signer check and no constraint gating the write',
+		run: ix => {
+			if (ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))) return []
+			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => GATE.includes(k))))
+			if (!ws.length) return []
+			const tg = [...new Set(ws.map(o => o.target!))]
+			const anyGuard = ws.some(o => (o.guards ?? []).length)
+			return [{ accounts: [...new Set(tg.map(t => t.split('.')[0]))], path: [L(ws[0].at)], evidence: [`writes ${tg.slice(0, 4).join(', ')}${tg.length > 4 ? ', …' : ''}`, anyGuard ? 'only type / owner / size checks dominate the writes' : 'no dominating check found'], confidence: ws.some(o => o.kinds.includes('AUTHORITY_WRITE')) || !anyGuard ? 'medium' as const : 'low' as const, weight: Math.max(...ws.map(wOf), 2) }]
+		},
+	},
+	{
+		id: 'share-price-zero-supply', title: 'Division by a supply / balance-like value with no zero / minimum check on the way (empty or donated pool)',
+		run: ix => (ix.divs ?? []).filter(d => d.status === 'not_found').slice(0, 2).map(d => ({
+			accounts: [], path: [L(d.at)], evidence: [`${d.expr}`, `divisor ${d.divisor}: no comparison on it found on the way (a zero divisor aborts; a first depositor / donation can skew the ratio)`], confidence: /\.amount\b|balance|lamports/.test(d.divisor) ? 'medium' as const : 'low' as const, weight: 4,
+		})),
+	},
+	{
+		id: 'mint-burn-authority-from-data', title: 'Mint / burn whose authority comes from account data rather than a signer',
+		run: ix => ix.ops.filter(o => o.kinds.includes('MINT') || o.kinds.includes('BURN')).flatMap(o => {
+			const au = o.cpi?.accounts.find(x => x.role && /authority|owner/.test(x.role))
+			const n = au && /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(au.text)?.[1]
+			const row = n ? ix.accounts.find(x => x.name === n) : undefined
+			const signed = row?.constraints.signer && row.constraints.signer.status !== 'not_found'
+			const fromData = (o.sources ?? []).filter(s => s.param === au?.role && !s.source.endsWith('.key') && s.source.includes('.'))
+			const seedsData = !o.cpi?.seeds ? [] : (o.sources ?? []).filter(s => s.param === 'signer seeds' && s.trust === 'caller-controlled' && !s.source.endsWith('.key'))
+			if (signed) return []
+			if (fromData.length) return [{ accounts: [n ?? au!.text], path: [L(o.at)], evidence: [o.text.slice(0, 140), `authority ← ${fromData.map(s => `${s.source} (${s.trust})`).join(', ')}`], confidence: fromData.some(s => s.trust === 'caller-controlled') ? 'medium' as const : 'low' as const, weight: wOf(o) }]
+			if (seedsData.length) return [{ accounts: seedsData.map(s => s.source), path: [L(o.at)], evidence: [o.text.slice(0, 140), `PDA signer seeds from unverified account data: ${seedsData.map(s => s.source).join(', ')}`], confidence: 'low' as const, weight: wOf(o) }]
+			if (!o.cpi?.seeds && au && !row) return [{ accounts: [au.text], path: [L(o.at)], evidence: [o.text.slice(0, 140), `authority ${au.text} is not an identified account with a signer check (read from memory / data)`], confidence: 'low' as const, weight: wOf(o) }]
+			return []
+		}),
+	},
+	{
+		id: 'cpi-forwarder', title: 'Verbatim CPI forwarder: account-supplied program id, caller accounts passed through, no signer seeds',
+		run: ix => ix.ops.filter(o => o.cpi && !o.cpi.known && o.cpi.program !== '?' && !o.cpi.seeds).flatMap(o => {
+			// (accounts decoded, every one a caller-provided account; the instruction data from the caller or not decoded)
+			const names = new Set(ix.accounts.map(x => x.name))
+			const accts = o.cpi!.accounts
+			if (!accts.length || !accts.every(x => { const m = /^\*?([A-Za-z_]\w*(?:\[\d+\])?)$/.exec(x.text.trim()); return m && names.has(m[1]) || /remaining/.test(x.text) })) return []
+			const dataCaller = !o.cpi!.fields.length || (o.sources ?? []).some(s => s.trust === 'caller-controlled' && (s.source === 'instruction data' || s.source.startsWith('ix.')))
+			if (!dataCaller) return []
+			const checked = /\(id compared with/.test(o.cpi!.checked ?? '')
+			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${accts.length} accounts, all caller-provided; data ${o.cpi!.fields.length ? 'from the instruction data' : 'not decoded'}; program id ${checked ? 'compared with a known id' : 'not compared with a known id'}`], confidence: checked ? 'low' as const : 'medium' as const, weight: 4 }]
+		}),
+	},
+	{
+		id: 'close-without-zeroing', title: 'Account close without zeroing the data / discriminator, or followed by a realloc (revival)',
+		run: ix => ix.ops.flatMap((o, oi) => {
+			if (!o.kinds.includes('ACCOUNT_CLOSE') || o.cpi?.known) return []
+			const z = closeZeroing(ix, oi)
+			if (z.revived) return [{ accounts: [o.target ?? '?'], path: [L(o.at)], evidence: [o.text.slice(0, 120), `realloc after the close: ${z.revived}`], confidence: 'medium' as Finding['confidence'], weight: 5 }]
+			if (z.zeroed) return []
+			return [{ accounts: [o.target ?? '?'], path: [L(o.at)], evidence: [o.text.slice(0, 120), 'lamports drained, but no data zeroing / closed discriminator / realloc(0) / owner reassignment found in the instruction'], confidence: 'low' as const, weight: 4 }]
+		}),
+	},
+	{
+		id: 'unchecked-arithmetic', title: 'Wrapping (unchecked) addition / subtraction on a value path with no bound check on the way',
+		run: ix => (ix.arith ?? []).filter(x => x.status === 'unchecked').sort((x, y) => Number(!!y.caller) - Number(!!x.caller) || (x.kind === 'sub' ? -1 : 1)).slice(0, 3).map(x => ({
+			accounts: [x.target.split('.')[0]], path: [L(x.at)], evidence: [`${x.target} ← ${x.expr} (${x.kind})`, `no comparison of the operands found on the way${x.caller ? '; operands include instruction data' : ''}${x.unnamed ? '; field not named (native layout)' : ''}`], confidence: x.caller && x.kind === 'sub' ? 'medium' as const : 'low' as const, weight: x.kind === 'sub' ? 3 : 2,
+		})),
+	},
+	{
+		id: 'recipient-unbound', title: 'Recipient / destination with no owner, mint or key binding',
+		run: ix => ix.ops.flatMap(o => {
+			const k = o.kinds
+			if (!k.some(x => x === 'TOKEN_TRANSFER' || x === 'LAMPORT_TRANSFER' || x === 'MINT')) return []
+			const dest = o.cpi?.accounts.find(x => x.role && /^(destination|to|account)$/.test(x.role))
+			const d = dest && /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(dest.text)?.[1]
+			const row = d ? ix.accounts.find(x => x.name === d) : undefined
+			if (!row) return []
+			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer'].filter(c => row.constraints[c] && row.constraints[c].status !== 'not_found')
+			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
+			if (bind.length || rel) return []
+			// (outflows the program signs for are the ones where an unbound destination matters most)
+			return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: no owner / mint / key / PDA / relation check found${o.cpi?.seeds ? '; the program signs this outflow (PDA)' : ''}`], confidence: o.cpi?.seeds ? 'medium' as const : 'low' as const, weight: wOf(o) }]
+		}),
 	},
 ]
 
