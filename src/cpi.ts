@@ -3,7 +3,7 @@
 // At a sol_invoke_signed_c / sol_invoke_signed_rust call (or a thin wrapper of one) whose instruction
 // struct lives in the caller's frame, the constant parts of what is invoked are read back from the
 // stores that built it and summarized in a comment. Instructions of well-known programs (SPL Token /
-// Token-2022, System, Associated Token Account, Compute Budget) are decoded: accounts by role, data fields
+// Token-2022, System, Associated Token Account, Compute Budget, Stake) are decoded: accounts by role, data fields
 // by name; when the program id is not a constant, the data/account shape is matched against SPL Token and
 // System and the comment says whether the id is compared with a known program id in the same function:
 //   // CPI TOKEN_PROGRAM.Transfer { source: f.key (w), destination: g.key (w), authority: h.key (s), amount: ld64(a + 0x20) }, no signer seeds
@@ -212,7 +212,31 @@ const COMPUTE_BUDGET: Family = {
 		4: L('SetLoadedAccountsDataSizeLimit', [], [['bytes', 1, 4]], 5),
 	},
 }
-const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET }
+// solana_stake_interface::instruction::StakeInstruction (bincode: u32 tag, then the fields); optional
+// trailing accounts (a lockup custodian) are shown as accountN
+const STAKE: Family = {
+	label: 'Stake', tagSize: 4, ixs: {
+		0: L('Initialize', ['stake', 'rent_sysvar'], [['staker', 4, 'key'], ['withdrawer', 36, 'key'], ['lockup_unix_timestamp', 68, 8], ['lockup_epoch', 76, 8], ['lockup_custodian', 84, 'key']], 116),
+		1: L('Authorize', ['stake', 'clock_sysvar', 'authority'], [['new_authority', 4, 'key'], ['stake_authorize', 36, 4]], 40),
+		2: L('DelegateStake', ['stake', 'vote', 'clock_sysvar', 'stake_history_sysvar', 'stake_config', 'stake_authority'], [], 4),
+		3: L('Split', ['stake', 'split_stake', 'stake_authority'], [['lamports', 4, 8]], 12),
+		4: L('Withdraw', ['stake', 'recipient', 'clock_sysvar', 'stake_history_sysvar', 'withdraw_authority'], [['lamports', 4, 8]], 12),
+		5: L('Deactivate', ['stake', 'clock_sysvar', 'stake_authority'], [], 4),
+		6: L('SetLockup', ['stake', 'authority'], []),
+		7: L('Merge', ['destination_stake', 'source_stake', 'clock_sysvar', 'stake_history_sysvar', 'stake_authority'], [], 4),
+		8: L('AuthorizeWithSeed', ['stake', 'authority_base', 'clock_sysvar'], [['new_authority', 4, 'key'], ['stake_authorize', 36, 4]]),
+		9: L('InitializeChecked', ['stake', 'rent_sysvar', 'stake_authority', 'withdraw_authority'], [], 4),
+		10: L('AuthorizeChecked', ['stake', 'clock_sysvar', 'authority', 'new_authority'], [['stake_authorize', 4, 4]], 8),
+		11: L('AuthorizeCheckedWithSeed', ['stake', 'authority_base', 'clock_sysvar', 'new_authority'], [['stake_authorize', 4, 4]]),
+		12: L('SetLockupChecked', ['stake', 'authority'], []),
+		13: L('GetMinimumDelegation', [], [], 4),
+		14: L('DeactivateDelinquent', ['stake', 'delinquent_vote', 'reference_vote'], [], 4),
+		15: L('Redelegate', ['stake', 'uninitialized_stake', 'vote', 'stake_config', 'stake_authority'], [], 4),
+		16: L('MoveStake', ['source_stake', 'destination_stake', 'stake_authority'], [['lamports', 4, 8]], 12),
+		17: L('MoveLamports', ['source_stake', 'destination_stake', 'stake_authority'], [['lamports', 4, 8]], 12),
+	},
+}
+const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET, STAKE_PROGRAM: STAKE }
 
 /** A described CPI: the comment, and the decoded instruction of a well-known program (guessed: the program id is not a constant). */
 export interface CpiDesc { text: string; family?: string; ix?: string; guessed?: boolean }
@@ -363,8 +387,8 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 				parts.push(`${name}: ${v}`)
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
-			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : 'compute_budget'
-			return { text: `CPI ${head} { ${parts.join(', ')} }${tail}`, family, ix: lay.name, guessed: !fam }
+			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : F === STAKE ? 'stake' : 'compute_budget'
+			return { text: `CPI ${head} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}${tail}`, family, ix: lay.name, guessed: !fam }
 		}
 	}
 	const parts = [`program ${program.text}${check}`]

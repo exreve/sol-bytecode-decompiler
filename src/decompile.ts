@@ -481,6 +481,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // functions that make exactly one CPI, of a decoded well-known instruction: cpi_<program>_<instruction>
+  // (the instruction in the frame, or one a run of the function builds; own exec budget)
+  const nameBudget = { steps: 100_000 };
   if (opts.sugar !== false) {
     const taken = new Set([...p.funcs.values()].map(x => x.name));
     for (const [pc, bt] of built) {
@@ -492,9 +494,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       for (const b of bt.f.blocks) size += b.stmts.length;
       if (size > 120) continue;
       const cpiOnly = (a: string | null | undefined) => (a === 'c' || a === 'rust' ? a : null);
-      const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? cpiOnly(invokeAbi(t.name)) : t.k === 'fn' ? cpiOnly(invokeThunks.get(t.pc)) : null));
+      const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? cpiOnly(invokeAbi(t.name)) : t.k === 'fn' ? cpiOnly(invokeThunks.get(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : null) : null));
       if (sites.size !== 1) continue;
-      const d = cpiDesc([...sites.values()][0], { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) });
+      const [[node, site]] = [...sites];
+      const env: CpiEnv = { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), strAt: (a, n) => sem.strAt(a, n), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) };
+      let d = site.abi === 'invoke' ? undefined : cpiDesc(site, env), ran = false;
+      if (!d?.ix) {
+        // an instruction built on the heap: the CPI a run of the function makes (cpiexec.ts)
+        const kind: ExecSiteKind | undefined = site.t?.k === 'sys' ? 'sys' : site.t?.k === 'fn' ? (invokeThunks.has(site.t.pc) ? 'thunk' : invokeWrappers.has(site.t.pc) ? 'wrapper' : undefined) : undefined;
+        const t = site.t?.k === 'fn' ? `fn:${site.t.pc}` : site.t?.k === 'sys' ? `sys:${site.t.name}` : undefined;
+        const at = node.k === 'stmt' && node.s.k === 'call' ? node.s.pc : t && callInsns(pc, t).length === 1 ? callInsns(pc, t)[0] : undefined;
+        const m = kind && at !== undefined && nameBudget.steps > 0 ? describeByExec(p, bt.f, at, kind, env, nameBudget) : undefined;
+        const x = m && formatIx(m, env);
+        if (x?.ix && !x.guessed) { d = x; ran = true; }
+      }
       if (!d?.ix) continue;
       const base = `cpi_${d.family}_${d.ix.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()}`;
       let nm = base, k = 2;
@@ -504,7 +517,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       fnByAddr.set(fnAddr(p, pc), nm);
       (fnNotes.get(pc) ?? fnNotes.set(pc, []).get(pc)!).push(d.guessed
         ? `name [heur]: its CPI's data and accounts match ${d.family === 'token' ? 'SPL Token' : 'System'} ${d.ix}, but the program id is not a constant here (was ${old})`
-        : `name [known]: makes the CPI ${d.ix} of a well-known program (was ${old})`);
+        : `name [known${ran ? ', exec' : ''}]: makes the CPI ${d.ix} of a well-known program${ran ? ' (the instruction a run of it builds)' : ''} (was ${old})`);
     }
   }
   // view types per function (the print loop adds the IDL argument views): known pointers, then
