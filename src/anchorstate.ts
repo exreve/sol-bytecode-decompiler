@@ -22,7 +22,7 @@ import { Exec, ExecMem, extentOf } from './exec.ts'
 import { callTargetName } from './emu.ts'
 import { unb58 } from './semantics.ts'
 import type { Views, Field } from './views.ts'
-import { nameArg } from './anchor.ts'
+import { nameArg, outAliases } from './anchor.ts'
 
 /** A variable holding a (boxed) deserialized account: its account name, the view of the object, the Rust account type. */
 export interface AccountObj { name: string; view: string; rust: string }
@@ -357,11 +357,12 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const fp = f.vars.find(v => v.param === 10)?.id
 		const outP = f.vars.find(v => v.param === 1)?.id
 		if (fp === undefined || outP === undefined) continue
-		// variables that only ever hold the out parameter
+		// variables that only ever hold the out parameter (or its spill slot's value)
 		const defs = new Map<number, Expr[]>()
 		for (const b of f.blocks) for (const st of b.stmts) if (st.k === 'set' || st.k === 'call') { let l = defs.get(st.dst); if (!l) defs.set(st.dst, (l = [])); l.push(st.k === 'set' ? st.e : { k: 'undef' }) }
-		if (defs.has(outP)) continue
-		const isOut = (id: number) => id === outP || (defs.get(id)?.every(e => e.k === 'var' && e.id === outP) ?? false)
+		const aliases = outAliases(f)
+		if (!aliases) continue
+		const isOut = (id: number) => aliases.has(id)
 		const off = (e: Expr, base: (id: number) => boolean): number | undefined => {
 			if (e.k === 'var' && base(e.id)) return 0
 			if (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && base(e.a.id) && e.b.k === 'const') return Number(BigInt.asIntN(64, e.b.v))

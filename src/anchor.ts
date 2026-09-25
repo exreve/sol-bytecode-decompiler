@@ -239,20 +239,57 @@ function exits(ns: Node[]): boolean {
 }
 
 /**
+ * Variables holding a function's first parameter (the out pointer): the parameter itself (never
+ * reassigned), variables only ever assigned it, and variables only ever loaded from a frame slot that is
+ * stored exactly once, with such a variable (the out pointer spilled under register pressure).
+ * Undefined when the parameter is reassigned.
+ */
+export function outAliases(f: VarFunc): Set<number> | undefined {
+	const out = f.vars.find(v => v.param === 1)?.id
+	const fp = f.vars.find(v => v.param === 10)?.id ?? -1
+	if (out === undefined) return undefined
+	const defs = new Map<number, Expr[]>()
+	const slots = new Map<number, Expr | null>()
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'set' || s.k === 'call') { let l = defs.get(s.dst); if (!l) defs.set(s.dst, (l = [])); l.push(s.k === 'set' ? s.e : { k: 'undef' }) }
+		else if (s.k === 'store' && s.size === 8) { const o = frameOff(s.addr, fp); if (o !== undefined) slots.set(o, slots.has(o) ? null : s.v) }
+		else if (s.k === 'stores') { const o = frameOff(s.addr, fp); if (o !== undefined) s.vals.forEach((v, i) => { const k = o + s.size * i; slots.set(k, slots.has(k) || s.size !== 8 ? null : v) }) }
+		else if (s.k === 'copy') { const o = frameOff(s.dst, fp); if (o !== undefined) for (let k = o - 7; k < o + s.n; k++) if (slots.has(k)) slots.set(k, null) }
+	}
+	if (defs.has(out)) return undefined
+	// the value a def copies: a variable, or the variable stored in a single-store slot it loads
+	const src = (e: Expr): number | undefined => {
+		if (e.k === 'var') return e.id
+		if (e.k !== 'load' || e.size !== 8) return undefined
+		const o = frameOff(e.addr, fp)
+		if (o === undefined) return undefined
+		// (another store overlapping the slot: not a single-store slot)
+		for (const k of slots.keys()) if (k !== o && k > o - 8 && k < o + 8) return undefined
+		const v = slots.get(o)
+		return v?.k === 'var' ? v.id : undefined
+	}
+	// greatest fixpoint: variables all of whose defs copy the out parameter or another such variable
+	const res = new Set<number>([out])
+	for (const [v, ds] of defs) if (ds.every(e => src(e) !== undefined)) res.add(v)
+	for (let changed = true; changed;) {
+		changed = false
+		for (const v of res) if (v !== out && !defs.get(v)!.every(e => res.has(src(e)!))) { res.delete(v); changed = true }
+	}
+	return res
+}
+
+/**
  * Layout of the Accounts struct a try_accounts function returns through its first parameter: offset ->
  * account name, from stores `st64(out + off, v)` of a named account variable (or of a frame slot stored
  * exactly once, with such a variable). Offsets stored with different names are dropped.
  */
 export function accountsLayout(f: VarFunc, names: Map<number, string>): Map<number, string> {
-	const out = f.vars.find(v => v.param === 1)?.id
 	const fp = f.vars.find(v => v.param === 10)?.id
 	const res = new Map<number, string>(), bad = new Set<number>()
-	if (out === undefined) return res
-	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === out) return res
 	// variables that only ever hold the out parameter
-	const aliasDefs = new Map<number, boolean>()
-	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) aliasDefs.set(s.dst, (aliasDefs.get(s.dst) ?? true) && s.k === 'set' && s.e.k === 'var' && s.e.id === out)
-	const isOut = (id: number) => id === out || aliasDefs.get(id) === true
+	const aliases = outAliases(f)
+	if (!aliases) return res
+	const isOut = (id: number) => aliases.has(id)
 	const fo = (e: Expr) => frameOff(e, fp ?? -1)
 	// frame slots stored exactly once
 	const slot = new Map<number, Expr | null>()
