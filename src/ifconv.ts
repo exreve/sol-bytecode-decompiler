@@ -22,7 +22,6 @@ import { type Expr, type Stmt, type Term, walkExpr, hasSideEffectsOrMem, exprSiz
 const pure = (e: Expr) => { const s = hasSideEffectsOrMem(e); return !s.load && !s.call && !s.trap }
 const hasUndef = (e: Expr) => { let u = false; walkExpr(e, x => { if (x.k === 'undef') u = true }); return u }
 const readsAny = (e: Expr, vs: Set<number>) => { let r = false; walkExpr(e, x => { if (x.k === 'var' && vs.has(x.id)) r = true }); return r }
-const bit = (s: Uint32Array, v: number) => (s[v >>> 5] >>> (v & 31)) & 1
 
 type Assign = Map<number, Expr> // var -> expression assigned by an arm
 
@@ -37,30 +36,50 @@ function armAssigns(b: Block, maxStmts: number): Assign | null {
 	return m
 }
 
-/** Variables definitely assigned at the end of each block (forward must-analysis). */
-function definitelyAssigned(f: VarFunc): Uint32Array[] {
-	const nv = f.vars.length, W = (nv + 31) >>> 5
-	const full = () => new Uint32Array(W).fill(0xffffffff)
-	const out = f.blocks.map(() => full())
-	const entry = new Uint32Array(W)
-	for (const v of f.vars) if (v.param >= 0) entry[v.id >>> 5] |= 1 << (v.id & 31)
-	const gen = f.blocks.map(b => {
-		const g = new Uint32Array(W)
-		// `x = undef` does not count: readable output omits it
-		for (const s of b.stmts) if ((s.k === 'set' && s.e.k !== 'undef') || (s.k === 'call' && s.dst >= 0)) g[s.dst >>> 5] |= 1 << (s.dst & 31)
-		return g
-	})
-	for (let changed = true; changed;) {
-		changed = false
-		for (const b of f.blocks) {
-			const inn = b.id === 0 ? entry.slice() : full()
-			for (const p of b.preds) { const o = out[p]; for (let k = 0; k < W; k++) inn[k] &= o[k] }
-			for (let k = 0; k < W; k++) inn[k] |= gen[b.id][k]
-			const o = out[b.id]
-			for (let k = 0; k < W; k++) if (inn[k] !== o[k]) { out[b.id] = inn; changed = true; break }
+/**
+ * Whether variable v is definitely assigned at the end of block a (forward must-analysis:
+ * block 0 starts with the parameters, out = in ∪ assigned, in = ∩ of the predecessors' out).
+ *
+ * Asked per (block, variable) instead of solving the analysis for every block and variable: the
+ * problem is distributive (gen only), so its maximal fixpoint is the meet over all paths: v is NOT
+ * definitely assigned at the end of a exactly when a path from the start of block 0 (v not a
+ * parameter) to the end of a passes no block assigning v. That is a backward search from a over
+ * `preds` that stops at blocks assigning v; blocks other than 0 without predecessors are
+ * unreachable, where the fixpoint holds every variable, and so are dead ends. (The former version
+ * re-solved the bit-vector problem for all blocks, allocating fresh vectors for every block on
+ * every pass, after each conversion; the answers are the same.)
+ */
+function definitelyAssigned(f: VarFunc) {
+	const seen = new Int32Array(f.blocks.length)
+	let stamp = 0
+	const gens = new Map<number, Set<number>>() // block -> variables it assigns (until its statements change)
+	const gen = (b: Block): Set<number> => {
+		let g = gens.get(b.id)
+		if (!g) {
+			g = new Set()
+			// `x = undef` does not count: readable output omits it
+			for (const s of b.stmts) if ((s.k === 'set' && s.e.k !== 'undef') || (s.k === 'call' && s.dst >= 0)) g.add(s.dst)
+			gens.set(b.id, g)
 		}
+		return g
 	}
-	return out
+	return {
+		/** Block b's statements changed. */
+		invalidate: (b: number) => { gens.delete(b) },
+		at: (a: number, v: number): boolean => {
+			const param = f.vars[v].param >= 0
+			const st = ++stamp
+			const stack = [a]
+			seen[a] = st
+			while (stack.length) {
+				const b = f.blocks[stack.pop()!]
+				if (gen(b).has(v)) continue
+				if (b.id === 0 && !param) return false
+				for (const p of b.preds) if (seen[p] !== st) { seen[p] = st; stack.push(p) }
+			}
+			return true
+		},
+	}
 }
 
 /** Identical terminators (so two arms can share one). exprEq never equates calls. */
@@ -81,7 +100,7 @@ function sameTerm(x: Term, y: Term): boolean {
 }
 
 export function ifConvert(f: VarFunc, maxStmts = 3): boolean {
-	let da: Uint32Array[] | null = null
+	const da = definitelyAssigned(f)
 	let changed = false
 	for (const a of f.blocks) {
 		const t = a.term
@@ -103,10 +122,7 @@ export function ifConvert(f: VarFunc, maxStmts = 3): boolean {
 		if ([...onT.values(), ...onF.values()].some(e => readsAny(e, targets))) continue
 		// the untaken side keeps the old value: it must be definitely assigned at the end of A
 		const oneSided = [...targets].filter(v => !(onT.has(v) && onF.has(v)))
-		if (oneSided.length) {
-			da ??= definitelyAssigned(f)
-			if (oneSided.some(v => !bit(da![a.id], v))) continue
-		}
+		if (oneSided.some(v => !da.at(a.id, v))) continue
 		const x = (v: number): Expr => ({ k: 'var', id: v })
 		const differ = [...targets].filter(v => !(onT.has(v) && onF.has(v) && exprEq(onT.get(v)!, onF.get(v)!)))
 		const stmts: Stmt[] = []
@@ -132,7 +148,8 @@ export function ifConvert(f: VarFunc, maxStmts = 3): boolean {
 			S.preds.push(a.id)
 		}
 		for (const arm of arms) { arm.preds = []; arm.succs = []; arm.stmts = []; arm.term = { k: 'trap', msg: 'dead' } }
-		da = null
+		da.invalidate(a.id)
+		for (const arm of arms) da.invalidate(arm.id)
 		changed = true
 	}
 	return changed
