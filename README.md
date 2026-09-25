@@ -89,7 +89,15 @@ ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
 bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
+slices/*.txt    security slices: UNVERIFIED views derived from the code above (see below)
 ```
+
+**Slices** (`slices/cpi.txt`, `pda.txt`, `account_checks.txt`, `account_writes.txt`) index the security-relevant
+lines: for each CPI, PDA derivation, condition on an account flag / owner / key (or Anchor constraint error),
+and write to account data or lamports, they list the instruction handlers reaching the function (direct calls,
+through library code too), the conditions the line runs under (enclosing blocks and earlier early exits), the
+definitions of the variables it uses (same function), and the line. They are read off the printed code and
+leave everything else out: an index for review, not verified code (never mixed into the `.ts` files).
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.
 
@@ -277,6 +285,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
+| `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |

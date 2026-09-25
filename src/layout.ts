@@ -9,6 +9,7 @@
 import type { Result, FuncOut } from './decompile.ts'
 import { SYSCALLS } from './syscalls.ts'
 import { VIEW_NOTATION } from './views.ts'
+import { renderSlices } from './slices.ts'
 
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
 // x as u8|u16|u32: truncate | x as i8|i16|i32: truncate + sign-extend | (x as i64) < (y as i64): signed compare
@@ -69,7 +70,8 @@ declare function callx(fn: u64, ...args: u64[]): u64`
 
 export interface Group { key: string; title: string; funcs: FuncOut[] }
 
-export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } {
+/** Instruction handlers (and inline processors) reaching each function through direct calls. */
+export function handlerOwners(r: Result): { handlers: FuncOut[]; owners: Map<number, Set<number>>; isRoot: (f: FuncOut) => boolean } {
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	const procNames = new Set(r.processors.map(x => x.fn))
 	const isRoot = (f: FuncOut) => f.name.startsWith('ix_') || procNames.has(f.name)
@@ -84,6 +86,12 @@ export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } 
 			for (const t of byPc.get(x)?.calls ?? []) if (byPc.has(t) && !seen.has(t) && !isRoot(byPc.get(t)!)) { seen.add(t); q.push(t) }
 		}
 	}
+	return { handlers, owners, isRoot }
+}
+
+export function groups(r: Result): { entry: Group; ix: Group[]; shared: Group } {
+	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
+	const { handlers, owners, isRoot } = handlerOwners(r)
 	const entry: Group = { key: 'entrypoint', title: 'entrypoint, dispatcher and code outside instruction handlers', funcs: [] }
 	const shared: Group = { key: 'shared', title: 'helpers used by several instructions', funcs: [] }
 	const ix = new Map<number, Group>(handlers.map(h => [h.pc, h.name.startsWith('ix_')
@@ -202,6 +210,25 @@ export function renderProject(r: Result): Map<string, string> {
 	for (const i of r.instructions) idx.push(`export { ix_${i.name} } from './ix/${i.name}.ts'`)
 	idx.push(`export { entrypoint } from './entrypoint.ts'`)
 	files.set('index.ts', idx.join('\n') + '\n')
+	// security slices: derived, unverified views (separate files); reachability through every direct
+	// call of the program, library code included (library functions call back into user code)
+	const { handlers } = handlerOwners(r)
+	const reach = new Map<number, Set<string>>()
+	for (const h of handlers) {
+		const seen = new Set<number>([h.pc]), q = [h.pc]
+		while (q.length) {
+			const x = q.pop()!
+			let o = reach.get(x); if (!o) reach.set(x, (o = new Set())); o.add(h.name)
+			for (const b of r.program.funcs.get(x)?.blocks ?? []) for (const st of b.stmts)
+				if (st.k === 'call' && st.t.k === 'fn' && !seen.has(st.t.pc) && !handlers.some(y => y.pc === (st.t as { pc: number }).pc)) { seen.add(st.t.pc); q.push(st.t.pc) }
+		}
+	}
+	const slices = renderSlices(r.funcs, f => [...(reach.get(f.pc) ?? [])].sort())
+	for (const [path, text] of slices) files.set(path, text + '\n')
+	if (slices.size) {
+		const idxText = files.get('index.ts')!
+		files.set('index.ts', idxText + `// slices/: security-oriented slices, UNVERIFIED views derived from this code (not executable): ${[...slices.keys()].map(k => k.slice(7)).join(', ')}\n`)
+	}
 	// self-contained per-instruction bundles: handler + all user code it reaches + the stubs it needs
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) {
