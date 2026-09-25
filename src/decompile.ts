@@ -723,6 +723,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
       ctx.views = views;
       ctx.varType = id => varTypes.get(id);
+      // temporaries defined once as an account of an Accounts struct (or a Context's accounts): its name
+      for (const b of f.blocks) for (const st of b.stmts) {
+        if (st.k !== 'set' || st.e.k !== 'load' || st.e.size !== 8 || !used.has(st.dst) || f.vars[st.dst]?.param >= 0 || !/^([a-z]{1,2}|v\d+)$/.test(names[st.dst] ?? '') || defCount(f, st.dst) !== 1) continue;
+        const a = st.e.addr;
+        const bv = a.k === 'var' ? a.id : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? a.a.id : undefined;
+        const off = a.k === 'bin' && a.b.k === 'const' ? Number(BigInt.asIntN(64, a.b.v)) : 0;
+        const t = bv === undefined ? undefined : varTypes.get(bv);
+        if (!t || !/(Accounts|Context)$/.test(t) || off < 0) continue;
+        const r = views.resolve(t, off);
+        if (!r || r.rest || r.last.k !== 'ref') continue;
+        names[st.dst] = unique(r.path[r.path.length - 1].replace(/\[\d+\]$/, ''));
+      }
     }
     const pr = new Printer(ctx);
     // Result<(), ProgramError> tags (u32 layout): stores of constants where the Ok tag is stored too

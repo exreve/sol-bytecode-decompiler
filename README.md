@@ -255,6 +255,9 @@ interface ChangeWhitelistAccounts {
 	cn = ld64(bk.sqrt_price + 8)
 ```
 
+Temporaries defined once as an account of an Accounts struct (or of a Context's `accounts`) are named after it:
+`const whirlpool: Whirlpool = accounts.whirlpool`.
+
 **Parameter types** (`[heur]`): a parameter (never reassigned) gets a view type when at least half of the direct
 calls pass an object of that view type and none one of another — or, with fewer, when every load and store through
 it hits a field of the view exactly and at least 3 fields: `// types [heur]: b: Whirlpool (1 of 3 calls pass one, …)`,
