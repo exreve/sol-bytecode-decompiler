@@ -473,3 +473,4 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/compact.ts` | store/copy run compaction |
 | `src/print.ts`, `src/layout.ts` | TypeScript printer, output layout |
 | `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition |
+| `src/builtins.ts` | u128 compiler builtins named by behavior (library stubs) |
