@@ -35,13 +35,22 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 	const sites = new Map<Node, CpiSite>()
 	const fo = (e: Expr): number | null => frameOff(e, fp)
 	const hasCall = (e: Expr) => { let c = false; walkExpr(e, x => { if (x.k === 'call') c = true }); return c }
-	const mentions = (e: Expr, v: number) => { let m = false; walkExpr(e, x => { if (x.k === 'var' && x.id === v) m = true }); return m }
-	/** does e load bytes that a frame store to [o, o + n) changes? */
-	const readsChanged = (e: Expr, o: number, n: number) => {
-		let r = false
-		walkExpr(e, x => { if (x.k === 'load') { const lo = fo(x.addr); if (lo !== null && lo < o + n && o < lo + x.size) r = true } })
+	// the variables and frame loads of each fact's expression, found once per expression (facts are
+	// re-checked at every later assignment and store: walking them each time was quadratic in long
+	// straight-line code; expressions are immutable)
+	const info = new Map<Expr, { vars: Set<number>; loads: [number, number][] }>()
+	const infoOf = (e: Expr) => {
+		let r = info.get(e)
+		if (!r) {
+			const vars = new Set<number>(), loads: [number, number][] = []
+			walkExpr(e, x => { if (x.k === 'var') vars.add(x.id); else if (x.k === 'load') { const lo = fo(x.addr); if (lo !== null) loads.push([lo, x.size]) } })
+			info.set(e, (r = { vars, loads }))
+		}
 		return r
 	}
+	const mentions = (e: Expr, v: number) => infoOf(e).vars.has(v)
+	/** does e load bytes that a frame store to [o, o + n) changes? */
+	const readsChanged = (e: Expr, o: number, n: number) => infoOf(e).loads.some(([lo, size]) => lo < o + n && o < lo + size)
 	const kill = (facts: Fact[], o: number, n: number) => facts.filter(f => !(f.off < o + n && o < f.off + f.size) && !readsChanged(f.e, o, n))
 	const note = (n: Node, e: Expr | null, facts: Fact[]) => {
 		if (!e) return
