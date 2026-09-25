@@ -317,18 +317,25 @@ function vocabTable() {
 	if (vocab !== undefined) return vocab
 	const db = selectors()
 	if (!db) return (vocab = null)
-	const names: string[] = []
-	for (const verb of db.verbs) for (const n of ['', ...db.nouns]) { const nm = n ? `${verb}_${n}` : verb; names.push(nm, nm + '_v2') }
-	const key = createHash('sha1').update(names.length + ':' + db.verbs.join() + db.nouns.slice(0, 50).join()).digest('hex').slice(0, 12)
+	// names[i] in verb-major order (verb, verb_v2, verb_noun0, verb_noun0_v2, ...), computed on demand
+	// instead of materializing all verbs x (nouns + 1) x 2 strings on every run
+	const per = 2 * (db.nouns.length + 1)
+	const count0 = db.verbs.length * per
+	const nameAt = (i: number) => {
+		const verb = db.verbs[Math.floor(i / per)], r = i % per, noun = r >> 1 ? db.nouns[(r >> 1) - 1] : ''
+		const nm = noun ? `${verb}_${noun}` : verb
+		return r & 1 ? nm + '_v2' : nm
+	}
+	const key = createHash('sha1').update(count0 + ':' + db.verbs.join() + db.nouns.slice(0, 50).join()).digest('hex').slice(0, 12)
 	const dir = join(homedir(), '.cache', 'sbpf-decompiler')
 	const file = join(dir, `vocab-${key}.bin`)
 	let buf: Buffer
 	if (existsSync(file)) buf = readFileSync(file)
 	else {
 		// entries: u64 hash (LE) + u32 index into names, sorted by hash
-		const n = names.length
+		const n = count0
 		const hs = new BigUint64Array(n)
-		for (let i = 0; i < n; i++) hs[i] = sha8(`global:${names[i]}`)
+		for (let i = 0; i < n; i++) hs[i] = sha8(`global:${nameAt(i)}`)
 		const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => (hs[a] < hs[b] ? -1 : hs[a] > hs[b] ? 1 : 0))
 		buf = Buffer.alloc(n * 12)
 		idx.forEach((i, k) => { buf.writeBigUInt64LE(hs[i], k * 12); buf.writeUInt32LE(i, k * 12 + 8) })
@@ -340,7 +347,7 @@ function vocabTable() {
 			let lo = 0, hi = count - 1
 			while (lo <= hi) {
 				const mid = (lo + hi) >> 1, h = buf.readBigUInt64LE(mid * 12)
-				if (h === v) return names[buf.readUInt32LE(mid * 12 + 8)]
+				if (h === v) return nameAt(buf.readUInt32LE(mid * 12 + 8))
 				if (h < v) lo = mid + 1; else hi = mid - 1
 			}
 			return undefined

@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { decompile } from './decompile.ts'
-import { renderProject } from './layout.ts'
-import { parseIdl, fetchIdl } from './idl.ts'
+import { homedir } from 'node:os'
+import { enableCompileCache } from 'node:module'
+
+// Cache Node's compilation (including TypeScript type stripping) of our modules on disk: saves
+// ~0.2 s per run. The decompiler modules are imported only after enabling it; entries are
+// validated against the sources, and the cache is optional (failures are ignored).
+try { enableCompileCache?.(join(homedir(), '.cache', 'sbpf-decompiler', 'node-compile-cache')) } catch { /* optional */ }
+const { decompile } = await import('./decompile.ts')
+const { renderProject } = await import('./layout.ts')
+const { parseIdl, fetchIdl } = await import('./idl.ts')
 
 const args = process.argv.slice(2)
 const file = args.find((a, i) => !a.startsWith('-') && !['-o', '--idl', '--program-id'].includes(args[i - 1]))
