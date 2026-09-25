@@ -25,6 +25,17 @@ import type { Views, Field } from './views.ts'
 import { nameArg, outAliases } from './anchor.ts'
 import { stmtExprs } from './simplify.ts'
 
+/** A Map whose changes since a mark can be undone (the frame state around a branch that leaves). */
+class UndoMap<K, V> extends Map<K, V> {
+	private log: [K, V | undefined, boolean][] = []
+	override set(k: K, v: V): this { this.log?.push([k, super.get(k), super.has(k)]); return super.set(k, v) }
+	override delete(k: K): boolean { if (super.has(k)) this.log.push([k, super.get(k), true]); return super.delete(k) }
+	mark(): number { return this.log.length }
+	undo(m: number) {
+		while (this.log.length > m) { const [k, v, had] = this.log.pop()!; if (had) super.set(k, v as V); else super.delete(k) }
+	}
+}
+
 /** A variable holding a (boxed) deserialized account: its account name, the view of the object, the Rust account type. */
 export interface AccountObj { name: string; view: string; rust: string }
 
@@ -177,11 +188,20 @@ function locateIn(p: Program, x: number, smp: Sample, boxAt: number | undefined)
 	const run = (bytes: number[]) => runAccountCallee(p, x, dataOf(smp, bytes), owner, [0, 1, 0], boxAt)
 	const base = run(smp.bytes)
 	if (!base) return undefined
+	// positions of each 4-byte prefix in the output (the values searched are 4+ bytes)
+	const at4 = new Map<number, number[]>()
+	for (let i = 0; i + 4 <= base.length; i++) {
+		const k = (base[i] | (base[i + 1] << 8) | (base[i + 2] << 16) | (base[i + 3] << 24)) >>> 0
+		const l = at4.get(k)
+		if (l) l.push(i); else at4.set(k, [i])
+	}
+	// the one offset of b in the output (-1: none, -2: several)
 	const find = (b: number[]) => {
 		let hit = -1
-		for (let i = 0; i + b.length <= base.length; i++) {
+		for (const i of at4.get((b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0) ?? []) {
+			if (i + b.length > base.length) continue
 			let ok = true
-			for (let j = 0; j < b.length; j++) if (base[i + j] !== b[j]) { ok = false; break }
+			for (let j = 4; j < b.length; j++) if (base[i + j] !== b[j]) { ok = false; break }
 			if (ok) { if (hit >= 0) return -2; hit = i }
 		}
 		return hit
@@ -391,10 +411,24 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		}
 		return r
 	}
+	// addresses of the discriminators' bytes in program memory (compared with memcmp(data, &DISC, 8))
+	let discAtMemo: Map<bigint, string> | undefined
+	const discAt = (): Map<bigint, string> => {
+		if (discAtMemo) return discAtMemo
+		discAtMemo = new Map()
+		for (const [d, name] of discs) {
+			const needle = Buffer.alloc(8); needle.writeBigUInt64LE(d)
+			for (const r of p.image.regions) {
+				const hay = Buffer.from(r.bytes.buffer, r.bytes.byteOffset, r.bytes.length)
+				for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) discAtMemo.set(r.vaddr + BigInt(i), name)
+			}
+		}
+		return discAtMemo
+	}
 	const calleeType = (x: number): string | undefined => {
 		if (typeOf.has(x)) return typeOf.get(x) ?? undefined
 		const hits = new Set<string>()
-		for (const v of immediates(p, x, 4, memo)) { const t = discs.get(v); if (t) hits.add(t) }
+		for (const v of immediates(p, x, 4, memo)) { const t = discs.get(v) ?? discAt().get(v); if (t) hits.add(t) }
 		if (!hits.size) for (const t of splOf(x, 5)) hits.add(t)
 		const t = hits.size === 1 ? [...hits][0] : undefined
 		typeOf.set(x, t ?? null)
@@ -439,14 +473,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 				return b && infoIn(b, 0x40)
 			}
 			const acc = t && !t.startsWith('spl:') ? idl?.accounts.find(a => a.name === t) : undefined
-			let r: (InfoAt & { type?: string }) | undefined = run(acc)
-			// not found with an arbitrary account: the IDL account type it accepts (a check of the
-			// discriminator the immediates did not show, e.g. compared with rodata bytes), found by running it
-			if (!r && !t && idl?.address) for (const a of idl.accounts) {
-				const i = run(a, Math.min(Math.max(0x400, (views.map.get(`${pascal(a.name)}Account`)?.size ?? 0) + 0x100), 0x40000))
-				if (i) { r = { ...i, type: a.name }; break }
-			}
-			infoWords.set(x, r ?? null)
+			infoWords.set(x, run(acc, acc ? Math.min(Math.max(0x400, (views.map.get(`${pascal(t!)}Account`)?.size ?? 0) + 0x100), 0x40000) : 0x400) ?? null)
 		}
 		return infoWords.get(x) ?? undefined
 	}
@@ -499,8 +526,8 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const takesAccounts = (args: Expr[]) => accountsP !== undefined && !defs.has(accountsP) && args.some(a => a.k === 'var' && a.id === accountsP)
 		interface Org { obj: number; off: number }
 		const objs: Obj[] = []
-		const org = new Map<number, Org>()     // frame word -> which object word it holds
-		const varOrg = new Map<number, Org>()  // variable -> which object word it holds
+		const org = new UndoMap<number, Org>()     // frame word -> which object word it holds
+		const varOrg = new UndoMap<number, Org>()  // variable -> which object word it holds
 		const outWords = new Map<number, Org>()
 		// (off -1: a pointer to the object, i.e. its box)
 		const boxVars = new Map<number, number>()
@@ -509,7 +536,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			if (e.k === 'load' && e.size === 8) { const o = fo(e.addr); return o === undefined ? undefined : org.get(o) }
 			return undefined
 		}
-		const clobber = (o: number, n: number, keepOwn = false) => { for (const w of [...org.keys()]) if (w + 8 > o && w < o + n && !(keepOwn && w !== o && own.get(w))) org.delete(w) }
+		const clobber = (o: number, n: number, keepOwn = false) => { for (const w of org.keys()) if (w + 8 > o && w < o + n && !(keepOwn && w !== o && own.get(w))) org.delete(w) }
 		const put = (dst: Expr, i: number, v: Org | undefined) => {
 			const g = fo(dst), k = oo(dst)
 			if (g !== undefined) { clobber(g + i, 8); if (v) org.set(g + i, v) }
@@ -589,10 +616,9 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const namesErr = (ns: Node[]) => ns.some(n => n.k === 'stmt' && ((n.s.k === 'call' && n.s.t.k === 'fn' && n.s.t.pc === nameFn) || (n.s.k === 'set' && n.s.e.k === 'call' && n.s.e.t.k === 'fn' && n.s.e.t.pc === nameFn)))
 		const exits = (ns: Node[]) => { const l = ns[ns.length - 1]; return !!l && (l.k === 'return' || l.k === 'break' || l.k === 'continue' || l.k === 'trap') || namesErr(ns) }
 		const isolated = (ns: Node[]) => {
-			const o = new Map(org), v = new Map(varOrg)
+			const o = org.mark(), v = varOrg.mark()
 			walk(ns)
-			org.clear(); o.forEach((x, k) => org.set(k, x))
-			varOrg.clear(); v.forEach((x, k) => varOrg.set(k, x))
+			org.undo(o); varOrg.undo(v)
 		}
 		// an account-name error built in place (with_account_name inlined): the leaving branch of a test of
 		// an object's word writes the name's bytes as constants into a fresh String buffer, and does not

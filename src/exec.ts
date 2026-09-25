@@ -119,7 +119,12 @@ export class ExecMem extends TestMem {
 		const o = Number(addr & 0xfffn)
 		if (o + n <= 4096) return this.page(addr >> 12n).b.slice(o, o + n)
 		const out = new Uint8Array(n)
-		for (let i = 0; i < n; i++) { const a = (addr + BigInt(i)) & M; out[i] = this.page(a >> 12n).b[Number(a & 0xfffn)] }
+		// page by page
+		for (let i = 0; i < n;) {
+			const a = (addr + BigInt(i)) & M, k = Number(a & 0xfffn), c = Math.min(n - i, 4096 - k)
+			out.set(this.page(a >> 12n).b.subarray(k, k + c), i)
+			i += c
+		}
 		return out
 	}
 	readU(addr: bigint, size: number): bigint {
@@ -127,12 +132,26 @@ export class ExecMem extends TestMem {
 		for (let i = size - 1; i >= 0; i--) v = (v << 8n) | BigInt(this.byte(addr + BigInt(i)))
 		return v
 	}
-	write(addr: bigint, b: Uint8Array, taint?: number | number[]) {
-		for (let i = 0; i < b.length; i++) {
-			const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n), k = Number(a & 0xfffn)
-			pg.b[k] = b[i]
-			if (taint !== undefined) tArr(pg)[k] = typeof taint === 'number' ? taint : taint[i]
+	write(addr: bigint, b: Uint8Array, taint?: number | ArrayLike<number>) {
+		// page by page
+		for (let i = 0; i < b.length;) {
+			const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n), k = Number(a & 0xfffn), c = Math.min(b.length - i, 4096 - k)
+			pg.b.set(b.subarray(i, i + c), k)
+			if (typeof taint === 'number') { if (pg.t || taint !== pg.t0) tArr(pg).fill(taint, k, k + c) }
+			else if (taint !== undefined) { const t = tArr(pg); for (let j = 0; j < c; j++) t[k + j] = taint[i + j] }
+			i += c
 		}
+	}
+	/** the taint of n bytes */
+	taintArr(addr: bigint, n: number): Uint8Array {
+		addr &= M
+		const out = new Uint8Array(n)
+		for (let i = 0; i < n;) {
+			const a = (addr + BigInt(i)) & M, pg = this.page(a >> 12n), k = Number(a & 0xfffn), c = Math.min(n - i, 4096 - k)
+			if (pg.t) out.set(pg.t.subarray(k, k + c), i); else if (pg.t0) out.fill(pg.t0, i, i + c)
+			i += c
+		}
+		return out
 	}
 	tainted(addr: bigint, n: number): number {
 		addr &= M
@@ -152,7 +171,7 @@ export class ExecMem extends TestMem {
 		addr &= M
 		const o = Number(addr & 0xfffn)
 		if (o + n <= 4096) { const pg = this.page(addr >> 12n); return pg.t ? Array.from(pg.t.subarray(o, o + n)) : new Array<number>(n).fill(pg.t0) }
-		return Array.from({ length: n }, (_, i) => this.tainted(addr + BigInt(i), 1))
+		return Array.from(this.taintArr(addr, n))
 	}
 }
 
@@ -317,8 +336,11 @@ export class Exec {
 			case 'abort': case 'sol_panic_': throw new Abort(name)
 			case 'sol_memcpy_': case 'sol_memmove_': {
 				if (n > 1 << 20) throw new Abort('memcpy size')
-				if (m.onLoad) for (let i = 0; i + 8 <= n; i += 8) m.onLoad((a[1] + BigInt(i)) & M, 8, m.readU(a[1] + BigInt(i), 8))
-				m.write(a[0], m.read(a[1], n), m.taintBytes(a[1], n).map(t => t | at[1] | at[2]))
+				const bytes = m.read(a[1], n)
+				if (m.onLoad) { const dv = new DataView(bytes.buffer, bytes.byteOffset, n); for (let i = 0; i + 8 <= n; i += 8) m.onLoad((a[1] + BigInt(i)) & M, 8, dv.getBigUint64(i, true)) }
+				const t = m.taintArr(a[1], n), x = at[1] | at[2]
+				if (x) for (let i = 0; i < n; i++) t[i] |= x
+				m.write(a[0], bytes, t)
 				return 0n
 			}
 			case 'sol_memset_': { if (n > 1 << 20) throw new Abort('memset size'); m.write(a[0], new Uint8Array(n).fill(Number(a[1] & 0xffn)), at[1] | at[2]); return 0n }
