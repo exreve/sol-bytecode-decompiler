@@ -14,7 +14,9 @@ export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wr
 // ldN(addr) / stN(addr, v, ...): N-bit little-endian load/store (extra values go to addr+N, addr+2N, ...)
 // copy(dst, src, n): copy n bytes as ascending 8-byte words (copyr: descending)
 // fp: frame pointer of the current function (stack locals at fp - k); undef: leftover register value; trap(): abort
-// "text" as a call argument = address of those rodata bytes (followed by their length)
+// a variable read before any assignment, and call arguments omitted at the end of the list, are undef
+// "text" as a call argument = address of the first occurrence of its UTF-8 bytes in program memory (next argument: length);
+//   other rodata text is shown as a comment after the address: 0x100001234 /* "text" */
 // memory map: 0x1_0000_0000 program/rodata, 0x2_0000_0000 stack, 0x3_0000_0000 heap, 0x4_0000_0000 input (serialized accounts + ix data)`
 
 const TYPES = `type u64 = number

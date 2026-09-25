@@ -130,9 +130,9 @@ test('keyeq / memeq print and evaluate as word-wise memory comparisons', () => {
 	}
 })
 
-for (const f of ['memo', 'token', 'ata']) {
-	test(`decompiled ${f}.so is equivalent to the bytecode (random differential testing)`, () => {
-		const r = checkProgram(new Uint8Array(readFileSync(`samples/${f}.so`)), 3)
+for (const f of ['memo', 'token', 'ata']) for (const sugar of [false, true]) {
+	test(`decompiled ${f}.so (${sugar ? 'readable' : 'raw'} output) is equivalent to the bytecode (random differential testing)`, () => {
+		const r = checkProgram(new Uint8Array(readFileSync(`samples/${f}.so`)), 3, Infinity, undefined, false, undefined, sugar)
 		assert.equal(r.errors.length, 0, JSON.stringify(r.errors.slice(0, 3)))
 		assert.equal(r.failures.length, 0, JSON.stringify(r.failures.slice(0, 3)))
 		assert.ok(r.funcs > 0)

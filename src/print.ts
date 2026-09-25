@@ -22,6 +22,7 @@ export interface PrintCtx {
   sysName: (name: string) => string;
   constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
   strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
+  strNote?: (ptr: bigint, len: bigint) => string | undefined; // rodata text for (ptr, len) pairs not printable as a literal (shown in a comment)
   keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
@@ -193,7 +194,11 @@ export class Printer {
     // (pointer, length) pairs into rodata render as the string they denote
     if (this.ctx.strAt) for (let i = 0; i + 1 < args.length; i++) {
       const x = args[i], y = args[i + 1];
-      if (x.k === 'const' && y.k === 'const') { const str = this.ctx.strAt(x.v, y.v); if (str !== undefined) a[i] = JSON.stringify(str); }
+      if (x.k === 'const' && y.k === 'const') {
+        const str = this.ctx.strAt(x.v, y.v);
+        if (str !== undefined) a[i] = JSON.stringify(str);
+        else { const n = this.ctx.strNote?.(x.v, y.v); if (n !== undefined && !a[i].includes('/*')) a[i] = `${a[i]} /* ${JSON.stringify(n).replaceAll('*/', '*\\/')} */`; }
+      }
     }
     this.keyArgs(args, a);
     if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${joinArgs(a)})`;

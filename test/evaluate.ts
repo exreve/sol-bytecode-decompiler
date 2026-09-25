@@ -16,6 +16,10 @@ export interface EvalEnv {
 	fnTarget: Map<string, string>    // function name -> call target id ("fn:<pc>")
 	sysTarget: Map<string, string>   // printed syscall name -> "sys:<name>"
 	maxSteps: number
+	// readable (sugared) output:
+	strAddr?: (s: string) => bigint | undefined // "text" argument: address of the first occurrence of its UTF-8 bytes
+	arity?: Map<string, number>                 // call target id -> argument count (omitted trailing arguments are undef)
+	undefUninit?: boolean                       // a variable read before any assignment holds undef (a leftover value)
 }
 
 /** 32 bytes denoted by a base58 string (leading '1's are leading zero bytes). */
@@ -129,7 +133,10 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 			const e = env()
 			const t = e.fnTarget.get(name) ?? e.sysTarget.get(name)
 			if (!t) throw new EvalError(`unknown function ${name}`)
-			return W(e.onCall(t, args.map(f => W(f()))))
+			const vs = args.map(f => W(f()))
+			const n = e.arity?.get(t)
+			if (n !== undefined) while (vs.length < n) vs.push(UNDEF)
+			return W(e.onCall(t, vs))
 		}
 	}
 
@@ -137,14 +144,24 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 		if (ts.isParenthesizedExpression(e)) return ex(e.expression)
 		if (ts.isNumericLiteral(e)) { const v = BigInt(e.getText()); return () => v }
 		if (e.kind === K.TrueKeyword) return () => 1n
-		if (ts.isStringLiteral(e)) return () => 0n
+		if (ts.isStringLiteral(e)) {
+			const text = e.text
+			return () => {
+				const f = env().strAddr
+				if (!f) return 0n
+				const a = f(text)
+				if (a === undefined) throw new EvalError('string not in program memory: ' + JSON.stringify(text))
+				return a
+			}
+		}
 		if (ts.isIdentifier(e)) {
 			const n = e.text
 			if (n === 'undef') return () => UNDEF
-			if (slots.has(n)) { const i = slots.get(n)!; return () => { const v = vals[i]; if (v === undefined) throw new EvalError(`read of uninitialized variable ${n}`); return v } }
+			const uninit = () => { if (env().undefUninit) return UNDEF; throw new EvalError(`read of uninitialized variable ${n}`) }
+			if (slots.has(n)) { const i = slots.get(n)!; return () => { const v = vals[i]; return v === undefined ? uninit() : v } }
 			return () => {
 				const i = slots.get(n)
-				if (i !== undefined) { const v = vals[i]; if (v === undefined) throw new EvalError(`read of uninitialized variable ${n}`); return v }
+				if (i !== undefined) { const v = vals[i]; return v === undefined ? uninit() : v }
 				const fa = env().fnAddr.get(n)
 				if (fa !== undefined) return fa
 				throw new EvalError(`unknown identifier ${n}`)

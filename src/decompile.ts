@@ -167,7 +167,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
     // readable mode: `x = undef` (leftover register value) is shown by leaving x unassigned
-    const body = opts.sugar !== false ? stripUndef(bt.body) : bt.body;
+    const body = opts.sugar !== false ? stripUndef(bt.body, undefOnly(bt.body, v => f.vars[v]?.param >= 0)) : bt.body;
     const names: string[] = [];
     const used = new Set<number>();
     const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') used.add(x.id); });
@@ -196,7 +196,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const ctx: PrintCtx = {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
-      strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strLit(ptr, len),
+      strNote: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
       keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
@@ -260,7 +261,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           for (const x of sorted) { if (x <= o && o - x < 0x200) b = x; if (x > o) break; }
           return [b, o - b];
         };
-        for (const o of all) usedBases.add(pick(o)[0]);
+        for (const o of all) if (o < 0 && o >= -0x2000) usedBases.add(pick(o)[0]); // (frameRef names these only)
         const nm = (b: number) => `s${(-b).toString(16)}`;
         ctx.frameRef = off => {
           const o = Number(off);
@@ -305,7 +306,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? 'call' : null));
       if (sites.size) {
         const env: CpiEnv = {
-          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: ctx.strAt,
+          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
           constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
         ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
@@ -494,13 +495,31 @@ function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<nu
   return { bases, all };
 }
 
-function stripUndef(ns: Node[]): Node[] {
+/** Variables whose every definition is `x = undef` (never assigned anything else: every read is a leftover value). */
+function undefOnly(ns: Node[], isParam: (v: number) => boolean): Set<number> {
+  const undef = new Set<number>(), other = new Set<number>();
+  const walk = (xs: Node[]) => {
+    for (const n of xs) {
+      if (n.k === 'stmt' && (n.s.k === 'set' || n.s.k === 'call') && n.s.dst >= 0) (n.s.k === 'set' && n.s.e.k === 'undef' ? undef : other).add(n.s.dst);
+      else if (n.k === 'if') { walk(n.then); walk(n.else); }
+      else if (n.k === 'block' || n.k === 'loop') walk(n.body);
+      else if (n.k === 'switch') n.cases.forEach(c => walk(c.body));
+      else if (n.k === 'setstate') other.add(n.v);
+    }
+  };
+  walk(ns);
+  for (const v of [...undef]) if (other.has(v) || isParam(v)) undef.delete(v);
+  return undef;
+}
+
+/** Drop `x = undef` for variables never assigned anything else (reads of an unassigned variable are undef). */
+function stripUndef(ns: Node[], only: Set<number>): Node[] {
   const out: Node[] = [];
   for (const n of ns) {
-    if (n.k === 'stmt' && n.s.k === 'set' && n.s.e.k === 'undef') continue;
-    if (n.k === 'if') out.push({ ...n, then: stripUndef(n.then), else: stripUndef(n.else) });
-    else if (n.k === 'block' || n.k === 'loop') out.push({ ...n, body: stripUndef(n.body) } as Node);
-    else if (n.k === 'switch') out.push({ ...n, cases: n.cases.map(c => ({ ...c, body: stripUndef(c.body) })) });
+    if (n.k === 'stmt' && n.s.k === 'set' && n.s.e.k === 'undef' && only.has(n.s.dst)) continue;
+    if (n.k === 'if') out.push({ ...n, then: stripUndef(n.then, only), else: stripUndef(n.else, only) });
+    else if (n.k === 'block' || n.k === 'loop') out.push({ ...n, body: stripUndef(n.body, only) } as Node);
+    else if (n.k === 'switch') out.push({ ...n, cases: n.cases.map(c => ({ ...c, body: stripUndef(c.body, only) })) });
     else out.push(n);
   }
   return out;

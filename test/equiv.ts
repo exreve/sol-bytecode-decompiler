@@ -5,6 +5,7 @@ import { decompile } from '../src/decompile.ts'
 import { emulate, TestMem, Abort, StepLimit, UNDEF, type Event } from '../src/emu.ts'
 import { fnAddr, loadProgram } from '../src/program.ts'
 import { parseFunctions, runFunction, EvalError } from './evaluate.ts'
+import { parseIdl } from '../src/idl.ts'
 
 export interface EquivReport { funcs: number; trials: number; skipped?: number; failures: { fn: string; seed: number; why: string }[]; errors: { fn: string; why: string }[] }
 
@@ -13,8 +14,12 @@ function rng(seed: number) {
 	return () => { x ^= x << 13n; x &= (1n << 64n) - 1n; x ^= x >> 7n; x ^= x << 17n; x &= (1n << 64n) - 1n; return x }
 }
 
-export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity, only?: Set<number>, verbose = false, dumpSeed?: number): EquivReport {
-	const res = decompile(bytes, { sugar: false, only, full: true })
+/**
+ * sugar: check the readable output (the CLI default: names, strings, typed views) instead of the raw form.
+ * idl: Anchor IDL (JSON) used for names in the readable output.
+ */
+export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity, only?: Set<number>, verbose = false, dumpSeed?: number, sugar = false, idl?: any): EquivReport {
+	const res = decompile(bytes, { sugar, only, full: true, idl: idl ? parseIdl(idl) : undefined })
 	const p = res.program
 	const report: EquivReport = { funcs: 0, trials: 0, failures: [], errors: [] }
 	let decls
@@ -22,6 +27,24 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 	const fnAddrMap = new Map<string, bigint>(), fnTarget = new Map<string, string>(), sysTarget = new Map<string, string>()
 	for (const f of p.funcs.values()) { fnAddrMap.set(f.name, fnAddr(p, f.pc)); fnTarget.set(f.name, `fn:${f.pc}`) }
 	for (const sc of p.syscalls.values()) sysTarget.set(sc.alias, `sys:${sc.name}`)
+	// readable output: argument counts of call targets (trailing undef arguments are omitted there)
+	const arity = new Map<string, number>()
+	for (const f of p.funcs.values()) arity.set(`fn:${f.pc}`, (f.stackArgs ? 4 + f.stackArgs : f.nparams) + f.extraIn.length)
+	for (const sc of p.syscalls.values()) arity.set(`sys:${sc.name}`, sc.params.length)
+	// "text": first occurrence of its UTF-8 bytes in program memory (regions in address order)
+	const strCache = new Map<string, bigint | undefined>()
+	const strAddr = (text: string) => {
+		if (strCache.has(text)) return strCache.get(text)
+		const needle = Buffer.from(text, 'utf8')
+		let at: bigint | undefined
+		for (const r of [...p.image.regions].sort((x, y) => (x.vaddr < y.vaddr ? -1 : 1))) {
+			const i = Buffer.from(r.bytes).indexOf(needle)
+			if (i >= 0) { at = r.vaddr + BigInt(i); break }
+		}
+		strCache.set(text, at)
+		return at
+	}
+	const sugarEnv = sugar ? { strAddr, arity, undefUninit: true } : {}
 	const argRegs = (t: string): number[] => {
 		if (t.startsWith('fn:')) { const f = p.funcs.get(Number(t.slice(3))); return f ? [...Array(f.nparams).keys()].map(i => i + 1).concat(f.extraIn) : [1, 2, 3, 4, 5] }
 		if (t.startsWith('sys:')) { const sc = p.syscalls.get(t.slice(4)); return sc ? sc.params.map((_, i) => i + 1) : [1, 2, 3, 4, 5] }
@@ -83,7 +106,7 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 				const pargs = f.stackArgs ? [...args.slice(0, 4), ...Array.from({ length: f.stackArgs }, (_, k) => mem.load(args[4] - 0x1000n + BigInt(8 * k), 8))] : args.slice(0, f.isEntry ? 1 : f.nparams)
 				if (!f.isEntry) for (const r of f.extraIn) pargs.push(r === 0 ? extra[0] : extra[r - 5])
 				try {
-					const r = runFunction(decl, pargs, { mem, onCall, fp, fnAddr: fnAddrMap, fnTarget, sysTarget, maxSteps: 20000 })
+					const r = runFunction(decl, pargs, { mem, onCall, fp, fnAddr: fnAddrMap, fnTarget, sysTarget, maxSteps: 20000, ...sugarEnv })
 					return { ...r, events }
 				} catch (e) {
 					if (e instanceof EvalError) return { err: e.message, events }
@@ -189,7 +212,9 @@ if (import.meta.main) {
 	const bytes = new Uint8Array(readFileSync(file))
 	const txt = loadProgram(bytes).elf.text.addr
 	const only = process.env.ONLY ? new Set(process.env.ONLY.split(',').map(x => (x.startsWith('fn_') ? (parseInt(x.slice(3), 16) - txt) / 8 : Number(x)))) : undefined
-	const r = checkProgram(new Uint8Array(readFileSync(file)), trials, maxFuncs, only, true, process.env.SEED ? Number(process.env.SEED) : undefined)
+	// SUGAR=1: check the readable output; IDL=<file.json>: with the program's Anchor IDL
+	const idl = process.env.IDL ? JSON.parse(readFileSync(process.env.IDL, 'utf8')) : undefined
+	const r = checkProgram(new Uint8Array(readFileSync(file)), trials, maxFuncs, only, true, process.env.SEED ? Number(process.env.SEED) : undefined, !!process.env.SUGAR || !!idl, idl)
 	console.log(`${file}: ${r.funcs} functions, ${r.trials} trials (${r.skipped ?? 0} skipped: memory-unsafe), ${r.failures.length} failing functions, ${r.errors.length} errors, ${Date.now() - t0}ms`)
 	for (const e of r.errors.slice(0, 10)) console.log('ERROR', e.fn, e.why)
 	if (r.failures.length || r.errors.length) process.exitCode = 1

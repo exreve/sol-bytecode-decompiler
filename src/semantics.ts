@@ -7,6 +7,7 @@ import { homedir } from 'node:os'
 import { gunzipSync } from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 import type { Program, Func } from './program.ts'
+import type { Image } from './elf.ts'
 import { type Expr, walkExpr } from './ir.ts'
 import { previewString } from './fingerprint.ts'
 import type { IdlInfo } from './idl.ts'
@@ -341,6 +342,19 @@ export class Semantics {
 		return printable >= s.length * 0.9 ? s : undefined
 	}
 
+	/**
+	 * A string literal that denotes exactly (ptr, len) in the output: the bytes are valid UTF-8 and
+	 * ptr is the first occurrence of those bytes in program memory (see stringAddr), so the literal
+	 * determines the address.
+	 */
+	strLit(ptr: bigint, len: bigint): string | undefined {
+		const s = this.strAt(ptr, len)
+		if (s === undefined || s.includes('\ufffd')) return undefined
+		const b = this.p.image.bytesAt(ptr, Number(len))!
+		if (!Buffer.from(s, 'utf8').equals(Buffer.from(b.buffer, b.byteOffset, b.byteLength))) return undefined
+		return stringAddr(this.p.image, s) === ptr ? s : undefined
+	}
+
 	sugar(_e: Expr, _pr: (e: Expr, prec: number) => string): string | undefined { return undefined }
 	funcComment(f: Func): string | undefined {
 		const ix = this.ixNames.get(f.pc)
@@ -356,6 +370,22 @@ function looksRandom(v: bigint): boolean {
 	let pc = 0, x = v
 	while (x) { pc += Number(x & 1n); x >>= 1n }
 	return pc >= 18 && pc <= 46 && v > 0xffffffffffffn
+}
+
+/** Address of the first occurrence of the UTF-8 bytes of `s` in program memory (regions in address order). */
+const strCache = new WeakMap<Image, Map<string, bigint | undefined>>()
+export function stringAddr(image: Image, s: string): bigint | undefined {
+	let m = strCache.get(image)
+	if (!m) strCache.set(image, (m = new Map()))
+	if (m.has(s)) return m.get(s)
+	const needle = Buffer.from(s, 'utf8')
+	let at: bigint | undefined
+	for (const r of image.regions) {
+		const i = Buffer.from(r.bytes.buffer, r.bytes.byteOffset, r.bytes.byteLength).indexOf(needle)
+		if (i >= 0) { at = r.vaddr + BigInt(i); break }
+	}
+	m.set(s, at)
+	return at
 }
 
 export function constsIn(e: Expr, out: Set<bigint>) { walkExpr(e, x => { if (x.k === 'const') out.add(x.v) }) }

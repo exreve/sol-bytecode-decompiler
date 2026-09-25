@@ -44,8 +44,8 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
-| `undef` | a register value left over by a callee (unspecified) |
-| `"text"` argument | address of those rodata bytes (next argument is the length) |
+| `undef` | a register value left over by a callee (unspecified); a variable read before any assignment and call arguments omitted at the end of the list are `undef` too |
+| `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length); text found elsewhere is shown as `0x100001234 /* "text" */` |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
 
 Style: tabs, no semicolons, short variable names (`a..e` = register arguments r1..r5, then `f, g, …`).
@@ -142,7 +142,9 @@ memory faults) are never dropped or reordered across side effects.
   arguments, stores outside the frame, frame state at every call, return value, abort — must match.
 
 ```
-node test/equiv.ts samples/token22.so 4      # 545 functions, 2180 trials, 0 failing
+node test/equiv.ts samples/token22.so 4      # 545 functions, 2180 trials, 0 failing (--raw form)
+SUGAR=1 node test/equiv.ts samples/token22.so 3   # the readable output (CLI default: names, strings, typed views)
+IDL=corpus/idl/<id>.json node test/equiv.ts corpus/<id>.so 3   # readable output with the Anchor IDL's names
 ```
 
 ## Data pipeline (maintainers)
