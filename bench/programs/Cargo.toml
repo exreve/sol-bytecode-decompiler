@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["a_vault", "a_staking", "a_escrow", "a_counter", "a_oracle", "a_mint", "n_vault", "n_token", "n_pool", "p_counter"]
+
+[workspace.dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = { version = "=0.31.1", default-features = false, features = ["token", "token_2022", "token_2022_extensions"] }
+solana-program = "=2.2.1"
+spl-token = { version = "=8.0.0", features = ["no-entrypoint"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

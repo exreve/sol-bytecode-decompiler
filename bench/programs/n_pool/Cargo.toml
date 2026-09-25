@@ -1,0 +1,18 @@
+[package]
+name = "n_pool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+v_div_no_zero = []
+v_no_owner = []
+v_wrapping_sub = []
+
+
+[dependencies]
+solana-program = { workspace = true }

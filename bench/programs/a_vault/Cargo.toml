@@ -1,0 +1,26 @@
+[package]
+name = "a_vault"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+v_no_signer = []
+v_no_has_one = []
+v_wrapping_sub = []
+v_close_no_zero = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { workspace = true }
