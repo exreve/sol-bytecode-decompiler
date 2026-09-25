@@ -353,21 +353,54 @@ export function stmtExprs(s: Stmt): Expr[] {
 }
 
 /**
+ * What is cached per statement object (stmtInfo, simplifyStmt): both depend only on the statement's
+ * kind and expressions, and statements are never mutated in place after variable recovery (rewrites
+ * create new objects). The cache lives in a symbol property (invisible to JSON and for-in, and much
+ * cheaper than a WeakMap with millions of entries) together with the kind and the objects holding the
+ * expressions it was computed for (the fields stmtExprs reads): spread copies (`{ ...s, e }`) inherit
+ * the property, and it applies to a statement only while those are the same.
+ */
+interface StmtMeta { k: Stmt['k']; a: unknown; b: unknown; c: unknown; info: StmtInfo | undefined; simple: boolean }
+const META = Symbol('stmtMeta');
+function metaOf(s: Stmt): StmtMeta | undefined {
+  const m: StmtMeta | undefined = (s as any)[META];
+  if (!m || m.k !== s.k) return undefined;
+  switch (s.k) {
+    case 'set': case 'eval': return m.a === s.e ? m : undefined;
+    case 'store': return m.a === s.addr && m.b === s.v ? m : undefined;
+    case 'call': return m.a === s.args && m.b === s.t && m.c === s.extra ? m : undefined;
+    case 'stores': return m.a === s.addr && m.b === s.vals ? m : undefined;
+    case 'copy': return m.a === s.dst && m.b === s.src ? m : undefined;
+    default: return m;
+  }
+}
+function meta(s: Stmt): StmtMeta {
+  let m = metaOf(s);
+  if (m) return m;
+  m = { k: s.k, a: undefined, b: undefined, c: undefined, info: undefined, simple: false };
+  switch (s.k) {
+    case 'set': case 'eval': m.a = s.e; break;
+    case 'store': m.a = s.addr; m.b = s.v; break;
+    case 'call': m.a = s.args; m.b = s.t; m.c = s.extra; break;
+    case 'stores': m.a = s.addr; m.b = s.vals; break;
+    case 'copy': m.a = s.dst; m.b = s.src; break;
+  }
+  (s as any)[META] = m;
+  return m;
+}
+
+/**
  * Per-statement summary of stmtExprs(s): every variable occurrence (with multiplicity) and the
- * union of hasSideEffectsOrMem over the expressions. Cached per statement object, which is sound
- * because statements are never mutated in place after variable recovery (rewrites create new ones).
- * The cache lives in a non-enumerable symbol property: invisible to spreads (`{ ...s }` copies do not
- * inherit it), JSON and for-in, and much cheaper than a WeakMap with millions of entries.
+ * union of hasSideEffectsOrMem over the expressions (cached, see StmtMeta).
  */
 interface StmtInfo { vars: number[]; load: boolean; call: boolean; trap: boolean }
-const INFO = Symbol('stmtInfo');
 export function stmtInfo(s: Stmt): StmtInfo {
-  let r: StmtInfo | undefined = (s as any)[INFO];
+  const r = metaOf(s)?.info;
   if (r) return r;
-  r = { vars: [], load: false, call: false, trap: false };
-  for (const e of stmtExprs(s)) scanInfo(e, r);
-  Object.defineProperty(s, INFO, { value: r });
-  return r;
+  const n: StmtInfo = { vars: [], load: false, call: false, trap: false };
+  for (const e of stmtExprs(s)) scanInfo(e, n);
+  meta(s).info = n;
+  return n;
 }
 /** One walk computing what walkExpr (var occurrences) and hasSideEffectsOrMem compute. */
 function scanInfo(e: Expr, r: StmtInfo): void {
@@ -437,13 +470,12 @@ export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filt
  * during a decompilation), and statements are never mutated in place after variable recovery, so a
  * statement it returned unchanged once is returned unchanged every time: optimizeFunc re-simplified
  * every statement in every round (and in every later optimizeFunc call) although most are stable.
- * The mark is a non-enumerable symbol property, like stmtInfo's cache (spread copies do not inherit it).
+ * The mark is kept with stmtInfo's cache (StmtMeta: spread copies do not inherit it).
  */
-const SIMPLE = Symbol('simplified');
 function simplifyStmt(s: Stmt): Stmt {
-  if ((s as any)[SIMPLE]) return s;
+  if (metaOf(s)?.simple) return s;
   const n = mapStmtExprsKeep(s, simplifyExpr);
-  if (n === s) Object.defineProperty(s, SIMPLE, { value: true });
+  if (n === s) meta(s).simple = true;
   return n;
 }
 
