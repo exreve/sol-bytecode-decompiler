@@ -447,15 +447,20 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 					// another account kind (e.g. AccountLoader<T>, Signer): the word holding the &AccountInfo (from a run)
 					const w = infoWord(tpc, t)
 					if (w !== undefined) {
+						// (the other words of the out object: the Err payload an account-name error is given)
 						const id = objs.push({ callee: tpc, type: t }) - 1
-						org.set(out + w, { obj: id, off: 0 })
+						clobber(out, 0x40)
+						for (let w2 = 0; w2 < 0x40; w2 += 8) org.set(out + w2, { obj: id, off: w2 - w })
 					}
 				}
 			}
 		}
 		// statement order; a branch that always leaves (an error return) does not change the frame state
 		// after it (what it stores into the returned struct is kept: only object words are recorded)
-		const exits = (ns: Node[]) => { const l = ns[ns.length - 1]; return !!l && (l.k === 'return' || l.k === 'break' || l.k === 'continue' || l.k === 'trap') }
+		// (a branch raising an account-name error leaves in practice: with_account_name's result is an Err,
+		// though the code still tests its tag and may fall through)
+		const namesErr = (ns: Node[]) => ns.some(n => n.k === 'stmt' && ((n.s.k === 'call' && n.s.t.k === 'fn' && n.s.t.pc === nameFn) || (n.s.k === 'set' && n.s.e.k === 'call' && n.s.e.t.k === 'fn' && n.s.e.t.pc === nameFn)))
+		const exits = (ns: Node[]) => { const l = ns[ns.length - 1]; return !!l && (l.k === 'return' || l.k === 'break' || l.k === 'continue' || l.k === 'trap') || namesErr(ns) }
 		const isolated = (ns: Node[]) => {
 			const o = new Map(org), v = new Map(varOrg)
 			walk(ns)

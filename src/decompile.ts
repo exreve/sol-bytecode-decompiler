@@ -346,8 +346,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
   }
   // boxed accounts deserialized by try_accounts (IDL types, SPL Token accounts), with their in-memory layouts (see anchorstate.ts)
+  // (an IDL without the program address, e.g. the legacy format: the id the entry code checks program_id against)
+  const stateIdl = opts.idl && !opts.idl.address ? { ...opts.idl, address: declaredId([...built.values()].map(b => b.f), a => sem.keyAt(a)) } : opts.idl;
   const objVars = opts.sugar !== false && nameFn !== undefined && tryOf.size
-    ? accountObjects(p, opts.idl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
+    ? accountObjects(p, stateIdl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
     : new Map<number, AccountObjs>();
   // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
   for (const [hpc, tpc] of tryOf) {
@@ -374,9 +376,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
     if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
     views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: fields.sort((x, y) => x.off - y.off) });
-    views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts), as the handler builds it [layout from the handler's stores]`, fields: [{ name: 'program_id', off: 0, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: 8, t: { k: 'ref', to: `${P}Accounts` } }] });
+    // the Context view, once its layout is known from a call site (see below)
+    let ctxLayout: string | undefined;
+    const ctxView = (op: number, oa: number, or?: number) => {
+      const key = `${op}:${oa}:${or}`;
+      if (ctxLayout) return ctxLayout === key;
+      ctxLayout = key;
+      const fs: import('./views.ts').Field[] = [{ name: 'program_id', off: op, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: oa, t: { k: 'ref', to: `${P}Accounts` } }];
+      if (or !== undefined) fs.push({ name: 'remaining_accounts', off: or, t: { k: 'ref', to: 'AccountInfo' }, doc: '&[AccountInfo]: the accounts after the instruction\'s own' }, { name: 'remaining_accounts_len', off: or + 8, t: { k: 'scalar', size: 8 } });
+      views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts${or !== undefined ? ', remaining_accounts' : ''}${op === 0 && oa === 8 ? '' : '; other fields not shown'}), as the handler builds it [layout from the handler's stores]`, fields: fs.sort((x, y) => x.off - y.off) });
+      return true;
+    };
     // the handler: the frame object R receiving try_accounts' result, and a call passing a frame object
-    // whose word 0 is program_id and word 8 the address of a copy of R
+    // holding program_id (a word) and the address of a copy of R (another word; Anchor ≥ 0.29 orders the
+    // Context's fields remaining_accounts, program_id, accounts, bumps; older ones program_id, accounts, …)
     const hb = built.get(hpc)!, hf = hb.f;
     const fpv = hf.vars.find(v => v.param === 10)?.id;
     // (Anchor's handler ABI: (out, program_id, accounts, …) when the dispatcher did not name them)
@@ -385,9 +398,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const fo = (e: Expr | undefined): number | undefined => (e && e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : e?.k === 'var' && e.id === fpv ? 0 : undefined);
     const defs = new Map<number, Expr[]>();
     for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'set') { let l = defs.get(st.dst); if (!l) defs.set(st.dst, (l = [])); l.push(st.e); }
-    let R: number | undefined;
-    for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn' && st.t.pc === tpc) R = fo(st.args[0]);
+    let R: number | undefined, S: number | undefined;
+    for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn' && st.t.pc === tpc) { R = fo(st.args[0]); S = fo(st.args[2]); }
     if (R === undefined) continue;
+    // (the &mut &[AccountInfo] given to try_accounts: what it leaves is the remaining accounts slice)
+    const copiesS = new Set<number>();
+    if (S !== undefined) for (const b of hf.blocks) for (const st of b.stmts) if (st.k === 'copy' && st.n === 16 && fo(st.src) === S) { const d = fo(st.dst); if (d !== undefined) copiesS.add(d); }
+    const loadsS = (e: Expr | undefined, k: number) => {
+      if (e?.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
+      return S !== undefined && e?.k === 'load' && e.size === 8 && fo(e.addr) === S + k;
+    };
     const loadsR = (e: Expr, k: number) => {
       if (e.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
       return e.k === 'load' && e.size === 8 && fo(e.addr) === R! + k;
@@ -414,13 +434,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       site.args.forEach((arg, i) => {
         const F = fo(arg);
         if (F === undefined) return;
-        const w0 = site.facts.find(x => x.off === F && x.size === 8)?.e, w1 = site.facts.find(x => x.off === F + 8 && x.size === 8)?.e;
-        const G = fo(w1);
-        if (!isProg(w0) || G === undefined) return;
-        if (!site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) return;
+        const word = (k: number) => site.facts.find(x => x.off === F + k && x.size === 8)?.e;
+        let op: number | undefined, oa: number | undefined;
+        for (let k = 0; k < 0x30 && (op === undefined || oa === undefined); k += 8) {
+          const w = word(k), G = fo(w);
+          if (op === undefined && isProg(w)) op = k;
+          else if (oa === undefined && G !== undefined && G !== F && site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) oa = k;
+        }
+        if (op === undefined || oa === undefined) return;
+        let or: number | undefined;
+        for (let k = 0; k < 0x30 && or === undefined; k += 8) if (k !== op && k !== oa && ((loadsS(word(k), 0) && loadsS(word(k + 8), 8)) || copiesS.has(F + k))) or = k;
         const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
         const pv = callee.f.vars.find(v => v.param === reg);
-        if (!pv || defCount(callee.f, pv.id) !== 0) return;
+        if (!pv || defCount(callee.f, pv.id) !== 0 || !ctxView(op, oa, or)) return;
         let m = paramTypes.get(cpc); if (!m) paramTypes.set(cpc, (m = new Map()));
         m.set(pv.id, [`${P}Context`, `the handler ix_${ix} passes a frame object holding (program_id, address of a copy of the Accounts result)`]);
       });
@@ -1022,6 +1048,37 @@ function argsVar(f: VarFunc, view: string, views: Views): number | undefined {
     if (ok && hit.size > score) { best = id; score = hit.size; }
   }
   return score >= Math.min(2, v.fields.length) ? best : undefined;
+}
+
+/**
+ * The program id an Anchor program declares (declare_id!): the one key compared, in the functions that
+ * raise anchor's DeclaredProgramIdMismatch (4100, given as a call argument), with 32 bytes through keyeq
+ * or a memcmp-style call with a rodata operand. Undefined when there is not exactly one.
+ */
+function declaredId(fs: VarFunc[], keyAt: (a: bigint) => string | undefined): string | undefined {
+  const keys = new Set<string>();
+  for (const f of fs) {
+    let raises = false;
+    const found = new Set<string>();
+    const visit = (e: Expr) => walkExpr(e, x => {
+      if (x.k === 'call' && x.args.some(a => a.k === 'const' && a.v === 0x1004n)) raises = true;
+      if (x.k === 'fn' && x.name === 'keyeq') found.add(keyB58(x.args.slice(1)));
+      if ((x.k === 'fn' && x.name === 'memeq') || (x.k === 'call' && x.args.length >= 3 && x.args[2].k === 'const' && x.args[2].v === 32n))
+        for (const o of x.args.slice(0, 2)) { const k = o.k === 'const' ? keyAt(o.v) : undefined; if (k) found.add(k); }
+    });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) {
+        stmtExprs(s).forEach(visit);
+        if (s.k === 'call') {
+          if (s.args.some(a => a.k === 'const' && a.v === 0x1004n)) raises = true;
+          if (s.args.length >= 3 && s.args[2].k === 'const' && s.args[2].v === 32n) for (const o of s.args.slice(0, 2)) { const k = o.k === 'const' ? keyAt(o.v) : undefined; if (k) found.add(k); }
+        }
+      }
+      if (b.term.k === 'br') visit(b.term.c);
+    }
+    if (raises) found.forEach(k => { if (!KNOWN_KEYS[k]) keys.add(k); });
+  }
+  return keys.size === 1 ? [...keys][0] : undefined;
 }
 
 /** Known keys (program ids by name) that the 32 bytes at `ptr` are compared with somewhere in f (keyeq, memeq, memcmp-style calls). */
