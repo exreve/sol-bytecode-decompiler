@@ -8,11 +8,13 @@
 // Everything here is DERIVED and over-approximate (see report.ts); it reads the IR the decompiled text is
 // printed from and never changes it.
 import type { FuncOut, Result } from '../decompile.ts'
+import type { VarFunc } from '../dataflow.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { computeRpo, dominators } from '../structure.ts'
 import { stmtExprs } from '../simplify.ts'
 import { borshSize, structFields } from '../idl.ts'
+import { knownFamilies } from '../cpi.ts'
 import type { Op, OpKind } from './facts.ts'
 
 // ---- control-flow graphs ----
@@ -23,6 +25,7 @@ export interface Cfg {
 	idom: Int32Array
 	pcBlock: Map<number, number>   // statement / instruction pc -> block
 	condBlock: Map<Expr, number>   // a branch condition (by identity) -> its block
+	retBlock: Map<Expr, number>    // a returned expression (by identity) -> its block
 }
 
 const cfgMemo = new WeakMap<FuncOut, Cfg>()
@@ -32,14 +35,15 @@ export function cfgOf(fo: FuncOut): Cfg {
 	const f = fo.f
 	const { order, rpo } = computeRpo(f)
 	const idom = dominators(f, order, rpo)
-	const pcBlock = new Map<number, number>(), condBlock = new Map<Expr, number>()
+	const pcBlock = new Map<number, number>(), condBlock = new Map<Expr, number>(), retBlock = new Map<Expr, number>()
 	f.blocks.forEach((b, i) => {
 		if (rpo[i] < 0) return
 		for (const s of b.stmts) if (!pcBlock.has(s.pc)) pcBlock.set(s.pc, i)
 		if (!pcBlock.has(b.end)) pcBlock.set(b.end, i)
 		if (b.term.k === 'br') condBlock.set(b.term.c, i)
+		else if (b.term.k === 'ret' && b.term.e) retBlock.set(b.term.e, i)
 	})
-	g = { fo, rpo, idom, pcBlock, condBlock }
+	g = { fo, rpo, idom, pcBlock, condBlock, retBlock }
 	cfgMemo.set(fo, g)
 	return g
 }
@@ -347,4 +351,307 @@ export function indirectTargets(r: Result): Indirect {
 		if (out.size) targets.set(fo.pc, [...out])
 	}
 	return { targets, byDisc }
+}
+
+// ---- native dispatchers: per-instruction regions of a function matching on the instruction tag ----
+
+/** A set of tag values 0..255 (256 stands for any larger value) as a bitset. */
+type Tags = Uint32Array
+const NT = 257
+const newTags = (all: boolean): Tags => { const t = new Uint32Array(9); if (all) { t.fill(0xffffffff, 0, 8); t[8] = 1 } return t }
+const has = (t: Tags, v: number) => (t[v >> 5] >>> (v & 31)) & 1
+const isAll = (t: Tags) => t[8] === 1 && t.subarray(0, 8).every(w => w === 0xffffffff)
+const orInto = (a: Tags, b: Tags): boolean => { let ch = false; for (let i = 0; i < 9; i++) { const x = a[i] | b[i]; if (x !== a[i]) { a[i] = x >>> 0; ch = true } } return ch }
+const filterTags = (t: Tags, f: (v: number) => boolean): Tags => { const o = newTags(false); for (let v = 0; v < NT; v++) if (has(t, v) && f(v)) o[v >> 5] |= 1 << (v & 31); return o }
+
+export interface DispatchGroup {
+	tags: number[]
+	name: string
+	source: 'str' | 'known' | 'tag'   // "Instruction: X" log in its region · a well-known program's layout · the tag value
+	accounts?: string[]                // account roles (known layout)
+	dispatchers: string[]              // the functions matching on the tag
+	keep: (fn: number, pc: number) => boolean    // is code at pc of fn reachable with one of the group's tags? (true outside the dispatchers)
+	allowed: (fn: number, b: number) => boolean  // the same for a block of fn
+}
+
+const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').replace(/\W+/g, '_').replace(/^_|_$/g, '').toLowerCase()
+
+interface TagStates { fo: FuncOut; inS: (Tags | undefined)[]; family: Set<number> }
+
+/**
+ * The tags each block of `fo` can be reached with: the variables compared with several small constants
+ * (the tag byte / u32 read from the instruction data or passed in `forced`, and enum values set from it),
+ * propagated forward from the entry and narrowed on branches.
+ */
+function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
+	const f = fo.f
+	if (f.blocks.length > 20000) return undefined
+	const defs = new Map<number, Expr[]>()
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set') { let l = defs.get(s.dst); if (!l) defs.set(s.dst, (l = [])); l.push(s.e) }
+	const leafVar = (e: Expr): number | undefined => e.k === 'var' ? e.id : e.k === 'ext' && e.a.k === 'var' ? e.a.id : undefined
+	const cmpConsts = new Map<number, Set<bigint>>()
+	const leaves = (c: Expr, fn: (x: Extract<Expr, { k: 'cmp' }>) => void) => {
+		if (c.k === 'cmp') fn(c)
+		else if (c.k === 'lnot') leaves(c.a, fn)
+		else if (c.k === 'land' || c.k === 'lor') { leaves(c.a, fn); leaves(c.b, fn) }
+	}
+	for (const b of f.blocks) if (b.term.k === 'br') leaves(b.term.c, c => {
+		if (c.op === 'set') return
+		const [x, k] = c.b.k === 'const' ? [c.a, c.b.v] : c.a.k === 'const' ? [c.b, c.a.v] : [undefined, 0n]
+		const v = x && leafVar(x)
+		if (v === undefined || k > 0xffffffffn) return
+		let s = cmpConsts.get(v); if (!s) cmpConsts.set(v, (s = new Set())); s.add(k)
+	})
+	const tagLike = (v: number, onlyConst: boolean) => {
+		const ds = defs.get(v)
+		if (!ds?.length) return false
+		return ds.every(e => (e.k === 'const' && e.v <= 0xffn) || (!onlyConst && ((e.k === 'load' && (e.size === 1 || e.size === 4)) || (e.k === 'ext' && e.a.k === 'load'))))
+	}
+	let primary = forced
+	if (primary === undefined) {
+		let best = 0
+		for (const [v, ks] of cmpConsts) if (ks.size > best && tagLike(v, false) && [...ks].filter(k => k <= 0xffn).length >= 2) { best = ks.size; primary = v }
+		if (primary === undefined || (best < 3 && !defs.get(primary)!.some(e => e.k === 'load' && e.size === 1))) return undefined
+	} else if ((cmpConsts.get(primary)?.size ?? 0) < 2) return undefined
+	const family = new Set([primary])
+	for (const [v, ks] of cmpConsts) if (v !== primary && ks.size >= 2 && tagLike(v, true)) family.add(v)
+	const g = cfgOf(fo)
+	const order = [...f.blocks.keys()].filter(b => g.rpo[b] >= 0).sort((a, b) => g.rpo[a] - g.rpo[b])
+	const inS: (Tags | undefined)[] = new Array(f.blocks.length)
+	inS[0] = newTags(true)
+	const narrow = (c: Expr, truth: boolean, t: Tags): Tags => {
+		if (c.k === 'lnot') return narrow(c.a, !truth, t)
+		if (c.k === 'land' || c.k === 'lor') {
+			if ((c.k === 'land') === truth) return narrow(c.b, truth, narrow(c.a, truth, t))
+			const o = narrow(c.a, truth, t); orInto(o, narrow(c.b, truth, t)); return o
+		}
+		if (c.k !== 'cmp' || c.op === 'set') return t
+		const [x, k, swap] = c.b.k === 'const' ? [c.a, c.b.v, false] : c.a.k === 'const' ? [c.b, c.a.v, true] : [undefined, 0n, false]
+		const v = x && leafVar(x)
+		if (v === undefined || !family.has(v)) return t
+		const ext = x!.k === 'ext' ? x as Extract<Expr, { k: 'ext' }> : undefined
+		return filterTags(t, n => {
+			let a = BigInt(n)
+			if (ext) { const m = (1n << BigInt(ext.bits)) - 1n; a &= m; if (ext.signed && a >> BigInt(ext.bits - 1)) a = BigInt.asUintN(64, a - (1n << BigInt(ext.bits))) }
+			return (swap ? evalCmpN(c.op, k, a) : evalCmpN(c.op, a, k)) === truth
+		})
+	}
+	for (let changed = true, it = 0; changed && it < 50; it++) {
+		changed = false
+		for (const b of order) {
+			const s0 = inS[b]
+			if (!s0) continue
+			let t = s0
+			for (const s of f.blocks[b].stmts) if (s.k === 'set' && family.has(s.dst) && s.e.k === 'const') { t = newTags(false); const v = Number(s.e.v > 256n ? 256n : s.e.v); t[v >> 5] |= 1 << (v & 31) }
+			const term = f.blocks[b].term
+			const succ = (x: number, tt: Tags) => { const cur = inS[x]; if (!cur) { inS[x] = Uint32Array.from(tt); changed = true } else if (orInto(cur, tt)) changed = true }
+			if (term.k === 'br') { succ(term.t, narrow(term.c, true, t)); succ(term.f, narrow(term.c, false, t)) }
+			else for (const x of f.blocks[b].succs) succ(x, t)
+		}
+	}
+	return { fo, inS, family }
+}
+
+/**
+ * The instructions of a native program whose handler is `root` (the entrypoint, or a processor handling
+ * several instructions inline): the dispatchers are the first function matching on the tag within two
+ * calls of the root, and the functions it passes the tag to (nested dispatch, e.g. fast paths first). Tags
+ * reaching the same blocks of the dispatchers form one instruction; its name comes from an
+ * "Instruction: X" log only its blocks make, else from a well-known program's layout when the tags
+ * match one, else the tag. Code reached by no tag in particular (paths of invalid tags) is left out.
+ */
+export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): DispatchGroup[] | undefined {
+	const byPc = new Map(r.funcs.map(x => [x.pc, x]))
+	let first: TagStates | undefined
+	const q: [number, number][] = [[root.pc, 0]], seen = new Set([root.pc])
+	while (q.length && !first) {
+		const [pc, d] = q.shift()!
+		const fo = byPc.get(pc)
+		if (!fo) continue
+		first = tagStates(fo)
+		if (d < 2) for (const c of r.facts.get(pc)?.calls ?? []) if (!c.errPath && !seen.has(c.callee) && !roots.has(c.callee)) { seen.add(c.callee); q.push([c.callee, d + 1]) }
+	}
+	if (!first) return undefined
+	// nested dispatchers: callees the tag is passed to
+	const ds: TagStates[] = [first]
+	for (let i = 0; i < ds.length && ds.length < 4; i++) {
+		const d = ds[i]
+		for (const b of d.fo.f.blocks) for (const s of b.stmts) {
+			const c = callOf(s)
+			if (c?.t.k !== 'fn' || ds.some(x => x.fo.pc === (c.t as { pc: number }).pc)) continue
+			const k = c.args.findIndex(a => { const v = a.k === 'var' ? a.id : a.k === 'ext' && a.a.k === 'var' ? a.a.id : -1; return d.family.has(v) })
+			const callee = byPc.get(c.t.pc)
+			const pv = k < 0 || !callee ? undefined : callee.f.vars.find(v => v.param === k + 1)?.id
+			const t = pv === undefined ? undefined : tagStates(callee!, pv)
+			if (t) ds.push(t)
+		}
+	}
+	// per tag: the blocks specific to some tags it reaches, in every dispatcher
+	const sig = new Map<string, number[]>()
+	for (let v = 0; v < NT; v++) {
+		const parts: string[] = []
+		ds.forEach((d, i) => d.inS.forEach((t, b) => { if (t && !isAll(t) && has(t, v)) parts.push(`${i}:${b}`) }))
+		if (!parts.length) continue
+		const k = parts.join(',')
+		let l = sig.get(k); if (!l) sig.set(k, (l = [])); l.push(v)
+	}
+	const dIdx = new Map(ds.map((d, i) => [d.fo.pc, i]))
+	// (blocks reached with any tag that never lead to the matching: paths leaving before the dispatch)
+	const before = ds.map(d => {
+		const blocks = d.fo.f.blocks
+		const reach = new Uint8Array(blocks.length)
+		const q: number[] = []
+		d.inS.forEach((t, b) => { if (t && !isAll(t)) { reach[b] = 1; q.push(b) } })
+		while (q.length) { const b = q.pop()!; for (const x of blocks[b].preds) if (!reach[x]) { reach[x] = 1; q.push(x) } }
+		return (b: number) => !!d.inS[b] && !reach[b]
+	})
+	const mk = (tags: number[] | 'before') => {
+		const mask = newTags(false); if (tags !== 'before') for (const v of tags) mask[v >> 5] |= 1 << (v & 31)
+		const allowed = (fn: number, b: number) => {
+			const i = dIdx.get(fn)
+			if (i === undefined) return true
+			if (tags === 'before' || before[i](b)) return tags === 'before' && before[i](b)
+			const t = ds[i].inS[b]; if (!t) return false
+			for (let j = 0; j < 9; j++) if (t[j] & mask[j]) return true
+			return false
+		}
+		const keep = (fn: number, pc: number) => { const i = dIdx.get(fn); if (i === undefined) return true; const b = cfgOf(ds[i].fo).pcBlock.get(pc); return b === undefined || allowed(fn, b) }
+		return { mask, allowed, keep }
+	}
+	const lineText = (fn: number, pc: number) => { const ff = r.facts.get(fn); const l = ff?.pcLine.get(pc); return l === undefined ? '' : ff!.lines[l - 1] ?? '' }
+	const cand: { tags: number[]; logs: Set<string>; acts: number; other: boolean }[] = []
+	for (const [k, tags] of sig) {
+		const { mask } = mk(tags)
+		let other = false, acts = 0
+		const logs = new Set<string>()
+		for (const part of k.split(',')) {
+			const [i, b] = part.split(':').map(Number)
+			const d = ds[i], t = d.inS[b]!
+			const excl = t.every((w, j) => (w & ~mask[j]) === 0)
+			const term = d.fo.f.blocks[b].term
+			if (term.k === 'ret' && term.e) walkExpr(term.e, x => { if (x.k === 'call') { acts++; if (x.t.k === 'fn' && roots.has(x.t.pc)) other = true } })
+			for (const s of d.fo.f.blocks[b].stmts) {
+				const c = callOf(s)
+				if (c?.t.k === 'fn' && roots.has(c.t.pc)) other = true
+				if (c || (s.k === 'store' || s.k === 'stores')) acts++
+				if (excl && c?.t.k === 'sys' && /log/.test(c.t.name)) { const m = /"Instruction: ([^"]+)"/.exec(lineText(d.fo.pc, s.pc)); if (m) logs.add(snake(m[1])) }
+			}
+		}
+		if (!other && acts && tags[0] < 256) cand.push({ tags, logs, acts, other })
+	}
+	// (the default branch of a match over 0..n-1: the next tag; other large tag sets are invalid tags)
+	const small = cand.filter(c => c.tags.length <= 4)
+	const maxSmall = Math.max(-1, ...small.flatMap(c => c.tags))
+	const rest = cand.filter(c => c.tags.length > 16).sort((a, b) => b.acts - a.acts)[0]
+	if (rest && rest.tags[0] === maxSmall + 1 && small.length >= 1) small.push({ ...rest, tags: [rest.tags[0]] })
+	let groups: DispatchGroup[] = small.map(c => {
+		const { allowed, keep } = mk(c === small[small.length - 1] && rest && c.tags.length === 1 && c.tags[0] === rest.tags[0] ? rest.tags : c.tags)
+		const name = c.logs.size === 1 ? [...c.logs][0] : c.tags.length === 1 ? `tag_${c.tags[0]}` : `tags_${c.tags.join('_')}`
+		return { tags: c.tags, name, source: c.logs.size === 1 ? 'str' as const : 'tag' as const, dispatchers: ds.map(d => d.fo.name), keep, allowed }
+	})
+	if (groups.length < 2) return undefined
+	if (before[0] && ds[0].inS.some((_, b) => before[0](b) && ds[0].fo.f.blocks[b].stmts.some(s => callOf(s) || s.k === 'store' || s.k === 'stores'))) {
+		const { allowed, keep } = mk('before')
+		groups.push({ tags: [], name: `${ds[0].fo.name}_before_dispatch`, source: 'tag', dispatchers: [ds[0].fo.name], keep, allowed })
+	}
+	// a well-known program's layout (the program's own id referenced, or exactly its tags)
+	if (groups.every(x => x.source === 'tag')) {
+		const tagSet = groups.filter(x => x.tags.length === 1).flatMap(x => x.tags)
+		for (const [known, fam] of knownFamilies()) {
+			const keys = Object.keys(fam.ixs).map(Number)
+			const cover = tagSet.filter(t => fam.ixs[t]).length
+			const exact = keys.length === tagSet.length && cover === keys.length
+			if (!(exact || (cover >= 0.8 * tagSet.length && cover >= 3 && r.funcs.some(x => x.text.includes(`/* ${known} */`))))) continue
+			for (const x of groups) if (x.tags.length === 1 && fam.ixs[x.tags[0]]) { const l = fam.ixs[x.tags[0]]; x.name = snake(l.name); x.source = 'known'; x.accounts = l.accounts }
+			break
+		}
+	}
+	groups = groups.sort((a, b) => (a.tags[0] ?? -1) - (b.tags[0] ?? -1))
+	const names = new Map<string, number>()
+	for (const x of groups) { const n = names.get(x.name) ?? 0; names.set(x.name, n + 1); if (n) x.name += `_${n + 1}` }
+	return groups
+}
+
+const evalCmpN = (op: string, a: bigint, b: bigint): boolean => {
+	const i = (x: bigint) => BigInt.asIntN(64, x)
+	switch (op) {
+		case 'eq': return a === b
+		case 'ne': return a !== b
+		case 'ugt': return a > b
+		case 'uge': return a >= b
+		case 'ult': return a < b
+		case 'ule': return a <= b
+		case 'sgt': return i(a) > i(b)
+		case 'sge': return i(a) >= i(b)
+		case 'slt': return i(a) < i(b)
+		case 'sle': return i(a) <= i(b)
+		default: return true
+	}
+}
+
+// ---- native accounts: account[i] from the serialized input / an &[AccountInfo] slice ----
+
+/** AccountInfo (solana-program, 0x30 bytes): field by offset */
+const INFO_FIELD: Record<number, string> = { 0: 'key', 8: 'lamports', 0x10: 'data', 0x18: 'owner', 0x20: 'rent_epoch', 0x28: 'is_signer', 0x29: 'is_writable', 0x2a: 'executable' }
+export interface AcctRef { index: number; field?: string }
+export interface AcctResolver { byName: Map<string, AcctRef>; refs: (e: Expr) => AcctRef[] }
+
+const resMemo = new WeakMap<object, AcctResolver>()
+/**
+ * Accounts a native function holds in temporaries: loads from a frame array of account-record pointers
+ * the entrypoint fills (8-byte entries, the first stored being the first record, `input + 8`), and
+ * offsets into an `&[AccountInfo]` slice (0x30-byte entries: a variable read at 0x30·i + field offsets for
+ * two or more i). Names are the printed variable names.
+ */
+export function accountResolver(fo: { f: VarFunc; names: string[] }): AcctResolver {
+	let res = resMemo.get(fo.f)
+	if (res) return res
+	const f = fo.f
+	const fp = f.vars.find(v => v.param === 10)?.id ?? -1
+	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
+	const defs = singleDefs(fo as FuncOut)
+	const rec0 = (d: Expr) => input !== undefined && d.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
+	const rec0Vars = new Set<number>()
+	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' && rec0(s.e)) rec0Vars.add(s.dst)
+	const isRec0 = (e: Expr): boolean => rec0(e) || (e.k === 'var' && rec0Vars.has(e.id))
+	let arr: number | undefined
+	const hits = new Map<number, Set<number>>() // slice var -> entries read
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'store' && s.size === 8 && isRec0(s.v)) { const o = offOf(s.addr, fp); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
+		for (const e of stmtExprs(s)) walkExpr(e, x => {
+			if (x.k !== 'load') return
+			const a = x.addr
+			if (a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id !== fp && a.b.k === 'const') {
+				const c = Number(BigInt.asIntN(64, a.b.v))
+				if (c >= 0 && c < 0x30 * 64 && INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) { let h = hits.get(a.a.id); if (!h) hits.set(a.a.id, (h = new Set())); h.add(Math.floor(c / 0x30)) }
+			}
+		})
+	}
+	const slices = new Set([...hits].filter(([, ks]) => ks.size >= 2).map(([v]) => v))
+	const at = (a: Expr): AcctRef | undefined => {
+		const [base, c] = a.k === 'bin' && a.op === 'add' && a.b.k === 'const' ? [a.a, Number(BigInt.asIntN(64, a.b.v))] : [a, 0]
+		if (base.k === 'var' && slices.has(base.id) && c >= 0) return { index: Math.floor(c / 0x30), field: INFO_FIELD[c % 0x30] }
+		if (arr !== undefined && base.k === 'var' && base.id === fp && (c - arr) % 8 === 0 && c >= arr && c - arr < 8 * 64) return { index: (c - arr) / 8 }
+		return undefined
+	}
+	const byName = new Map<string, AcctRef>()
+	for (const [v, e] of defs) {
+		const nm = fo.names[v]
+		if (!nm) continue
+		// (a record pointer loaded from the array; &slice[i]; a field of slice[i] (key / owner pointer))
+		if (e.k === 'load' && e.size === 8) { const r0 = at(e.addr); if (r0) { byName.set(nm, r0.field === undefined ? { index: r0.index } : r0); continue } }
+		const r1 = at(e)
+		if (r1 && r1.field === 'key' && e.k !== 'load') byName.set(nm, { index: r1.index })
+	}
+	const refs = (e: Expr): AcctRef[] => {
+		const out: AcctRef[] = []
+		walkExpr(e, x => {
+			if (x.k === 'load') { const r0 = at(x.addr); if (r0 && r0.field) out.push(r0) }
+			else if (x.k === 'var') { const nm = fo.names[x.id]; const r0 = nm ? byName.get(nm) : undefined; if (r0?.field) out.push(r0) }
+		})
+		return out
+	}
+	res = { byName, refs }
+	resMemo.set(fo.f, res)
+	return res
 }

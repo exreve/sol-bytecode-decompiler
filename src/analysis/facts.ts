@@ -32,6 +32,7 @@ export interface FnInput {
 	anchor: boolean
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
+	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -71,7 +72,7 @@ export interface Op {
 	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
 }
 
-export interface Call { line: number; pc?: number; callee: number; main: boolean; errPath: boolean }
+export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)
 
 export interface FnFacts {
 	pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean
@@ -225,7 +226,17 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const l = lineOf(n)
 		const t = lines[l]?.trim() ?? ''
 		const m = /^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: \/\/.*)?$/.exec(t)
-		if (!m) return
+		if (!m) {
+			// raw account data: stN(X.data + off, v) with X an account (record / AccountInfo)
+			const d = /^st(8|16|32|64)\(([A-Za-z_][\w.]*)\.data(?: \+ (0x[0-9a-f]+|\d+))?(?: \/\*[^*]*\*\/)?, (.*)\)$/.exec(t)
+			const r = d && refOf(resolve(d[2]) + '.data', facts.types)
+			if (!d || !r || s.k !== 'store') return
+			const off = Number(d[3] ?? 0), z = Number(d[1]) / 8
+			const field = `data[${off}..${off + z}]`
+			const self = new RegExp(`^ld${d[1]}\\(${d[2].replace(/\./g, '\\.')}\\.data${d[3] ? ` \\+ ${d[3]}` : ''}\\) ([-+]) `).exec(d[4])
+			facts.ops.push({ line: l + 1, pc: s.pc, kinds: ['ACCOUNT_DATA_WRITE'], text: t, main, errPath: err, target: { acct: r.acct, field }, how: self ? (self[1] === '+' ? '+=' : '-=') : '=', value: d[4] })
+			return
+		}
 		const lv = resolve(m[1]), rhs = m[2]
 		if (/\.(borrow|strong|weak|dup_marker)$/.test(lv)) return
 		const r = refOf(lv, facts.types)
@@ -259,7 +270,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 			if (FIELD_KIND[f0]) add(FIELD_KIND[f0])
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
-		if (/\bkeyeq\(|memeq\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
+		for (const x of inp.irRefs?.(n.c) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
+		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// the error raised: an IDL error, else an Anchor error that reports a constraint, else any Anchor / program error
 		let error = ''
 		const cm2 = /\berror::(\w+)/.exec(ft)
@@ -306,7 +318,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 					if (cs.length) before = cs[cs.length - 1]
 					break
 				}
-				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, callee: c, main, errPath: err }); break
+				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, ret: n.e, callee: c, main, errPath: err }); break
 				case 'if': {
 					const rest = ns.slice(k + 1)
 					// (the rest of the list ends with the list's last node: its exit is the same for every k)

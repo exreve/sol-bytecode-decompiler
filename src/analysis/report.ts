@@ -41,7 +41,8 @@
 import type { Result } from '../decompile.ts'
 import type { FnFacts, Op, OpKind } from './facts.ts'
 import { refOf } from './facts.ts'
-import { addExitWrites, indirectTargets } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup } from './flow.ts'
+import type { Expr } from '../ir.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -49,7 +50,7 @@ export interface Evidence { status: Status; at?: Loc; via?: string; note?: strin
 export interface AccountRow {
 	index?: number
 	name: string
-	source: 'idl' | 'str' | 'code'
+	source: 'idl' | 'str' | 'code' | 'known'
 	expected: { signer?: boolean; writable?: boolean; pda?: boolean; address?: string; optional?: boolean }
 	constraints: Record<string, Evidence>
 }
@@ -66,6 +67,7 @@ export interface IxOut {
 	score: number
 	effects: string[]
 	indirect: string[]   // functions reached through function pointers / tables (and why)
+	dispatch?: string    // native: the tag(s) selecting this instruction's part of the handler
 }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
 export interface Analysis {
@@ -113,10 +115,21 @@ function analyze0(r: Result): Analysis {
 	let roots = r.funcs.filter(f => f.name.startsWith('ix_') || procNames.has(f.name))
 	if (!roots.length) roots = r.funcs.filter(f => f.f.isEntry)
 	const rootPcs = new Set(roots.map(f => f.pc))
+	// native programs: the instructions a processor / the entrypoint dispatches on the tag (flow.ts)
+	const splits = new Map<number, DispatchGroup[]>()
+	if (!r.anchor) for (const h of roots) if (!h.name.startsWith('ix_')) { const g = splitDispatch(r, h, rootPcs); if (g) splits.set(h.pc, g) }
 	const ixs: IxOut[] = []
-	for (const h of roots) {
-		const name = h.name.startsWith('ix_') ? h.name.slice(3) : h.name
-		const info = r.instructions.find(i => i.pc === h.pc)
+	for (const h of roots) for (const grp of splits.get(h.pc) ?? [undefined]) {
+		const name = grp ? grp.name : h.name.startsWith('ix_') ? h.name.slice(3) : h.name
+		const info = grp ? undefined : r.instructions.find(i => i.pc === h.pc)
+		const keep = (fn: number, pc: number | undefined) => !grp || pc === undefined || grp.keep(fn, pc)
+		// (a dispatcher's branches on the tag look like checks to facts.ts: its error-path marks do not apply)
+		const isDisp = (fn: number) => !!grp && grp.dispatchers.includes(facts.get(fn)?.name ?? '')
+		const keepCall = (fn: number, c: { pc?: number; ret?: Expr }) => {
+			if (!grp || c.pc !== undefined) return keep(fn, c.pc)
+			const fo = byPc.get(fn), b = fo && c.ret ? cfgOf(fo).retBlock.get(c.ret) : undefined
+			return b === undefined || grp.allowed(fn, b)
+		}
 		// functions reachable through direct calls (not other handlers): main = through main-path calls only
 		// (library code is followed too: it calls back into user code, e.g. trait implementations; those
 		// calls count as conditional)
@@ -146,12 +159,13 @@ function analyze0(r: Result): Analysis {
 		while (q.length) {
 			const x = q.shift()!
 			const m = main.get(x)!
-			for (const c of facts.get(x)?.calls ?? []) if (!c.errPath) reach(c.callee, m && (c.main || (generated && x === h.pc)))
+			for (const c of facts.get(x)?.calls ?? []) if ((!c.errPath || isDisp(x)) && keepCall(x, c)) reach(c.callee, m && (c.main || (generated && x === h.pc)))
 			for (const t of ind.targets.get(x) ?? []) viaPtr(t, `function pointer in ${facts.get(x)?.name}`)
 		}
 		const fns = [...main.keys()].map(pc => facts.get(pc)!).filter(Boolean)
 		// the accounts: IDL, else the program's account-error strings, then names met in the code
 		const accounts: AccountRow[] = info?.accounts?.length ? info.accounts.map(parseIdlAccount)
+			: grp?.accounts ? grp.accounts.map((n, i) => ({ index: i, name: n, source: 'known' as const, expected: {}, constraints: {} }))
 			: (info?.strAccounts ?? []).map((n, i) => ({ index: i, name: n, source: 'str' as const, expected: {}, constraints: {} }))
 		const known = new Set(accounts.map(x => x.name))
 		const canon = (acct: string | undefined): string | undefined => {
@@ -159,7 +173,8 @@ function analyze0(r: Result): Analysis {
 			if (known.has(acct)) return acct
 			const a = acct.replace(/_\d+$/, '')
 			if (known.has(a)) return a
-			if (/^acc\d+$/.test(a)) return `account[${a.slice(3)}]`
+			const ix = /^acc(\d+)$/.exec(a) ?? /^account\[(\d+)\]$/.exec(a)
+			if (ix) return accounts.find(y => y.index === Number(ix[1]))?.name ?? `account[${ix[1]}]`
 			return TEMP.test(acct) ? undefined : a
 		}
 		const row = (nm: string): AccountRow => {
@@ -175,31 +190,39 @@ function analyze0(r: Result): Analysis {
 		const loc = (ff: FnFacts, line: number, pc?: number): Loc => ({ fn: ff.name, line, pc })
 		const checks: CheckOut[] = []
 		const ops: OpOut[] = []
+		const idxName = (i: number) => accounts.find(y => y.index === i)?.name ?? `account[${i}]`
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
+			// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice)
+			const R = !r.anchor && byPc.get(ff.pc) ? accountResolver(byPc.get(ff.pc)!) : undefined
+			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
 			for (const c of ff.checks) {
+				if (!keep(ff.pc, c.pc)) continue
 				const status: 'found' | 'partial' = fm && c.main ? 'found' : 'partial'
+				const irRefs = R && c.c ? R.refs(c.c) : []
 				// (an account the code holds in a temporary: its name, marked with ?)
-				const acct = canon(c.named) ?? canon(c.refs.find(x => canon(x.acct))?.acct) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
-				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k))]
+				const acct = cn(c.named) ?? cn(c.refs.find(x => cn(x.acct))?.acct) ?? (irRefs[0] ? idxName(irRefs[0].index) : undefined) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
+				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
+				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
 				const at = loc(ff, c.line, c.pc)
 				checks.push({ at, status, account: acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined })
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind
-				if (c.named && canon(c.named)) for (const k of kinds) note(canon(c.named)!, k, { status, at, via: c.via && !c.kinds.includes(k) ? c.via.fn : undefined })
+				if (c.named && cn(c.named)) for (const k of kinds) note(cn(c.named)!, k, { status, at, via: c.via && !c.kinds.includes(k) ? c.via.fn : undefined })
+				for (const x of irRefs) { const k = fk(x.field); if (k) note(idxName(x.index), k, { status, at }) }
 				for (const x of c.refs) {
-					const ca = canon(x.acct)
-					if (!ca || ca === canon(c.named)) continue
+					const ca = cn(x.acct)
+					if (!ca || ca === cn(c.named)) continue
 					const f0 = x.field?.split('.')[0] ?? ''
 					const k = { is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' }[f0] ?? (x.field ? 'state' : undefined)
 					if (k) note(ca, k, { status, at })
 				}
 			}
 			for (const o of ff.ops) {
-				if (o.errPath) continue
+				if ((o.errPath && !isDisp(ff.pc)) || !keep(ff.pc, o.pc)) continue
 				// (a wrapper's own CPI site, when its calls in this instruction are decoded)
 				if (ff.wrapper && !o.cpi && fns.some(g => g.ops.some(x => x.via === ff.name))) continue
 				const at = loc(ff, o.line, o.pc)
-				const tgt = o.target ? `${canon(o.target.acct) ?? o.target.acct}${o.target.field ? '.' + o.target.field : ''}` : undefined
+				const tgt = o.target ? `${cn(o.target.acct) ?? o.target.acct}${o.target.field ? '.' + o.target.field : ''}` : undefined
 				ops.push({ at, kinds: o.kinds, text: o.text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi: o.cpi, pda: o.pda })
 			}
 		}
@@ -251,8 +274,9 @@ function analyze0(r: Result): Analysis {
 		}
 		// unverified expected privileges raise the rank
 		for (const x of accounts) for (const [k, ev] of Object.entries(x.constraints)) if (ev.status === 'not_found' && (k === 'signer' || k === 'pda' || k === 'address')) score += 2
-		const kind: IxOut['kind'] = !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
-		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect })
+		const kind: IxOut['kind'] = grp ? 'native' : !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
+		const dispatch = grp && `${grp.tags.length ? `tag ${grp.tags.join(', ')}` : 'paths leaving before the tag is matched'} (instruction data) matched in ${grp.dispatchers.join(', ')}; name ${grp.source === 'str' ? '[str: its "Instruction: …" log]' : grp.source === 'known' ? '[heur: the layout of a well-known program with these tags]' : '[the tag]'}`
+		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect, dispatch })
 	}
 	ixs.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name))
 	// operations in code no handler reaches through direct calls (function pointers, dispatch tables)
@@ -323,7 +347,7 @@ export function renderJson(a: Analysis, where: Where): string {
 		note: 'derived, over-approximate facts read off the decompiled code (the verified source of truth); statuses: found | partial | not_found (no check found, not a proof of absence) | runtime (enforced by the Solana runtime)',
 		program: a.program,
 		instructions: a.ixs.map(ix => ({
-			name: ix.name, handler: ix.handler, kind: ix.kind, score: ix.score, effects: ix.effects, functions: ix.functions, indirect: ix.indirect.length ? ix.indirect : undefined,
+			name: ix.name, handler: ix.handler, kind: ix.kind, dispatch: ix.dispatch, score: ix.score, effects: ix.effects, functions: ix.functions, indirect: ix.indirect.length ? ix.indirect : undefined,
 			accounts: ix.accounts.map(x => ({ index: x.index, name: x.name, source: x.source, expected: x.expected, constraints: Object.fromEntries(Object.entries(x.constraints).map(([k, e]) => [k, ev(ix.name, e)])) })),
 			checks: ix.checks.map(c => ({ at: L(ix.name, c.at), status: c.status, account: c.account, kinds: c.kinds, cond: c.cond, fails_if: c.failsIf, error: c.error, via: c.via })),
 			operations: ix.ops.map(o => ({
@@ -367,7 +391,7 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => `${x.name} (${ST[x.constraints.signer.status]})`)
 		const anon = ix.checks.filter(c => c.kinds.includes('signer') && (!c.account || c.account.endsWith('?'))).length
 		if (anon) signers.push(`${anon} signer check${anon > 1 ? 's' : ''} on accounts held in temporaries (see ${ixFile(ix)})`)
-		out.push(`- **${ix.name}** — score ${ix.score} · [${ixFile(ix)}](${ixFile(ix)})${ix.kind === 'anchor' || ix.kind === 'native' ? ` · ../bundle/${ix.name}.ts` : ''}`)
+		out.push(`- **${ix.name}** — score ${ix.score} · [${ixFile(ix)}](${ixFile(ix)})${ix.handler.startsWith('ix_') ? ` · ../bundle/${ix.name}.ts` : ''}`)
 		out.push(`  - signers: ${signers.join(', ') || 'none found'}`)
 		for (const e of ix.effects.slice(0, 12)) out.push(`  - ${e}`)
 		if (ix.effects.length > 12) out.push(`  - … ${ix.effects.length - 12} more (see ${ixFile(ix)})`)
@@ -415,6 +439,7 @@ const md = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 export function renderIx(ix: IxOut, where: Where): string {
 	const W = (at: Loc) => at2s(where, ix.name, at)
 	const out = [`# ${ix.name}`, '', ...HEADER, '', `Handler ${ix.handler} (${ix.kind}); ${ix.functions.length} functions reachable: ${ix.functions.slice(0, 12).join(', ')}${ix.functions.length > 12 ? ', …' : ''}.`, '']
+	if (ix.dispatch) out.push(`Dispatch: ${ix.dispatch}.`, '')
 	if (ix.indirect.length) out.push(`Reached through function pointers / tables (conditional): ${ix.indirect.slice(0, 8).join(', ')}${ix.indirect.length > 8 ? ', …' : ''}.`, '')
 	const fl = flags(ix)
 	if (fl.length) out.push('## Look first', '', ...fl.map(f => `- ⚠ ${f}`), '')

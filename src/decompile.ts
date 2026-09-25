@@ -25,6 +25,7 @@ import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
+import { accountResolver } from './analysis/flow.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -1089,6 +1090,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false) facts.set(pc, functionFacts({
       pc, name: f.name, body, lines, at: bodyAt, spans, sites: siteNotes, anchor: sem.anchor,
       noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
+      irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }).refs(e),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });

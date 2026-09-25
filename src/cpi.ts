@@ -237,6 +237,8 @@ const STAKE: Family = {
 	},
 }
 const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET, STAKE_PROGRAM: STAKE }
+/** The instruction layouts of the well-known programs (by the known-id label), for naming a program's own instructions. */
+export const knownFamilies = (): [string, { label: string; ixs: Record<number, { name: string; accounts: string[] }> }][] => Object.entries(FAMILY)
 
 /** A described CPI: the comment, and the decoded instruction of a well-known program (guessed: the program id is not a constant). */
 export interface CpiDesc { text: string; family?: string; ix?: string; guessed?: boolean; parts?: CpiParts }
