@@ -2,18 +2,20 @@
 import { readFileSync } from 'node:fs'
 import { loadProgram } from '../src/program.ts'
 import { inferSignatures, recoverVars, type VarFunc } from '../src/dataflow.ts'
-import { optimizeFunc, setFoldImage } from '../src/simplify.ts'
+import { optimizeFunc, setFoldImage, isSettled } from '../src/simplify.ts'
 import { structure, cleanup } from '../src/structure.ts'
 import { Semantics } from '../src/semantics.ts'
 import { classify } from '../src/library.ts'
 import { promoteStack } from '../src/stack.ts'
 import { rewriteStackArgs } from '../src/stackargs.ts'
 import { compactStores } from '../src/compact.ts'
+import { recognizeIdioms } from '../src/idioms.ts'
+import { statementIdioms } from '../src/stmtidioms.ts'
 
 const slow = Number(process.argv[3] ?? 200)
 const tot: Record<string, number> = {}
 const time = <T>(k: string, fn: () => T): T => { const t = performance.now(); const r = fn(); tot[k] = (tot[k] ?? 0) + performance.now() - t; return r }
-const p = time('load', () => loadProgram(new Uint8Array(readFileSync(process.argv[2]))))
+const p = time('load', () => loadProgram(new Uint8Array(readFileSync(process.argv[2])), { lazyBlocks: true })) // as decompile loads it
 console.log('funcs', p.funcs.size, 'insns', p.insns.length)
 const mem = (s: string) => { const g = (globalThis as any).gc; if (g) g(); console.log(s, Math.round(process.memoryUsage().heapUsed / 1e6), "MB heap") }
 mem("after load")
@@ -29,6 +31,8 @@ for (const f0 of p.funcs.values()) {
 	const f = time('recoverVars', () => recoverVars(p, f0))
 	time('optimize', () => optimizeFunc(f))
 	if (time('promote', () => promoteStack(f))) time('optimize2', () => optimizeFunc(f))
+	const idi = { real: false }
+	if (time('idioms', () => recognizeIdioms(f, idi)) && (idi.real || !isSettled(f))) time('optimize3', () => optimizeFunc(f))
 	const dt = performance.now() - t0
 	if (dt > slow) console.log(f.name, 'blocks', f.blocks.length, 'vars', f.vars.length, Math.round(dt), 'ms')
 	built.set(f.pc, { f, body: [], irreducible: false })
@@ -40,6 +44,7 @@ for (const bt of built.values()) {
 	time('compact', () => compactStores(bt.f))
 	const st = time('structure', () => structure(bt.f))
 	bt.body = time('cleanup', () => cleanup(st, bt.f.returns))
+	bt.body = time('stmtidioms', () => statementIdioms(bt.body, bt.f.vars.find(v => v.param === 10)?.id))
 	const dt = performance.now() - t0
 	if (dt > slow) console.log(bt.f.name, 'structure+cleanup', Math.round(dt), 'ms')
 }
