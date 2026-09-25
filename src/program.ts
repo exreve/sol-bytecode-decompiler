@@ -328,17 +328,24 @@ function discover(p: Program) {
       fnPtr((BigInt(p.insns[i + 1].imm >>> 0) << 32n) | BigInt(ins.imm >>> 0));
     }
   }
-  const seen = new Int32Array(p.insns.length);
+  const seen = new Int32Array(p.insns.length), lead = new Int32Array(p.insns.length);
   let stamp = 0;
-  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, buildFunc(p, lifter, pc, starts, seen, ++stamp));
+  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, buildFunc(p, lifter, pc, starts, seen, lead, ++stamp));
 }
 
-function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, stamp: number): Func {
+function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, lead: Int32Array, stamp: number): Func {
   // 1) find leaders via reachability
-  // seen[pc] === stamp: visited by this function (out-of-text pcs stop the walk right away)
-  const leaders = new Set<number>([entry]);
-  const work = [entry];
+  // seen[pc] === stamp: visited by this function (out-of-text pcs stop the walk right away);
+  // lead[pc] === stamp: in-text leader of this function (out-of-text leaders are kept in `outside`)
   const n = p.insns.length;
+  const leaderList: number[] = [entry];
+  const outside = new Set<number>();
+  const addLeader = (x: number) => {
+    if (x >= 0 && x < n) { if (lead[x] !== stamp) { lead[x] = stamp; leaderList.push(x); } }
+    else if (!outside.has(x)) { outside.add(x); leaderList.push(x); }
+  };
+  if (entry >= 0 && entry < n) lead[entry] = stamp; else outside.add(entry);
+  const work = [entry];
   while (work.length) {
     let pc = work.pop()!;
     while (true) {
@@ -348,15 +355,16 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       const l = lifter.liftShared(pc);
       if ('next' in l) { pc = l.next; continue; }
       const t = l.term;
-      const tg = t.k === 'jmp' ? [t.to] : t.k === 'br' ? [t.t, t.f] : [];
-      for (const x of tg) { leaders.add(x); work.push(x); }
+      if (t.k === 'jmp') { addLeader(t.to); work.push(t.to); }
+      else if (t.k === 'br') { addLeader(t.t); work.push(t.t); addLeader(t.f); work.push(t.f); }
       break;
     }
   }
+  const isLeader = (x: number) => (x >= 0 && x < n ? lead[x] === stamp : outside.has(x));
   // 2) form blocks
   const blockAt = new Map<number, number>();
   const blocks: Block[] = [];
-  const sortedLeaders = [entry, ...[...leaders].filter(x => x !== entry).sort((a, b) => a - b)];
+  const sortedLeaders = [entry, ...leaderList.slice(1).sort((a, b) => a - b)];
   for (const l of sortedLeaders) { blockAt.set(l, blocks.length); blocks.push({ id: blocks.length, start: l, end: l, stmts: [], term: { k: 'trap', msg: '' }, succs: [], preds: [] }); }
   for (const b of blocks) {
     let pc = b.start;
@@ -364,10 +372,10 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       // every pc reached here was visited (and so lifted) by the walk above
       const l = pc >= 0 && pc < n && starts[pc] ? lifter.memo[pc] : undefined;
       if (!l) { b.term = { k: 'trap', msg: pc >= p.insns.length || pc < 0 ? 'jump outside text' : 'jump into middle of lddw' }; break; }
-      b.stmts.push(...l.stmts);
+      for (const s of l.stmts) b.stmts.push(s);
       if ('term' in l) { b.term = { ...l.term }; b.end = pc; break; } // terminators are patched per function (block ids): never shared
       b.end = pc;
-      if (blockAt.has(l.next)) { b.term = { k: 'jmp', to: l.next }; break; }
+      if (isLeader(l.next)) { b.term = { k: 'jmp', to: l.next }; break; }
       pc = l.next;
     }
   }
