@@ -136,7 +136,19 @@ export function recognizeIdioms(f: VarFunc): boolean {
 		return e
 	}
 	let changed = merged
-	const rw = (e: Expr) => { const n = mapExpr(e, rewrite); if (n !== e && !exprEq(n, e)) changed = true; return n }
+	// rewrite() only acts on `x >> 56` and `x & 0x1fe` nodes: an expression without one would be
+	// rebuilt as a structurally equal copy, so it is kept as it is (expressions are immutable). The
+	// copy still counted as a change when it contains a call (exprEq never equates calls), which makes
+	// the caller optimize again: that is kept.
+	const rw = (e: Expr) => {
+		let cand = false, call = false
+		walkExpr(e, x => {
+			if (x.k === 'call') call = true
+			else if (x.k === 'bin' && x.b.k === 'const' && ((x.op === 'lshr' && x.b.v === 56n) || (x.op === 'and' && x.b.v === 0x1fen))) cand = true
+		})
+		if (!cand) { if (call) changed = true; return e }
+		const n = mapExpr(e, rewrite); if (n !== e && !exprEq(n, e)) changed = true; return n
+	}
 	for (const b of f.blocks) {
 		curB = b.id
 		b.stmts = b.stmts.map((s: Stmt, i) => { curI = i; return mapStmtExprs(s, rw) })
