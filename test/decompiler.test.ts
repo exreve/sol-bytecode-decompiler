@@ -193,3 +193,30 @@ test('rc_inc / rc_dec statement idioms: same loads, stores, abort and result as 
 		}
 	}
 })
+
+test('typed views: x.field / x[k].field / nested embedded fields print and evaluate as the loads and stores they replace', async () => {
+	const { Views, VIEW_NOTATION } = await import('../src/views.ts')
+	const V = new Views()
+	const R = rng(11)
+	const types = ['AccountInfo', 'AccountRecord', 'Input']
+	const decls = [...VIEW_NOTATION, ...V.render(types)].join('\n')
+	let viewed = 0
+	for (let i = 0; i < 400; i++) {
+		const ty = types[i % 3]
+		const size = ([1, 2, 4, 8] as const)[Number(R() % 4n)]
+		const off = BigInt(Number(R() % 0xa0n))
+		const addr: Expr = { k: 'bin', op: 'add', a: { k: 'var', id: 0 }, b: { k: 'const', v: off } }
+		const pr = new Printer({ fnName: () => 'f', fnAddrName: () => undefined, sysName: n => n, constComment: () => undefined, varName: id => 'abc'[id], views: V, varType: id => (id === 0 ? ty : undefined) })
+		const load = pr.u({ k: 'load', size, addr }, 2)
+		const lv = pr.viewLvalue(size, addr)
+		if (/\.\w/.test(load)) viewed++
+		const src = `${decls}\nfunction t(a: ${ty}, b: u64, c: u64): u64 {\n\t${lv ? `${lv} = b` : `st${size * 8}(${pr.u(addr, 2)}, b)`}\n\treturn ${load} + ${pr.u(addr, 12)}\n}`
+		const mem = new TestMem(new Image([]), i, [])
+		const base = 0x3_0000_0000n + (R() % 0x100n) * 8n
+		const val = R()
+		const r = runFunction(parseFunctions(src).get('t')!, [base, val, 0n], { mem, onCall: () => 0n, fp: 0n, fnAddr: new Map(), fnTarget: new Map(), sysTarget: new Map(), maxSteps: 100 })
+		const want = (val & ((1n << BigInt(size * 8)) - 1n)) + base + off
+		assert.equal(r.ret, want & ((1n << 64n) - 1n), src)
+	}
+	assert.ok(viewed > 100, `only ${viewed} loads printed as views`)
+})

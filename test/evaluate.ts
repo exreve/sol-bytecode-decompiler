@@ -45,6 +45,42 @@ export function parseFunctions(src: string): Map<string, ts.FunctionDeclaration>
 	return m
 }
 
+// ---- typed views: `interface T { f: at<off, u8|u16|u32|u64 | ref<U> | U> }` declared in the source ----
+interface VField { off: bigint; kind: 'scalar' | 'ref' | 'embed'; size: number; type?: string }
+type Views = Map<string, Map<string, VField>>
+const viewSize = new WeakMap<Map<string, VField>, bigint>() // from `extends sized<N>`
+const viewCache = new WeakMap<ts.SourceFile, Views>()
+const SCALAR: Record<string, number> = { u8: 1, u16: 2, u32: 4, u64: 8 }
+function viewsOf(sf: ts.SourceFile): Views {
+	let v = viewCache.get(sf)
+	if (v) return v
+	v = new Map()
+	for (const st of sf.statements) {
+		if (!ts.isInterfaceDeclaration(st)) continue
+		const fields = new Map<string, VField>()
+		for (const m of st.members) {
+			if (!ts.isPropertySignature(m) || !m.type || !ts.isTypeReferenceNode(m.type) || m.type.typeName.getText() !== 'at') throw new EvalError('bad view field ' + m.getText())
+			const [o, t] = m.type.typeArguments ?? []
+			if (!o || !t || !ts.isLiteralTypeNode(o) || !ts.isNumericLiteral(o.literal) || !ts.isTypeReferenceNode(t)) throw new EvalError('bad view field ' + m.getText())
+			const off = BigInt(o.literal.getText()), tn = t.typeName.getText()
+			if (SCALAR[tn]) fields.set(m.name.getText(), { off, kind: 'scalar', size: SCALAR[tn] })
+			else if (tn === 'ref') {
+				const to = t.typeArguments?.[0]
+				if (!to || !ts.isTypeReferenceNode(to)) throw new EvalError('bad ref ' + m.getText())
+				fields.set(m.name.getText(), { off, kind: 'ref', size: 8, type: to.typeName.getText() })
+			} else fields.set(m.name.getText(), { off, kind: 'embed', size: 0, type: tn })
+		}
+		v.set(st.name.text, fields)
+		for (const h of st.heritageClauses ?? []) for (const t of h.types) {
+			const a = t.typeArguments?.[0]
+			if (t.expression.getText() !== 'sized' || !a || !ts.isLiteralTypeNode(a) || !ts.isNumericLiteral(a.literal)) throw new EvalError('bad view heritage ' + t.getText())
+			viewSize.set(fields, BigInt(a.literal.getText()))
+		}
+	}
+	viewCache.set(sf, v)
+	return v
+}
+
 type Ex = () => bigint
 type St = () => number // 0 normal, 1 break, 2 continue, 3 return
 interface Ctl { label: string | null; ret: bigint | undefined; steps: number; max: number }
@@ -63,6 +99,41 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 	const env = () => envRef.cur!
 	const B = (b: boolean) => (b ? 1n : 0n)
 	const K = ts.SyntaxKind
+	// view types of identifiers: from parameter and variable declarations
+	const views = viewsOf(fn.getSourceFile())
+	const declType = new Map<string, string>()
+	const noteType = (name: ts.BindingName, t: ts.TypeNode | undefined) => {
+		if (!t || !ts.isTypeReferenceNode(t) || !views.has(t.typeName.getText())) return
+		const n = (name as ts.Identifier).text, tn = t.typeName.getText()
+		if (declType.has(n) && declType.get(n) !== tn) throw new EvalError(`${n} declared with two view types`)
+		declType.set(n, tn)
+	}
+	fn.parameters.forEach(p => noteType(p.name, p.type))
+	const scanDecls = (n: ts.Node) => { if (ts.isVariableDeclaration(n)) noteType(n.name, n.type); ts.forEachChild(n, scanDecls) }
+	if (fn.body) scanDecls(fn.body)
+	const field = (e: ts.PropertyAccessExpression): VField => {
+		const t = typeOf(e.expression)
+		if (!t) throw new EvalError('field access on a value without a view type: ' + e.getText())
+		const f = views.get(t)?.get(e.name.text)
+		if (!f) throw new EvalError(`no field ${e.name.text} in view ${t}`)
+		return f
+	}
+	/** view type of an expression (undefined: a plain value) */
+	const typeOf = (e: ts.Expression): string | undefined => {
+		if (ts.isParenthesizedExpression(e)) return typeOf(e.expression)
+		if (ts.isIdentifier(e)) return declType.get(e.text)
+		if (ts.isAsExpression(e) && ts.isTypeReferenceNode(e.type) && views.has(e.type.typeName.getText())) return e.type.typeName.getText()
+		if (ts.isPropertyAccessExpression(e)) { const f = field(e); return f.kind === 'scalar' ? undefined : f.type }
+		if (ts.isElementAccessExpression(e)) return typeOf(e.expression)
+		return undefined
+	}
+	/** x[k]: the k-th object of x's (sized) view type from x */
+	const element = (e: ts.ElementAccessExpression): Ex => {
+		const t = typeOf(e.expression), size = t ? viewSize.get(views.get(t)!) : undefined
+		if (!size || !ts.isNumericLiteral(e.argumentExpression)) throw new EvalError('bad element access ' + e.getText())
+		const obj = ex(e.expression), d = BigInt(e.argumentExpression.getText()) * size
+		return () => W(obj() + d)
+	}
 
 	const helper = (name: string, args: Ex[]): Ex => {
 		const ld = /^ld(8|16|32|64)$/.exec(name)
@@ -178,6 +249,14 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 			throw new EvalError('bad unary')
 		}
 		if (ts.isVoidExpression(e)) { const a = ex(e.expression); return () => { a(); return 0n } }
+		if (ts.isPropertyAccessExpression(e)) {
+			const f = field(e), obj = ex(e.expression), off = f.off
+			if (f.kind === 'embed') return () => W(obj() + off)
+			const size = f.size
+			return () => env().mem.load(W(obj() + off), size)
+		}
+		if (ts.isElementAccessExpression(e)) return element(e)
+		if (ts.isAsExpression(e) && ts.isTypeReferenceNode(e.type) && views.has(e.type.typeName.getText())) return ex(e.expression)
 		if (ts.isAsExpression(e)) {
 			const a = ex(e.expression)
 			const m = /^([ui])(8|16|32|64)$/.exec(e.type.getText())
@@ -200,6 +279,12 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 		if (ts.isConditionalExpression(e)) { const c = ex(e.condition), a = ex(e.whenTrue), b = ex(e.whenFalse); return () => (W(c()) !== 0n ? a() : b()) }
 		if (ts.isBinaryExpression(e)) {
 			const op = e.operatorToken.kind
+			if (op === K.EqualsToken && ts.isPropertyAccessExpression(e.left)) {
+				// x.f = v: store to a scalar view field
+				const f = field(e.left), obj = ex(e.left.expression), r = ex(e.right), off = f.off, size = f.size
+				if (f.kind !== 'scalar') throw new EvalError('assignment to a non-scalar view field: ' + e.getText())
+				return () => { const a = W(obj() + off), v = W(r()); env().mem.store(a, size, v); return v }
+			}
 			if (op === K.EqualsToken) {
 				const i = slot((e.left as ts.Identifier).text), r = ex(e.right)
 				return () => { const v = W(r()); vals[i] = v; return v }

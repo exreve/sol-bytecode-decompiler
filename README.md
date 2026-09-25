@@ -47,8 +47,33 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `undef` | a register value left over by a callee (unspecified); a variable read before any assignment and call arguments omitted at the end of the list are `undef` too |
 | `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length); text found elsewhere is shown as `0x100001234 /* "text" */` |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
+| `x: AccountInfo`, `x.is_signer` | typed view (below): `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
+| `x[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice |
 
 Style: tabs, no semicolons, short variable names (`a..e` = register arguments r1..r5, then `f, g, …`).
+
+### Typed views
+
+Variables (and parameters) known to point to a structure are declared with a view type, and memory
+accesses through them print as fields. Views are declared with the output (`lib.d.ts` / file header):
+
+```ts
+type at<Offset extends number, T> = T  // field: a T at byte Offset (scalar: loaded; ref<U>: loaded pointer; other: address)
+interface AccountInfo extends sized<0x30> {   // solana_program::account_info::AccountInfo
+	key:       at<0x00, ref<Pubkey>>
+	is_signer: at<0x28, u8>
+	...
+}
+function fn_10c18(a: u64, b: u64, c: u64, d: AccountInfo) {
+	if (d.is_signer == 0) { ... }          // ld8(d + 0x28)
+	fn_67d68(s3c8, d.owner)                // ld64(d + 0x18)
+	st64(s180 + 0x28, d[1].is_signer)      // ld8(d + 0x30 + 0x28): the next AccountInfo
+```
+
+Built-in views: `AccountInfo` (Rust), `AccountRecord` (serialized input account: `dup_marker`, `is_signer`,
+`is_writable`, `executable`, `key`, `owner` (embedded `Pubkey`s), `lamports`, `data_len`, `data`), `Input`
+(entrypoint parameter: `num_accounts`, `acc0`). A view is an exact alias whatever the variable holds; *which*
+variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
 
 ### Project layout (`-o dir/`)
 
@@ -68,9 +93,8 @@ Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<
 
 ### Annotations (comments only)
 
-* account fields: loads through pointers recognized as a Rust `AccountInfo` (slice iteration with stride
-  0x30, typical field accesses, parameters receiving one) or as a raw serialized account record
-  (pinocchio style) name the field: `ld8(c + 0x28 /* is_signer */)`, `ld64(x + 0x50 /* data_len */)`;
+* account fields through recognized account pointers that are not a variable (e.g. a loaded pointer)
+  name the field in a comment: `ld8(ld64(s30) + 0x28 /* is_signer */)` (through variables: typed views, above);
 * `Result<_, ProgramError>` niche values: `0x8000000000000007 /* Err(ProgramError::MissingRequiredSignature) */`,
   the `Ok` value being inferred per program (it depends on the solana-program version);
 * public keys: known program ids, 32-byte rodata keys compared/copied by address (`/* key <base58> */`),
@@ -169,7 +193,8 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/dataflow.ts` | liveness, interprocedural params/returns/noreturn, variable recovery |
 | `src/simplify.ts`, `src/cfgopt.ts` | exact expression simplification, propagation, tail duplication, DSE, jump threading |
 | `src/ifconv.ts`, `src/idioms.ts` | if-conversion to selects; bit-trick and multi-word compare idioms (popcount/clz/ctz, memeq/keyeq) |
-| `src/accounts.ts` | AccountInfo / raw account pointer recognition (field-name comments) |
+| `src/accounts.ts` | AccountInfo / raw account pointer recognition (view types, field-name comments) |
+| `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |

@@ -8,6 +8,7 @@
 //   lib.d.ts       runtime model, syscalls, library stubs
 import type { Result, FuncOut } from './decompile.ts'
 import { SYSCALLS } from './syscalls.ts'
+import { VIEW_NOTATION } from './views.ts'
 
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
 // x as u8|u16|u32: truncate | x as i8|i16|i32: truncate + sign-extend | (x as i64) < (y as i64): signed compare
@@ -115,6 +116,14 @@ function usedHelpers(r: Result): string[] {
 	return TYPES.split('\n').filter(l => { const m = /^declare function (\w+)\(.*\/\/ /.exec(l); return m && names.has(m[1]) })
 }
 
+/** Declarations of the typed views the output uses (x.field notation), with the notation itself. */
+function usedViews(r: Result, funcs: FuncOut[] = r.funcs): string[] {
+	const names = new Set<string>()
+	for (const f of funcs) for (const m of f.text.matchAll(/(?::|\bas) ([A-Z][A-Za-z0-9_]*)\b/g)) if (r.views.map.has(m[1])) names.add(m[1])
+	if (!names.size) return []
+	return ['// typed views: x.field is exactly the load / store / address given by the field declaration', ...VIEW_NOTATION, ...r.views.render(names)]
+}
+
 function usedSyscalls(r: Result): string[] {
 	const names = new Set<string>()
 	for (const f of r.funcs) for (const m of f.text.matchAll(/\b(sol_[a-z0-9_]+|abort)\(/g)) names.add(m[1])
@@ -143,6 +152,8 @@ export function renderSingle(r: Result): string {
 	const out: string[] = [PRELUDE, ...summary(r), '']
 	const helpers = usedHelpers(r)
 	if (helpers.length) out.push(`// helpers:`, ...helpers, '')
+	const vw = usedViews(r)
+	if (vw.length) out.push(...vw, '')
 	const sys = usedSyscalls(r)
 	if (sys.length) out.push(...sys, '')
 	if (r.stubs.length) out.push(`// library functions (recognized, not decompiled):`, ...r.stubs, '')
@@ -179,7 +190,7 @@ export function renderProject(r: Result): Map<string, string> {
 	}
 	mod(g.entry); mod(g.shared); g.ix.forEach(mod)
 	void libNames
-	const lib = [PRELUDE, TYPES, '', '// syscalls', ...usedSyscalls(r), '', '// library functions (recognized in many programs; not decompiled)', ...r.stubs].join('\n') + '\n'
+	const lib = [PRELUDE, TYPES, '', ...usedViews(r), '', '// syscalls', ...usedSyscalls(r), '', '// library functions (recognized in many programs; not decompiled)', ...r.stubs].join('\n') + '\n'
 	files.set('lib.d.ts', lib)
 	const idx = [...summary(r), '']
 	for (const i of r.instructions) idx.push(`export { ix_${i.name} } from './ix/${i.name}.ts'`)
@@ -202,7 +213,7 @@ export function renderProject(r: Result): Map<string, string> {
 		const used = new Set([...text.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\(/g)].map(m => m[1]))
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls({ ...r, funcs: order })
-		files.set(`bundle/${h.name.slice(3)}.ts`, [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...sys, ...stubs, '', text, ''].join('\n'))
+		files.set(`bundle/${h.name.slice(3)}.ts`, [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, '', text, ''].join('\n'))
 	}
 	return files
 }

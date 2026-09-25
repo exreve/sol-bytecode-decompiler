@@ -16,6 +16,7 @@ import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { findCpiSites, describeCpi, type CpiEnv } from './cpi.ts';
+import { Views } from './views.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -31,6 +32,7 @@ export interface Result {
   funcs: FuncOut[];
   stubs: string[];                 // `declare function` lines for referenced library functions
   instructions: { name: string; pc: number; disc: bigint; args?: string[]; accounts?: string[] }[];
+  views: Views;                    // typed views available to the output (declared with it)
   processors: { fn: string; names: string[] }[];  // functions handling several instructions inline (native programs)
   anchor: boolean;
   libCount: number;
@@ -163,6 +165,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
   }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
+  const views = new Views();
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
@@ -273,6 +276,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
       }
     }
+    // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
+    const varTypes = new Map<number, string>();
+    if (opts.sugar !== false) {
+      for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
+      if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
+      ctx.views = views;
+      ctx.varType = id => varTypes.get(id);
+    }
     const pr = new Printer(ctx);
     // Result<(), ProgramError> tags (u32 layout): stores of constants where the Ok tag is stored too
     if (opts.sugar !== false && sem.resultOkTag !== undefined) {
@@ -314,11 +325,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
-    if (f.isEntry) params.push('input: u64');
+    const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
+    if (f.isEntry) params.push(`input: ${paramType(1)}`);
     else {
-      for (let r = 1; r <= (f.stackArgs ? 4 : f.nparams); r++) params.push(`${paramName[r]}: u64`);
-      for (let k = 0; k < (f.stackArgs ?? 0); k++) params.push(`p${5 + k}: u64`);
-      for (const r of f.extraIn) params.push(`${paramName[r]}: u64`);
+      for (let r = 1; r <= (f.stackArgs ? 4 : f.nparams); r++) params.push(`${paramName[r]}: ${paramType(r)}`);
+      for (let k = 0; k < (f.stackArgs ?? 0); k++) params.push(`p${5 + k}: ${paramType(100 + k)}`);
+      for (const r of f.extraIn) params.push(`${paramName[r]}: ${paramType(r)}`);
     }
     const lines: string[] = [];
     const sig = `function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ''}`;
@@ -327,7 +339,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
     if (frameDecl) lines.push(frameDecl);
-    if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]} = 0`).join(', ')}`);
+    if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]}${varTypes.has(v.id) ? `: ${varTypes.get(v.id)}` : ''} = 0`).join(', ')}`);
     lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
     lines.push('}');
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
@@ -337,7 +349,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views };
   res.text = renderSingle(res);
   return res;
 }
