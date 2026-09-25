@@ -52,9 +52,11 @@ function fillBytes(seed: number, k: bigint): Uint8Array {
 	if (fillCached < 4096) { c.set(Number(k), b); fillCached++ }
 	return b
 }
-/** page buffers of released memories (ExecMem.release) */
-const bufPool: ArrayBuffer[] = []
-const tArr = (pg: Page) => (pg.t ??= new Uint8Array(4096).fill(pg.t0))
+/** pages of released memories (ExecMem.release), for their buffers and views; taint arrays likewise */
+const pagePool: Page[] = []
+const tPool: Uint8Array[] = []
+const newT = (t0: number) => (tPool.pop() ?? new Uint8Array(4096)).fill(t0)
+const tArr = (pg: Page) => (pg.t ??= newT(pg.t0))
 export class ExecMem extends TestMem {
 	fillSeed: number
 	pages = new Map<number, Page>() // (page number as a Number: exact below 2^53, and faster to hash than a BigInt)
@@ -73,8 +75,8 @@ export class ExecMem extends TestMem {
 		let pg = this.pages.get(Number(k))
 		if (pg) { this.prevK = this.lastK; this.prevPg = this.lastPg; this.lastK = k; this.lastPg = pg; return pg }
 		const base = k * PAGE
-		const pooled = bufPool.pop()
-		const b = pooled ? new Uint8Array(pooled) : new Uint8Array(4096), t0 = base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1
+		const pooled = pagePool.pop()
+		const b = pooled ? pooled.b : new Uint8Array(4096), t0 = base >= 0x3_0000_0000n && base < 0x4_0000_0000n ? 0 : 1
 		if (pooled && !this.fillSeed) b.fill(0)
 		let t: Uint8Array | undefined
 		if (this.fillSeed) b.set(fillBytes(this.fillSeed, k))
@@ -87,10 +89,10 @@ export class ExecMem extends TestMem {
 			ro ??= new Uint8Array(4096)
 			const o = Number(lo - base), n = Number(hi - lo)
 			b.set(r.bytes.subarray(Number(lo - r.vaddr), Number(lo - r.vaddr) + n), o)
-			t ??= new Uint8Array(4096).fill(t0)
+			t ??= newT(t0)
 			t.fill(0, o, o + n); ro.fill(1, o, o + n)
 		}
-		pg = { b, dv: new DataView(b.buffer), t, t0, ro }
+		pg = { b, dv: pooled ? pooled.dv : new DataView(b.buffer), t, t0, ro }
 		this.pages.set(Number(k), pg)
 		this.prevK = this.lastK; this.prevPg = this.lastPg
 		this.lastK = k; this.lastPg = pg
@@ -98,7 +100,10 @@ export class ExecMem extends TestMem {
 	}
 	/** give the pages' buffers back for reuse by later memories (this one must not be used afterwards) */
 	release() {
-		for (const pg of this.pages.values()) if (!pg.ro && bufPool.length < 1024) bufPool.push(pg.b.buffer as ArrayBuffer)
+		for (const pg of this.pages.values()) {
+			if (pg.t && tPool.length < 1024) tPool.push(pg.t)
+			if (!pg.ro && pagePool.length < 1024) pagePool.push(pg)
+		}
 		this.pages.clear(); this.lastK = this.prevK = -1n; this.lastPg = this.prevPg = undefined
 	}
 	byte(a: bigint): number { a &= M; return this.page(a >> 12n).b[Number(a & 0xfffn)] }
