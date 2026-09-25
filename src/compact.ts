@@ -60,6 +60,8 @@ function tryRun(ss: Store[], frame: boolean): Stmt | null {
 	if (!pure(base)) return null
 	const offs = ss.map(s => baseOff(s.addr)[1])
 	if (ss.some(s => s.size !== size)) return null
+	// only the function's own frame [fp - 0x1000, fp) is private and never faults
+	if (frame && ss.some((s, i) => offs[i] < -0x1000n || offs[i] + BigInt(size) > 0n)) frame = false
 	// ordering: ascending in program order, or any order for frame stores with distinct offsets
 	const order = ss.map((_, i) => i).sort((a, b) => (offs[a] < offs[b] ? -1 : 1))
 	const ascendingAsWritten = order.every((v, i) => v === i)
