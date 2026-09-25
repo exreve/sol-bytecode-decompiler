@@ -113,19 +113,20 @@ export function rewriteStackArgs(p: Program, built: Map<number, { f: VarFunc }>)
 						const vals: Expr[] = Array.from({ length: n }, (_, k) => r5 ? { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: r5, b: { k: 'const', v: BigInt.asUintN(64, BigInt(AREA + 8 * k)) } } } as Expr : { k: 'undef' } as Expr)
 						return { ...e, args: [...args.slice(0, 4), ...vals, ...extra] }
 					}
+					// (an expression without such a call is kept as it is: IR nodes are immutable)
 					switch (e.k) {
-						case 'bin': case 'cmp': case 'land': case 'lor': return { ...e, a: fixExpr(e.a), b: fixExpr(e.b) } as Expr
-						case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: fixExpr(e.a) } as Expr
-						case 'load': return { ...e, addr: fixExpr(e.addr) }
-						case 'sel': return { ...e, c: fixExpr(e.c), a: fixExpr(e.a), b: fixExpr(e.b) }
-						case 'call': case 'fn': return { ...e, args: e.args.map(fixExpr) }
+						case 'bin': case 'cmp': case 'land': case 'lor': { const a = fixExpr(e.a), b = fixExpr(e.b); return a === e.a && b === e.b ? e : { ...e, a, b } as Expr }
+						case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': { const a = fixExpr(e.a); return a === e.a ? e : { ...e, a } as Expr }
+						case 'load': { const addr = fixExpr(e.addr); return addr === e.addr ? e : { ...e, addr } }
+						case 'sel': { const c = fixExpr(e.c), a = fixExpr(e.a), b = fixExpr(e.b); return c === e.c && a === e.a && b === e.b ? e : { ...e, c, a, b } }
+						case 'call': case 'fn': { const args = keepAll(e.args, fixExpr); return args === e.args ? e : { ...e, args } as Expr }
 						default: return e
 					}
 		}
 		const fixTerm = fixExpr
 		for (const b of f.blocks) {
 			for (let i = 0; i < b.stmts.length; i++) {
-				b.stmts[i] = mapExprs(b.stmts[i], fixExpr)
+				b.stmts[i] = mapExprsKeep(b.stmts[i], fixExpr)
 				const s = b.stmts[i]
 				const n = s.k === 'call' && s.t.k === 'fn' ? nstack.get(s.t.pc) : undefined
 				if (!n || s.k !== 'call') continue
@@ -224,6 +225,25 @@ function latestStore(stmts: Stmt[], i: number, fp: number, off: number): Expr | 
 		if (t.k === 'set' && stmtExprs(t).some(e => { let c = false; walkExpr(e, x => { if (x.k === 'call') c = true }); return c })) return null
 	}
 	return null
+}
+
+/** es mapped by f; es itself when f returned every element unchanged. */
+function keepAll(es: Expr[], f: (e: Expr) => Expr): Expr[] {
+	let out: Expr[] | undefined
+	for (let i = 0; i < es.length; i++) { const n = f(es[i]); if (n !== es[i]) (out ??= es.slice())[i] = n }
+	return out ?? es
+}
+
+/** mapExprs, returning s itself when f returned every expression unchanged (statements are immutable). */
+function mapExprsKeep(s: Stmt, f: (e: Expr) => Expr): Stmt {
+	switch (s.k) {
+		case 'set': case 'eval': return f(s.e) === s.e ? s : mapExprs(s, f)
+		case 'store': return f(s.addr) === s.addr && f(s.v) === s.v ? s : mapExprs(s, f)
+		case 'call': return keepAll(s.args, f) === s.args && (s.t.k !== 'ind' || f(s.t.e) === s.t.e) && (!s.extra || keepAll(s.extra, f) === s.extra) ? s : mapExprs(s, f)
+		case 'stores': return f(s.addr) === s.addr && keepAll(s.vals, f) === s.vals ? s : mapExprs(s, f)
+		case 'copy': return f(s.dst) === s.dst && f(s.src) === s.src ? s : mapExprs(s, f)
+		default: return s
+	}
 }
 
 function mapExprs(s: Stmt, f: (e: Expr) => Expr): Stmt {
