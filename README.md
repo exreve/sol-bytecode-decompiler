@@ -42,7 +42,7 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
 | `rc_inc(p[, x])` | Rc count increment: `x = ld64(p)` (unless given); `st64(p, x + 1)`; `abort()` if x was `-1` |
 | `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
-| | (both also replace the nested form `st64(p, x + 1); if (x != -1) { …never falls through… } abort()`; assignments moved before them may read the current frame) |
+| | (`rc_inc` also replaces the nested form `st64(p, x + 1); if (x != -1) { …never falls through… } abort()`; for both, assignments moved before the helper may read the current frame) |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
 | `undef` | a register value left over by a callee (unspecified); a variable read before any assignment and call arguments omitted at the end of the list are `undef` too |
