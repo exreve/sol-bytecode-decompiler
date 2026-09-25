@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 import { b58 } from './fetch-samples.ts'
 
-const RPC = process.env.RPC ?? 'https://api.mainnet-beta.solana.com'
+const RPC = process.env.SOLANA_RPC_URL ?? ''
+if (!RPC) { console.error('set SOLANA_RPC_URL to a Solana RPC endpoint'); process.exit(1) }
 const target = Number(process.argv[2] ?? 300)
 const out = process.argv[3] ?? 'corpus'
 mkdirSync(`${out}/idl`, { recursive: true })
@@ -105,9 +106,7 @@ async function main() {
 				data = data.subarray(48)
 			}
 			if (data[0] !== 0x7f || data[1] !== 0x45) continue
-			let end = data.length
-			while (end > 0 && data[end - 1] === 0) end--
-			writeFileSync(`${out}/${pid}.so`, data.subarray(0, Math.max(end, 64)))
+			writeFileSync(`${out}/${pid}.so`, data)
 			n++
 			// anchor IDL
 			const idl = await rpc('getAccountInfo', [anchorIdlAddress(pid), { encoding: 'base64' }])

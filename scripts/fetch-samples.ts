@@ -2,7 +2,8 @@
 // usage: node scripts/fetch-samples.ts [name=ProgramId ...]   (no args: default set)
 import { writeFileSync, mkdirSync } from 'node:fs'
 
-const RPC = process.env.RPC ?? 'https://api.mainnet-beta.solana.com'
+const RPC = process.env.SOLANA_RPC_URL ?? ''
+if (!RPC) { console.error('set SOLANA_RPC_URL to a Solana RPC endpoint'); process.exit(1) }
 const DEFAULT: Record<string, string> = {
 	memo: 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',
 	ata: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',

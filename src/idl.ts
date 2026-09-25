@@ -93,10 +93,14 @@ export function anchorIdlAddress(programId: string): string {
 	throw new Error('no pda')
 }
 
-export async function fetchIdl(programId: string, rpc = process.env.RPC ?? 'https://api.mainnet-beta.solana.com'): Promise<any | undefined> {
+export async function fetchIdl(programId: string, rpc: string): Promise<any | undefined> {
 	const r = await fetch(rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAccountInfo', params: [anchorIdlAddress(programId), { encoding: 'base64' }] }) })
 	const v = (await r.json() as any).result?.value
-	if (!v) return undefined
+	// the IDL account is owned by the program: [8 discriminator][32 authority][u32 len][zlib json]
+	if (!v || v.owner !== programId) return undefined
 	const raw = Buffer.from(v.data[0], 'base64')
-	return JSON.parse(inflateSync(raw.subarray(44, 44 + raw.readUInt32LE(40))).toString())
+	if (raw.length < 44) return undefined
+	const len = raw.readUInt32LE(40)
+	if (44 + len > raw.length) return undefined
+	try { return JSON.parse(inflateSync(raw.subarray(44, 44 + len)).toString()) } catch { return undefined }
 }

@@ -1,19 +1,77 @@
 # sol-bytecode-decompiler
 
-Decompiles Solana sBPF programs (`.so`, SBPF v0–v3) into compact, **semantically exact** TypeScript,
-designed to be read by LLMs reviewing many programs.
+Decompiles deployed Solana programs (sBPF `.so`, SBPF v0–v3) into compact, **semantically exact**
+TypeScript, made to be read by AI models (and humans) reviewing many programs.
+
+* works on stripped mainnet binaries: native, Anchor, pinocchio, hand-written asm
+* fetches programs by address from any RPC endpoint you provide (no built-in endpoint)
+* one file per instruction handler, self-contained per-instruction bundles, an instruction index
+* recognizes generic library code (Rust std, solana-program, anchor-lang, spl, …) and shows it as one-line
+  typed stubs with real Rust names instead of decompiling it
+* names instructions (Anchor discriminators, `"Instruction: X"` logs, on-chain IDL), accounts fields,
+  well-known program ids, error codes, strings
+* every function is checked against an independent sBPF emulator (see [Exactness](#exactness-and-how-it-is-verified))
+
+Requires Node ≥ 23.6 (runs the TypeScript sources directly). No runtime dependencies.
+
+## Quick start
+
+```sh
+git clone https://github.com/exreve/sol-bytecode-decompiler && cd sol-bytecode-decompiler
+npm install                                  # dev dependencies (tests only)
+
+# a local binary
+node src/cli.ts program.so -o out.ts
+
+# a deployed program, by address (any RPC endpoint; none is built in)
+node src/cli.ts whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc --rpc https://your-rpc.example -o whirlpool/
+
+# or set the endpoint once
+export SOLANA_RPC_URL=https://your-rpc.example
+node src/cli.ts TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb -o token22/
+```
+
+More recipes: [docs/USAGE.md](docs/USAGE.md).
+
+## Usage
 
 ```
-node src/cli.ts program.so                 # single file to stdout
-node src/cli.ts program.so -o out.ts       # single file
-node src/cli.ts program.so -o outdir/      # project layout (see below)
-  --idl f.json         Anchor IDL: instruction args/accounts (signer/mut/pda), custom error names
-  --program-id <id>    fetch the on-chain Anchor IDL (mainnet, or $RPC)
-  --full   also decompile recognized library functions
-  --raw    no Solana-specific names/comments (the form verified by the test harness)
+sbpf-decompile <input> [options]
+
+input:
+  program.so            a local program binary
+  <program address>     fetched from an RPC endpoint (needs --rpc or $SOLANA_RPC_URL)
+  -                     read the binary from stdin
+
+output:
+  (default)             single file to stdout
+  -o out.ts             single file
+  -o outdir/            project layout (see below)
+
+options:
+  --rpc <url>           Solana RPC endpoint (default: $SOLANA_RPC_URL; there is no built-in endpoint)
+  --idl <file.json>     Anchor IDL: instruction args/accounts (signer/mut/pda), custom error names
+  --program-id <id>     fetch the on-chain Anchor IDL for this program id (with a local input)
+  --no-idl              do not fetch the on-chain IDL automatically for an address input
+  --save-so <file>      save the fetched binary
+  --full                also decompile recognized library functions
+  --raw                 no Solana-specific names/comments (the form verified by the tests)
+  --exact-memory        keep every stack access in memory (see Exactness)
 ```
 
-Requires Node ≥ 23.6 (runs TypeScript directly). No runtime dependencies.
+When the input is an address, the program is fetched (BPFLoader 1/2, upgradeable loader via its
+programdata account, loader v4) and its on-chain Anchor IDL is used automatically when it exists.
+
+Other tools:
+
+```
+node src/selector.ts 0xc88775e1919ec6f8     # discriminator -> name   (i:swap)
+node src/selector.ts open_position          # name -> instruction / account / event discriminators
+node test/equiv.ts program.so 3             # check the decompilation of every function (see below)
+```
+
+Speed (warm cache, 8-core VM): memo 0.8 s, token-2022 4 s, whirlpool (173k instructions) 7 s,
+jupiter (258k instructions) 12 s.
 
 ## Output
 
@@ -120,15 +178,14 @@ node src/selector.ts open_position          # -> instruction / account / event d
 
 ## Exactness and how it is verified
 
-Every transformation is an identity on the VM semantics — with one documented assumption in the
-default mode: stack slots of the current function are only accessed through frame-pointer-derived
+Every transformation is an identity on the VM semantics (agave `solana-sbpf` interpreter, including
+quirks such as SBPF v0 `add32/sub32/mul32` sign-extending their result), with one documented
+assumption in the default mode: stack slots of the current function are only accessed through frame-pointer-derived
 addresses (true for every memory-safe execution). Stack slots whose address never escapes become
 variables, and SBF stack-passed arguments become parameters. `--exact-memory` turns both off, making
 the output exact even for executions that corrupt their own stack frame through wild pointers.
 
-Every transformation is an identity on the VM semantics (agave `solana-sbpf` interpreter, including
-quirks such as SBPF v0 `add32/sub32/mul32` sign-extending their result). Traps (division by zero,
-memory faults) are never dropped or reordered across side effects.
+Traps (division by zero, memory faults) are never dropped or reordered across side effects.
 
 `test/equiv.ts` checks this differentially for **every function**:
 
@@ -142,12 +199,17 @@ memory faults) are never dropped or reordered across side effects.
   arguments, stores outside the frame, frame state at every call, return value, abort — must match.
 
 ```
-node test/equiv.ts samples/token22.so 4      # 545 functions, 2180 trials, 0 failing
+node test/equiv.ts samples/token22.so 3      # 545 functions, 1632 trials, 0 failing
+npm test                                     # unit tests, printer/simplifier fuzzer, samples
 ```
+
+Checked on all bundled samples (memo, token, ata, stake-pool, token-2022, whirlpool, jupiter);
+`scripts/equiv-corpus.sh` runs it over a mainnet corpus (`scripts/corpus.ts`).
 
 ## Data pipeline (maintainers)
 
 ```
+export SOLANA_RPC_URL=...                             # the scripts use it too (no default)
 node scripts/fetch-samples.ts                         # sample programs from mainnet
 node scripts/corpus.ts 400 corpus                     # mainnet corpus + on-chain Anchor IDLs
 node scripts/build-libdb.ts corpus 3                  # data/libsigs.json
