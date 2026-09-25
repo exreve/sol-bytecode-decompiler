@@ -70,8 +70,8 @@ node src/selector.ts open_position          # name -> instruction / account / ev
 node test/equiv.ts program.so 3             # check the decompilation of every function (see below)
 ```
 
-Speed (warm cache, 8-core VM): memo 0.8 s, token-2022 4 s, whirlpool (173k instructions) 7 s,
-jupiter (258k instructions) 12 s.
+Speed (warm cache, 8-core VM): memo 0.5 s, token-2022 2.2 s, whirlpool (173k instructions) 3.6 s,
+jupiter (258k instructions) 5.4 s (peak memory 0.2 / 0.3 / 0.5 / 0.6 GB).
 
 ## Output
 
