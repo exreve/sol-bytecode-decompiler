@@ -42,7 +42,8 @@ program/ix/<ix>.ts      the handler and helpers used only by it
 program/shared.ts       helpers used by several instructions
 program/entrypoint.ts   entrypoint, dispatcher, remaining code
 program/lib.d.ts        runtime model (what every helper means), syscalls, library stubs
-program/security/       derived analysis: summary.md (read first), <ix>.md, analysis.json
+program/security/       derived analysis: summary.md (read first), <ix>.md, analysis.json;
+                        fingerprints.json (per-function hashes, for diffing and fork matching)
 ```
 
 For AI review: give the model `security/summary.md` + `index.ts` + `lib.d.ts`, then one `bundle/<ix>.ts` at a
@@ -71,6 +72,18 @@ node src/selector.ts 0xc88775e1919ec6f8    # a constant as printed in the output
 node src/selector.ts f8c69e91e17587c8      # raw instruction-data bytes work too
 node src/selector.ts deposit               # name -> instruction / account / event discriminators
 ```
+
+## Compare two programs
+
+```sh
+node src/diff.ts old.so new.so              # upgrade diff: changed/added/removed functions per instruction
+node src/diff.ts fork.so original.so        # fork matching: share of user code identical / near
+node src/diff.ts a.so b.so --idl-a a.json --idl-b b.json --all   # IDL instruction names too; full lists
+```
+
+`same code (e.g. redeployed at a new address)` means the same set of function hashes (addresses, call
+targets and rodata locations normalized). Library code is summarized in one line (a different toolchain or
+dependency version); "constants only" lists the rodata constants that changed (e.g. a hard-coded key).
 
 ## Check a decompilation
 
