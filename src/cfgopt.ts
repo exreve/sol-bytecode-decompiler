@@ -171,91 +171,76 @@ export function localConstProp(f: VarFunc): boolean {
   return changed;
 }
 
-/** Variables live at the entry of each block (bitsets indexed by variable id). */
-export function liveInSets(f: VarFunc): Uint32Array[] {
-  // Same scheme as deadStores: liveIn = gen | (out & ~kill) with gen/kill computed once per block
-  // (the former version re-walked every expression and allocated a fresh set per block on every
-  // pass), re-evaluating only blocks whose successors changed. Liveness has a unique least fixpoint,
-  // which both reach from the all-empty start, so the sets are the same.
-  const W = (f.vars.length + 31) >>> 5, nb = f.blocks.length;
-  const liveIn = f.blocks.map(() => new Uint32Array(W));
-  const gen = f.blocks.map(() => new Uint32Array(W)), kill = f.blocks.map(() => new Uint32Array(W));
-  for (let id = 0; id < nb; id++) {
-    const b = f.blocks[id], g = gen[id], kl = kill[id];
-    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') g[x.id >>> 5] |= 1 << (x.id & 31); });
-    if (b.term.k === 'br') uses(b.term.c);
-    else if (b.term.k === 'ret' && b.term.e) uses(b.term.e);
-    for (let i = b.stmts.length - 1; i >= 0; i--) {
-      const s = b.stmts[i];
-      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { g[s.dst >>> 5] &= ~(1 << (s.dst & 31)); kl[s.dst >>> 5] |= 1 << (s.dst & 31); }
-      for (const v of stmtInfo(s).vars) g[v >>> 5] |= 1 << (v & 31); // = walking stmtExprs(s)
-    }
-  }
+/**
+ * Least solution of liveIn = gen | (OR of the successors' liveIn) & ~kill over W-word rows of flat
+ * arrays (row = block id). (b, v) is in it exactly when some path along successors from b reaches a
+ * block reading v before writing it, with no block before that one (b included) writing v; so each
+ * variable is propagated backwards from the blocks that read it first, through predecessors that do
+ * not write it. That is the least fixpoint the former round-robin iteration reached, computed with
+ * work proportional to the live ranges instead of blocks x variables per pass.
+ */
+function solveLiveIn(f: VarFunc, W: number, gen: Uint32Array, kill: Uint32Array): Uint32Array {
+  const nb = f.blocks.length;
+  const liveIn = gen.slice();
   const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
   for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
-  const dirty = new Uint8Array(nb).fill(1);
-  for (let changed = true; changed;) {
-    changed = false;
-    for (let id = nb - 1; id >= 0; id--) {
-      if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
-      dirty[id] = 0;
-      const succs = f.blocks[id].succs, li = liveIn[id], g = gen[id], kl = kill[id];
-      let upd = false;
-      for (let k = 0; k < W; k++) {
-        let o = 0;
-        for (const s of succs) o |= liveIn[s][k];
-        const v = (g[k] | (o & ~kl[k])) >>> 0;
-        if (v !== li[k]) { li[k] = v; upd = true; }
-      }
-      if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
+  const stack: number[] = []; // (block, variable) pairs just made live-in
+  for (let b = 0; b < nb; b++) {
+    for (let k = 0; k < W; k++) {
+      let w = gen[b * W + k];
+      while (w) { const t = w & -w; stack.push(b, k * 32 + 31 - Math.clz32(t)); w ^= t; }
+    }
+  }
+  while (stack.length) {
+    const v = stack.pop()!, b = stack.pop()!;
+    const k = v >>> 5, m = 1 << (v & 31);
+    for (const u of users[b]) {
+      const i = u * W + k;
+      if (!(kill[i] & m) && !(liveIn[i] & m)) { liveIn[i] |= m; stack.push(u, v); }
     }
   }
   return liveIn;
 }
 
+/** gen (variables read before written) and kill (written) of every block, as W-word rows. */
+function genKill(f: VarFunc, W: number): { gen: Uint32Array; kill: Uint32Array } {
+  const nb = f.blocks.length;
+  const gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
+  for (let id = 0; id < nb; id++) {
+    const b = f.blocks[id], base = id * W;
+    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') gen[base + (x.id >>> 5)] |= 1 << (x.id & 31); });
+    if (b.term.k === 'br') uses(b.term.c);
+    else if (b.term.k === 'ret' && b.term.e) uses(b.term.e);
+    for (let i = b.stmts.length - 1; i >= 0; i--) {
+      const s = b.stmts[i];
+      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { gen[base + (s.dst >>> 5)] &= ~(1 << (s.dst & 31)); kill[base + (s.dst >>> 5)] |= 1 << (s.dst & 31); }
+      for (const v of stmtInfo(s).vars) gen[base + (v >>> 5)] |= 1 << (v & 31); // = walking stmtExprs(s)
+    }
+  }
+  return { gen, kill };
+}
+
+/** Variables live at the entry of each block (bitsets indexed by variable id). */
+export function liveInSets(f: VarFunc): Uint32Array[] {
+  const W = (f.vars.length + 31) >>> 5;
+  const { gen, kill } = genKill(f, W);
+  const liveIn = solveLiveIn(f, W, gen, kill);
+  return f.blocks.map((_, b) => liveIn.subarray(b * W, b * W + W));
+}
+
 /** Backward variable liveness; removes dead pure assignments (multi-def variables included). */
 export function deadStores(f: VarFunc): boolean {
-  const nv = f.vars.length, W = (nv + 31) >>> 5, nb = f.blocks.length;
+  const nv = f.vars.length, W = (nv + 31) >>> 5;
   // bitsets are W-word rows of flat arrays (row id = block id): no per-block allocations
-  const liveIn = new Uint32Array(nb * W), gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
   const setBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] |= 1 << (v & 31); };
   const clrBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] &= ~(1 << (v & 31)); };
   const uses = (e: Expr, a: Uint32Array, base: number) => walkExpr(e, x => { if (x.k === 'var') setBit(a, base, x.id); });
   // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
   const usesS = (s: Stmt, a: Uint32Array, base: number) => { for (const v of stmtInfo(s).vars) setBit(a, base, v); };
-  // The non-applying transfer is liveIn = gen | (out & ~kill); compute gen/kill once per block
-  // instead of re-walking every expression on each iteration. Liveness has a unique least fixpoint,
-  // so the result is the same.
-  for (let id = 0; id < nb; id++) {
-    const b = f.blocks[id], base = id * W;
-    const t = b.term;
-    if (t.k === 'br') uses(t.c, gen, base);
-    else if (t.k === 'ret' && t.e) uses(t.e, gen, base);
-    for (let i = b.stmts.length - 1; i >= 0; i--) {
-      const s = b.stmts[i];
-      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { clrBit(gen, base, s.dst); setBit(kill, base, s.dst); }
-      usesS(s, gen, base);
-    }
-  }
-  const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
-  for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
-  const dirty = new Uint8Array(nb).fill(1);
-  for (let changed = true; changed;) {
-    changed = false;
-    for (let id = nb - 1; id >= 0; id--) {
-      if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
-      dirty[id] = 0;
-      const succs = f.blocks[id].succs, base = id * W;
-      let upd = false;
-      for (let k = 0; k < W; k++) {
-        let o = 0;
-        for (const s of succs) o |= liveIn[s * W + k];
-        const v = (gen[base + k] | (o & ~kill[base + k])) >>> 0;
-        if (v !== liveIn[base + k]) { liveIn[base + k] = v; upd = true; }
-      }
-      if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
-    }
-  }
+  // The non-applying transfer is liveIn = gen | (out & ~kill), solved once (see solveLiveIn) from
+  // gen/kill computed once per block.
+  const { gen, kill } = genKill(f, W);
+  const liveIn = solveLiveIn(f, W, gen, kill);
   // apply: walk each block backwards from its live-out (liveIn is not updated while applying)
   const live = new Uint32Array(W);
   const has = (v: number) => (live[v >>> 5] >>> (v & 31)) & 1;
