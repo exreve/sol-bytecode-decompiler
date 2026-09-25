@@ -1,11 +1,13 @@
-// Program analysis (phase 1 of docs/ANALYSIS_SPEC.md): per-instruction facts aggregated from the
-// per-function facts (facts.ts) over the call graph, and the reports written to security/.
+// Program analysis (docs/ANALYSIS_SPEC.md): per-instruction facts aggregated from the per-function facts
+// (facts.ts) over the call graph, IR-level facts (flow.ts), the phase 2 views (phase2.ts), and the reports
+// written to security/.
 //
 // DERIVED and OVER-APPROXIMATE: the decompiled code is the verified source of truth; everything here is
 // read off it by structural heuristics and may be incomplete or wrong. Statuses:
-//   found      a check was found on every path of the instruction that does not exit early (it is not
-//              nested under other branching, in its function nor at the calls leading to it)
-//   partial    a check was found, but only on some paths
+//   found      a check dominates every sensitive operation of the instruction (real dominators, across
+//              calls: see phase2.ts dominance); in an instruction without one, it is on every path that
+//              does not exit early (not nested under other branching, in its function nor at the calls)
+//   partial    a check was found, but it dominates only some operations (or is only on some paths)
 //   not_found  no check was found (not a proof of absence: it may be made in a way not recognized)
 //   runtime    enforced by the Solana runtime (a written account must be writable and owned by the
 //              program; a CPI's signer / writable privileges cannot exceed the caller's; the invoked
@@ -17,24 +19,35 @@
 // Accounts>::try_accounts` results) get the checks of the callee (its Anchor error codes, the account types
 // of the library functions it uses: Signer, Account, Program, …). Accounts are named by the IDL, the
 // program's account-error strings, and the names the code gives them (a temporary is shown as `name?`).
+// Also (flow.ts): Anchor account fields stored before the exit serialization; functions reached through
+// function pointers / tables / vtables (conditional; a fast path picked by discriminator); native programs
+// split per instruction on the tag dispatch (kind 'native', `dispatch` says how), accounts in temporaries
+// resolved to account[i] (input record array, &[AccountInfo] slice) and named by a well-known layout.
 //
 // security/analysis.json schema ("schema": "sbpf-decompiler/security@1"):
 //   program      { version, instructions (sBPF), functions, anchor, idl }
 //   instructions [ {
-//     name, handler (function), kind ('anchor' | 'native' | 'processor' | 'entrypoint'), score, effects: [string],
-//     functions: [function names reachable from the handler through direct calls],
-//     accounts: [ { index?, name, source ('idl' | 'str' | 'code'), expected: { signer?, writable?, pda?, address?, optional? },
+//     name, handler (function), kind ('anchor' | 'native' | 'processor' | 'entrypoint'), dispatch?, score, effects: [string],
+//     functions: [function names reachable from the handler], indirect?: [functions reached through pointers (why)],
+//     accounts: [ { index?, name, source ('idl' | 'str' | 'code' | 'known'), expected: { signer?, writable?, pda?, address?, optional? },
 //                   constraints: { <kind>: { status, at?, via?, note? } } } ],
-//     checks:   [ { at, status ('found' | 'partial'), account?, kinds: [string], cond, fails_if (bool: the exit is taken when cond holds),
+//     checks:   [ { id, at, status ('found' | 'partial'), account?, kinds: [string], cond, fails_if (bool: the exit is taken when cond holds),
 //                   error, via? } ],
 //     operations: [ { at, kinds: [OpKind], text, path ('main' | 'conditional'), target?, how?, value?,
 //                     cpi?: { program, known?, program_check, instruction?, accounts: [ { role?, text, w?, s? } ], fields: [[name, value]], seeds? },
-//                     pda?: { fn, seeds, program } } ],
+//                     pda?: { fn, seeds, program },
+//                     guarded_by?: [check id] (dominating checks), bypass?: [ { check, path: [at] } ] (a path reaching it without that check),
+//                     sources?: [ { param, source (ix data / ix.<arg> / <account>.key / <account>.<field>), trust } ] } ],
+//     trust:     [ { value (<account>.key | <account>.data | ix.<arg>), trust ('caller-controlled' | 'validated' | 'partially-validated' | 'runtime'), evidence } ],
+//     relations: [ { a, b, kind ('key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'), status, at } ],
+//     authority: [ { operation (index), kind, enabled_by: [ { kind ('signer' | 'stored' | 'pda' | 'none'), what, status?, writtenBy? } ] } ],
 //   } ]
+//   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low'), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
+//   authority_fields [ { field, writtenBy: [ix] } ]: stored fields written by an AUTHORITY_WRITE
 //   pdas         [ { seeds, program, derived_in: [ix], signs_in: [ix], accounts: [ix.account with a seeds constraint], compared: status } ]
 //   state_writes [ { target (account.field), writes: [ { ix, how, at } ] } ]
 //   dependencies [ { target, read_by: [ix] (in checks), written_by: [ix] } ]
-//   unattributed_operations [ { at, kinds, text, target?, how?, cpi? } ]: in functions no handler reaches through direct calls
+//   unattributed_operations [ { at, kinds, text, target?, how?, cpi? } ]: in functions no handler reaches
 // `at` = { fn, line (1-based, in the function's text), pc? (sBPF instruction index), file?, file_line? (the line in that file) }.
 // constraint kinds: signer, writable, owner, discriminator, initialized, pda, address, executable, has_one, key, state,
 //   custom (IDL error), raw, rent_exempt, count, token_mint, token_owner, …; op kinds: see facts.ts OpKind.
