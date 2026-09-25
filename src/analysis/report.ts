@@ -41,7 +41,7 @@
 import type { Result } from '../decompile.ts'
 import type { FnFacts, Op, OpKind } from './facts.ts'
 import { refOf } from './facts.ts'
-import { addExitWrites } from './flow.ts'
+import { addExitWrites, indirectTargets } from './flow.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -65,6 +65,7 @@ export interface IxOut {
 	ops: OpOut[]
 	score: number
 	effects: string[]
+	indirect: string[]   // functions reached through function pointers / tables (and why)
 }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
 export interface Analysis {
@@ -106,6 +107,7 @@ function parseIdlAccount(s: string, i: number): AccountRow {
 function analyze0(r: Result): Analysis {
 	const facts = r.facts, p = r.program
 	addExitWrites(r)
+	const ind = indirectTargets(r)
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	const procNames = new Set(r.processors.map(x => x.fn))
 	let roots = r.funcs.filter(f => f.name.startsWith('ix_') || procNames.has(f.name))
@@ -136,10 +138,16 @@ function analyze0(r: Result): Analysis {
 		// function, exit; its branches only handle errors, so its calls outside error paths are made on
 		// every successful path)
 		const generated = h.name.startsWith('ix_') && r.anchor
+		// (functions reached through function pointers / tables: conditional; a fast-path handler the
+		// entrypoint picks from a table by this instruction's discriminator)
+		const indirect: string[] = []
+		const viaPtr = (t: number, why: string) => { if (!main.has(t) && !rootPcs.has(t) && facts.has(t)) { if (facts.get(t)!.ops.length || !why.startsWith('function')) indirect.push(`${facts.get(t)!.name} (${why})`); reach(t, false) } }
+		if (info) for (const t of ind.byDisc.get(info.disc) ?? []) viaPtr(t, 'entrypoint table entry chosen by the discriminator')
 		while (q.length) {
 			const x = q.shift()!
 			const m = main.get(x)!
 			for (const c of facts.get(x)?.calls ?? []) if (!c.errPath) reach(c.callee, m && (c.main || (generated && x === h.pc)))
+			for (const t of ind.targets.get(x) ?? []) viaPtr(t, `function pointer in ${facts.get(x)?.name}`)
 		}
 		const fns = [...main.keys()].map(pc => facts.get(pc)!).filter(Boolean)
 		// the accounts: IDL, else the program's account-error strings, then names met in the code
@@ -244,7 +252,7 @@ function analyze0(r: Result): Analysis {
 		// unverified expected privileges raise the rank
 		for (const x of accounts) for (const [k, ev] of Object.entries(x.constraints)) if (ev.status === 'not_found' && (k === 'signer' || k === 'pda' || k === 'address')) score += 2
 		const kind: IxOut['kind'] = !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
-		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects })
+		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect })
 	}
 	ixs.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name))
 	// operations in code no handler reaches through direct calls (function pointers, dispatch tables)
@@ -315,7 +323,7 @@ export function renderJson(a: Analysis, where: Where): string {
 		note: 'derived, over-approximate facts read off the decompiled code (the verified source of truth); statuses: found | partial | not_found (no check found, not a proof of absence) | runtime (enforced by the Solana runtime)',
 		program: a.program,
 		instructions: a.ixs.map(ix => ({
-			name: ix.name, handler: ix.handler, kind: ix.kind, score: ix.score, effects: ix.effects, functions: ix.functions,
+			name: ix.name, handler: ix.handler, kind: ix.kind, score: ix.score, effects: ix.effects, functions: ix.functions, indirect: ix.indirect.length ? ix.indirect : undefined,
 			accounts: ix.accounts.map(x => ({ index: x.index, name: x.name, source: x.source, expected: x.expected, constraints: Object.fromEntries(Object.entries(x.constraints).map(([k, e]) => [k, ev(ix.name, e)])) })),
 			checks: ix.checks.map(c => ({ at: L(ix.name, c.at), status: c.status, account: c.account, kinds: c.kinds, cond: c.cond, fails_if: c.failsIf, error: c.error, via: c.via })),
 			operations: ix.ops.map(o => ({
@@ -407,6 +415,7 @@ const md = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 export function renderIx(ix: IxOut, where: Where): string {
 	const W = (at: Loc) => at2s(where, ix.name, at)
 	const out = [`# ${ix.name}`, '', ...HEADER, '', `Handler ${ix.handler} (${ix.kind}); ${ix.functions.length} functions reachable: ${ix.functions.slice(0, 12).join(', ')}${ix.functions.length > 12 ? ', …' : ''}.`, '']
+	if (ix.indirect.length) out.push(`Reached through function pointers / tables (conditional): ${ix.indirect.slice(0, 8).join(', ')}${ix.indirect.length > 8 ? ', …' : ''}.`, '')
 	const fl = flags(ix)
 	if (fl.length) out.push('## Look first', '', ...fl.map(f => `- ⚠ ${f}`), '')
 	out.push('## Account privileges (expected by the IDL · verified by the code)', '', '| # | account | signer | writable | owner | executable | address |', '|---|---|---|---|---|---|---|')

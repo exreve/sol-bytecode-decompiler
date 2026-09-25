@@ -278,3 +278,73 @@ export function addExitWrites(r: Result) {
 		}
 	}
 }
+
+// ---- indirect calls: constant function pointers, tables, vtables ----
+
+export interface Indirect { targets: Map<number, number[]>; byDisc: Map<bigint, number[]> }
+
+/**
+ * Functions a function may reach other than by direct calls: `callx` through a constant, a table entry
+ * `ld64(C + k)` in read-only memory (C a constant, or a variable only ever set to constants), function
+ * addresses it passes or stores, and the function entries of read-only tables (vtables) whose address it
+ * uses. Table entries chosen after comparing an 8-byte value with an instruction discriminator are
+ * returned by discriminator (hand-written fast-path dispatch of an Anchor program).
+ */
+export function indirectTargets(r: Result): Indirect {
+	const p = r.program
+	const targets = new Map<number, number[]>(), byDisc = new Map<bigint, number[]>()
+	const fnAt = (a: bigint): number | undefined => {
+		const o = a - p.textVaddr
+		if (o < 0n || o % 8n !== 0n) return undefined
+		const pc = Number(o / 8n)
+		return p.funcs.has(pc) ? pc : undefined
+	}
+	const ro = (a: bigint) => { const g = p.image.region(a, 8); return !!g && !g.exec && /^\.(rodata|data\.rel\.ro)$/.test(g.name) }
+	const discs = new Set(r.instructions.map(i => i.disc))
+	for (const fo of r.funcs) {
+		const out = new Set<number>()
+		const consts = new Map<number, { v: bigint; b: number }[]>() // var -> the constants it is set to (in which block)
+		const other = new Set<number>()
+		fo.f.blocks.forEach((b, bi) => {
+			for (const s of b.stmts) {
+				if (s.k === 'set') { if (s.e.k === 'const') { let l = consts.get(s.dst); if (!l) consts.set(s.dst, (l = [])); l.push({ v: s.e.v, b: bi }) } else other.add(s.dst) }
+				else if (s.k === 'call' && s.dst >= 0) other.add(s.dst)
+				for (const e of stmtExprs(s)) walkExpr(e, x => {
+					if (x.k !== 'const') return
+					const t = fnAt(x.v)
+					if (t !== undefined && p.addressTaken.has(t)) out.add(t)
+					else if (ro(x.v)) for (let k = 0; k < 12; k++) {
+						const w = p.image.readConst(x.v + BigInt(8 * k), 8)
+						const t2 = w === undefined ? undefined : fnAt(w)
+						if (t2 !== undefined && p.addressTaken.has(t2)) out.add(t2)
+						else if (w === undefined || w > 0x10000n) break
+					}
+				})
+			}
+		})
+		for (const b of fo.f.blocks) for (const s of b.stmts) {
+			const c = callOf(s)
+			if (c?.t.k !== 'ind') continue
+			const e = c.t.e
+			if (e.k === 'const') { const t = fnAt(e.v); if (t !== undefined) out.add(t); continue }
+			if (e.k !== 'load' || e.size !== 8) continue
+			const a = e.addr
+			const [base, k] = a.k === 'bin' && a.op === 'add' && a.b.k === 'const' ? [a.a, a.b.v] : [a, 0n]
+			if (base.k === 'const') { const w = p.image.readConst(base.v + k, 8); const t = w === undefined ? undefined : fnAt(w); if (t !== undefined) out.add(t); continue }
+			if (base.k !== 'var' || other.has(base.id)) continue
+			for (const d of consts.get(base.id) ?? []) {
+				const w = p.image.readConst(d.v + k, 8)
+				const t = w === undefined ? undefined : fnAt(w)
+				if (t === undefined) continue
+				// (the constant chosen right before comparing an 8-byte value with a discriminator)
+				const term = fo.f.blocks[d.b].term
+				const cd = term.k === 'br' && term.c.k === 'cmp' && (term.c.op === 'eq' || term.c.op === 'ne') ? (term.c.b.k === 'const' ? term.c.b.v : term.c.a.k === 'const' ? term.c.a.v : undefined) : undefined
+				if (cd !== undefined && discs.has(cd)) { let l = byDisc.get(cd); if (!l) byDisc.set(cd, (l = [])); l.push(t) }
+				else out.add(t)
+			}
+		}
+		out.delete(fo.pc)
+		if (out.size) targets.set(fo.pc, [...out])
+	}
+	return { targets, byDisc }
+}
