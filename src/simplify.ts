@@ -370,8 +370,9 @@ function propagateGlobal(f: VarFunc, st: { real: boolean }): boolean {
   }
   if (!m.size) return false;
   // resolve chains; keep only substitutions that stay small (no duplication blow-up)
-  for (const [v, e] of m) m.set(v, resolve(e, m, 0));
-  for (const [v, e] of m) if (exprSize(e) > 4) m.delete(v);
+  // (the first pass stops resolving an entry once it exceeds the size limit: see resolveSmall)
+  for (const [v, e] of m) m.set(v, resolveSmall(e, m, 0));
+  for (const [v, e] of m) if (e === TOO_BIG || exprSize(e) > 4) m.delete(v);
   for (const [v, e] of m) m.set(v, resolve(e, m, 0));
   // Historical result: the former rewrite rebuilt every non-trap statement, so it reported a change
   // whenever some block has one (or a terminator was rewritten); optimizeFunc's round count depends on it.
@@ -395,6 +396,29 @@ function resolve(e: Expr, m: Map<number, Expr>, depth: number): Expr {
   if (depth > 20) return e;
   const n = substVars(e, m);
   return n === e ? e : resolve(n, m, depth + 1);
+}
+
+/** Stand-in for a resolved expression larger than 4 nodes (such entries are dropped). */
+const TOO_BIG: Expr = { k: 'undef' };
+
+/**
+ * resolve() for the first chain-resolution pass, whose results larger than 4 nodes are all dropped.
+ * Substituting variables never shrinks an expression, so once an intermediate result exceeds 4
+ * nodes (or would contain a TOO_BIG value) the final one would too: return TOO_BIG instead of
+ * building it. Results that stay small are computed exactly as resolve() does. This avoids the
+ * exponential growth of chains like `x2 = x1 * x1`, `x3 = x2 * x2`, ... in huge straight-line code.
+ */
+function resolveSmall(e: Expr, m: Map<number, Expr>, depth: number): Expr {
+  for (;;) {
+    if (depth > 20) return e;
+    let hit = false, big = false;
+    walkExpr(e, x => { if (x.k === 'var') { const r = m.get(x.id); if (r !== undefined) { hit = true; if (r === TOO_BIG) big = true; } } });
+    if (!hit) return e;
+    if (big) return TOO_BIG;
+    const n = substVars(e, m);
+    if (exprSize(n) > 4) return TOO_BIG;
+    e = n; depth++;
+  }
 }
 
 /** Inline single-use definitions into their (same-block) use when no intervening statement interferes. */

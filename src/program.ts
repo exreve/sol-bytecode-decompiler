@@ -82,6 +82,21 @@ export class Lifter {
     return t !== undefined ? { k: 'fn', pc: t } : null;
   }
 
+  /**
+   * lift() memoized per pc. Functions overlap heavily before noreturn calls are known (code after a
+   * panic call falls through into whatever follows), so without sharing the same instructions are
+   * lifted many times over. The returned statements/expressions are shared between functions:
+   * nothing mutates them in place except call statements in variable recovery, and
+   * inferSignatures gives every function its own copies of those (unshareCalls) before that.
+   * Lifting is a pure function of the pc apart from registering syscalls, which the first lift does.
+   */
+  private memo = new Map<number, Lifted>();
+  liftShared(pc: number): Lifted {
+    let l = this.memo.get(pc);
+    if (!l) { l = this.lift(pc); this.memo.set(pc, l); }
+    return l;
+  }
+
   syscallByImm(imm: number): CallTarget | null {
     const sc = SYSCALL_BY_HASH.get(imm >>> 0);
     if (!sc) return null;
@@ -328,7 +343,7 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       if (seen.has(pc)) break;
       seen.add(pc);
       if (pc < 0 || pc >= p.insns.length || !starts[pc]) break;
-      const l = lifter.lift(pc);
+      const l = lifter.liftShared(pc);
       lifted.set(pc, l);
       if ('next' in l) { pc = l.next; continue; }
       const t = l.term;
@@ -348,7 +363,7 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
       const l = pc >= 0 && pc < p.insns.length && starts[pc] ? lifted.get(pc) : undefined;
       if (!l) { b.term = { k: 'trap', msg: pc >= p.insns.length || pc < 0 ? 'jump outside text' : 'jump into middle of lddw' }; break; }
       b.stmts.push(...l.stmts);
-      if ('term' in l) { b.term = l.term; b.end = pc; break; }
+      if ('term' in l) { b.term = { ...l.term }; b.end = pc; break; } // terminators are patched per function (block ids): never shared
       b.end = pc;
       if (blockAt.has(l.next)) { b.term = { k: 'jmp', to: l.next }; break; }
       pc = l.next;

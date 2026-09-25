@@ -179,6 +179,12 @@ export function inferSignatures(p: Program) {
   }
   // Cut blocks after calls to noreturn callees (code after them is unreachable)
   for (const f of funcs) truncateNoreturn(p, f);
+  // lifted statements are shared between overlapping functions (Lifter.liftShared); call statements
+  // get per-function state (indClobber, and in-place rewriting in recoverVars): unshare them now
+  for (const f of funcs) for (const b of f.blocks) {
+    const ss = b.stmts;
+    for (let i = 0; i < ss.length; i++) if (ss[i].k === 'call') ss[i] = { ...ss[i] };
+  }
   for (const f of funcs) computeIndClobber(p, f);
   for (const f of funcs) {
     f.nparams = 0; f.extraIn = [];
