@@ -409,7 +409,11 @@ export function localCopyProp(f: VarFunc, st?: { real: boolean }): boolean {
   let changed = false;
   for (const b of f.blocks) {
     const m = new Map<number, Expr>();
-    const killVar = (v: number) => { m.delete(v); for (const [k, e] of m) if (e.k === 'var' && e.id === v) m.delete(k); };
+    // m's entries are copies `k = y`; copiesOf[y] = those k (so a reassignment of y finds them
+    // without scanning m)
+    const copiesOf = new Map<number, Set<number>>();
+    const del = (k: number) => { const e = m.get(k); if (e) { m.delete(k); if (e.k === 'var') copiesOf.get(e.id)?.delete(k); } };
+    const killVar = (v: number) => { del(v); const ks = copiesOf.get(v); if (ks) { for (const k of ks) m.delete(k); ks.clear(); } };
     const look = (v: number) => m.get(v);
     // `changed` keeps its historical meaning: the former copying substitution returned a new object
     // for every composite expression whenever m was non-empty, and optimizeFunc's round loop (whose
@@ -421,7 +425,28 @@ export function localCopyProp(f: VarFunc, st?: { real: boolean }): boolean {
       if (n !== e && st) st.real = true; // an actual substitution
       return n;
     };
-    rewriteBlock(b, sub, (dst, ns) => { killVar(dst); if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) m.set(dst, ns.e); });
+    // a statement without a variable of m is left as it is by substConst: not rewritten, but `sub`
+    // would still have flagged its composite top-level expressions
+    const same = (s: Stmt) => {
+      if (!m.size) return true;
+      for (const v of stmtInfo(s).vars) if (m.has(v)) return false;
+      if (!changed) changed = topComposite(s);
+      return true;
+    };
+    rewriteBlock(b, sub, (dst, ns) => {
+      killVar(dst);
+      if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) { m.set(dst, ns.e); let ks = copiesOf.get(ns.e.id); if (!ks) copiesOf.set(ns.e.id, (ks = new Set())); ks.add(dst); }
+    }, same);
   }
   return changed;
+}
+
+/** Some expression rewriteBlock passes to `sub` for this statement is composite. */
+function topComposite(s: Stmt): boolean {
+  switch (s.k) {
+    case 'set': case 'eval': return COMPOSITE.has(s.e.k);
+    case 'store': return COMPOSITE.has(s.addr.k) || COMPOSITE.has(s.v.k);
+    case 'call': return s.args.some(e => COMPOSITE.has(e.k)) || !!s.extra?.some(e => COMPOSITE.has(e.k)) || (s.t.k === 'ind' && COMPOSITE.has(s.t.e.k));
+    default: return false;
+  }
 }
