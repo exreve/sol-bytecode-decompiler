@@ -47,6 +47,7 @@ export interface Result {
   text: string;                    // single-file rendering
   facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
   tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
+  programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
 }
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
@@ -318,7 +319,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (st.k === 'set' && st.e.k === 'call' && isInv(st.e.t)) hit = true;
       if (b.term.k === 'ret' && b.term.e?.k === 'call' && isInv(b.term.e.t)) hit = true;
     }
-    if (hit && n <= 12 && (bt.f.nparams >= 4 || bt.f.stackArgs)) userInvoke.add(pc);
+    if (hit && n <= 80 && (bt.f.nparams >= 4 || bt.f.stackArgs)) userInvoke.add(pc);
   }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
@@ -1104,7 +1105,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address };
   res.text = renderSingle(res);
   return res;
 }

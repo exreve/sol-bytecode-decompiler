@@ -11,6 +11,13 @@
 //              program; a CPI's signer / writable privileges cannot exceed the caller's; the invoked
 //              program must be executable)
 //
+// Model (phase 1): an instruction is its handler and the functions it reaches through direct calls (library
+// code included, which calls back into user code). An Anchor handler is generated code whose branches only
+// handle errors: its calls count as made on every successful path. Anchor try-call checks (`<T as
+// Accounts>::try_accounts` results) get the checks of the callee (its Anchor error codes, the account types
+// of the library functions it uses: Signer, Account, Program, …). Accounts are named by the IDL, the
+// program's account-error strings, and the names the code gives them (a temporary is shown as `name?`).
+//
 // security/analysis.json schema ("schema": "sbpf-decompiler/security@1"):
 //   program      { version, instructions (sBPF), functions, anchor, idl }
 //   instructions [ {
@@ -27,6 +34,7 @@
 //   pdas         [ { seeds, program, derived_in: [ix], signs_in: [ix], accounts: [ix.account with a seeds constraint], compared: status } ]
 //   state_writes [ { target (account.field), writes: [ { ix, how, at } ] } ]
 //   dependencies [ { target, read_by: [ix] (in checks), written_by: [ix] } ]
+//   unattributed_operations [ { at, kinds, text, target?, how?, cpi? } ]: in functions no handler reaches through direct calls
 // `at` = { fn, line (1-based, in the function's text), pc? (sBPF instruction index), file?, file_line? (the line in that file) }.
 // constraint kinds: signer, writable, owner, discriminator, initialized, pda, address, executable, has_one, key, state,
 //   custom (IDL error), raw, rent_exempt, count, token_mint, token_owner, …; op kinds: see facts.ts OpKind.
@@ -64,6 +72,7 @@ export interface Analysis {
 	pdas: PdaOut[]
 	stateWrites: { target: string; writes: { ix: string; how: string; at: Loc }[] }[]
 	deps: { target: string; readBy: string[]; writtenBy: string[] }[]
+	unattributed: OpOut[] // operations in functions no instruction handler reaches through direct calls
 }
 
 /** Sensitivity weights (ranking of the instruction surface). */
@@ -94,7 +103,7 @@ function parseIdlAccount(s: string, i: number): AccountRow {
 }
 
 function analyze0(r: Result): Analysis {
-	const facts = r.facts
+	const facts = r.facts, p = r.program
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	const procNames = new Set(r.processors.map(x => x.fn))
 	let roots = r.funcs.filter(f => f.name.startsWith('ix_') || procNames.has(f.name))
@@ -105,17 +114,30 @@ function analyze0(r: Result): Analysis {
 		const name = h.name.startsWith('ix_') ? h.name.slice(3) : h.name
 		const info = r.instructions.find(i => i.pc === h.pc)
 		// functions reachable through direct calls (not other handlers): main = through main-path calls only
+		// (library code is followed too: it calls back into user code, e.g. trait implementations; those
+		// calls count as conditional)
 		const main = new Map<number, boolean>([[h.pc, true]])
+		const lib = new Set<number>()
 		const q = [h.pc]
+		const reach = (callee: number, cm: boolean) => {
+			if (rootPcs.has(callee)) return
+			if (!facts.has(callee)) {
+				if (lib.has(callee) || !p.funcs.has(callee)) return
+				lib.add(callee)
+				for (const b of p.funcs.get(callee)!.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn') reach(st.t.pc, false)
+				return
+			}
+			const prev = main.get(callee)
+			if (prev === undefined || (cm && !prev)) { main.set(callee, cm); q.push(callee) }
+		}
+		// (an Anchor handler is generated code: argument deserialization, try_accounts, the instruction's
+		// function, exit; its branches only handle errors, so its calls outside error paths are made on
+		// every successful path)
+		const generated = h.name.startsWith('ix_') && r.anchor
 		while (q.length) {
 			const x = q.shift()!
 			const m = main.get(x)!
-			for (const c of facts.get(x)?.calls ?? []) {
-				if (!facts.has(c.callee) || rootPcs.has(c.callee) || c.errPath) continue
-				const cm = m && c.main
-				const prev = main.get(c.callee)
-				if (prev === undefined || (cm && !prev)) { main.set(c.callee, cm); q.push(c.callee) }
-			}
+			for (const c of facts.get(x)?.calls ?? []) if (!c.errPath) reach(c.callee, m && (c.main || (generated && x === h.pc)))
 		}
 		const fns = [...main.keys()].map(pc => facts.get(pc)!).filter(Boolean)
 		// the accounts: IDL, else the program's account-error strings, then names met in the code
@@ -124,6 +146,7 @@ function analyze0(r: Result): Analysis {
 		const known = new Set(accounts.map(x => x.name))
 		const canon = (acct: string | undefined): string | undefined => {
 			if (!acct) return undefined
+			if (known.has(acct)) return acct
 			const a = acct.replace(/_\d+$/, '')
 			if (known.has(a)) return a
 			if (/^acc\d+$/.test(a)) return `account[${a.slice(3)}]`
@@ -191,7 +214,8 @@ function analyze0(r: Result): Analysis {
 			if (e.signer) need.push('signer')
 			if (e.writable) need.push('writable')
 			if (e.pda) need.push('pda')
-			if (e.address) need.push('address')
+			// (an account fixed to this program's own id: the placeholder of an absent optional account, or the program itself)
+			if (e.address && e.address !== r.programId) need.push('address')
 			for (const k of need) if (!x.constraints[k]) x.constraints[k] = { status: 'not_found' }
 		}
 		// effects (surface tree) and the sensitivity score
@@ -204,11 +228,11 @@ function analyze0(r: Result): Analysis {
 			const w = Math.max(...k.map(x => WEIGHT[x] ?? 0))
 			if (k.includes('CPI')) {
 				const c = o.cpi
-				const prog = c ? (c.known ? c.program : `${c.program} [account-supplied program id${c.checked ? `; ${c.checked}` : ''}]`) : '?'
-				const what = c?.ix ? `${prog}.${c.ix}` : c ? prog : 'program not decoded'
+				const prog = c && c.program !== '?' ? (c.known ? c.program : `${c.program} [account-supplied program id${c.checked ? `; ${c.checked}` : ''}]`) : '?'
+				const what = c?.ix ? `${prog}.${c.ix}` : prog !== '?' ? prog : 'program not decoded'
 				const tag = k.includes('TOKEN_TRANSFER') ? 'TOKEN MOVE' : k.includes('LAMPORT_TRANSFER') ? 'LAMPORT MOVE' : k.includes('MINT') ? 'MINT' : k.includes('BURN') ? 'BURN'
 					: k.includes('ACCOUNT_CLOSE') ? 'CLOSE' : k.includes('AUTHORITY_WRITE') ? 'SET authority' : k.includes('ACCOUNT_CREATE') ? 'CREATE' : k.includes('OWNER_ASSIGN') ? 'ASSIGN owner' : k.includes('ACCOUNT_REALLOC') ? 'ALLOCATE' : k.includes('PROGRAM_UPGRADE') ? 'UPGRADE' : 'CPI'
-				eff(`${tag}: CPI → ${what}${k.includes('PDA_SIGNATURE') ? ' (PDA-signed)' : ''}`, w + (c && !c.known ? 3 : 0))
+				eff(`${tag}: CPI → ${what}${k.includes('PDA_SIGNATURE') ? ' (PDA-signed)' : ''}`, w + (c && !c.known && c.program !== '?' ? 3 : 0))
 			} else if (k.includes('PDA_DERIVE')) eff(`DERIVE PDA ${o.pda?.seeds ?? '?'}`, 0)
 			else if (k.includes('LAMPORT_WRITE')) eff(`${k.includes('ACCOUNT_CLOSE') ? 'CLOSE (lamports = 0)' : o.how === '-=' ? 'LAMPORT OUT' : o.how === '+=' ? 'LAMPORT IN' : 'LAMPORT SET'} ${o.target}`, w)
 			else if (k.includes('AUTHORITY_WRITE')) eff(`SET authority ${o.target}`, w)
@@ -221,6 +245,13 @@ function analyze0(r: Result): Analysis {
 		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects })
 	}
 	ixs.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name))
+	// operations in code no handler reaches through direct calls (function pointers, dispatch tables)
+	const reached = new Set<string>(ixs.flatMap(x => x.functions))
+	const unattributed: OpOut[] = []
+	if (ixs.some(x => x.kind !== 'entrypoint')) for (const ff of facts.values()) {
+		if (reached.has(ff.name)) continue
+		for (const o of ff.ops) if (!o.errPath && !o.kinds.every(k => k === 'PDA_DERIVE')) unattributed.push({ at: { fn: ff.name, line: o.line, pc: o.pc }, kinds: o.kinds, text: o.text, main: false, target: o.target && `${o.target.acct}${o.target.field ? '.' + o.target.field : ''}`, how: o.how, value: o.value, cpi: o.cpi, pda: o.pda })
+	}
 
 	// program-level views: PDAs, state writes, read/write dependencies
 	const pdas = new Map<string, PdaOut>()
@@ -256,12 +287,12 @@ function analyze0(r: Result): Analysis {
 	}
 	const deps: Analysis['deps'] = []
 	for (const [t, rs] of reads) { const w = writes.get(t); if (w) deps.push({ target: t, readBy: [...rs].sort(), writtenBy: [...new Set(w.map(x => x.ix))].sort() }) }
-	const p = r.program
 	return {
 		program: { version: p.version, instructions: p.insns.length, functions: p.funcs.size, anchor: r.anchor, idl: r.instructions.some(i => i.accounts !== undefined) },
 		ixs, pdas: [...pdas.values()],
 		stateWrites: [...writes].sort((x, y) => x[0].localeCompare(y[0])).map(([target, w]) => ({ target, writes: w })),
 		deps: deps.sort((x, y) => x.target.localeCompare(y.target)),
+		unattributed,
 	}
 }
 
@@ -294,6 +325,7 @@ export function renderJson(a: Analysis, where: Where): string {
 		pdas: a.pdas.map(x => ({ seeds: x.seeds, program: x.program, derived_in: x.derivedIn, signs_in: x.signsIn, accounts: x.accounts, compared: x.compared })),
 		state_writes: a.stateWrites.map(s => ({ target: s.target, writes: s.writes.map(w => ({ ix: w.ix, how: w.how, at: L(w.ix, w.at) })) })),
 		dependencies: a.deps.map(d => ({ target: d.target, read_by: d.readBy, written_by: d.writtenBy })),
+		unattributed_operations: a.unattributed.map(o => ({ at: L(undefined, o.at), kinds: o.kinds, text: o.text, target: o.target, how: o.how, cpi: o.cpi && { program: o.cpi.program, known: o.cpi.known, instruction: o.cpi.ix, accounts: o.cpi.accounts, fields: o.cpi.fields, seeds: o.cpi.seeds } })),
 	}
 	return JSON.stringify(doc, (_, v) => (v === undefined ? undefined : v), 1) + '\n'
 }
@@ -307,7 +339,9 @@ const HEADER = [
 function flags(ix: IxOut): string[] {
 	const out: string[] = []
 	for (const x of ix.accounts) for (const k of ['signer', 'pda', 'address', 'writable']) if (x.constraints[k]?.status === 'not_found') out.push(`${x.name}: ${k} expected, no check found`)
-	for (const o of ix.ops) if (o.cpi && !o.cpi.known && !/compared with/.test(o.cpi.checked ?? '')) out.push(`CPI to an account-supplied program id without a recognized check (${o.at.fn}:${o.at.line})`)
+	// (a program account with an address / executable check found counts as the check: e.g. an Anchor Interface<TokenInterface>)
+	const progChecked = ix.accounts.some(x => /program/.test(x.name) && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
+	for (const o of ix.ops) if (o.cpi && !o.cpi.known && o.cpi.program !== '?' && !/\(id compared with/.test(o.cpi.checked ?? '') && !progChecked) out.push(`CPI to an account-supplied program id without a recognized check (${o.at.fn}:${o.at.line})`)
 	const value = ix.ops.some(o => o.kinds.some(k => ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'LAMPORT_WRITE', 'ACCOUNT_CLOSE', 'AUTHORITY_WRITE'].includes(k)))
 	const signer = ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))
 	if (value && !signer) out.push('moves value / changes authority, but no signer check was found')
@@ -329,6 +363,12 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		if (ix.effects.length > 12) out.push(`  - … ${ix.effects.length - 12} more (see ${ixFile(ix)})`)
 		for (const f of flags(ix).slice(0, 6)) out.push(`  - ⚠ ${f}`)
 	}
+	if (a.unattributed.length) {
+		out.push('', '## Operations not attributed to an instruction', '', 'In functions no handler reaches through direct calls (called through function pointers / dispatch tables, or dead code):', '')
+		const w = (o: OpOut) => Math.max(...o.kinds.map(k => WEIGHT[k] ?? 0))
+		for (const o of [...a.unattributed].sort((x, y) => w(y) - w(x)).slice(0, 25)) out.push(`- ${at2s(where, undefined, o.at)} ${o.kinds.join(', ')}: ${o.text.slice(0, 160)}`)
+		if (a.unattributed.length > 25) out.push(`- … ${a.unattributed.length - 25} more in analysis.json`)
+	}
 	if (a.pdas.length) {
 		out.push('', '## PDAs', '')
 		for (const x of a.pdas) out.push(`- seeds ${x.seeds}, program ${x.program}${x.derivedIn.length ? ` — derived in ${x.derivedIn.join(', ')}` : ''}${x.signsIn.length ? ` — signs in ${x.signsIn.join(', ')}` : ''}${x.accounts.length ? ` — seeds constraint on ${x.accounts.join(', ')} (${ST[x.compared]})` : ''}`)
@@ -342,7 +382,6 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		out.push('', '## Read/write dependencies (field checked by X, written by Y)', '')
 		for (const d of a.deps) out.push(`- ${d.target}: checked in ${d.readBy.join(', ')}; written in ${d.writtenBy.join(', ')}`)
 	}
-	void where
 	return out.join('\n') + '\n'
 }
 
@@ -381,7 +420,7 @@ export function renderIx(ix: IxOut, where: Where): string {
 		out.push('', '## CPIs', '')
 		for (const o of cpis) {
 			const c = o.cpi
-			const prog = !c ? 'program not decoded' : c.known ? `${c.program} (constant)` : `${c.program} (account-supplied; ${c.checked ?? 'check unknown'})`
+			const prog = !c || c.program === '?' ? 'program not decoded' : c.known ? `${c.program} (constant)` : `${c.program} (account-supplied; ${c.checked ?? 'check unknown'})`
 			out.push(`- ${W(o.at)} ${o.main ? '' : '[conditional] '}${prog}${c?.ix ? `.${c.ix}` : ''}${c?.accounts.length ? ` — accounts ${c.accounts.map(x => `${x.role ? x.role + ': ' : ''}${x.text}${x.w ? ' w' : ''}${x.s ? ' s' : ''}`).join(', ')}` : ''}${c?.fields.length ? ` — ${c.fields.map(([k, v]) => `${k}: ${v}`).join(', ')}` : ''}${c?.seeds ? ` — PDA signer: ${c.seeds}` : ''}`)
 			if (!c) out.push(`  - ${md(o.text)}`)
 		}
