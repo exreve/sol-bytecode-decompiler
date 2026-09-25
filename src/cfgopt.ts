@@ -169,23 +169,41 @@ export function localConstProp(f: VarFunc): boolean {
 
 /** Variables live at the entry of each block (bitsets indexed by variable id). */
 export function liveInSets(f: VarFunc): Uint32Array[] {
-  const W = (f.vars.length + 31) >>> 5;
-  const uses = (e: Expr, set: Uint32Array) => walkExpr(e, x => { if (x.k === 'var') set[x.id >>> 5] |= 1 << (x.id & 31); });
+  // Same scheme as deadStores: liveIn = gen | (out & ~kill) with gen/kill computed once per block
+  // (the former version re-walked every expression and allocated a fresh set per block on every
+  // pass), re-evaluating only blocks whose successors changed. Liveness has a unique least fixpoint,
+  // which both reach from the all-empty start, so the sets are the same.
+  const W = (f.vars.length + 31) >>> 5, nb = f.blocks.length;
   const liveIn = f.blocks.map(() => new Uint32Array(W));
+  const gen = f.blocks.map(() => new Uint32Array(W)), kill = f.blocks.map(() => new Uint32Array(W));
+  for (let id = 0; id < nb; id++) {
+    const b = f.blocks[id], g = gen[id], kl = kill[id];
+    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') g[x.id >>> 5] |= 1 << (x.id & 31); });
+    if (b.term.k === 'br') uses(b.term.c);
+    else if (b.term.k === 'ret' && b.term.e) uses(b.term.e);
+    for (let i = b.stmts.length - 1; i >= 0; i--) {
+      const s = b.stmts[i];
+      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { g[s.dst >>> 5] &= ~(1 << (s.dst & 31)); kl[s.dst >>> 5] |= 1 << (s.dst & 31); }
+      for (const v of stmtInfo(s).vars) g[v >>> 5] |= 1 << (v & 31); // = walking stmtExprs(s)
+    }
+  }
+  const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
+  for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
+  const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true; changed;) {
     changed = false;
-    for (let id = f.blocks.length - 1; id >= 0; id--) {
-      const b = f.blocks[id];
-      const live = new Uint32Array(W);
-      for (const s of b.succs) { const li = liveIn[s]; for (let k = 0; k < W; k++) live[k] |= li[k]; }
-      if (b.term.k === 'br') uses(b.term.c, live);
-      else if (b.term.k === 'ret' && b.term.e) uses(b.term.e, live);
-      for (let i = b.stmts.length - 1; i >= 0; i--) {
-        const s = b.stmts[i];
-        if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        stmtExprs(s).forEach(e => uses(e, live));
+    for (let id = nb - 1; id >= 0; id--) {
+      if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
+      dirty[id] = 0;
+      const succs = f.blocks[id].succs, li = liveIn[id], g = gen[id], kl = kill[id];
+      let upd = false;
+      for (let k = 0; k < W; k++) {
+        let o = 0;
+        for (const s of succs) o |= liveIn[s][k];
+        const v = (g[k] | (o & ~kl[k])) >>> 0;
+        if (v !== li[k]) { li[k] = v; upd = true; }
       }
-      for (let k = 0; k < W; k++) if (live[k] !== liveIn[id][k]) { liveIn[id] = live; changed = true; break; }
+      if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
     }
   }
   return liveIn;
