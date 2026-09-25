@@ -386,6 +386,7 @@ function scanInfo(e: Expr, r: StmtInfo): void {
   }
 }
 const countIn = (vars: number[], v: number) => { let n = 0; for (let k = 0; k < vars.length; k++) if (vars[k] === v) n++; return n; };
+const someIn = (vars: number[], m: Map<number, unknown>) => { for (let k = 0; k < vars.length; k++) if (m.has(vars[k])) return true; return false; };
 
 function countUses(f: VarFunc): Int32Array {
   const uses = new Int32Array(f.vars.length);
@@ -447,31 +448,48 @@ export function optimizeFunc(f: VarFunc) {
   // round that modifies nothing leaves the IR identical, so every later round would repeat it
   // exactly (all passes are deterministic functions of the IR; tail duplication only runs in
   // rounds < 6, and it did nothing in this round either) and stopping early gives the same result.
+  //
+  // Within a round, the passes after the last one that modified the IR in the previous round saw
+  // that round's final IR and left it as it was. When nothing has been modified yet in this round by
+  // the time such a pass is reached, the IR is that same final IR again, so it and every later pass
+  // would leave it as it is: the rest of the round is skipped (the round modifies nothing, so the
+  // loop stops after it exactly as when all passes ran; `changed` does not matter then).
   let fixed = false;
+  let prevLast = Infinity; // index of the last pass that modified the IR in the previous round
   for (let round = 0; round < 8; round++) {
     let changed = false;
     const st = { real: false };
+    let last = -1;
+    const mod = (i: number) => { st.real = true; last = i; };
     for (const b of f.blocks) {
       const ss = b.stmts;
-      for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) { ss[i] = n; st.real = true; } }
-      if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) { b.term.c = c; st.real = true; } }
-      else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) { b.term.e = c; st.real = true; } }
+      for (let i = 0; i < ss.length; i++) { const n = simplifyStmt(ss[i]); if (n !== ss[i]) { ss[i] = n; mod(0); } }
+      if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) { b.term.c = c; mod(0); } }
+      else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) { b.term.e = c; mod(0); } }
     }
     const off = (n: string) => DISABLED.has(n);
-    const exact = (c: boolean) => { if (c) { changed = true; st.real = true; } };
-    if (!off('prop')) changed = propagateGlobal(f, st) || changed;
+    const exact = (c: boolean, i: number) => { if (c) { changed = true; mod(i); } };
     // inlineLocal hands dce the exact use counts after its rewrites (saves a recount)
     let counts: Int32Array | undefined;
-    if (!off('inline')) exact(inlineLocal(f, c => { counts = c; }));
-    exact(dce(f, counts));
-    if (!off('lconst')) exact(localConstProp(f));
-    if (!off('gconst')) exact(globalConstProp(f));
-    if (!off('copy')) changed = localCopyProp(f, st) || changed;
-    if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; st.real = true; }
-    if (!off('thread') && threadJumps(f)) { changed = true; st.real = true; }
-    if (!off('ifconv') && ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; st.real = true; }
-    if (!off('dse')) exact(deadStores(f));
-    if (!off('taildup') && round < 6 && tailDuplicate(f)) { changed = true; st.real = true; }
+    const passes: (() => void)[] = [
+      () => {},
+      () => { if (!off('prop')) { const r = { real: false }; changed = propagateGlobal(f, r) || changed; if (r.real) mod(1); } },
+      () => { if (!off('inline')) exact(inlineLocal(f, c => { counts = c; }), 2); },
+      () => exact(dce(f, counts), 3),
+      () => { if (!off('lconst')) exact(localConstProp(f), 4); },
+      () => { if (!off('gconst')) exact(globalConstProp(f), 5); },
+      () => { if (!off('copy')) { const r = { real: false }; changed = localCopyProp(f, r) || changed; if (r.real) mod(6); } },
+      () => { if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; mod(7); } },
+      () => { if (!off('thread') && threadJumps(f)) { changed = true; mod(8); } },
+      () => { if (!off('ifconv') && ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; mod(9); } },
+      () => { if (!off('dse')) exact(deadStores(f), 10); },
+      () => { if (!off('taildup') && round < 6 && tailDuplicate(f)) { changed = true; mod(11); } },
+    ];
+    for (let i = 1; i < passes.length; i++) {
+      if (!st.real && i > prevLast) break; // (see above)
+      passes[i]();
+    }
+    prevLast = last;
     if (!changed || !st.real) { fixed = !st.real && round < 6; break; }
   }
   // expressions created by the last round's passes (e.g. selects from if-conversion) still get simplified
@@ -529,6 +547,9 @@ function propagateGlobal(f: VarFunc, st: { real: boolean }): boolean {
     for (let i = 0; i < ss.length; i++) {
       const s = ss[i];
       if (s.k !== 'trap') changed = true;
+      // substVars leaves expressions without a variable of m as they are: skip such statements
+      // (their variable occurrences are cached per statement, see stmtInfo)
+      if (!someIn(stmtInfo(s).vars, m)) continue;
       const n = mapStmtExprsKeep(s, sub);
       if (n !== s) { ss[i] = n; st.real = true; }
     }

@@ -124,12 +124,14 @@ const COMPOSITE = new Set(['bin', 'cmp', 'land', 'lor', 'neg', 'not', 'ext', 'bs
 /**
  * Rewrites the expressions of every statement of b (in order) with `sub`; `def` is called after each
  * statement that defines a variable. Unchanged statements keep their identity (IR nodes are never
- * mutated in place after variable recovery, so sharing them is safe).
+ * mutated in place after variable recovery, so sharing them is safe). `same(s)`, when given, tells
+ * statements that `sub` certainly leaves unchanged: they are not rewritten (`def` still sees them).
  */
-function rewriteBlock(b: Block, sub: (e: Expr) => Expr, def: (dst: number, ns: Stmt) => void) {
+function rewriteBlock(b: Block, sub: (e: Expr) => Expr, def: (dst: number, ns: Stmt) => void, same?: (s: Stmt) => boolean) {
   const ss = b.stmts;
   for (let i = 0; i < ss.length; i++) {
     const s = ss[i];
+    if (same?.(s)) { if ((s.k === 'set' || (s.k === 'call' && s.dst >= 0))) def(s.dst, s); continue; }
     switch (s.k) {
       case 'set': { const e = sub(s.e); const ns = e !== s.e ? (ss[i] = { ...s, e }) : s; def(s.dst, ns); break; }
       case 'store': { const addr = sub(s.addr), v = sub(s.v); if (addr !== s.addr || v !== s.v) ss[i] = { ...s, addr, v }; break; }
@@ -162,7 +164,9 @@ export function localConstProp(f: VarFunc): boolean {
     // substConst returns a new object exactly when a variable was replaced (what the former
     // JSON comparison of before/after detected)
     const sub = (e: Expr) => { if (!m.size) return e; const n = substConst(e, look); if (n !== e) changed = true; return n; };
-    rewriteBlock(b, sub, (dst, ns) => { m.delete(dst); if (ns.k === 'set' && (ns.e.k === 'const' || ns.e.k === 'undef')) m.set(dst, ns.e); });
+    // (a statement mentioning no variable of m is left as it is by substConst)
+    const same = (s: Stmt) => { if (!m.size) return true; for (const v of stmtInfo(s).vars) if (m.has(v)) return false; return true; };
+    rewriteBlock(b, sub, (dst, ns) => { m.delete(dst); if (ns.k === 'set' && (ns.e.k === 'const' || ns.e.k === 'undef')) m.set(dst, ns.e); }, same);
   }
   return changed;
 }
@@ -379,7 +383,10 @@ export function globalConstProp(f: VarFunc): boolean {
       return k >= 0 && st[k] >= 0 ? { k: 'const', v: cval[st[k]] } : undefined;
     };
     const sub = (e: Expr) => { const n = substConst(e, look); if (n !== e) changed = true; return n; };
-    rewriteBlock(b, sub, (dst, ns) => loc.set(dst, ns.k === 'set' && ns.e.k === 'const' ? ns.e : null));
+    // (a statement none of whose variables has a known constant is left as it is by substConst)
+    const known = (v: number) => { const l = loc.get(v); if (l !== undefined) return l !== null; const k = slot[v]; return k >= 0 && st[k] >= 0; };
+    const same = (s: Stmt) => { for (const v of stmtInfo(s).vars) if (known(v)) return false; return true; };
+    rewriteBlock(b, sub, (dst, ns) => loc.set(dst, ns.k === 'set' && ns.e.k === 'const' ? ns.e : null), same);
   }
   return changed;
 }
