@@ -90,7 +90,7 @@ const BASE = 0x4_2000_0000n, K2 = BASE + 0x100n, DC = BASE + 0x200n, LC = BASE +
  * Run an account-taking callee x (out, &mut &[AccountInfo] in every other argument register: its ABI is not
  * known) on one synthetic account at AI with the given data, owner and flags; the out object's bytes.
  */
-function runAccountCallee(p: Program, x: number, data: number[], owner: Uint8Array, flags: [number, number, number], boxAt?: number): Uint8Array | undefined {
+function runAccountCallee(p: Program, x: number, data: number[], owner: Uint8Array, flags: [number, number, number], boxAt?: number, args?: () => bigint[]): Uint8Array | undefined {
 	const mem = new ExecMem(p, 5)
 	const K1 = BASE, LV = BASE + 0x380n, SL = BASE + 0x500n, DB = BASE + 0x1000n
 	const w = (a: bigint, b: Uint8Array | number[]) => mem.write(a, new Uint8Array(b))
@@ -104,14 +104,37 @@ function runAccountCallee(p: Program, x: number, data: number[], owner: Uint8Arr
 	// AccountInfo { key, lamports, data, owner, rent_epoch, is_signer, is_writable, executable }; &mut &[AccountInfo]
 	w64(AI, K2); w64(AI + 8n, LC); w64(AI + 0x10n, DC); w64(AI + 0x18n, K1); w64(AI + 0x20n, 0n); w(AI + 0x28n, flags)
 	w64(SL, AI); w64(SL + 8n, 1n)
+	w64(BASE + 0x600n, AI) // (a word holding the &AccountInfo: an &AccountLoader)
 	const e = new Exec(p, mem, { maxSteps: 60_000 })
 	e.noPanic = true
-	const r = e.run(x, [OUT, SL, SL, SL, SL], 0x2_0000_3000n)
+	const r = e.run(x, args ? args() : [OUT, SL, SL, SL, SL], 0x2_0000_3000n)
 	if (r.abort !== undefined || r.limit || r.stopped) return undefined
 	if (boxAt === undefined) return mem.read(OUT, SIZE)
 	// the object the out word boxAt points to (a boxed result)
 	const q = mem.readU(OUT + BigInt(boxAt), 8)
 	return q >= 0x3_0000_0000n && q < 0x4_0000_0000n ? mem.read(q, SIZE) : undefined
+}
+
+/**
+ * AccountLoader::load / load_mut (zero-copy accounts): does x, given (out, &AccountInfo) or (out, a pointer
+ * to a word holding the &AccountInfo), return a pointer to the account's data after the 8-byte
+ * discriminator? The out word holding it (in the first 0x40 bytes), from a run on a synthetic account of
+ * that type (discriminator, owner = the program, writable), data of `size` bytes.
+ */
+const loaderMemo = new Map<string, number | null>()
+export function loaderWord(p: Program, x: number, disc: bigint, owner: Uint8Array, size: number): number | undefined {
+	const k = `${x}:${disc}`
+	if (loaderMemo.has(k)) return loaderMemo.get(k) ?? undefined
+	const data = Array.from({ length: Math.min(Math.max(size + 0x100, 0x400), 0x40000) }, (_, i) => (i < 8 ? Number((disc >> BigInt(8 * i)) & 0xffn) : 0))
+	const DB = BASE + 0x1000n, SLOT = BASE + 0x600n
+	let hit: number | undefined
+	for (const how of ['info', 'slot'] as const) {
+		const b = runAccountCallee(p, x, data, owner, [0, 1, 0], undefined, () => [OUT, how === 'info' ? AI : SLOT, 0n, 0n, 0n])
+		if (b) for (let i = 0; i < 0x40 && hit === undefined; i += 8) { let v = 0n; for (let j = 7; j >= 0; j--) v = (v << 8n) | BigInt(b[i + j]); if (v === DB + 8n) hit = i }
+		if (hit !== undefined) break
+	}
+	loaderMemo.set(k, hit ?? null)
+	return hit
 }
 
 /** 8-aligned words among the first 0x40 bytes of an out object that point into the heap (candidate boxes). */

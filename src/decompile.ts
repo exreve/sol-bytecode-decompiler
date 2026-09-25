@@ -5,7 +5,7 @@ import { optimizeFunc, stmtExprs, DISABLED, setFoldImage, isSettled } from './si
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
-import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS } from './semantics.ts';
+import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS, unb58 } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
@@ -21,7 +21,7 @@ import { callTargetName } from './emu.ts';
 import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
-import { accountObjects, type AccountObjs } from './anchorstate.ts';
+import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 
 export interface Options {
@@ -351,6 +351,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const objVars = opts.sugar !== false && nameFn !== undefined && tryOf.size
     ? accountObjects(p, stateIdl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
     : new Map<number, AccountObjs>();
+  // Accounts fields holding (the &AccountInfo of) an account of an IDL type without its data deserialized
+  // (AccountLoader): `${instruction}:${offset in try_accounts' out object}` -> type; see the loader pass below
+  const acctFieldType = new Map<string, { ty: string; embed: boolean }>();
+  const acctFieldView = new Map<string, { ty: string; embed: boolean }>(); // `${Accounts view}:${offset}` -> type
   // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
   for (const [hpc, tpc] of tryOf) {
     const ix = sem.ixNames.get(hpc)!;
@@ -372,6 +376,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (covered(off) || fields.some(x => x.off === off || x.name === nm)) continue;
       if (embed) fields.push({ name: nm, off, t: { k: 'embed', type: 'AccountInfo' }, doc: `the AccountInfo (a copy in place)${ty ? ` of an account of type ${ty} (data not deserialized here)` : ''}` });
       else fields.push({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' }, doc: ty ? `the &AccountInfo of an account of type ${ty} (e.g. AccountLoader<${ty}>: data not deserialized)` : undefined });
+      if (ty) acctFieldType.set(`${ix}:${off}`, { ty, embed });
     }
     if (!fields.length) continue;
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
@@ -384,6 +389,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (ctxLayout) return ctxLayout === key;
       const afs = fields.filter(x => x.off >= shift).map(x => ({ ...x, off: x.off - shift }));
       if (!afs.length) return false;
+      for (const x of afs) { const a = acctFieldType.get(`${ix}:${x.off + shift}`); if (a) acctFieldView.set(`${P}Accounts:${x.off}`, a); }
       ctxLayout = key;
       views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it${shift ? ` (at +0x${shift.toString(16)} of its out object)` : ''}: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: afs.sort((x, y) => x.off - y.off) });
       const fs: import('./views.ts').Field[] = [{ name: 'program_id', off: op, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: oa, t: { k: 'ref', to: `${P}Accounts` } }];
@@ -549,8 +555,74 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         const ty = setType(f, st.e, id => t.get(id));
         if (ty && views.map.has(ty)) { t.set(st.dst, ty); grew = true; }
       }
+      if (!grew && it < 3 && acctFieldView.size && loaderPass(f, t)) grew = true;
     }
     return t;
+  };
+  /**
+   * AccountLoader::load / load_mut of a zero-copy account (see anchorstate.ts loaderWord): a call given an
+   * Accounts field holding an account of IDL type T (its &AccountInfo, or the AccountInfo in place) and a
+   * frame out object; a variable then loaded (in the same block, before any other call or store touching
+   * it) from the out word a run of the callee fills with the data pointer gets the view <T>Data.
+   */
+  const loaderPass = (f: VarFunc, t: Map<number, string>): boolean => {
+    const fpv = f.vars.find(v => v.param === 10)?.id;
+    if (fpv === undefined) return false;
+    const fo = (e: Expr): number | undefined => (e.k === 'var' && e.id === fpv ? 0 : e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
+    // the account type of an argument: ld64(x + off) with x an Accounts view and a loader-account field there (or x + off, the AccountInfo in place)
+    const acctOf = (e: Expr): string | undefined => {
+      const ld = e.k === 'load' && e.size === 8 ? e.addr : e;
+      const b = ld.k === 'var' ? { id: ld.id, off: 0 } : ld.k === 'bin' && ld.op === 'add' && ld.a.k === 'var' && ld.b.k === 'const' ? { id: ld.a.id, off: Number(BigInt.asIntN(64, ld.b.v)) } : undefined;
+      const vt = b && t.get(b.id);
+      const a = vt ? acctFieldView.get(`${vt}:${b!.off}`) : undefined;
+      return a && a.embed === (e.k !== 'load') ? a.ty : undefined;
+    };
+    let grew = false;
+    const multi = new Map<number, { view: string; defs: Set<Stmt> }>(); // variables defined elsewhere too
+    for (const b of f.blocks) {
+      const live = new Map<number, string>(); // frame word -> data view
+      for (const st of b.stmts) {
+        const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined;
+        if (st.k === 'set' && st.e.k === 'load' && st.e.size === 8) {
+          const o = fo(st.e.addr), dv = o !== undefined ? live.get(o) : undefined;
+          if (dv && !t.has(st.dst) && f.vars[st.dst]?.param < 0) {
+            if (defCount(f, st.dst) === 1) { t.set(st.dst, dv); grew = true; }
+            else { const m = multi.get(st.dst); if (!m) multi.set(st.dst, { view: dv, defs: new Set([st]) }); else if (m.view === dv) m.defs.add(st); else m.view = ''; }
+          }
+        }
+        if (c) {
+          for (const a of c.args) { const o = fo(a); if (o !== undefined) for (const w of [...live.keys()]) if (w >= o && w < o + 0x100) live.delete(w); }
+          const out = c.args[0] && fo(c.args[0]);
+          const ty = c.t.k === 'fn' && out !== undefined && c.args[1] ? acctOf(c.args[1]) : undefined;
+          const view = ty && dataView(ty);
+          const acc = ty ? opts.idl?.accounts.find(a => a.name === ty) : undefined;
+          if (view && acc && stateIdl?.address && c.t.k === 'fn') {
+            const w = loaderWord(p, c.t.pc, acc.disc, unb58(stateIdl.address), views.map.get(`${pascalName(ty)}Account`)?.size ?? 0x400);
+            if (w !== undefined) live.set(out! + w, view);
+          }
+        } else if (st.k === 'store' || st.k === 'stores' || st.k === 'copy') {
+          const o = fo(st.k === 'copy' ? st.dst : st.addr);
+          const n = st.k === 'copy' ? st.n : st.k === 'store' ? st.size : st.size * st.vals.length;
+          if (o !== undefined) for (const w of [...live.keys()]) if (w + 8 > o && w < o + n) live.delete(w);
+        }
+      }
+    }
+    // a variable also defined otherwise: typed when every load or store through it is reached only by
+    // its loader definitions (reaching definitions over the blocks)
+    for (const [v, { view, defs }] of multi) if (view && onlyReachedBy(f, v, defs)) { t.set(v, view); grew = true; }
+    return grew;
+  };
+  // <T>Data: the account data of IDL type T after its 8-byte discriminator (from the <T>Account view)
+  const pascalName = (s: string) => `${s[0].toUpperCase()}${s.slice(1)}`;
+  const dataView = (ty: string): string | undefined => {
+    const name = `${pascalName(ty)}Data`;
+    if (views.map.has(name)) return name;
+    const acc = views.map.get(`${pascalName(ty)}Account`);
+    if (!acc) return undefined;
+    const fs = acc.fields.filter(x => x.off >= 8).map(x => ({ ...x, off: x.off - 8 }));
+    if (!fs.length) return undefined;
+    views.add({ name, doc: `the data of an account of type ${ty} after its 8-byte discriminator, in place in the account (zero-copy: what AccountLoader::load / load_mut returns) [idl layout; the loader from a run]`, size: acc.size !== undefined ? acc.size - 8 : undefined, fields: fs });
+    return name;
   };
   if (opts.sugar !== false) {
     for (const pc of built.keys()) baseTypes.set(pc, computeTypes(pc));
@@ -1055,6 +1127,51 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
 
 /** Number of definitions (assignments, call results) of variable v in f (counted once per function, cached). */
 const defCounts = new WeakMap<VarFunc, Map<number, number>>();
+/**
+ * Is every load or store whose address is v (or v + c) in f reached only by definitions of v in `defs`
+ * (and at least one such access)? Reaching definitions of the one variable over the blocks.
+ */
+function onlyReachedBy(f: VarFunc, v: number, defs: Set<Stmt>): boolean {
+  const byId = new Map(f.blocks.map(b => [b.id, b]));
+  const isDef = (s: Stmt) => (s.k === 'set' || s.k === 'call') && s.dst === v;
+  // out state per block: the definitions reaching its end (null: none yet computed); 'entry' marks the parameter value / undef
+  const out = new Map<number, Set<Stmt | 'entry'>>();
+  const inOf = (b: typeof f.blocks[number]): Set<Stmt | 'entry'> => {
+    const r = new Set<Stmt | 'entry'>();
+    if (b === f.blocks[0]) r.add('entry');
+    for (const p of b.preds) for (const d of out.get(p) ?? []) r.add(d);
+    return r;
+  };
+  for (let changed = true, it = 0; changed && it < 50; it++) {
+    changed = false;
+    for (const b of f.blocks) {
+      let cur = inOf(b);
+      for (const s of b.stmts) if (isDef(s)) cur = new Set([s]);
+      const old = out.get(b.id);
+      if (!old || old.size !== cur.size || [...cur].some(d => !old.has(d))) { out.set(b.id, cur); changed = true; }
+    }
+  }
+  let uses = 0, ok = true;
+  const based = (a: Expr) => (a.k === 'var' && a.id === v) || (a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === v && a.b.k === 'const');
+  const check = (e: Expr, cur: Set<Stmt | 'entry'>) => walkExpr(e, x => {
+    if (x.k === 'load' && based(x.addr)) { uses++; if (![...cur].every(d => d !== 'entry' && defs.has(d))) ok = false; }
+  });
+  for (const b of f.blocks) {
+    let cur = inOf(b);
+    for (const s of b.stmts) {
+      if ((s.k === 'store' || s.k === 'stores') && based(s.addr)) { uses++; if (![...cur].every(d => d !== 'entry' && defs.has(d))) ok = false; }
+      stmtExprs(s).forEach(e => check(e, cur));
+      if (isDef(s)) cur = new Set([s]);
+      if (!ok) return false;
+    }
+    if (b.term.k === 'br') check(b.term.c, cur);
+    if (b.term.k === 'ret' && b.term.e) check(b.term.e, cur);
+    if (!ok) return false;
+  }
+  void byId;
+  return ok && uses > 0;
+}
+
 function defCount(f: VarFunc, v: number): number {
   let m = defCounts.get(f);
   if (!m) {
