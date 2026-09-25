@@ -19,7 +19,8 @@ export type FieldType =
 	| { k: 'scalar'; size: 1 | 2 | 4 | 8 }
 	| { k: 'ref'; to: string }    // 8-byte pointer to a `to`
 	| { k: 'embed'; type: string } // a `type` stored in place (value = its address)
-export interface Field { name: string; off: number; t: FieldType; doc?: string }
+/** `count`: an array of that many `t` in a row (an embedded sized view: x.f[k] is the k-th) */
+export interface Field { name: string; off: number; t: FieldType; doc?: string; count?: number }
 export interface View { name: string; doc: string; size?: number; fields: Field[] }
 
 const S = (size: 1 | 2 | 4 | 8): FieldType => ({ k: 'scalar', size })
@@ -161,7 +162,7 @@ export class Views {
 		const v = this.map.get(type)
 		if (!v) return undefined
 		let best: Field | undefined
-		for (const f of v.fields) if (f.off <= off && off < f.off + this.width(f.t) && (!best || f.off > best.off)) best = f
+		for (const f of v.fields) if (f.off <= off && off < f.off + this.width(f.t) * (f.count ?? 1) && (!best || f.off > best.off)) best = f
 		return best
 	}
 
@@ -173,7 +174,14 @@ export class Views {
 	resolve(type: string, off: number): { path: string[]; rest: number; last: FieldType } | undefined {
 		const f = this.fieldAt(type, off)
 		if (!f) return undefined
-		const d = off - f.off
+		let d = off - f.off
+		if (f.count !== undefined && f.t.k === 'embed') {
+			// an array element: f[k]
+			const w = this.width(f.t), k = Math.floor(d / w)
+			d -= k * w
+			const inner = d > 0 && this.map.has(f.t.type) ? this.resolve(f.t.type, d) : undefined
+			return inner ? { path: [`${f.name}[${k}]`, ...inner.path], rest: inner.rest, last: inner.last } : { path: [`${f.name}[${k}]`], rest: d, last: f.t }
+		}
 		if (f.t.k === 'embed' && d > 0 && this.map.has(f.t.type)) {
 			const inner = this.resolve(f.t.type, d)
 			if (inner) return { path: [f.name, ...inner.path], rest: inner.rest, last: inner.last }
@@ -198,7 +206,8 @@ export class Views {
 			const w = Math.max(...v.fields.map(f => f.name.length))
 			for (const f of v.fields) {
 				const t = f.t.k === 'scalar' ? TS_SCALAR[f.t.size] : f.t.k === 'ref' ? `ref<${f.t.to}>` : f.t.type
-				out.push(`\t${(f.name + ':').padEnd(w + 1)} at<${hex(f.off)}, ${t}>${f.doc ? ` // ${f.doc}` : ''}`)
+				const doc = [f.count !== undefined ? `[${f.count}]` : '', f.doc ?? ''].filter(Boolean).join(' ')
+				out.push(`\t${(f.name + ':').padEnd(w + 1)} at<${hex(f.off)}, ${t}>${doc ? ` // ${doc}` : ''}`)
 			}
 			out.push('}')
 		}

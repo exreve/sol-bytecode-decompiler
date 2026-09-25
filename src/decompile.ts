@@ -4,7 +4,7 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, DISABLED, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, exprEq, INTRINSICS } from './ir.ts';
+import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
 import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
@@ -15,10 +15,13 @@ import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
-import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
+import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite } from './cpi.ts';
+import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
+import { callTargetName } from './emu.ts';
 import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
+import { accountObjects, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 
 export interface Options {
@@ -257,6 +260,35 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const abi = calls.length === 1 && t?.k === 'sys' ? invokeAbi(t.name) : null;
     if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
   }
+  // library CPI wrappers taking (out, &Instruction, account infos, their count, [signer seeds]):
+  // solana_program::program::invoke / invoke_signed and wrappers of them (see cpiexec.ts)
+  const invokeWrappers = new Set<number>();
+  {
+    const INVOKE = /^(program_invoke(_signed)?|invoke(_signed)?(_unchecked)?|solana_cpi_invoke\w*)(_?[0-9a-f]+)?$/;
+    // library code reaching the CPI syscall within two calls
+    const reaches = (pc: number, depth: number): boolean => {
+      const fn = p.funcs.get(pc);
+      if (!fn || !isLib(pc)) return false;
+      if (INVOKE.test(fn.name)) return true;
+      for (const b of fn.blocks) for (const st of b.stmts) if (st.k === 'call') {
+        if (st.t.k === 'sys' && (st.t.name === 'sol_invoke_signed_rust' || st.t.name === 'sol_invoke_signed_c')) return true;
+        if (depth > 0 && st.t.k === 'fn' && reaches(st.t.pc, depth - 1)) return true;
+      }
+      return false;
+    };
+    for (const pc of libs.keys()) { const fn = p.funcs.get(pc); if (fn && (fn.nparams >= 4 || fn.stackArgs) && reaches(pc, 2)) invokeWrappers.add(pc); }
+  }
+  // the call instruction of each (function, target) pair, when there is exactly one (sites in return expressions)
+  const callInsns = (fpc: number, target: string): number[] => {
+    const out: number[] = [];
+    const starts = [...p.funcs.keys()];
+    let end = p.insns.length;
+    for (const x of starts) if (x > fpc && x < end) end = x;
+    for (let pc = fpc; pc < end; pc++) if (p.insns[pc].opc === 0x85 && callTargetName(p, pc, p.insns[pc].imm) === target) out.push(pc);
+    return out;
+  };
+  // CPI sites described by execution (cpiexec.ts): interpreter steps per program (deterministic)
+  const execBudget = { steps: 250_000 };
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
@@ -313,20 +345,42 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
   }
+  // boxed accounts deserialized by try_accounts (IDL types, SPL Token accounts), with their in-memory layouts (see anchorstate.ts)
+  const objVars = opts.sugar !== false && nameFn !== undefined && tryOf.size
+    ? accountObjects(p, opts.idl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
+    : new Map<number, AccountObjs>();
   // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
   for (const [hpc, tpc] of tryOf) {
     const ix = sem.ixNames.get(hpc)!;
-    const layout = accountsLayout(built.get(tpc)!.f, anchorInfo.get(tpc)!.varNames);
-    if (!layout.size) continue;
+    const objs = objVars.get(tpc);
+    const named = new Map(anchorInfo.get(tpc)!.varNames);
+    for (const [v, o] of objs?.boxes ?? []) named.set(v, o.name);
+    const objView = new Map([...(objs?.boxes.values() ?? [])].map(o => [o.name, o]));
+    const layout = accountsLayout(built.get(tpc)!.f, named);
+    // accounts copied in place into the struct (Account<T> not boxed): their words replace any single-word field
+    const fields: import('./views.ts').Field[] = [];
+    const inl = [...(objs?.inline ?? [])];
+    const covered = (off: number) => inl.some(([o, a]) => off >= o && off < o + (views.map.get(a.view)?.size ?? 8));
+    // boxed accounts (words holding a box of a deserialized account)
+    for (const [off, a] of objs?.refs ?? []) if (!covered(off)) fields.push({ name: a.name, off, t: { k: 'ref', to: a.view }, doc: `Box<Account<${a.rust}>>` });
+    for (const [off, nm] of layout) if (!covered(off) && !inl.some(([, a]) => a.name === nm) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: objView.get(nm)?.view ?? 'AccountInfo' }, doc: objView.has(nm) ? `Box<Account<${objView.get(nm)!.rust}>>` : undefined });
+    for (const [off, a] of inl) fields.push({ name: a.name, off, t: { k: 'embed', type: a.view }, doc: `Account<${a.rust}> in place` });
+    // other accounts' &AccountInfo words (named by the error following the call that took the account)
+    for (const [off, nt] of objs?.infos ?? []) {
+      const [nm, ty] = nt.split(':');
+      if (!covered(off) && !fields.some(x => x.off === off || x.name === nm)) fields.push({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' }, doc: ty ? `the &AccountInfo of an account of type ${ty} (e.g. AccountLoader<${ty}>: data not deserialized)` : undefined });
+    }
+    if (!fields.length) continue;
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
     if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
-    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo) at the offsets it stores them [str names; offsets inferred]`, fields: [...layout].sort((x, y) => x[0] - y[0]).map(([off, nm]) => ({ name: nm, off, t: { k: 'ref', to: 'AccountInfo' } })) });
+    views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: fields.sort((x, y) => x.off - y.off) });
     views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts), as the handler builds it [layout from the handler's stores]`, fields: [{ name: 'program_id', off: 0, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: 8, t: { k: 'ref', to: `${P}Accounts` } }] });
     // the handler: the frame object R receiving try_accounts' result, and a call passing a frame object
     // whose word 0 is program_id and word 8 the address of a copy of R
     const hb = built.get(hpc)!, hf = hb.f;
     const fpv = hf.vars.find(v => v.param === 10)?.id;
-    const prog = [...(abiNames.get(hpc) ?? [])].find(([, n]) => n === 'program_id')?.[0];
+    // (Anchor's handler ABI: (out, program_id, accounts, …) when the dispatcher did not name them)
+    const prog = [...(abiNames.get(hpc) ?? [])].find(([, n]) => n === 'program_id')?.[0] ?? hf.vars.find(v => v.param === 2)?.id;
     if (fpv === undefined || prog === undefined) continue;
     const fo = (e: Expr | undefined): number | undefined => (e && e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : e?.k === 'var' && e.id === fpv ? 0 : undefined);
     const defs = new Map<number, Expr[]>();
@@ -338,6 +392,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (e.k === 'var' && defs.get(e.id)?.length === 1) e = defs.get(e.id)![0];
       return e.k === 'load' && e.size === 8 && fo(e.addr) === R! + k;
     };
+    // program_id, or a variable loaded from the frame slot it alone was stored in
+    const slotVals = new Map<number, Expr[]>();
+    for (const b of hf.blocks) for (const st of b.stmts) {
+      if (st.k === 'store' && st.size === 8) { const o = fo(st.addr); if (o !== undefined) { let l = slotVals.get(o); if (!l) slotVals.set(o, (l = [])); l.push(st.v); } }
+      else if (st.k === 'stores' && st.size === 8) { const o = fo(st.addr); if (o !== undefined) st.vals.forEach((v, i) => { let l = slotVals.get(o + 8 * i); if (!l) slotVals.set(o + 8 * i, (l = [])); l.push(v); }); }
+    }
+    const isProg = (e: Expr | undefined): boolean => {
+      if (e?.k !== 'var') return false;
+      if (e.id === prog) return true;
+      const d = defs.get(e.id);
+      if (d?.length !== 1 || d[0].k !== 'load' || d[0].size !== 8) return false;
+      const o = fo(d[0].addr), vals = o === undefined ? undefined : slotVals.get(o);
+      return !!vals && vals.length === 1 && vals[0].k === 'var' && vals[0].id === prog;
+    };
     const sites = findCpiSites(hb.body, fpv, t => (t.k === 'fn' && t.pc !== tpc && built.has(t.pc) ? 'call' : null));
     for (const site of sites.values()) {
       if (site.t?.k !== 'fn') continue;
@@ -348,7 +416,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (F === undefined) return;
         const w0 = site.facts.find(x => x.off === F && x.size === 8)?.e, w1 = site.facts.find(x => x.off === F + 8 && x.size === 8)?.e;
         const G = fo(w1);
-        if (w0?.k !== 'var' || w0.id !== prog || G === undefined) return;
+        if (!isProg(w0) || G === undefined) return;
         if (!site.facts.some(x => x.size === 8 && x.off >= G && x.off < G + 0x800 && loadsR(x.e, x.off - G))) return;
         const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
         const pv = callee.f.vars.find(v => v.param === reg);
@@ -385,6 +453,98 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         ? `name [heur]: its CPI's data and accounts match ${d.family === 'token' ? 'SPL Token' : 'System'} ${d.ix}, but the program id is not a constant here (was ${old})`
         : `name [known]: makes the CPI ${d.ix} of a well-known program (was ${old})`);
     }
+  }
+  // view types per function (the print loop adds the IDL argument views): known pointers, then
+  // single-definition variables holding a typed object (x = acc.data); a parameter gets a view type when
+  // at least half of the direct calls pass an object of that type and none one of another type (a few
+  // rounds, so types flow down call chains)
+  const baseTypes = new Map<number, Map<number, string>>();
+  const computeTypes = (pc: number): Map<number, string> => {
+    const f = built.get(pc)!.f, t = new Map<number, string>();
+    for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
+    for (const v of anchorInfo.get(pc)?.accountVars ?? []) if (!t.has(v)) t.set(v, 'AccountInfo');
+    for (const [v, o] of objVars.get(pc)?.boxes ?? []) if (!t.has(v)) t.set(v, o.view);
+    for (const [v, [ty]] of paramTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
+    for (const [v, ty] of dataVars.get(pc) ?? []) if (!t.has(v) || t.get(v) === 'AccountRecord') t.set(v, ty);
+    for (let it = 0, grew = true; grew && it < 4; it++) {
+      grew = false;
+      for (const b of f.blocks) for (const st of b.stmts) {
+        if (st.k !== 'set' || t.has(st.dst) || f.vars[st.dst]?.param >= 0 || defCount(f, st.dst) !== 1) continue;
+        const ty = exprType(views, st.e, id => t.get(id));
+        if (ty && views.map.has(ty)) { t.set(st.dst, ty); grew = true; }
+      }
+    }
+    return t;
+  };
+  if (opts.sugar !== false) {
+    for (const pc of built.keys()) baseTypes.set(pc, computeTypes(pc));
+    // direct calls once: callee -> (caller, param var of the callee, argument), for parameters never reassigned
+    const callArgs = new Map<number, { caller: number; v: number; a: Expr }[]>();
+    for (const [pc, bt] of built) {
+      const visit = (args: Expr[], cpc: number) => {
+        const callee = built.get(cpc);
+        if (!callee || cpc === pc) return;
+        args.forEach((a, i) => {
+          const reg = callee.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
+          const pv = callee.f.vars.find(v => v.param === reg);
+          if (!pv || defCount(callee.f, pv.id) !== 0 || a.k === 'const') return;
+          let l = callArgs.get(cpc); if (!l) callArgs.set(cpc, (l = [])); l.push({ caller: pc, v: pv.id, a });
+        });
+      };
+      for (const b of bt.f.blocks) for (const st of b.stmts) {
+        if (st.k === 'call' && st.t.k === 'fn') visit(st.args, st.t.pc);
+        if (st.k === 'set' && st.e.k === 'call' && st.e.t.k === 'fn') visit(st.e.args, st.e.t.pc);
+      }
+    }
+    for (let round = 0; round < 3; round++) {
+      let changed: number[] = [];
+      for (const [cpc, sites] of callArgs) {
+        // param var -> the view type the calls pass (null: two types), how many calls do, of how many, callers passing one
+        const seen = new Map<number, { ty: string | null | undefined; n: number; of: number; callers: string[] }>();
+        for (const { caller, v, a } of sites) {
+          const ty = exprType(views, a, id => baseTypes.get(caller)!.get(id));
+          let r = seen.get(v); if (!r) seen.set(v, (r = { ty: undefined, n: 0, of: 0, callers: [] }));
+          r.of++;
+          if (!ty) continue;
+          r.n++;
+          r.ty = r.ty === undefined || r.ty === ty ? ty : null;
+          const nm = p.funcs.get(caller)!.name;
+          if (!r.callers.includes(nm)) r.callers.push(nm);
+        }
+        for (const [v, { ty, n, of, callers }] of seen) {
+          if (!ty || !views.map.has(ty) || ['AccountRecord', 'Input'].includes(ty)) continue;
+          let pt = paramTypes.get(cpc); if (!pt) paramTypes.set(cpc, (pt = new Map()));
+          if (pt.has(v) || baseTypes.get(cpc)!.has(v)) continue;
+          if (n * 2 < of && !fitsView(built.get(cpc)!.f, v, ty)) continue;
+          pt.set(v, [ty, `${n === of ? 'every call passes one' : `${n} of ${of} calls pass one, the others an untyped value${n * 2 < of ? '; its loads and stores through it all hit fields of the view' : ''}`}: ${callers.slice(0, 3).join(', ')}${callers.length > 3 ? ', …' : ''}`]);
+          changed.push(cpc);
+        }
+      }
+      if (!changed.length) break;
+      for (const pc of new Set(changed)) baseTypes.set(pc, computeTypes(pc));
+    }
+  }
+  /**
+   * Do all loads and stores through `v + c` in f hit fields of view `ty` exactly (scalars of their size,
+   * pointers as 8-byte loads, inside embedded fields), and at least 3 different fields?
+   */
+  function fitsView(f: VarFunc, v: number, ty: string): boolean {
+    const hit = new Set<string>();
+    let ok = true;
+    const acc = (addr: Expr, size: number) => {
+      const o = addr.k === 'var' && addr.id === v ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === v && addr.b.k === 'const' ? Number(BigInt.asIntN(64, addr.b.v)) : undefined;
+      if (o === undefined) return;
+      const r = o < 0 ? undefined : views.resolve(ty, o);
+      if (!r || (r.last.k === 'scalar' && (r.rest || r.last.size !== size)) || (r.last.k === 'ref' && (r.rest || size !== 8)) || (r.last.k === 'embed' && r.rest + size > views.width(r.last))) ok = false;
+      else hit.add(r.path.join('.'));
+    };
+    for (const b of f.blocks) for (const st of b.stmts) {
+      if (st.k === 'store') acc(st.addr, st.size);
+      else if (st.k === 'stores') st.vals.forEach((_, i) => acc(st.addr.k === 'bin' && st.addr.b.k === 'const' ? { ...st.addr, b: { k: 'const', v: st.addr.b.v + BigInt(i * st.size) } } : { k: 'bin', op: 'add', a: st.addr, b: { k: 'const', v: BigInt(i * st.size) } }, st.size));
+      stmtExprs(st).forEach(e => walkExpr(e, x => { if (x.k === 'load') acc(x.addr, x.size); }));
+      if (!ok) return false;
+    }
+    return ok && hit.size >= 3;
   }
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
@@ -452,6 +612,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (!used.has(v) || argTypes.has(v) || f.vars[v]?.param === 10) continue;
       names[v] = unique(t.replace(/Account$|Record$/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() + (t.endsWith('Record') ? '_acc' : '_data'));
     }
+    const objs = objVars.get(pc);
+    for (const [v, o] of objs?.boxes ?? []) if (used.has(v) && f.vars[v]?.param !== 10 && !argTypes.has(v)) { names[v] = unique(`${o.name}_box`); recovered.push(names[v]); }
     if (an) {
       for (const [v, nm0] of [...an.varNames].sort((x, y) => x[0] - y[0])) {
         if (!used.has(v) || f.vars[v]?.param === 10 || argTypes.has(v) || dataVars.get(pc)?.has(v)) continue;
@@ -545,11 +707,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const dataNotes: string[] = [];
     const ctxNotes: string[] = [];
     if (opts.sugar !== false) {
-      for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
-      for (const v of an?.accountVars ?? []) if (!varTypes.has(v)) varTypes.set(v, 'AccountInfo');
+      for (const [v, t] of baseTypes.get(pc) ?? []) if (used.has(v) || f.vars[v]?.param >= 0) varTypes.set(v, t);
       for (const [v, t] of argTypes) varTypes.set(v, t);
-      for (const [v, [t, why]] of paramTypes.get(pc) ?? []) if (!varTypes.has(v)) { varTypes.set(v, t); ctxNotes.push(`${names[v]}: ${t} (${why})`); }
-      for (const [v, t] of dataVars.get(pc) ?? []) if ((!varTypes.has(v) || varTypes.get(v) === 'AccountRecord') && used.has(v)) { varTypes.set(v, t); dataNotes.push(`${names[v]}: ${t}`); }
+      for (const [v, [t, why]] of paramTypes.get(pc) ?? []) if (varTypes.get(v) === t && names[v]) ctxNotes.push(`${names[v]}: ${t} (${why})`);
+      for (const [v, t] of dataVars.get(pc) ?? []) if (varTypes.get(v) === t && used.has(v)) dataNotes.push(`${names[v]}: ${t}`);
       // single-definition variables holding a typed object (x = acc.data): that object's view type
       for (let it = 0, grew = true; grew && it < 4; it++) {
         grew = false;
@@ -562,6 +723,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
       ctx.views = views;
       ctx.varType = id => varTypes.get(id);
+      // temporaries defined once as an account of an Accounts struct (or a Context's accounts): its name
+      for (const b of f.blocks) for (const st of b.stmts) {
+        if (st.k !== 'set' || st.e.k !== 'load' || st.e.size !== 8 || !used.has(st.dst) || f.vars[st.dst]?.param >= 0 || !/^([a-z]{1,2}|v\d+)$/.test(names[st.dst] ?? '') || defCount(f, st.dst) !== 1) continue;
+        const a = st.e.addr;
+        const bv = a.k === 'var' ? a.id : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? a.a.id : undefined;
+        const off = a.k === 'bin' && a.b.k === 'const' ? Number(BigInt.asIntN(64, a.b.v)) : 0;
+        const t = bv === undefined ? undefined : varTypes.get(bv);
+        if (!t || !/(Accounts|Context)$/.test(t) || off < 0) continue;
+        const r = views.resolve(t, off);
+        if (!r || r.rest || r.last.k !== 'ref') continue;
+        names[st.dst] = unique(r.path[r.path.length - 1].replace(/\[\d+\]$/, ''));
+      }
     }
     const pr = new Printer(ctx);
     // Result<(), ProgramError> tags (u32 layout): stores of constants where the Ok tag is stored too
@@ -593,15 +766,50 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
-      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? 'call' : null));
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
       if (sites.size) {
+        // exec descriptions (cpiexec.ts) are expressions of the parameters: variables defined (once) as such
+        // an expression print as that variable
+        let defsByKey: Map<string, number> | undefined;
+        const ekey = (e: Expr) => JSON.stringify(e, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+        const named = (e: Expr): Expr => {
+          if (!defsByKey) {
+            defsByKey = new Map();
+            for (const b of f.blocks) for (const st of b.stmts) if (st.k === 'set' && names[st.dst] && (st.e.k === 'load' || st.e.k === 'bin') && defCount(f, st.dst) === 1) { const k = ekey(st.e); if (!defsByKey.has(k)) defsByKey.set(k, st.dst); }
+          }
+          return mapExpr(e, x => { const v = x.k === 'load' || x.k === 'bin' ? defsByKey!.get(ekey(x)) : undefined; return v !== undefined ? { k: 'var', id: v } : x; });
+        };
         const env: CpiEnv = {
+          named,
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           tainted: e => exprTainted(taint.get(pc), e, fpVar),
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
-          constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
+          constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
-        ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
+        // sites the frame contents do not describe as a well-known instruction: run the function (cpiexec.ts)
+        const execKind = (s: CpiSite): ExecSiteKind | undefined => s.t?.k === 'sys' ? (s.abi === 'c' || s.abi === 'rust' ? 'sys' : undefined)
+          : s.t?.k === 'fn' ? (invokeThunks.has(s.t.pc) && (s.abi === 'c' || s.abi === 'rust') ? 'thunk' : invokeWrappers.has(s.t.pc) ? 'wrapper' : undefined) : undefined;
+        const sitePc = (n: Node, s: CpiSite): number | undefined => {
+          if (n.k === 'stmt' && n.s.k === 'call') return n.s.pc;
+          const t = s.t?.k === 'fn' ? `fn:${s.t.pc}` : s.t?.k === 'sys' ? `sys:${s.t.name}` : undefined;
+          const l = t ? callInsns(pc, t) : [];
+          return l.length === 1 ? l[0] : undefined;
+        };
+        ctx.nodeNote = n => {
+          const s = sites.get(n);
+          if (!s) return undefined;
+          const d = cpiDesc(s, env);
+          const kind = execKind(s);
+          if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
+            const at = sitePc(n, s);
+            if (at !== undefined) {
+              const m = describeByExec(p, f, at, kind, env, execBudget);
+              const x = m && formatIx(m, env);
+              if (x) return x.text;
+            }
+          }
+          return d?.text;
+        };
       }
     }
     const { decls, hoisted } = declarations(f, body);

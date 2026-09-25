@@ -105,7 +105,7 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length); text found elsewhere is shown as `0x100001234 /* "text" */` |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
 | `x: AccountInfo`, `x.is_signer` | typed view (below): `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
-| `x[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice |
+| `x[k]`, `x.f[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`), e.g. the next `AccountInfo` in a slice; `x.f[k]` for a field that is an array of such objects (`// [count]`) |
 
 Style: tabs, no semicolons, short variable names (`a..e` = register arguments r1..r5, then `f, g, …`).
 
@@ -203,8 +203,9 @@ discriminator). The account-name function is `Error_with_account_name`, and the 
 **Accounts struct and Context** (`[heur]`): each instruction's try_accounts function stores the named account
 pointers into the struct it returns; those offsets give a view `<Ix>Accounts` (fields `&AccountInfo`), and
 `<Ix>Context` = (`program_id`, `accounts`). A function the handler passes a frame object holding exactly that —
-word 0 the handler's `program_id`, word 8 the address of a copy of the try_accounts result, checked on the frame
-contents at the call — gets the Context type for that parameter:
+word 0 the handler's `program_id` (its second parameter when the dispatcher did not name it; also through a frame
+slot holding only it), word 8 the address of a copy of the try_accounts result, checked on the frame contents at the
+call — gets the Context type for that parameter:
 
 ```ts
 // types [heur]: b: InitializeRewardContext (the handler ix_initialize_reward passes a frame object holding …)
@@ -212,8 +213,55 @@ function fn_32bc0(a: u64, b: InitializeRewardContext, c: u64): u64 {
 	const f: InitializeRewardAccounts = b.accounts
 ```
 
-Coverage is partial: boxed accounts (`Box<Account<T>>`) are stored as the box pointer, and logic inlined into
-the handler has no Context parameter.
+Logic inlined into the handler has no Context parameter.
+
+**Deserialized accounts** (`Account<T>`, `Box<Account<T>>`): try_accounts gets each account from a callee
+(`<Account<T> as Accounts>::try_accounts`, given the accounts slice) into a frame object; the object is followed
+through the frame word by word (stores of loaded words, memcpy) in statement order — branches that end in an error
+return do not change what the frame holds after them — into the struct try_accounts returns, in place, or as a box
+(a heap copy, or a box the callee returns). The account's name is the one the account-name error carries when its
+payload is the callee's error result. The account type is the IDL account whose discriminator the callee's code (or a callee's, within 3 calls)
+holds, or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
+an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`src/exec.ts`)
+on an account whose data is a sample of that type (Borsh from the IDL, or the SPL layout) with pseudo-random
+values and whose owner is the program id (IDL `address`) or the Token program: each value is found at its offset
+(values of 4+ bytes by their bytes, smaller ones by changing them in another run). That gives a view named after
+the type, `info` being the `&AccountInfo`, arrays of structs as element views (`x.reward_infos[1].vault`), the
+IDL type in a comment where the view type does not say it (`// i32`); the box variable (`<account>_box`) and the
+Accounts field get it (`src/anchorstate.ts`). Other account kinds (Signer, AccountLoader, Program, …) give the
+field holding their `&AccountInfo` (found by a run of the callee too):
+
+```ts
+interface Whirlpool { // Account<Whirlpool> as deserialized in memory (… [idl names; offsets from exec] …)
+	info:                 at<0x00, ref<AccountInfo>> // &AccountInfo
+	reward_infos:         at<0x08, WhirlpoolRewardInfosElem> // [3]
+	token_mint_a:         at<0x1a8, Pubkey>
+	liquidity:            at<0x228, u128>
+	sqrt_price:           at<0x238, u128>
+	tick_current_index:   at<0x280, u32> // i32
+	…
+interface SwapAccounts {
+	token_authority:       at<0x08, ref<AccountInfo>>
+	whirlpool:             at<0x10, ref<Whirlpool>> // Box<Account<Whirlpool>>
+	token_owner_account_a: at<0x18, ref<TokenAccount>> // Box<Account<TokenAccount>>
+…
+interface ChangeWhitelistAccounts {
+	admin:     at<0x00, ref<AccountInfo>>
+	conf:      at<0x08, Conf> // Account<Conf> in place
+…
+	if ((memcmp(af + 8, whirlpool_box.token_mint_a, 0x20) as u32) == 0) {   // has_one / address constraint
+…
+	const bk: Whirlpool = m.whirlpool
+	cn = ld64(bk.sqrt_price + 8)
+```
+
+Temporaries defined once as an account of an Accounts struct (or of a Context's `accounts`) are named after it:
+`const whirlpool: Whirlpool = accounts.whirlpool`.
+
+**Parameter types** (`[heur]`): a parameter (never reassigned) gets a view type when at least half of the direct
+calls pass an object of that view type and none one of another — or, with fewer, when every load and store through
+it hits a field of the view exactly and at least 3 fields: `// types [heur]: b: Whirlpool (1 of 3 calls pass one, …)`,
+then `b.tick_current_index = h`, `st64(b.liquidity, i, j)`.
 
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
@@ -268,9 +316,26 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   When the program id is not a constant, the comment says whether it is compared with a known program id in the
   same function, and a data/account shape matching SPL Token or System is decoded as such, marked as a guess:
   `// CPI program *(q + 8) (id not a constant, and not compared with a known program id in this function) — data and accounts match SPL Token TransferChecked; if it is SPL Token: { source: i.key (w), mint: h.key, … }`.
-  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`.
+  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`;
+  Anchor `emit_cpi!` self-invocations (data starting with `EVENT_IX_TAG`) are labeled as such.
   Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
   is a constant, `[heur]` when only the data shape matches);
+* CPIs whose instruction the frame does not show (built on the heap, by builder functions such as
+  `system_instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
+  are described from two runs of the function in the reference interpreter (`src/exec.ts`, `src/cpiexec.ts`), marked
+  `[exec]`. The parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two
+  runs); branches are forced towards the call when only one side can reach it (and away from panics in callees);
+  library wrappers get no account infos (their RefCell checks are skipped; the run checks that the wrapper passes the
+  instruction on). The instruction reaching the CPI syscall is read back and traced with input taint: the same
+  untainted bytes in both runs are constants, a value an 8-byte load produced is `ld64(<its address traced the same
+  way>)`, 32 bytes read at an address `*<address>` (shown as the function's variable defined as that expression, when
+  there is one); anything computed from the inputs is `?`. Values input-dependent branches select: run B takes the
+  other side of each such branch (until the call; flips that keep it from the CPI are dropped), so they differ between
+  the runs; after the branches it could not explore, and after any in called functions, computed numbers are not
+  taken for constants (instruction tags, keys, flags and random-looking words are):
+  `// CPI SYSTEM_PROGRAM.Transfer { from: *f (w,s), to: *l (w), lamports: p7 }, signer seeds p5[..p6] [exec]`
+  (bump seeds and PDAs are never taken for constants: the PDA syscall models differ between the runs; a
+  budget of interpreter steps per program bounds the time);
 * PDA derivations (`sol_try_find_program_address` / `sol_create_program_address`, thin wrappers, and
   `Pubkey::find/create_program_address`) whose seed list is built in the frame:
   `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`
@@ -280,7 +345,11 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   call results and callee writes are not followed). CPI data fields and PDA seeds that may derive from it are
   marked `[ix data?]` (a program id: `[id from ix data]`), and functions list the parameters it may reach:
   `// instruction data may reach [heur: …]: c (points to it), d (value)`;
-* calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
+* calls receiving a `fmt::Arguments` built in the frame (format!, msg!, panic!): the literal pieces with the
+  arguments in place of the `{}`, each argument as what the frame holds at its value pointer (`*src` for 32
+  bytes copied from `src`, else `*ptr`) and its formatter function:
+  `// fmt "Initializing vault for global config {} with mint {}" {} = *l [fn_7d078], {} = *m [fn_7d078]`
+  (with placeholder specs, e.g. `{:?}` or `{0}`: `// fmt pieces [...] (with placeholder specs), arguments: …`).
 
 ## Library code
 
@@ -372,12 +441,14 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
+| `src/anchorstate.ts` | in-memory layouts of deserialized accounts (`Box<Account<T>>`), from runs of the deserializer |
 | `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
 | `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |
 | `src/cpi.ts` | CPI and format-string descriptions (comments) |
+| `src/exec.ts`, `src/cpiexec.ts` | concrete runs with every call followed and input taint (analysis only); CPIs described from them |
 | `src/compact.ts` | store/copy run compaction |
 | `src/print.ts`, `src/layout.ts` | TypeScript printer, output layout |
 | `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition |

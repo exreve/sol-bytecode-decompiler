@@ -6,6 +6,7 @@ import { inflateSync } from 'node:zlib'
 
 export interface IdlInfo {
 	name?: string
+	address?: string // program id (base58), when the IDL gives it
 	instructions: { name: string; disc: bigint; args: string[]; accounts: string[]; argDefs: { name: string; type: any }[] }[]
 	errors: Map<number, string>
 	discs: Map<bigint, string> // u64 (LE) discriminator -> "ix:x" / "account:X" / "event:X"
@@ -15,7 +16,9 @@ export interface IdlInfo {
 
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toLowerCase()
 const pascal = (s: string) => s.split(/[_\s-]+/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1)).join('')
-const le8 = (b: Uint8Array | number[]) => Buffer.from(b).readBigUInt64LE(0)
+// Anchor 0.31 allows custom discriminators of any length: shorter ones are zero-padded (never matched as
+// a u64 constant: only random-looking values are annotated), longer ones truncated to their first 8 bytes
+const le8 = (b: Uint8Array | number[]) => { const x = Buffer.alloc(8); Buffer.from(b).copy(x, 0, 0, 8); return x.readBigUInt64LE(0) }
 const sha8 = (s: string) => le8(createHash('sha256').update(s).digest())
 
 function typeStr(t: any): string {
@@ -41,7 +44,7 @@ function flattenAccounts(accs: any[], prefix = ''): string[] {
 }
 
 export function parseIdl(json: any): IdlInfo {
-	const info: IdlInfo = { name: json.metadata?.name ?? json.name, instructions: [], errors: new Map(), discs: new Map(), types: new Map(), accounts: [] }
+	const info: IdlInfo = { name: json.metadata?.name ?? json.name, address: json.address ?? json.metadata?.address, instructions: [], errors: new Map(), discs: new Map(), types: new Map(), accounts: [] }
 	for (const t of json.types ?? []) if (t?.name && t.type) info.types.set(t.name, t.type)
 	// legacy IDLs define account structs under `accounts` only
 	for (const a of json.accounts ?? []) if (a?.name && a.type && !info.types.has(a.name)) info.types.set(a.name, a.type)
@@ -112,6 +115,61 @@ export function structFields(name: string, types: Map<string, any>): { name: str
 	const def = types.get(name)
 	if (def?.kind !== 'struct' || !Array.isArray(def.fields) || !def.fields.every((f: any) => typeof f === 'object' && f.name)) return undefined
 	return def.fields.map((f: any) => ({ name: f.name, type: f.type }))
+}
+
+// ---- Borsh samples (anchorstate.ts: in-memory layouts of deserialized accounts) ----
+/** A leaf value of a sample: field path, offset and size in the serialized bytes; `heap`: inside a Vec/String. */
+export interface SampleLeaf { path: string; off: number; size: number; kind: 'int' | 'bool' | 'key' | 'bytes'; type: string; heap?: boolean }
+
+/**
+ * Borsh serialization of a value of the given fields with pseudo-random contents (`rnd` gives bytes):
+ * integers, keys and byte arrays random, bools true, options Some, enums their first variant, vectors
+ * and strings of length 1 and 3. Returns the bytes and the leaves (undefined past the depth limit).
+ */
+export function borshSample(fields: { name: string; type: any }[], types: Map<string, any>, rnd: () => number): { bytes: number[]; leaves: SampleLeaf[] } | undefined {
+	const bytes: number[] = [], leaves: SampleLeaf[] = []
+	let ok = true
+	const put = (n: number, path: string, kind: SampleLeaf['kind'], heap: boolean, type: string) => {
+		const off = bytes.length
+		for (let i = 0; i < n; i++) bytes.push(kind === 'bool' ? 1 : rnd() & 0xff)
+		leaves.push({ path, off, size: n, kind, type, ...(heap ? { heap } : {}) })
+	}
+	const u32 = (v: number) => { bytes.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >>> 24) & 0xff) }
+	const val = (t: any, path: string, heap: boolean, depth: number) => {
+		if (!ok || depth > 12 || bytes.length > 0x10000) { ok = false; return }
+		if (typeof t === 'string') {
+			if (t === 'bool') return put(1, path, 'bool', heap, t)
+			if (t === 'string') { u32(3); for (let i = 0; i < 3; i++) bytes.push(0x61 + i); return }
+			if (t === 'bytes') { u32(1); return put(1, path, 'bytes', true, t) }
+			const z = SCALAR_SIZE[t]
+			if (z === undefined) { ok = false; return }
+			return put(z, path, z === 32 ? 'key' : 'int', heap, t === 'publicKey' ? 'pubkey' : t)
+		}
+		if (t?.array) {
+			const [et, n] = t.array
+			if (typeof n !== 'number' || n > 4096) { ok = false; return }
+			if (et === 'u8' || et === 'i8') return put(n, path, 'bytes', heap, `[${et}; ${n}]`)
+			for (let i = 0; i < n; i++) val(et, `${path}[${i}]`, heap, depth + 1)
+			return
+		}
+		if (t?.option !== undefined || t?.coption !== undefined) { if (t.coption !== undefined) u32(1); else bytes.push(1); return val(t.option ?? t.coption, path, heap, depth + 1) }
+		if (t?.vec !== undefined) { u32(1); return val(t.vec, `${path}[0]`, true, depth + 1) }
+		const d = t?.defined === undefined ? undefined : typeof t.defined === 'string' ? t.defined : t.defined.name
+		const def = d === undefined ? undefined : types.get(d)
+		if (def?.kind === 'struct' && Array.isArray(def.fields)) {
+			def.fields.forEach((f: any, i: number) => val(typeof f === 'object' && 'type' in f ? f.type : f, `${path}.${typeof f === 'object' && f.name ? snake(f.name) : i}`, heap, depth + 1))
+			return
+		}
+		if (def?.kind === 'enum' && Array.isArray(def.variants) && def.variants.length) {
+			bytes.push(0)
+			const v = def.variants[0]
+			for (const [i, f] of (v.fields ?? []).entries()) val(typeof f === 'object' && 'type' in f ? f.type : f, `${path}.${typeof f === 'object' && f.name ? snake(f.name) : i}`, heap, depth + 1)
+			return
+		}
+		ok = false
+	}
+	for (const f of fields) val(f.type, snake(f.name), false, 0)
+	return ok ? { bytes, leaves } : undefined
 }
 
 // ---- fetching the on-chain IDL account ----

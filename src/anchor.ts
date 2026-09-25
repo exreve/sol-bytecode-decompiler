@@ -33,7 +33,7 @@ function callsIn(s: Stmt): Call[] {
 }
 
 /** The name carried by a call's last (pointer, length) argument pair, if it is an identifier string. */
-function nameArg(args: Expr[], strAt: (p: bigint, n: bigint) => string | undefined): string | undefined {
+export function nameArg(args: Expr[], strAt: (p: bigint, n: bigint) => string | undefined): string | undefined {
 	const p = args[args.length - 2], n = args[args.length - 1]
 	if (p?.k !== 'const' || n?.k !== 'const' || n.v > 64n) return undefined
 	const s = strAt(p.v, n.v)
@@ -249,6 +249,10 @@ export function accountsLayout(f: VarFunc, names: Map<number, string>): Map<numb
 	const res = new Map<number, string>(), bad = new Set<number>()
 	if (out === undefined) return res
 	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === out) return res
+	// variables that only ever hold the out parameter
+	const aliasDefs = new Map<number, boolean>()
+	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) aliasDefs.set(s.dst, (aliasDefs.get(s.dst) ?? true) && s.k === 'set' && s.e.k === 'var' && s.e.id === out)
+	const isOut = (id: number) => id === out || aliasDefs.get(id) === true
 	const fo = (e: Expr) => frameOff(e, fp ?? -1)
 	// frame slots stored exactly once
 	const slot = new Map<number, Expr | null>()
@@ -267,10 +271,14 @@ export function accountsLayout(f: VarFunc, names: Map<number, string>): Map<numb
 		if (res.has(off) && res.get(off) !== nm) bad.add(off)
 		res.set(off, nm)
 	}
+	const outOff = (a: Expr) => (a.k === 'var' && isOut(a.id) ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && isOut(a.a.id) && a.b.k === 'const' ? Number(a.b.v) : -1)
+	// blocks returning an error: Result<Accounts, Error> is Err when its first word (a reference) is 0
+	const errBlock = (b: typeof f.blocks[number]) => b.stmts.some(s => (s.k === 'store' && s.size === 8 && s.v.k === 'const' && s.v.v === 0n && outOff(s.addr) === 0) || (s.k === 'stores' && s.size === 8 && s.vals[0].k === 'const' && s.vals[0].v === 0n && outOff(s.addr) === 0))
 	for (const b of f.blocks) for (const s of b.stmts) {
 		if (s.k !== 'store' && s.k !== 'stores') continue
+		if (errBlock(b)) break
 		const a = s.addr
-		const off = a.k === 'var' && a.id === out ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === out && a.b.k === 'const' ? Number(a.b.v) : -1
+		const off = outOff(a)
 		if (off < 0 || off > 0x10000 || s.size !== 8) continue
 		if (s.k === 'store') note(off, s.v); else s.vals.forEach((v, i) => note(off + 8 * i, v))
 	}
