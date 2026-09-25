@@ -958,6 +958,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const l = t ? callInsns(pc, t) : [];
           return l.length === 1 ? l[0] : undefined;
         };
+        // (a call instruction duplicated in the IR, e.g. by tail duplication, is run once: the runs and
+        // their text depend only on the function, the call and the kind; the steps are charged again)
+        const execMemo = new Map<string, { x?: { text: string }; steps: number }>();
         ctx.nodeNote = n => {
           const s = sites.get(n);
           if (!s) return undefined;
@@ -966,10 +969,15 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
             const at = sitePc(n, s);
             if (at !== undefined) {
-              const b0 = execBudget.steps, t0 = Date.now();
-              const m = describeByExec(p, f, at, kind, env, execBudget);
-              const x = m && formatIx(m, env);
-              if (x) return x.text;
+              const k = `${at}:${kind}`;
+              let r = execMemo.get(k);
+              if (r) execBudget.steps -= r.steps;
+              else {
+                const b0 = execBudget.steps;
+                const m = describeByExec(p, f, at, kind, env, execBudget);
+                execMemo.set(k, (r = { x: (m && formatIx(m, env)) || undefined, steps: b0 - execBudget.steps }));
+              }
+              if (r.x) return r.x.text;
             }
           }
           return d?.text;
