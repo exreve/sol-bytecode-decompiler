@@ -34,7 +34,7 @@ sbpf-decompile <program.so | program address> [-o out.ts | -o outdir/] [--rpc <u
   program.so        a local program binary ("-" reads it from stdin)
   program address   fetched from the RPC endpoint given with --rpc (its on-chain Anchor IDL is used when published)
   -o out.ts         write a single file (default: stdout)
-  -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, slices/
+  -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, security/
   --idl file.json   Anchor IDL (instruction args/accounts, account layouts, error names)
   --full            also decompile recognized library code (default: one-line typed stubs)
 ```
@@ -81,7 +81,7 @@ function accounts_set_fee_authority(a: u64, b: u64, c: u64, d: u64, e: u64): u64
 
 Everything printed is executable under the runtime model below and verified against the bytecode
 (`test/equiv.ts`); names, view types and comments carry their provenance (`[idl]`, `[str]`, `[known]`,
-`[heur]`, see "Recovered names"). Security slices (`slices/*.txt`) are separate, unverified views.
+`[heur]`, see "Recovered names"). The security analysis (`security/`) is a separate, derived view.
 
 Runtime model (also emitted as the file prelude / `lib.d.ts`):
 
@@ -147,15 +147,19 @@ ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
 bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
-slices/*.txt    security slices: UNVERIFIED views derived from the code above (see below)
+security/       program analysis: summary.md (read first), <ix>.md per instruction, analysis.json (see below)
 ```
 
-**Slices** (`slices/cpi.txt`, `pda.txt`, `account_checks.txt`, `account_writes.txt`) index the security-relevant
-lines: for each CPI, PDA derivation, condition on an account flag / owner / key (or Anchor constraint error),
-and write to account data or lamports, they list the instruction handlers reaching the function (direct calls,
-through library code too), the conditions the line runs under (enclosing blocks and earlier early exits), the
-definitions of the variables it uses (same function), and the line. They are read off the printed code and
-leave everything else out: an index for review, not verified code (never mixed into the `.ts` files).
+**Security analysis** (`security/`, phase 1 of [docs/ANALYSIS_SPEC.md](docs/ANALYSIS_SPEC.md)), computed from the
+same IR in the same run: `summary.md` ranks the instructions by sensitivity (value movement, PDA signing, CPIs to
+account-supplied programs, authority / state writes, closes) with their effects and what to look at first;
+`<ix>.md` has the account privilege matrix (signer / writable / owner / executable / address: what the IDL
+expects, and whether the code checks it), the constraints per account, CPIs (program, instruction, accounts,
+signer seeds), PDAs, account writes and every recognized check, each linked to `bundle/<ix>.ts:<line>`;
+`analysis.json` has all of it (schema in `src/analysis/report.ts`). Statuses: `found` (on every non-failing
+path), `partial` (some paths), `not_found` (none recognized — not a proof of absence), `runtime` (enforced by
+Solana, e.g. a written account must be writable). Derived and over-approximate: the `.ts` code is the verified
+source of truth. The single-file output gets a short summary comment block instead.
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.
 
@@ -463,7 +467,8 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
 | `src/anchorstate.ts` | in-memory layouts of deserialized accounts (`Box<Account<T>>`), from runs of the deserializer |
-| `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
+| `src/analysis/facts.ts` | per-function facts for security/: checks (guarded early exits), CPIs, PDAs, account writes, calls |
+| `src/analysis/report.ts` | per-instruction analysis (privileges, constraints, operations, ranking) and the security/ files |
 | `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |

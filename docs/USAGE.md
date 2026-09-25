@@ -42,10 +42,13 @@ program/ix/<ix>.ts      the handler and helpers used only by it
 program/shared.ts       helpers used by several instructions
 program/entrypoint.ts   entrypoint, dispatcher, remaining code
 program/lib.d.ts        runtime model (what every helper means), syscalls, library stubs
-program/slices/         unverified cross-references (CPIs, PDAs, account checks/writes)
+program/security/       derived analysis: summary.md (read first), <ix>.md, analysis.json
 ```
 
-For AI review: give the model `index.ts` + `lib.d.ts`, then one `bundle/<ix>.ts` at a time.
+For AI review: give the model `security/summary.md` + `index.ts` + `lib.d.ts`, then one `bundle/<ix>.ts` at a
+time with its `security/<ix>.md` (privileges and checks found, CPIs, PDAs, writes, each with its bundle line).
+The security views are derived and over-approximate (`not_found` = no check recognized, not a proof of absence);
+the decompiled code stays the source of truth. A single-file output (`-o out.ts`) carries a short summary comment.
 
 Names carry their source: `[idl]` Anchor IDL, `[str]` the program's own strings, `[known]` well-known
 programs/layouts, `[heur]` inferred (verify).
