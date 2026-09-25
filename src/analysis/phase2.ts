@@ -1,0 +1,332 @@
+// Program analysis, phase 2 (docs/ANALYSIS_SPEC.md): views over the per-instruction facts of report.ts.
+//   dominance   which checks dominate each operation (real dominators, across calls), and for the
+//               relevant ones that do not, a path reaching the operation without them
+//   trust       caller-controlled values (instruction data, account keys, data of accounts whose owner is
+//               not verified, remaining accounts) vs values validated by checks (with the checks)
+//   sources     where an operation's parameters come from (taint: instruction data as taint.ts marks it
+//               `[ix data?]`, account keys, stored account fields, constants)
+//   relations   key / field equalities between accounts the checks establish
+//   authority   who enables each value movement / authority change (signers, stored authority fields
+//               related to them, PDA signatures) and which instructions write those fields
+//   findings    a small declarative rule engine over all of the above
+// DERIVED and OVER-APPROXIMATE like everything in security/: the decompiled code is the source of truth.
+import type { Result } from '../decompile.ts'
+import type { OpKind } from './facts.ts'
+import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
+import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
+
+export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
+export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'; status: 'found' | 'partial'; at: Loc; negated?: boolean }
+export interface Enabler { kind: 'signer' | 'stored' | 'pda' | 'none'; what: string; status?: string; writtenBy?: string[] }
+export interface AuthorityRow { op: number; kind: string; enabledBy: Enabler[] }
+export interface Finding { rule: string; title: string; ix: string; accounts: string[]; path: string[]; evidence: string[]; confidence: 'high' | 'medium' | 'low'; weight: number }
+
+const VALUE: OpKind[] = ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'BURN', 'ACCOUNT_CLOSE', 'OWNER_ASSIGN', 'PROGRAM_UPGRADE']
+const isSensitive = (o: OpOut) => o.kinds.some(k => k !== 'PDA_DERIVE')
+const isValueOrAuth = (o: OpOut) => o.kinds.some(k => VALUE.includes(k) || k === 'AUTHORITY_WRITE') || (o.kinds.includes('LAMPORT_WRITE') && o.how === '-=')
+const GUARD_KINDS = ['signer', 'owner', 'key', 'address', 'has_one', 'pda', 'custom', 'discriminator', 'state']
+
+// ---- dominance ----
+
+interface Site { fn: number; b: number; pc: number }
+
+/**
+ * Which checks dominate which operations. A check takes effect at its deciding block (its failing side
+ * leaves the function), and, when it is on every path of its function (facts.ts `main`), at each call
+ * site of that function up the call path (the error propagates). An operation's points are its block and
+ * the call sites leading to its function from the handler (one call path: the first found). A check
+ * dominates an operation if one of its sites dominates one of the operation's points (in the part of a
+ * native dispatcher the instruction's tags reach). Check statuses become: found = dominates every
+ * sensitive operation, partial = some; unchanged when the instruction makes none.
+ */
+export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCtx) {
+	const byPc = fnIndex(r)
+	const cfg = (fn: number): Cfg | undefined => { const fo = byPc.get(fn); return fo && cfgOf(fo) }
+	const blockOf = (fn: number, pc?: number, ret?: unknown): number | undefined => {
+		const g = cfg(fn)
+		if (!g) return undefined
+		return pc !== undefined ? g.pcBlock.get(pc) : ret ? g.retBlock.get(ret as never) : undefined
+	}
+	const chainUp = (fn: number, first: Site | undefined): Site[] => {
+		const out: Site[] = first ? [first] : []
+		for (let x = fn, k = 0; x !== ctx.handler && k < 16; k++) {
+			const p = ctx.parents.get(x)
+			if (!p) break
+			const b = blockOf(p.fn, p.pc, p.ret)
+			if (b === undefined) break
+			out.push({ fn: p.fn, b, pc: p.pc ?? Infinity })
+			x = p.fn
+		}
+		return out
+	}
+	// (restricted to the blocks the instruction's tags reach: blocks reachable from the entry avoiding a)
+	const avoidMemo = new Map<string, Uint8Array>()
+	const dom = (fn: number, a: Site, b: Site): boolean => {
+		const g = cfg(fn)!
+		if (a.b === b.b) return a.pc < b.pc
+		if (!ctx.allowed) return dominates(g, a.b, b.b)
+		const k = `${fn}:${a.b}`
+		let seen = avoidMemo.get(k)
+		if (!seen) {
+			const blocks = g.fo.f.blocks
+			seen = new Uint8Array(blocks.length)
+			if (a.b !== 0) {
+				const q = [0]; seen[0] = 1
+				while (q.length) { const x = q.pop()!; for (const s of blocks[x].succs) if (!seen[s] && s !== a.b && ctx.allowed(fn, s)) { seen[s] = 1; q.push(s) } }
+			}
+			avoidMemo.set(k, seen)
+		}
+		return !seen[b.b]
+	}
+	const siteOf = checks.map(c => {
+		const g = cfg(c.fnPc)
+		const b = g && decisionBlock(g, c.c, c.at.pc)
+		if (b === undefined) return []
+		const own: Site = { fn: c.fnPc, b, pc: Infinity }
+		return c.main && c.fnPc !== ctx.handler ? chainUp(c.fnPc, own) : [own]
+	})
+	const pointsOf = ops.map(o => {
+		if (o.fnPc === undefined) return []
+		const b = blockOf(o.fnPc, o.at.pc)
+		return chainUp(o.fnPc, b === undefined ? undefined : { fn: o.fnPc, b, pc: o.at.pc ?? Infinity })
+	})
+	const doms = (ci: number, oi: number) => siteOf[ci].some(s => pointsOf[oi].some(p => p.fn === s.fn && dom(s.fn, s, p)))
+	const sens = ops.map((o, i) => i).filter(i => isSensitive(ops[i]) && pointsOf[i].length)
+	for (const oi of sens) ops[oi].guards = []
+	checks.forEach((c, ci) => {
+		if (!siteOf[ci].length || !sens.length) return
+		let n = 0
+		for (const oi of sens) if (doms(ci, oi)) { n++; ops[oi].guards!.push(ci) }
+		c.status = n === sens.length ? 'found' : 'partial'
+	})
+	// relevant checks that do not dominate a value-moving / authority operation: a path around them
+	for (const oi of sens) {
+		const o = ops[oi]
+		if (!isValueOrAuth(o)) continue
+		const accts = opAccounts(o)
+		const cand = checks.map((c, ci) => ci).filter(ci => !o.guards!.includes(ci) && checks[ci].kinds.some(k => GUARD_KINDS.includes(k)) && (checks[ci].kinds.includes('signer') || (checks[ci].account && accts.has(checks[ci].account!.replace(/\?$/, '')))))
+		for (const ci of cand.slice(0, 3)) {
+			for (const s of siteOf[ci]) {
+				const p = pointsOf[oi].find(x => x.fn === s.fn)
+				if (!p) continue
+				const g = cfg(s.fn)!
+				const path = bypass(g, s.b, p.b, ctx.allowed ? b => ctx.allowed!(s.fn, b) : undefined)
+				if (!path) continue
+				const ff = r.facts.get(s.fn)
+				const locs: Loc[] = []
+				for (const b of path) { const pc = blockPc(g, b); const line = ff?.pcLine.get(pc); if (line !== undefined && (!locs.length || locs[locs.length - 1].line !== line)) locs.push({ fn: ff!.name, line, pc }) }
+				const short = locs.length > 6 ? [...locs.slice(0, 3), ...locs.slice(-3)] : locs
+				;(o.bypass ??= []).push({ check: ci, path: short })
+				break
+			}
+		}
+	}
+}
+
+const idx = new WeakMap<Result, Map<number, Result['funcs'][number]>>()
+function fnIndex(r: Result) { let m = idx.get(r); if (!m) idx.set(r, (m = new Map(r.funcs.map(f => [f.pc, f])))); return m }
+
+/** the accounts an operation names (target, CPI accounts) */
+function opAccounts(o: OpOut): Set<string> {
+	const s = new Set<string>()
+	if (o.target) s.add(o.target.split('.')[0])
+	for (const a of o.cpi?.accounts ?? []) { const m = /^\*?([A-Za-z_]\w*)/.exec(a.text); if (m) s.add(m[1]); if (a.role) s.add(a.role) }
+	return s
+}
+
+// ---- trust, sources, relations, authority, rules ----
+
+const ACCT_REF = /\b([A-Za-z_]\w*(?:\[\d+\])?)\.(key|owner|lamports|data|[a-z_][a-z0-9_]*(?:\[\d+\.\.\d+\])?)\b/g
+
+export function phase2(a: Analysis, r: Result) {
+	const findings: Finding[] = []
+	const authFields = new Map<string, string[]>() // stored authority field -> instructions writing it
+	for (const s of a.stateWrites) {
+		const ixw = s.writes.map(w => w.ix)
+		const isAuth = a.ixs.some(ix => ix.ops.some(o => o.target === s.target && o.kinds.includes('AUTHORITY_WRITE')))
+		if (isAuth) authFields.set(s.target, [...new Set(ixw)])
+	}
+	for (const ix of a.ixs) {
+		const names = new Set(ix.accounts.map(x => x.name))
+		const acctOf = (t: string): string | undefined => { const m = /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(t); const n = m?.[1]; return n && names.has(n) ? n : undefined }
+		// trust
+		const trust: TrustRow[] = []
+		const ev = (x: IxOut['accounts'][number], ks: string[]) => ks.filter(k => x.constraints[k] && x.constraints[k].status !== 'not_found').map(k => `${k} ${x.constraints[k].status}${x.constraints[k].at ? ` @${x.constraints[k].at!.fn}:${x.constraints[k].at!.line}` : ''}`)
+		const st = (x: IxOut['accounts'][number], ks: string[]): TrustRow['trust'] => {
+			const ss = ks.map(k => x.constraints[k]?.status).filter(Boolean)
+			return ss.includes('found') ? 'validated' : ss.includes('runtime') ? 'runtime' : ss.includes('partial') ? 'partially-validated' : 'caller-controlled'
+		}
+		for (const x of ix.accounts) {
+			trust.push({ value: `${x.name}.key`, trust: st(x, ['address', 'pda', 'key', 'has_one']), evidence: ev(x, ['address', 'pda', 'key', 'has_one']) })
+			const dataT = st(x, ['owner'])
+			trust.push({ value: `${x.name}.data`, trust: dataT === 'validated' && !x.constraints.discriminator && !x.constraints.initialized && r.anchor ? 'partially-validated' : dataT, evidence: ev(x, ['owner', 'discriminator', 'initialized']) })
+		}
+		const info = r.instructions.find(i => i.name === ix.name)
+		const args = (info?.args ?? []).map(s => s.split(':')[0].trim())
+		for (const g of args) trust.push({ value: `ix.${g}`, trust: 'caller-controlled', evidence: ['instruction data'] })
+		ix.trust = trust
+		const trustOf = (v: string) => trust.find(t => t.value === v)?.trust
+		// sources of operation parameters (taint)
+		const classify = (text: string): { source: string; trust: string }[] => {
+			const out: { source: string; trust: string }[] = []
+			if (/\[ix data\?\]/.test(text)) out.push({ source: 'instruction data', trust: 'caller-controlled' })
+			for (const g of args) if (new RegExp(`\\b${g}\\b`).test(text)) out.push({ source: `ix.${g}`, trust: 'caller-controlled' })
+			for (const m of text.matchAll(ACCT_REF)) {
+				const acct = acctOf(m[1])
+				if (!acct) continue
+				const v = m[2] === 'key' ? `${acct}.key` : `${acct}.data`
+				out.push({ source: m[2] === 'key' ? `${acct}.key` : `${acct}.${m[2]}`, trust: trustOf(v) ?? 'caller-controlled' })
+			}
+			const bare = acctOf(text.trim())
+			if (bare && !out.length) out.push({ source: `${bare}.key`, trust: trustOf(`${bare}.key`) ?? 'caller-controlled' })
+			return out.filter((x, i) => out.findIndex(y => y.source === x.source) === i)
+		}
+		for (const o of ix.ops) {
+			if (!isSensitive(o)) continue
+			const params: [string, string][] = []
+			if (o.cpi) {
+				if (!o.cpi.known && o.cpi.program !== '?') params.push(['program', o.cpi.program])
+				for (const x of o.cpi.accounts) params.push([x.role ?? 'account', x.text])
+				for (const [k, v] of o.cpi.fields) params.push([k, v])
+				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds])
+			}
+			if (o.pda) params.push(['seeds', o.pda.seeds])
+			if (o.value !== undefined && o.target) params.push([o.target, o.value])
+			const src: NonNullable<OpOut['sources']> = []
+			for (const [p, t] of params) for (const s of classify(t)) src.push({ param: p, ...s })
+			if (src.length) o.sources = src.slice(0, 24)
+		}
+		// relations: two sides of an equality check, at least one an account key / field
+		const rel: Relation[] = []
+		for (const c of ix.checks) {
+			// (Anchor has_one on account T: T.<f> == f.key; the error names T, not f: each signer is a candidate)
+			if (c.kinds.includes('has_one') && c.account) for (const sgn of ix.accounts) if (sgn.name !== c.account && sgn.constraints.signer && sgn.constraints.signer.status !== 'not_found') rel.push({ a: `${c.account}.${sgn.name}?`, b: `${sgn.name}.key`, kind: 'has_one', status: c.status, at: c.at })
+			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
+			const sides = eqSides(c.cond)
+			if (!sides) continue
+			const norm = (t: string) => {
+				for (const m of t.matchAll(ACCT_REF)) { const acct = acctOf(m[1]); if (acct) return `${acct}.${m[2]}` }
+				const b = acctOf(t.trim())
+				return b ? `${b}.key` : undefined
+			}
+			const [x, y] = [norm(sides[0]), norm(sides[1])]
+			if (!x && !y) continue
+			const kind: Relation['kind'] = x?.endsWith('.key') && y?.endsWith('.key') ? 'key_eq' : x && y ? 'field_eq' : 'compare'
+			rel.push({ a: x ?? sides[0].slice(0, 60), b: y ?? sides[1].slice(0, 60), kind, status: c.status, at: c.at })
+		}
+		ix.relations = rel
+		// (account data rows only for accounts whose data is checked or read by an operation)
+		const dataUsed = new Set(ix.ops.flatMap(o => (o.sources ?? []).filter(x => !x.source.endsWith('.key')).map(x => x.source.split('.')[0])))
+		ix.trust = trust.filter(t => !t.value.endsWith('.data') || t.evidence.length || dataUsed.has(t.value.slice(0, -5)))
+		// authority: who enables each value movement / authority change
+		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found')
+		const auth: AuthorityRow[] = []
+		ix.ops.forEach((o, oi) => {
+			if (!isValueOrAuth(o)) return
+			const en: Enabler[] = []
+			for (const s of signers) {
+				en.push({ kind: 'signer', what: s.name, status: s.constraints.signer.status })
+				for (const x of rel) {
+					const other = x.a === `${s.name}.key` ? x.b : x.b === `${s.name}.key` ? x.a : undefined
+					if (!other || other.endsWith('.key') && x.kind !== 'has_one') continue
+					const field = x.kind === 'has_one' ? [...authFields.keys()].find(f => f.endsWith(`.${s.name}`)) ?? other.replace(/\?$/, '') : other
+					en.push({ kind: 'stored', what: `${s.name}.key == ${field}`, status: x.status, writtenBy: authFields.get(field) ?? a.stateWrites.find(w => w.target === field)?.writes.map(w => w.ix) })
+				}
+			}
+			if (o.cpi?.seeds) en.push({ kind: 'pda', what: `PDA signature ${o.cpi.seeds}` })
+			if (!en.length) en.push({ kind: 'none', what: 'no signer, stored authority or PDA signature found' })
+			auth.push({ op: oi, kind: o.kinds.filter(k => k !== 'CPI').join(', ') || 'CPI', enabledBy: en })
+		})
+		ix.authority = auth
+		findings.push(...rules(ix, a))
+	}
+	const rank = { high: 3, medium: 2, low: 1 }
+	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
+	a.findings = findings
+	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
+}
+
+/** the two sides of an (in)equality condition: a == b, a != b, memeq/keyeq/memcmp(a, b, 0x20) */
+function eqSides(cond: string): [string, string] | undefined {
+	const c = cond.replace(/^!+\(?/, '').replace(/\)$/, '')
+	const m = /^(?:\(\s*)?(?:memeq|keyeq|memcmp)\(([^,]+), ([^,]+?)(?:, 0x20)?\)(?: as u32\))?(?: [!=]= 0)?$/.exec(c)
+	if (m) return [m[1], m[2]]
+	const e = /^([^&|=!<>]+?) [!=]= ([^&|=!<>]+)$/.exec(cond)
+	if (e && !/^\d+$|^0x[0-9a-f]+$/.test(e[2].trim())) return [e[1], e[2]]
+	return undefined
+}
+
+// ---- rules ----
+
+interface Rule { id: string; title: string; run: (ix: IxOut, a: Analysis) => Omit<Finding, 'rule' | 'title' | 'ix'>[] }
+const W: Partial<Record<OpKind, number>> = { TOKEN_TRANSFER: 5, LAMPORT_TRANSFER: 5, MINT: 5, PROGRAM_UPGRADE: 6, AUTHORITY_WRITE: 4, ACCOUNT_CLOSE: 4, OWNER_ASSIGN: 4, LAMPORT_WRITE: 4, BURN: 3, CPI: 1 }
+const wOf = (o: OpOut) => Math.max(0, ...o.kinds.map(k => W[k] ?? 0))
+const L = (at: Loc) => `${at.fn}:${at.line}`
+
+const RULES: Rule[] = [
+	{
+		id: 'cpi-unchecked-program', title: 'CPI to an account-supplied program id with no dominating check against a known id',
+		run: ix => ix.ops.filter(o => o.cpi && !o.cpi.known && o.cpi.program !== '?' && !/\(id compared with/.test(o.cpi.checked ?? '')).flatMap(o => {
+			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && (!c.account || /program/.test(c.account) || o.cpi!.program.includes(c.account.replace(/\?$/, ''))))
+			if (g.length) return []
+			const progAcct = ix.accounts.find(x => /program/.test(x.name) && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
+			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, progAcct ? `a program account (${progAcct.name}) is checked, but no check dominating this CPI compares its id` : 'no address / executable check on a program account found'], confidence: progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + 2 }]
+		}),
+	},
+	{
+		id: 'value-move-no-signer', title: 'Value movement or authority change with no signer check and no PDA signature',
+		run: ix => {
+			const signers = ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))
+			if (signers) return []
+			return ix.ops.filter(o => isValueOrAuth(o) && !o.cpi?.seeds && !o.kinds.includes('PDA_SIGNATURE')).slice(0, 3).map(o => ({ accounts: [...opAccounts(o)], path: [L(o.at)], evidence: [o.text.slice(0, 140)], confidence: 'medium' as const, weight: wOf(o) }))
+		},
+	},
+	{
+		id: 'signer-not-related-to-authority', title: 'Value movement or authority change with a signer but no relation between the signer key and a stored authority field',
+		run: ix => (ix.authority ?? []).flatMap(row => {
+			const o = ix.ops[row.op]
+			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
+			if (!hasSigner || stored || o.cpi?.seeds) return []
+			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
+			if (o.cpi?.known && o.cpi.accounts.some(x => x.s)) return []
+			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
+		}),
+	},
+	{
+		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
+		run: ix => ix.ops.flatMap(o => (o.bypass ?? []).map(b => {
+			const c = ix.checks[b.check]
+			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`], confidence: 'medium' as const, weight: wOf(o) + 1 }
+		})),
+	},
+	{
+		id: 'token-mint-unrelated', title: 'Token transfer (unchecked Transfer) whose destination mint is not related to the source / state mint',
+		run: ix => ix.ops.filter(o => o.kinds.includes('TOKEN_TRANSFER') && o.cpi?.ix === 'Transfer').flatMap(o => {
+			const dest = o.cpi!.accounts.find(x => x.role === 'destination')
+			const d = dest && /^\*?([A-Za-z_]\w*)/.exec(dest.text)?.[1]
+			if (!d || !ix.accounts.some(x => x.name === d)) return []
+			const row = ix.accounts.find(x => x.name === d)
+			const related = row && (row.constraints.token_mint || row.constraints.associated) || (ix.relations ?? []).some(x => (x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`)) && /mint/.test(x.a + x.b))
+			return related ? [] : [{ accounts: [d], path: [L(o.at)], evidence: [o.text.slice(0, 140), `no token::mint constraint / mint relation found for ${d}`], confidence: 'low' as const, weight: wOf(o) }]
+		}),
+	},
+	{
+		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
+		run: ix => ix.ops.flatMap(o => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target))).slice(0, 2).map(s => ({
+			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
+		}))),
+	},
+	{
+		id: 'unverified-account-data', title: 'Operation parameter read from the data of an account whose owner is not verified',
+		run: ix => ix.ops.flatMap(o => (o.sources ?? []).filter(s => !/\.key$/.test(s.source) && s.source !== 'instruction data' && !s.source.startsWith('ix.') && s.trust === 'caller-controlled' && isValueOrAuth(o)).slice(0, 1).map(s => ({
+			accounts: [s.source.split('.')[0]], path: [L(o.at)], evidence: [`${s.param} ← ${s.source}: the account's owner is not verified (no check found)`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
+		}))),
+	},
+]
+
+function rules(ix: IxOut, a: Analysis): Finding[] {
+	const out: Finding[] = []
+	for (const r of RULES) for (const f of r.run(ix, a)) out.push({ rule: r.id, title: r.title, ix: ix.name, ...f })
+	return out
+}
+export const RULE_IDS = RULES.map(r => `${r.id}: ${r.title}`)

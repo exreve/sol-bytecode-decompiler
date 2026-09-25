@@ -41,6 +41,7 @@
 import type { Result } from '../decompile.ts'
 import type { FnFacts, Op, OpKind } from './facts.ts'
 import { refOf } from './facts.ts'
+import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup } from './flow.ts'
 import type { Expr } from '../ir.ts'
 
@@ -54,8 +55,17 @@ export interface AccountRow {
 	expected: { signer?: boolean; writable?: boolean; pda?: boolean; address?: string; optional?: boolean }
 	constraints: Record<string, Evidence>
 }
-export interface CheckOut { at: Loc; status: 'found' | 'partial'; account?: string; kinds: string[]; cond: string; failsIf: boolean; error: string; via?: string }
-export interface OpOut { at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda'] }
+export interface CheckOut {
+	at: Loc; status: 'found' | 'partial'; account?: string; kinds: string[]; cond: string; failsIf: boolean; error: string; via?: string
+	fnPc: number; c?: Expr; main: boolean // (internal: the dominance analysis, phase2.ts)
+}
+export interface OpOut {
+	at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda']
+	fnPc?: number                                   // (internal)
+	guards?: number[]                               // indices of the instruction's checks that dominate it (phase2.ts)
+	bypass?: { check: number; path: Loc[] }[]       // relevant checks that do not: a path reaching it without them
+	sources?: { param: string; source: string; trust: string }[] // taint: where its parameters come from (phase2.ts)
+}
 export interface IxOut {
 	name: string
 	handler: string
@@ -68,7 +78,12 @@ export interface IxOut {
 	effects: string[]
 	indirect: string[]   // functions reached through function pointers / tables (and why)
 	dispatch?: string    // native: the tag(s) selecting this instruction's part of the handler
+	ctx?: IxCtx          // (internal: the dominance analysis)
+	trust?: TrustRow[]
+	relations?: Relation[]
+	authority?: AuthorityRow[]
 }
+export interface IxCtx { handler: number; parents: Map<number, { fn: number; pc?: number; ret?: Expr }>; allowed?: (fn: number, b: number) => boolean }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
 export interface Analysis {
 	program: { version: number; instructions: number; functions: number; anchor: boolean; idl: boolean }
@@ -77,6 +92,8 @@ export interface Analysis {
 	stateWrites: { target: string; writes: { ix: string; how: string; at: Loc }[] }[]
 	deps: { target: string; readBy: string[]; writtenBy: string[] }[]
 	unattributed: OpOut[] // operations in functions no instruction handler reaches through direct calls
+	findings?: Finding[]  // phase 2 rule engine (phase2.ts)
+	authorityFields?: { field: string; writtenBy: string[] }[]
 }
 
 /** Sensitivity weights (ranking of the instruction surface). */
@@ -136,8 +153,11 @@ function analyze0(r: Result): Analysis {
 		const main = new Map<number, boolean>([[h.pc, true]])
 		const lib = new Set<number>()
 		const q = [h.pc]
+		const parents: IxCtx['parents'] = new Map()
+		let from: { fn: number; pc?: number; ret?: Expr } | undefined
 		const reach = (callee: number, cm: boolean) => {
 			if (rootPcs.has(callee)) return
+			if (from && !parents.has(callee) && callee !== h.pc) parents.set(callee, from)
 			if (!facts.has(callee)) {
 				if (lib.has(callee) || !p.funcs.has(callee)) return
 				lib.add(callee)
@@ -159,7 +179,8 @@ function analyze0(r: Result): Analysis {
 		while (q.length) {
 			const x = q.shift()!
 			const m = main.get(x)!
-			for (const c of facts.get(x)?.calls ?? []) if ((!c.errPath || isDisp(x)) && keepCall(x, c)) reach(c.callee, m && (c.main || (generated && x === h.pc)))
+			for (const c of facts.get(x)?.calls ?? []) if ((!c.errPath || isDisp(x)) && keepCall(x, c)) { from = { fn: x, pc: c.pc, ret: c.ret }; reach(c.callee, m && (c.main || (generated && x === h.pc))) }
+			from = { fn: x }
 			for (const t of ind.targets.get(x) ?? []) viaPtr(t, `function pointer in ${facts.get(x)?.name}`)
 		}
 		const fns = [...main.keys()].map(pc => facts.get(pc)!).filter(Boolean)
@@ -189,6 +210,7 @@ function analyze0(r: Result): Analysis {
 		}
 		const loc = (ff: FnFacts, line: number, pc?: number): Loc => ({ fn: ff.name, line, pc })
 		const checks: CheckOut[] = []
+		const pend: [string, string, number, string | undefined][] = []
 		const ops: OpOut[] = []
 		const idxName = (i: number) => accounts.find(y => y.index === i)?.name ?? `account[${i}]`
 		for (const ff of fns) {
@@ -205,16 +227,18 @@ function analyze0(r: Result): Analysis {
 				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
 				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
 				const at = loc(ff, c.line, c.pc)
-				checks.push({ at, status, account: acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined })
+				checks.push({ at, status, account: acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, fnPc: ff.pc, c: c.c, main: c.main })
+				const ci = checks.length - 1
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind
-				if (c.named && cn(c.named)) for (const k of kinds) note(cn(c.named)!, k, { status, at, via: c.via && !c.kinds.includes(k) ? c.via.fn : undefined })
-				for (const x of irRefs) { const k = fk(x.field); if (k) note(idxName(x.index), k, { status, at }) }
+				// (applied once the statuses are final: see the dominance analysis below)
+				if (c.named && cn(c.named)) for (const k of kinds) pend.push([cn(c.named)!, k, ci, c.via && !c.kinds.includes(k) ? c.via.fn : undefined])
+				for (const x of irRefs) { const k = fk(x.field); if (k) pend.push([idxName(x.index), k, ci, undefined]) }
 				for (const x of c.refs) {
 					const ca = cn(x.acct)
 					if (!ca || ca === cn(c.named)) continue
 					const f0 = x.field?.split('.')[0] ?? ''
 					const k = { is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' }[f0] ?? (x.field ? 'state' : undefined)
-					if (k) note(ca, k, { status, at })
+					if (k) pend.push([ca, k, ci, undefined])
 				}
 			}
 			for (const o of ff.ops) {
@@ -223,9 +247,13 @@ function analyze0(r: Result): Analysis {
 				if (ff.wrapper && !o.cpi && fns.some(g => g.ops.some(x => x.via === ff.name))) continue
 				const at = loc(ff, o.line, o.pc)
 				const tgt = o.target ? `${cn(o.target.acct) ?? o.target.acct}${o.target.field ? '.' + o.target.field : ''}` : undefined
-				ops.push({ at, kinds: o.kinds, text: o.text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi: o.cpi, pda: o.pda })
+				ops.push({ at, kinds: o.kinds, text: o.text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi: o.cpi, pda: o.pda, fnPc: ff.pc })
 			}
 		}
+		// check statuses from real dominators (across calls), then the per-account constraints
+		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed }
+		dominance(r, checks, ops, ctx)
+		for (const [acct, k, ci, via] of pend) note(acct, k, { status: checks[ci].status, at: checks[ci].at, via })
 		// runtime model: what the Solana runtime enforces for the operations made
 		for (const o of ops) {
 			const acct = o.target?.split('.')[0]
@@ -276,7 +304,7 @@ function analyze0(r: Result): Analysis {
 		for (const x of accounts) for (const [k, ev] of Object.entries(x.constraints)) if (ev.status === 'not_found' && (k === 'signer' || k === 'pda' || k === 'address')) score += 2
 		const kind: IxOut['kind'] = grp ? 'native' : !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
 		const dispatch = grp && `${grp.tags.length ? `tag ${grp.tags.join(', ')}` : 'paths leaving before the tag is matched'} (instruction data) matched in ${grp.dispatchers.join(', ')}; name ${grp.source === 'str' ? '[str: its "Instruction: …" log]' : grp.source === 'known' ? '[heur: the layout of a well-known program with these tags]' : '[the tag]'}`
-		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect, dispatch })
+		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect, dispatch, ctx })
 	}
 	ixs.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name))
 	// operations in code no handler reaches through direct calls (function pointers, dispatch tables)
@@ -321,13 +349,15 @@ function analyze0(r: Result): Analysis {
 	}
 	const deps: Analysis['deps'] = []
 	for (const [t, rs] of reads) { const w = writes.get(t); if (w) deps.push({ target: t, readBy: [...rs].sort(), writtenBy: [...new Set(w.map(x => x.ix))].sort() }) }
-	return {
+	const a: Analysis = {
 		program: { version: p.version, instructions: p.insns.length, functions: p.funcs.size, anchor: r.anchor, idl: r.instructions.some(i => i.accounts !== undefined) },
 		ixs, pdas: [...pdas.values()],
 		stateWrites: [...writes].sort((x, y) => x[0].localeCompare(y[0])).map(([target, w]) => ({ target, writes: w })),
 		deps: deps.sort((x, y) => x.target.localeCompare(y.target)),
 		unattributed,
 	}
+	phase2(a, r)
+	return a
 }
 
 // ---- rendering ----
@@ -349,16 +379,20 @@ export function renderJson(a: Analysis, where: Where): string {
 		instructions: a.ixs.map(ix => ({
 			name: ix.name, handler: ix.handler, kind: ix.kind, dispatch: ix.dispatch, score: ix.score, effects: ix.effects, functions: ix.functions, indirect: ix.indirect.length ? ix.indirect : undefined,
 			accounts: ix.accounts.map(x => ({ index: x.index, name: x.name, source: x.source, expected: x.expected, constraints: Object.fromEntries(Object.entries(x.constraints).map(([k, e]) => [k, ev(ix.name, e)])) })),
-			checks: ix.checks.map(c => ({ at: L(ix.name, c.at), status: c.status, account: c.account, kinds: c.kinds, cond: c.cond, fails_if: c.failsIf, error: c.error, via: c.via })),
+			checks: ix.checks.map((c, i) => ({ id: i, at: L(ix.name, c.at), status: c.status, account: c.account, kinds: c.kinds, cond: c.cond, fails_if: c.failsIf, error: c.error, via: c.via })),
 			operations: ix.ops.map(o => ({
 				at: L(ix.name, o.at), kinds: o.kinds, text: o.text, path: o.main ? 'main' : 'conditional', target: o.target, how: o.how, value: o.value,
 				cpi: o.cpi && { program: o.cpi.program, known: o.cpi.known, program_check: o.cpi.known ? 'constant' : o.cpi.checked ?? 'unknown', instruction: o.cpi.ix, accounts: o.cpi.accounts, fields: o.cpi.fields, seeds: o.cpi.seeds },
 				pda: o.pda,
+				guarded_by: o.guards, bypass: o.bypass?.map(b => ({ check: b.check, path: b.path.map(x => L(ix.name, x)) })), sources: o.sources,
 			})),
+			trust: ix.trust, relations: ix.relations?.map(x => ({ ...x, at: L(ix.name, x.at) })), authority: ix.authority?.map(x => ({ operation: x.op, kind: x.kind, enabled_by: x.enabledBy })),
 		})),
 		pdas: a.pdas.map(x => ({ seeds: x.seeds, program: x.program, derived_in: x.derivedIn, signs_in: x.signsIn, accounts: x.accounts, compared: x.compared })),
 		state_writes: a.stateWrites.map(s => ({ target: s.target, writes: s.writes.map(w => ({ ix: w.ix, how: w.how, at: L(w.ix, w.at) })) })),
 		dependencies: a.deps.map(d => ({ target: d.target, read_by: d.readBy, written_by: d.writtenBy })),
+		findings: a.findings?.map(f => ({ rule: f.rule, instruction: f.ix, confidence: f.confidence, title: f.title, accounts: f.accounts, path: f.path, evidence: f.evidence })),
+		authority_fields: a.authorityFields,
 		unattributed_operations: a.unattributed.map(o => ({ at: L(undefined, o.at), kinds: o.kinds, text: o.text, target: o.target, how: o.how, cpi: o.cpi && { program: o.cpi.program, known: o.cpi.known, instruction: o.cpi.ix, accounts: o.cpi.accounts, fields: o.cpi.fields, seeds: o.cpi.seeds } })),
 	}
 	return JSON.stringify(doc, (_, v) => (v === undefined ? undefined : v), 1) + '\n'
@@ -382,11 +416,28 @@ function flags(ix: IxOut): string[] {
 	return [...new Set(out)]
 }
 
+/** The ranked findings of the rule engine (phase2.ts), top ones. */
+function renderFindings(a: Analysis, where: Where): string[] {
+	const fs = a.findings ?? []
+	const out = ['## Findings (ranked; rule engine over the facts: leads to review, not verdicts)', '']
+	if (!fs.length) out.push('- none of the rules matched')
+	for (const f of fs.slice(0, 15)) {
+		const at = f.path[0]
+		out.push(`- [${f.confidence}] **${f.rule}** · ${f.ix}${f.accounts.length ? ` · ${f.accounts.slice(0, 3).join(', ')}` : ''}${at ? ` · ${at}` : ''} — ${f.evidence[0] ?? ''}`.slice(0, 260))
+	}
+	if (fs.length > 15) out.push(`- … ${fs.length - 15} more in analysis.json (findings)`)
+	const byRule = new Map<string, number>()
+	for (const f of fs) byRule.set(f.rule, (byRule.get(f.rule) ?? 0) + 1)
+	if (fs.length) out.push(`- by rule: ${[...byRule].map(([k, n]) => `${k} ${n}`).join(', ')}`)
+	out.push('')
+	return out
+}
+
 /** security/summary.md: the ranked instruction surface tree. */
 export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => string): string {
 	const out = ['# Security summary', '', ...HEADER, '',
 		`Program: sBPF v${a.program.version}, ${a.program.instructions} instructions, ${a.program.functions} functions${a.program.anchor ? ', Anchor' : ''}${a.program.idl ? ' (with IDL)' : ''}. Machine-readable: analysis.json.`, '',
-		'## Instructions (most sensitive first)', '']
+		...renderFindings(a, where), '## Instructions (most sensitive first)', '']
 	for (const ix of a.ixs) {
 		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => `${x.name} (${ST[x.constraints.signer.status]})`)
 		const anon = ix.checks.filter(c => c.kinds.includes('signer') && (!c.account || c.account.endsWith('?'))).length
@@ -412,6 +463,10 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		for (const s of a.stateWrites.slice(0, 60)) out.push(`- ${s.target} ← ${s.writes.map(w => `${w.ix} (${w.how})`).join(', ')}`)
 		if (a.stateWrites.length > 60) out.push(`- … ${a.stateWrites.length - 60} more in analysis.json`)
 	}
+	if (a.authorityFields?.length) {
+		out.push('', '## Authority fields (stored authorities and the instructions writing them)', '')
+		for (const x of a.authorityFields.slice(0, 30)) out.push(`- ${x.field} ← ${x.writtenBy.join(', ')}`)
+	}
 	if (a.deps.length) {
 		out.push('', '## Read/write dependencies (field checked by X, written by Y)', '')
 		for (const d of a.deps) out.push(`- ${d.target}: checked in ${d.readBy.join(', ')}; written in ${d.writtenBy.join(', ')}`)
@@ -436,13 +491,15 @@ export function failText(c: { cond: string; failsIf: boolean }): string {
 const md = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
 
 /** security/<ix>.md: privilege matrix, constraint matrix, CPIs, PDAs, operations, state writes, checks. */
-export function renderIx(ix: IxOut, where: Where): string {
+export function renderIx(ix: IxOut, where: Where, a?: Analysis): string {
 	const W = (at: Loc) => at2s(where, ix.name, at)
 	const out = [`# ${ix.name}`, '', ...HEADER, '', `Handler ${ix.handler} (${ix.kind}); ${ix.functions.length} functions reachable: ${ix.functions.slice(0, 12).join(', ')}${ix.functions.length > 12 ? ', …' : ''}.`, '']
 	if (ix.dispatch) out.push(`Dispatch: ${ix.dispatch}.`, '')
 	if (ix.indirect.length) out.push(`Reached through function pointers / tables (conditional): ${ix.indirect.slice(0, 8).join(', ')}${ix.indirect.length > 8 ? ', …' : ''}.`, '')
 	const fl = flags(ix)
 	if (fl.length) out.push('## Look first', '', ...fl.map(f => `- ⚠ ${f}`), '')
+	const fs = (a?.findings ?? []).filter(f => f.ix === ix.name)
+	if (fs.length) out.push('## Findings (rule engine)', '', ...fs.slice(0, 10).map(f => `- [${f.confidence}] ${f.rule}: ${f.title}. ${f.evidence.join(' · ').slice(0, 220)}${f.path.length > 1 ? ` (path ${f.path.join(' → ')})` : f.path[0] ? ` (${f.path[0]})` : ''}`), '')
 	out.push('## Account privileges (expected by the IDL · verified by the code)', '', '| # | account | signer | writable | owner | executable | address |', '|---|---|---|---|---|---|---|')
 	for (const x of ix.accounts) out.push(`| ${x.index ?? ''} | ${x.name}${x.source !== 'idl' ? ` [${x.source}]` : ''} | ${cell(x, 'signer')} | ${cell(x, 'writable')} | ${cell(x, 'owner')}${x.constraints.discriminator ? ` (+discriminator ${ST[x.constraints.discriminator.status]})` : ''} | ${cell(x, 'executable')} | ${x.expected.address ? `= ${x.expected.address.slice(0, 8)}… · ` : ''}${cell(x, 'address')} |`)
 	out.push('', '## Constraints per account', '')
@@ -473,9 +530,35 @@ export function renderIx(ix: IxOut, where: Where): string {
 		out.push('', '## Operations (account writes)', '')
 		for (const o of sens) out.push(`- ${W(o.at)} ${o.kinds.join(', ')} ${o.target ?? ''} ${o.how ?? ''}${o.value ? ` ${md(o.value).slice(0, 80)}` : ''}${o.main ? '' : ' [conditional]'}`)
 	}
+	const vo = ix.ops.map((o, i) => [o, i] as const).filter(([o]) => o.guards && o.kinds.some(k => k !== 'PDA_DERIVE' && k !== 'CPI' || (o.cpi && !o.cpi.known)))
+	if (vo.length) {
+		out.push('', '## Dominance (checks on every path to the operation; across calls)', '')
+		for (const [o] of vo.slice(0, 20)) {
+			const g = o.guards!.map(i => ix.checks[i]).filter(c => c.kinds.some(k => k !== 'count'))
+			const ks = [...new Set(g.flatMap(c => c.kinds.map(k => `${k}${c.account ? ` ${c.account}` : ''}`)))]
+			out.push(`- ${W(o.at)} ${o.kinds.filter(k => k !== 'CPI').join(', ') || 'CPI'}: ${g.length} dominating checks${ks.length ? ` (${ks.slice(0, 8).join('; ')}${ks.length > 8 ? '; …' : ''})` : ''}`)
+			for (const b of o.bypass ?? []) out.push(`  - ⚠ check ${W(ix.checks[b.check].at)} (${ix.checks[b.check].kinds.join(', ')}${ix.checks[b.check].account ? ` on ${ix.checks[b.check].account}` : ''}) does not dominate it: ${b.path.map(W).join(' → ')}`)
+			if (o.sources?.length) out.push(`  - sources: ${o.sources.slice(0, 6).map(x => `${x.param} ← ${x.source} (${x.trust})`).join('; ')}`)
+		}
+	}
+	if (ix.authority?.length) {
+		out.push('', '## Authority (who enables each value movement / authority change)', '')
+		for (const x of ix.authority.slice(0, 12)) out.push(`- ${W(ix.ops[x.op].at)} ${x.kind}: ${x.enabledBy.map(e => `${e.kind} ${e.what}${e.status ? ` (${ST[e.status as Status] ?? e.status})` : ''}${e.writtenBy?.length ? ` — written by ${e.writtenBy.join(', ')}` : ''}`).join('; ')}`)
+	}
+	if (ix.relations?.length) {
+		out.push('', '## Relations (equalities the checks establish)', '')
+		for (const x of ix.relations.slice(0, 20)) out.push(`- ${x.a} ${x.kind === 'compare' ? '~' : '=='} ${x.b} (${x.kind}, ${ST[x.status]}, ${W(x.at)})`)
+	}
+	const tr = ix.trust?.filter(t => t.trust !== 'validated' || t.evidence.length) ?? []
+	if (tr.length) {
+		out.push('', '## Trust (caller-controlled vs validated values)', '')
+		const cc = tr.filter(t => t.trust === 'caller-controlled').map(t => t.value)
+		if (cc.length) out.push(`- caller-controlled (no validating check found): ${cc.join(', ')}`)
+		for (const t of tr.filter(t => t.trust !== 'caller-controlled')) out.push(`- ${t.value}: ${t.trust}${t.evidence.length ? ` (${t.evidence.slice(0, 4).join(', ')})` : ''}`)
+	}
 	if (ix.checks.length) {
-		out.push('', '## Checks', '', '| at | status | account | kinds | fails if | error |', '|---|---|---|---|---|---|')
-		for (const c of ix.checks) out.push(`| ${W(c.at)} | ${ST[c.status]} | ${c.account ?? ''} | ${c.kinds.join(', ')}${c.via ? ` (via ${c.via})` : ''} | \`${md(failText(c)).slice(0, 100)}\` | ${c.error} |`)
+		out.push('', '## Checks', '', '| # | at | status | account | kinds | fails if | error |', '|---|---|---|---|---|---|---|')
+		ix.checks.forEach((c, i) => out.push(`| ${i} | ${W(c.at)} | ${ST[c.status]} | ${c.account ?? ''} | ${c.kinds.join(', ')}${c.via ? ` (via ${c.via})` : ''} | \`${md(failText(c)).slice(0, 100)}\` | ${c.error} |`))
 	}
 	return out.join('\n') + '\n'
 }
