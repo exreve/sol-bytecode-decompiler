@@ -18,60 +18,39 @@ Requires Node ≥ 23.6 (runs the TypeScript sources directly). No runtime depend
 
 ```sh
 git clone https://github.com/exreve/sol-bytecode-decompiler && cd sol-bytecode-decompiler
-npm install                                  # dev dependencies (tests only)
 
-# a local binary
-node src/cli.ts program.so -o out.ts
-
-# a deployed program, by address (any RPC endpoint; none is built in)
-node src/cli.ts whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc --rpc https://your-rpc.example -o whirlpool/
-
-# or set the endpoint once
-export SOLANA_RPC_URL=https://your-rpc.example
-node src/cli.ts TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb -o token22/
+node src/cli.ts program.so -o out.ts                                   # a local binary
+node src/cli.ts <program address> --rpc <your rpc url> -o out/          # a deployed program
 ```
 
-More recipes: [docs/USAGE.md](docs/USAGE.md).
+That's it: no install step, no configuration. Output is always the most readable exact form.
+More examples: [docs/USAGE.md](docs/USAGE.md).
 
 ## Usage
 
 ```
-sbpf-decompile <input> [options]
+sbpf-decompile <program.so | program address> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
 
-input:
-  program.so            a local program binary
-  <program address>     fetched from an RPC endpoint (needs --rpc or $SOLANA_RPC_URL)
-  -                     read the binary from stdin
-
-output:
-  (default)             single file to stdout
-  -o out.ts             single file
-  -o outdir/            project layout (see below)
-
-options:
-  --rpc <url>           Solana RPC endpoint (default: $SOLANA_RPC_URL; there is no built-in endpoint)
-  --idl <file.json>     Anchor IDL: instruction args/accounts (signer/mut/pda), custom error names
-  --program-id <id>     fetch the on-chain Anchor IDL for this program id (with a local input)
-  --no-idl              do not fetch the on-chain IDL automatically for an address input
-  --save-so <file>      save the fetched binary
-  --full                also decompile recognized library functions
-  --raw                 no Solana-specific names/comments (the form verified by the tests)
-  --exact-memory        keep every stack access in memory (see Exactness)
+  program.so        a local program binary ("-" reads it from stdin)
+  program address   fetched from the RPC endpoint given with --rpc (its on-chain Anchor IDL is used when published)
+  -o out.ts         write a single file (default: stdout)
+  -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, slices/
+  --idl file.json   Anchor IDL (instruction args/accounts, account layouts, error names)
+  --full            also decompile recognized library code (default: one-line typed stubs)
 ```
 
-When the input is an address, the program is fetched (BPFLoader 1/2, upgradeable loader via its
-programdata account, loader v4) and its on-chain Anchor IDL is used automatically when it exists.
+There is no built-in RPC endpoint: bring your own (`--rpc`). Upgradeable programs are resolved through
+their programdata account; loader v4 and the legacy loaders work too.
 
-Other tools:
+Discriminator lookup:
 
 ```
 node src/selector.ts 0xc88775e1919ec6f8     # discriminator -> name   (i:swap)
 node src/selector.ts open_position          # name -> instruction / account / event discriminators
-node test/equiv.ts program.so 3             # check the decompilation of every function (see below)
 ```
 
-Speed (warm cache, 8-core VM): memo 0.5 s, token-2022 2.2 s, whirlpool (173k instructions) 3.6 s,
-jupiter (258k instructions) 5.4 s (peak memory 0.2 / 0.3 / 0.5 / 0.6 GB).
+Speed (8-core VM): memo 0.6 s, token-2022 2.2 s, whirlpool (173k instructions) 3.7 s,
+jupiter (258k instructions) 5.6 s.
 
 ## Output
 
@@ -185,7 +164,7 @@ Every recovered name says where it comes from, so a reader knows what to double-
 
 | tag | source |
 |---|---|
-| `[idl]` | the Anchor IDL (`--idl` / `--program-id`) |
+| `[idl]` | the Anchor IDL (`--idl`, or published on-chain for a fetched program) |
 | `[str]` | the program's own strings: `"Instruction: X"` logs, Anchor account-error names |
 | `[known]` | well-known program ids, sysvars, SPL layouts |
 | `[heur]` | structural inference: verify before relying on it |
@@ -358,8 +337,8 @@ Every transformation is an identity on the VM semantics (agave `solana-sbpf` int
 quirks such as SBPF v0 `add32/sub32/mul32` sign-extending their result), with one documented
 assumption in the default mode: stack slots of the current function are only accessed through frame-pointer-derived
 addresses (true for every memory-safe execution). Stack slots whose address never escapes become
-variables, and SBF stack-passed arguments become parameters. `--exact-memory` turns both off, making
-the output exact even for executions that corrupt their own stack frame through wild pointers.
+variables, and SBF stack-passed arguments become parameters (the library option `exactMemory` turns
+both off, for executions that corrupt their own stack frame through wild pointers).
 
 Traps (division by zero, memory faults) are never dropped or reordered across side effects.
 
@@ -375,9 +354,9 @@ Traps (division by zero, memory faults) are never dropped or reordered across si
   arguments, stores outside the frame, frame state at every call, return value, abort — must match.
 
 ```
-node test/equiv.ts samples/token22.so 3            # --raw form: 545 functions, 0 failing
-SUGAR=1 node test/equiv.ts samples/token22.so 3    # the readable output (CLI default: names, strings, typed views)
-IDL=corpus/idl/<id>.json node test/equiv.ts corpus/<id>.so 3   # readable output with an Anchor IDL's names
+node --stack-size=65500 test/equiv.ts samples/token22.so 3                # the output as the CLI prints it
+node --stack-size=65500 test/equiv.ts corpus/<id>.so 3 --idl <idl.json>   # with an Anchor IDL
+node --stack-size=65500 test/equiv.ts samples/token22.so 3 --raw          # the plain form (no names/views)
 npm test                                           # unit tests, printer/simplifier fuzzer, samples
 ```
 
@@ -387,9 +366,8 @@ Checked on all bundled samples (memo, token, ata, stake-pool, token-2022, whirlp
 ## Data pipeline (maintainers)
 
 ```
-export SOLANA_RPC_URL=...                             # the scripts use it too (no default)
-node scripts/fetch-samples.ts                         # sample programs from mainnet
-node scripts/corpus.ts 400 corpus                     # mainnet corpus + on-chain Anchor IDLs
+node scripts/fetch-samples.ts --rpc <url>            # sample programs from mainnet
+node scripts/corpus.ts 400 corpus --rpc <url>         # mainnet corpus + on-chain Anchor IDLs
 node scripts/build-libdb.ts corpus 3                  # data/libsigs.json
 node scripts/refbuild.ts && node scripts/build-libnames.ts   # symbolized builds -> data/libnames.json
 node scripts/build-selectors.ts <idl/source dirs...>  # data/selectors.json.gz

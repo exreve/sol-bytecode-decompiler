@@ -1,12 +1,4 @@
-// Minimal Solana JSON-RPC client: program binaries and Anchor IDLs. There is no built-in endpoint:
-// callers pass one (CLI `--rpc`, or the SOLANA_RPC_URL environment variable).
-
-export const RPC_ENV = 'SOLANA_RPC_URL'
-
-/** RPC URL from an explicit value or the environment; undefined when none is configured. */
-export function rpcUrl(explicit?: string): string | undefined {
-	return explicit ?? process.env[RPC_ENV] ?? undefined
-}
+// Minimal Solana JSON-RPC client for program binaries. There is no built-in endpoint: callers pass one.
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 

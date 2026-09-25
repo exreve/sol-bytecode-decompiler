@@ -497,7 +497,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       strNote: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
       keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
-      exprHook: opts.sugar ? (e, pr) => sem.sugar(e, pr) : undefined,
+      exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
     // entrypoint: annotate fields of the serialized input (first account + header)
     const inputVar = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined;
