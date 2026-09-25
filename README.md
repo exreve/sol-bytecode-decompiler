@@ -42,6 +42,7 @@ Runtime model (also emitted as the file prelude / `lib.d.ts`):
 | `keyeq(p, "<base58>")` | the 32 bytes at p equal that public key (same word-wise comparison) |
 | `rc_inc(p[, x])` | Rc count increment: `x = ld64(p)` (unless given); `st64(p, x + 1)`; `abort()` if x was `-1` |
 | `rc_dec(p[, x])` | Rc drop: `x = ld64(p)` (unless given); `st64(p, x - 1)`; if x was 1, `st64(p + 8, ld64(p + 8) - 1)` |
+| | (both also replace the nested form `st64(p, x + 1); if (x != -1) { …never falls through… } abort()`; assignments moved before them may read the current frame) |
 | `fp`, `s30` | frame pointer; `s30 = fp - 0x30` names a stack object (`s30 + 8` = its field at +8) |
 | `p5, p6, …` | arguments 6+ (SBF passes them through the caller's frame; turned back into parameters) |
 | `undef` | a register value left over by a callee (unspecified); a variable read before any assignment and call arguments omitted at the end of the list are `undef` too |
@@ -142,6 +143,21 @@ to every handler name the handlers' parameters after Anchor's handler ABI:
 `ix_swap(a, program_id, accounts, accounts_len, ix_args, ix_args_len)` (`ix_args` = the data after the
 discriminator). The account-name function is `Error_with_account_name`, and the callee most often given an
 `anchor_lang` error code `anchor_error_from` (`<Error as From<ErrorCode>>::from`).
+
+**Accounts struct and Context** (`[heur]`): each instruction's try_accounts function stores the named account
+pointers into the struct it returns; those offsets give a view `<Ix>Accounts` (fields `&AccountInfo`), and
+`<Ix>Context` = (`program_id`, `accounts`). A function the handler passes a frame object holding exactly that —
+word 0 the handler's `program_id`, word 8 the address of a copy of the try_accounts result, checked on the frame
+contents at the call — gets the Context type for that parameter:
+
+```ts
+// types [heur]: b: InitializeRewardContext (the handler ix_initialize_reward passes a frame object holding …)
+function fn_32bc0(a: u64, b: InitializeRewardContext, c: u64): u64 {
+	const f: InitializeRewardAccounts = b.accounts
+```
+
+Coverage is partial: boxed accounts (`Box<Account<T>>`) are stored as the box pointer, and logic inlined into
+the handler has no Context parameter.
 
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
