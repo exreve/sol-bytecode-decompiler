@@ -299,7 +299,7 @@ function substConst(e: Expr, look: (v: number) => Expr | undefined): Expr {
 }
 
 /** Block-local copy propagation: after `x = y`, uses of x become y until x or y is reassigned. */
-export function localCopyProp(f: VarFunc): boolean {
+export function localCopyProp(f: VarFunc, st?: { real: boolean }): boolean {
   let changed = false;
   for (const b of f.blocks) {
     const m = new Map<number, Expr>();
@@ -311,7 +311,9 @@ export function localCopyProp(f: VarFunc): boolean {
     const sub = (e: Expr) => {
       if (!m.size) return e;
       if (COMPOSITE.has(e.k) || (e.k === 'var' && m.has(e.id))) changed = true;
-      return substConst(e, look);
+      const n = substConst(e, look);
+      if (n !== e && st) st.real = true; // an actual substitution
+      return n;
     };
     rewriteBlock(b, sub, (dst, ns) => { killVar(dst); if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) m.set(dst, ns.e); });
   }

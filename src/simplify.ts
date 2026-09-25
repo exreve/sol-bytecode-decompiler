@@ -147,6 +147,7 @@ function simp1(e: Expr): Expr {
           if ((op === 'ne') && c > max) return C(1);
         }
       }
+      if (op === e.op && a === e.a && b === e.b) return e; // unchanged (same as rebuilding it)
       if (op === 'set' && b.k === 'const' && ((b.v & (b.v - 1n)) === 0n) && a.k === 'bin' && a.op === 'and') return { k: 'cmp', op, a, b };
       return { k: 'cmp', op, a, b };
     }
@@ -164,19 +165,33 @@ function simp1(e: Expr): Expr {
   }
 }
 
+// simplifyExpr returns `e` itself when nothing changes (IR expressions are immutable, so reusing the
+// node is equivalent to rebuilding it); optimizeFunc relies on this to detect rounds that did nothing.
 export function simplifyExpr(e: Expr): Expr {
   switch (e.k) {
-    case 'bin': return simp1({ ...e, a: simplifyExpr(e.a), b: simplifyExpr(e.b) });
-    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return simp1({ ...e, a: simplifyExpr(e.a) } as Expr);
+    case 'bin': case 'cmp': case 'land': case 'lor': {
+      const a = simplifyExpr(e.a), b = simplifyExpr(e.b);
+      return simp1(a === e.a && b === e.b ? e : { ...e, a, b } as Expr);
+    }
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': {
+      const a = simplifyExpr(e.a);
+      return simp1(a === e.a ? e : { ...e, a } as Expr);
+    }
     case 'load': {
       const addr = simplifyExpr(e.addr);
       // read-only program memory never changes and never faults: the load is a constant
       if (addr.k === 'const' && foldImage) { const v = foldImage.readConst(addr.v, e.size); if (v !== undefined) return C(v); }
-      return { ...e, addr };
+      return addr === e.addr ? e : { ...e, addr };
     }
-    case 'cmp': case 'land': case 'lor': return simp1({ ...e, a: simplifyExpr(e.a), b: simplifyExpr(e.b) } as Expr);
-    case 'sel': return simp1({ ...e, c: simplifyExpr(e.c), a: simplifyExpr(e.a), b: simplifyExpr(e.b) });
-    case 'call': return { ...e, args: e.args.map(simplifyExpr) };
+    case 'sel': {
+      const c = simplifyExpr(e.c), a = simplifyExpr(e.a), b = simplifyExpr(e.b);
+      return simp1(c === e.c && a === e.a && b === e.b ? e : { ...e, c, a, b });
+    }
+    case 'call': {
+      let args: Expr[] | undefined;
+      for (let i = 0; i < e.args.length; i++) { const x = simplifyExpr(e.args[i]); if (x !== e.args[i]) (args ??= e.args.slice())[i] = x; }
+      return args ? { ...e, args } : e;
+    }
     default: return e;
   }
 }
@@ -219,6 +234,28 @@ export function mapStmtExprs(s: Stmt, f: (e: Expr) => Expr): Stmt {
     case 'copy': return { ...s, dst: f(s.dst), src: f(s.src) };
     default: return s;
   }
+}
+
+/** mapStmtExprs that returns `s` itself when `f` returned every expression unchanged. */
+function mapStmtExprsKeep(s: Stmt, f: (e: Expr) => Expr): Stmt {
+  switch (s.k) {
+    case 'set': { const e = f(s.e); return e === s.e ? s : { ...s, e }; }
+    case 'store': { const addr = f(s.addr), v = f(s.v); return addr === s.addr && v === s.v ? s : { ...s, addr, v }; }
+    case 'eval': { const e = f(s.e); return e === s.e ? s : { ...s, e }; }
+    case 'call': {
+      const args = mapAll(s.args, f), te = s.t.k === 'ind' ? f(s.t.e) : undefined, extra = s.extra && mapAll(s.extra, f);
+      if (args === s.args && extra === s.extra && (s.t.k !== 'ind' || te === s.t.e)) return s;
+      return { ...s, args, t: s.t.k === 'ind' ? { k: 'ind', e: te! } : s.t, extra };
+    }
+    case 'stores': { const addr = f(s.addr), vals = mapAll(s.vals, f); return addr === s.addr && vals === s.vals ? s : { ...s, addr, vals }; }
+    case 'copy': { const dst = f(s.dst), src = f(s.src); return dst === s.dst && src === s.src ? s : { ...s, dst, src }; }
+    default: return s;
+  }
+}
+function mapAll(es: Expr[], f: (e: Expr) => Expr): Expr[] {
+  let out: Expr[] | undefined;
+  for (let i = 0; i < es.length; i++) { const n = f(es[i]); if (n !== es[i]) (out ??= es.slice())[i] = n; }
+  return out ?? es;
 }
 
 export function stmtExprs(s: Stmt): Expr[] {
@@ -277,29 +314,37 @@ export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filt
 
 export function optimizeFunc(f: VarFunc) {
   // simplify all expressions first
+  // `changed` keeps the historical per-pass flags (propagateGlobal and localCopyProp over-report),
+  // which decide how many rounds run. `st.real` records whether the IR was actually modified: a
+  // round that modifies nothing leaves the IR identical, so every later round would repeat it
+  // exactly (all passes are deterministic functions of the IR; tail duplication only runs in
+  // rounds < 6, and it did nothing in this round either) and stopping early gives the same result.
   for (let round = 0; round < 8; round++) {
     let changed = false;
+    const st = { real: false };
     for (const b of f.blocks) {
-      b.stmts = b.stmts.map(s => mapStmtExprs(s, simplifyExpr));
-      if (b.term.k === 'br') b.term.c = simplifyExpr(b.term.c);
-      else if (b.term.k === 'ret' && b.term.e) b.term.e = simplifyExpr(b.term.e);
+      const ss = b.stmts;
+      for (let i = 0; i < ss.length; i++) { const n = mapStmtExprsKeep(ss[i], simplifyExpr); if (n !== ss[i]) { ss[i] = n; st.real = true; } }
+      if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) { b.term.c = c; st.real = true; } }
+      else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) { b.term.e = c; st.real = true; } }
     }
     const off = (n: string) => DISABLED.has(n);
-    if (!off('prop')) changed = propagateGlobal(f) || changed;
-    if (!off('inline')) changed = inlineLocal(f) || changed;
-    changed = dce(f) || changed;
-    if (!off('lconst')) changed = localConstProp(f) || changed;
-    if (!off('gconst')) changed = globalConstProp(f) || changed;
-    if (!off('copy')) changed = localCopyProp(f) || changed;
-    if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; }
-    if (!off('dse')) changed = deadStores(f) || changed;
-    if (!off('taildup') && round < 6 && tailDuplicate(f)) changed = true;
-    if (!changed) break;
+    const exact = (c: boolean) => { if (c) { changed = true; st.real = true; } };
+    if (!off('prop')) changed = propagateGlobal(f, st) || changed;
+    if (!off('inline')) exact(inlineLocal(f));
+    exact(dce(f));
+    if (!off('lconst')) exact(localConstProp(f));
+    if (!off('gconst')) exact(globalConstProp(f));
+    if (!off('copy')) changed = localCopyProp(f, st) || changed;
+    if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; st.real = true; }
+    if (!off('dse')) exact(deadStores(f));
+    if (!off('taildup') && round < 6 && tailDuplicate(f)) { changed = true; st.real = true; }
+    if (!changed || !st.real) break;
   }
 }
 
 /** Substitute single-def vars whose definition is a cheap pure expression over single-def vars / constants. */
-function propagateGlobal(f: VarFunc): boolean {
+function propagateGlobal(f: VarFunc, st: { real: boolean }): boolean {
   const { sites } = defSites(f);
   const m = new Map<number, Expr>();
   // iterate to allow chains
@@ -328,15 +373,20 @@ function propagateGlobal(f: VarFunc): boolean {
   for (const [v, e] of m) m.set(v, resolve(e, m, 0));
   for (const [v, e] of m) if (exprSize(e) > 4) m.delete(v);
   for (const [v, e] of m) m.set(v, resolve(e, m, 0));
+  // Historical result: the former rewrite rebuilt every non-trap statement, so it reported a change
+  // whenever some block has one (or a terminator was rewritten); optimizeFunc's round count depends on it.
   let changed = false;
+  const sub = (e: Expr) => substVars(e, m);
   for (const b of f.blocks) {
-    b.stmts = b.stmts.map(s => {
-      const n = mapStmtExprs(s, e => substVars(e, m));
-      if (n !== s) changed = true;
-      return n;
-    });
-    if (b.term.k === 'br') { const c = substVars(b.term.c, m); if (c !== b.term.c) { b.term.c = c; changed = true; } }
-    else if (b.term.k === 'ret' && b.term.e) { const c = substVars(b.term.e, m); if (c !== b.term.e) { b.term.e = c; changed = true; } }
+    const ss = b.stmts;
+    for (let i = 0; i < ss.length; i++) {
+      const s = ss[i];
+      if (s.k !== 'trap') changed = true;
+      const n = mapStmtExprsKeep(s, sub);
+      if (n !== s) { ss[i] = n; st.real = true; }
+    }
+    if (b.term.k === 'br') { const c = substVars(b.term.c, m); if (c !== b.term.c) { b.term.c = c; changed = true; st.real = true; } }
+    else if (b.term.k === 'ret' && b.term.e) { const c = substVars(b.term.e, m); if (c !== b.term.e) { b.term.e = c; changed = true; st.real = true; } }
   }
   return changed;
 }
