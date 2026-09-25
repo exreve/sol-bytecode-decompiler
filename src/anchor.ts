@@ -65,22 +65,62 @@ export function anchorFn(f: VarFunc, body: Node[], nameFn: number, strAt: (p: bi
 	errName: (code: bigint) => string | undefined, isAccount: (v: number) => boolean): AnchorFn | undefined {
 	const fp = f.vars.find(v => v.param === 10)?.id ?? -1
 	const res: AnchorFn = { accounts: [], checks: new Map(), varNames: new Map(), accountVars: new Set() }
-	// names and error codes of a node list (recursively)
+	// names and error codes of a node list (recursively): the per-node summaries merged in order
 	interface Info { names: Set<string>; codes: string[] }
 	const cache = new Map<Node[], Info>()
+	const nodeCache = new Map<Node, Info>()
+	const merge = (r: Info, i: Info) => { i.names.forEach(x => r.names.add(x)); i.codes.forEach(x => { if (!r.codes.includes(x)) r.codes.push(x) }) }
+	const nodeInfo = (n: Node): Info => {
+		let r = nodeCache.get(n)
+		if (r) return r
+		r = { names: new Set(), codes: [] }
+		if (n.k === 'stmt') {
+			for (const c of callsIn(n.s)) {
+				if (c.pc === nameFn) { const nm = nameArg(c.args, strAt); if (nm) r.names.add(nm) }
+				for (const a of c.args) if (a.k === 'const') { const e = errName(a.v); if (e && !r.codes.includes(e)) r.codes.push(e) }
+			}
+		} else for (const sub of children(n)) merge(r, info(sub))
+		nodeCache.set(n, r)
+		return r
+	}
 	const info = (ns: Node[]): Info => {
 		let r = cache.get(ns)
 		if (r) return r
 		r = { names: new Set(), codes: [] }
-		for (const n of ns) {
-			if (n.k === 'stmt') {
-				for (const c of callsIn(n.s)) {
-					if (c.pc === nameFn) { const nm = nameArg(c.args, strAt); if (nm) r.names.add(nm) }
-					for (const a of c.args) if (a.k === 'const') { const e = errName(a.v); if (e && !r.codes.includes(e)) r.codes.push(e) }
-				}
-			} else for (const sub of children(n)) { const i = info(sub); i.names.forEach(x => r!.names.add(x)); i.codes.forEach(x => { if (!r!.codes.includes(x)) r!.codes.push(x) }) }
-		}
+		for (const n of ns) merge(r, nodeInfo(n))
 		cache.set(ns, r)
+		return r
+	}
+	/**
+	 * What `branches` needs from the suffixes ns.slice(j) of a list, for every j at once (built
+	 * backwards; the former version re-summarized each suffix from scratch, quadratic in the list
+	 * length): the number of distinct names (capped at 2), the name when there is exactly one, the
+	 * error codes in order of first appearance (while there is at most one name), and the last position
+	 * of each name among the list's unconditional name calls (for topNames of a suffix).
+	 */
+	interface Suffixes { count: Int8Array; one: (string | undefined)[]; codes: (string[] | undefined)[]; topLast: Map<string, number> }
+	const sufCache = new Map<Node[], Suffixes>()
+	const suffixes = (ns: Node[]): Suffixes => {
+		let r = sufCache.get(ns)
+		if (r) return r
+		const len = ns.length
+		r = { count: new Int8Array(len + 1), one: new Array(len + 1), codes: new Array(len + 1), topLast: new Map() }
+		const names = new Set<string>()
+		let codes: string[] = []
+		r.codes[len] = codes
+		for (let k = len - 1; k >= 0; k--) {
+			const n = ns[k]
+			for (const nm of topNames([n], nameFn, strAt)) if (!r.topLast.has(nm)) r.topLast.set(nm, k)
+			if (names.size >= 2) { r.count[k] = 2; continue }
+			const i = nodeInfo(n)
+			i.names.forEach(x => names.add(x))
+			r.count[k] = Math.min(names.size, 2)
+			if (names.size === 1) r.one[k] = [...names][0]
+			// codes of ns.slice(k): this node's, then the later ones not already listed
+			if (i.codes.length) { const c = [...i.codes]; for (const x of codes) if (!c.includes(x)) c.push(x); codes = c }
+			r.codes[k] = codes
+		}
+		sufCache.set(ns, r)
 		return r
 	}
 	if (!info(body).names.size) return undefined
@@ -127,17 +167,28 @@ export function anchorFn(f: VarFunc, body: Node[], nameFn: number, strAt: (p: bi
 			if (n.k === 'if') {
 				// `if (c) { …; return }` followed by more code: that code is the other side (when it fails
 				// unconditionally: its name call is not nested in a further check)
-				const sides: [Node[], boolean][] = [[n.then, false], [n.else, false]]
-				if (!n.else.length && exits(n.then)) sides[1] = [ns.slice(k + 1), true]
-				if (!n.then.length && exits(n.else)) sides[0] = [ns.slice(k + 1), true]
+				// a side: a list of its own, or the rest of this list (ns.slice(k + 1), read off suffixes(ns))
+				const sides: [Node[] | null, boolean][] = [[n.then, false], [n.else, false]]
+				if (!n.else.length && exits(n.then)) sides[1] = [null, true]
+				if (!n.then.length && exits(n.else)) sides[0] = [null, true]
 				for (const [side, rest] of sides) {
-					const i = info(side)
-					if (i.names.size !== 1) continue
-					const nm = [...i.names][0]
-					const top = topNames(side, nameFn, strAt)
-					if (rest && !top.has(nm)) continue
+					let nm: string, codes: string[], topHas: boolean
+					if (side) {
+						const i = info(side)
+						if (i.names.size !== 1) continue
+						nm = [...i.names][0]
+						codes = i.codes
+						topHas = topNames(side, nameFn, strAt).has(nm)
+					} else {
+						const suf = suffixes(ns)
+						if (suf.count[k + 1] !== 1) continue
+						nm = suf.one[k + 1]!
+						codes = suf.codes[k + 1]!
+						topHas = (suf.topLast.get(nm) ?? -1) >= k + 1
+					}
+					if (rest && !topHas) continue
 					// the variables tested: only when the failing side names the account unconditionally
-					if (top.has(nm)) {
+					if (topHas) {
 						const vs = new Set<number>()
 						vars(n.c, vs)
 						vs.delete(fp)
@@ -145,7 +196,7 @@ export function anchorFn(f: VarFunc, body: Node[], nameFn: number, strAt: (p: bi
 					}
 					// the check itself: the error codes raised on that side
 					let l = res.checks.get(nm); if (!l) res.checks.set(nm, (l = []))
-					for (const c of i.codes) if (!l.includes(c)) l.push(c)
+					for (const c of codes) if (!l.includes(c)) l.push(c)
 				}
 				branches(n.then); branches(n.else)
 			} else children(n).forEach(branches)
