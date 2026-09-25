@@ -202,11 +202,14 @@ discriminator). The account-name function is `Error_with_account_name`, and the 
 `anchor_lang` error code `anchor_error_from` (`<Error as From<ErrorCode>>::from`).
 
 **Accounts struct and Context** (`[heur]`): each instruction's try_accounts function stores the named account
-pointers into the struct it returns; those offsets give a view `<Ix>Accounts` (fields `&AccountInfo`), and
-`<Ix>Context` = (`program_id`, `accounts`). A function the handler passes a frame object holding exactly that —
-word 0 the handler's `program_id` (its second parameter when the dispatcher did not name it; also through a frame
-slot holding only it), word 8 the address of a copy of the try_accounts result, checked on the frame contents at the
-call — gets the Context type for that parameter:
+pointers into the struct it returns (also through the out pointer spilled to a frame slot); those offsets give a
+view `<Ix>Accounts` (fields `&AccountInfo`, or an `AccountInfo` copied in place), and `<Ix>Context` = (`program_id`,
+`accounts`, and `remaining_accounts` when it is a copy of the slice try_accounts consumed). A function the handler
+passes a frame object holding that — a word the handler's `program_id` (its second parameter when the dispatcher
+did not name it; also through a frame slot holding only it, or a copy made in the entry block), another word the
+address of a copy of the try_accounts result (possibly past a `Result` tag word: the Accounts view is then shifted;
+copies through frame memcpy chains count), checked on the frame contents at the call — gets the Context type for
+that parameter (Anchor ≥ 0.29 orders the fields remaining_accounts, program_id, accounts, bumps):
 
 ```ts
 // types [heur]: b: InitializeRewardContext (the handler ix_initialize_reward passes a frame object holding …)
@@ -221,8 +224,10 @@ Logic inlined into the handler has no Context parameter.
 through the frame word by word (stores of loaded words, memcpy) in statement order — branches that end in an error
 return do not change what the frame holds after them — into the struct try_accounts returns, in place, or as a box
 (a heap copy, or a box the callee returns). The account's name is the one the account-name error carries when its
-payload is the callee's error result. The account type is the IDL account whose discriminator the callee's code (or a callee's, within 3 calls)
-holds, or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
+payload is the callee's error result (by value or by the address of a frame copy), or, `with_account_name` inlined,
+the identifier the error side writes byte by byte into a fresh String buffer. The account type is the IDL account
+whose discriminator the callee's code (or a callee's, within 3 calls) holds — as an immediate, or as the address of
+its bytes in program memory — or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
 an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`src/exec.ts`)
 on an account whose data is a sample of that type (Borsh from the IDL, or the SPL layout) with pseudo-random
 values and whose owner is the program id (IDL `address`) or the Token program: each value is found at its offset
@@ -281,7 +286,16 @@ is declared with it; variables that are exactly one argument are named after it:
 discriminator, then the fields in serialized order (Borsh prefix; zero-copy accounts are `Pod`, so laid out the
 same way). A pointer whose first 8 bytes are compared with the account's discriminator gets it (directly, or as
 `ld64(P)` for a slice `P` checked in a caller), and a serialized input record `r` whose `ld64(r + 0x58)` is
-compared (zero-copy `AccountLoader`) gets `<Name>Record`, whose `data` field is the layout:
+compared (zero-copy `AccountLoader`) gets `<Name>Record`, whose `data` field is the layout. An IDL without an
+`address` (legacy format) takes the program id from the `DeclaredProgramIdMismatch` check.
+
+**Zero-copy data** (`AccountLoader::load` / `load_mut`): a call given an Accounts field holding an account of IDL
+type `T` whose data is not deserialized is run on a synthetic account of that type; when the callee returns the
+pointer to the data past the discriminator in its out object, the variable loaded from that word gets the view
+`<T>Data` (the layout without the discriminator) — a variable defined otherwise too only when every load and store
+through it is reached by such definitions alone: `g.time_unit`, `memcmp(g.delegate_authority, …)`.
+
+Account data views (`<Name>Account`, `<Name>Record`):
 
 ```ts
 // account data [idl: layout; the pointer is inferred from a comparison of its first 8 bytes with the account discriminator]: whirlpool_data: WhirlpoolAccount
@@ -311,7 +325,7 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   stores into such a result get `// Err(ProgramError::InvalidSeeds)`, `// Err(ProgramError::Custom(6008))`, `// Ok`;
 * cross-program invocations (`sol_invoke_signed_c/_rust` and thin wrappers) whose instruction is built in the
   frame get a line describing it, read back from the stores along straight-line code. Instructions of well-known
-  programs (SPL Token / Token-2022 incl. p-token, System, Associated Token Account, Compute Budget) are decoded,
+  programs (SPL Token / Token-2022 incl. p-token, System, Associated Token Account, Compute Budget, Stake) are decoded,
   accounts by role and data fields by name:
   `// CPI TOKEN_PROGRAM.Transfer { source: f.key (w), destination: g.key (w), authority: h.key (s), amount: ld64(a + 0x20) }, no signer seeds`.
   When the program id is not a constant, the comment says whether it is compared with a known program id in the
@@ -320,12 +334,15 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`;
   Anchor `emit_cpi!` self-invocations (data starting with `EVENT_IX_TAG`) are labeled as such.
   Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
-  is a constant, `[heur]` when only the data shape matches);
+  is a constant, `[heur]` when only the data shape matches, `[known, exec]` when a run of the function builds it:
+  `cpi_stake_merge`);
 * CPIs whose instruction the frame does not show (built on the heap, by builder functions such as
   `system_instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
   are described from two runs of the function in the reference interpreter (`src/exec.ts`, `src/cpiexec.ts`), marked
   `[exec]`. The parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two
-  runs); branches are forced towards the call when only one side can reach it (and away from panics in callees);
+  runs); branches are forced towards the call when only one side can reach it (and away from panics in callees); an
+  input-dependent branch run more than 40 times takes the other side from then on (loops over pseudo-random counts
+  exit; what follows is not taken for constants);
   library wrappers get no account infos (their RefCell checks are skipped; the run checks that the wrapper passes the
   instruction on). The instruction reaching the CPI syscall is read back and traced with input taint: the same
   untainted bytes in both runs are constants, a value an 8-byte load produced is `ld64(<its address traced the same
