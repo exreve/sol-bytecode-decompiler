@@ -14,6 +14,8 @@ import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
+import { statementIdioms } from './stmtidioms.ts';
+import { findCpiSites, describeCpi, type CpiEnv } from './cpi.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -38,7 +40,7 @@ export interface Result {
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
 
 const HELPERS = new Set(['copy', 'copyr', 'sar', 'shl', 'sdiv', 'srem', 'sdiv32', 'srem32', 'mulhu', 'mulhs', 'trap', 'callx', 'undef', 'fp',
-  'memeq', 'keyeq', ...Object.keys(INTRINSICS)]);
+  'memeq', 'keyeq', 'rc_inc', ...Object.keys(INTRINSICS)]);
 
 function* shortNames(): Generator<string> {
   const al = 'abcdefghijklmnopqrstuvwxyz';
@@ -85,6 +87,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (!DISABLED.has('compact')) compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
+    if (!DISABLED.has('stmtidioms')) bt.body = statementIdioms(bt.body);
     bt.irreducible = st.irreducible;
   }
 
@@ -142,6 +145,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
 
   // ---- phase 4: print ----
+  // thin wrappers of the CPI syscalls (same arguments)
+  const invokeThunks = new Map<number, 'c' | 'rust'>();
+  for (const fn of p.funcs.values()) {
+    if (fn.blocks.length > 2) continue;
+    let n = 0; for (const b of fn.blocks) n += b.end - b.start + 1;
+    const calls = fn.blocks.flatMap(b => b.stmts.filter(s => s.k === 'call'));
+    const t = calls[0]?.k === 'call' ? calls[0].t : undefined;
+    const abi = calls.length === 1 && t?.k === 'sys' ? invokeAbi(t.name) : null;
+    if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
+  }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
@@ -235,6 +248,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
     }
     const pr = new Printer(ctx);
+    // cross-program invocations: what is invoked (comment before the call)
+    const fpVar = f.vars.find(v => v.param === 10)?.id;
+    if (opts.sugar !== false && fpVar !== undefined) {
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) : t.k === 'fn' ? invokeThunks.get(t.pc) ?? null : null));
+      if (sites.size) {
+        const env: CpiEnv = {
+          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: ctx.strAt,
+          constName: v => sem.constComment(v, 'value'), read: (a, n) => p.image.readConst(a, n),
+        };
+        ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
+      }
+    }
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     if (f.isEntry) params.push('input: u64');
@@ -263,6 +288,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '' };
   res.text = renderSingle(res);
   return res;
+}
+
+function invokeAbi(sys: string): 'c' | 'rust' | null {
+  return sys === 'sol_invoke_signed_c' ? 'c' : sys === 'sol_invoke_signed_rust' ? 'rust' : null;
 }
 
 /** Decide where each variable is declared (see README: "declarations"). */

@@ -304,7 +304,8 @@ export class Semantics {
 	}
 
 	strAt(ptr: bigint, len: bigint): string | undefined {
-		if (len < 1n || len > 512n || !this.p.image.region(ptr, Number(len))) return undefined
+		// (tiny values are counts and flags, not rodata addresses, even where rodata is mapped at 0)
+		if (len < 1n || len > 512n || ptr < 0x100n || !this.p.image.region(ptr, Number(len))) return undefined
 		const b = this.p.image.bytesAt(ptr, Number(len))
 		if (!b) return undefined
 		const s = new TextDecoder('utf-8', { fatal: false }).decode(b)

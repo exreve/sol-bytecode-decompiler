@@ -148,7 +148,12 @@ export const INTRINSICS = {
  *                         (printed as keyeq(p, "<base58>"))
  */
 export type MemIntrinsic = 'memeq' | 'keyeq';
-export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic;
+/**
+ * Statement helpers with effects, introduced only on the final structured body (src/stmtidioms.ts):
+ *   rc_inc(p[, x])   x = ld64(p) (unless given); st64(p, x + 1); if (x == u64::MAX) abort()
+ */
+export type EffIntrinsic = 'rc_inc';
+export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic | EffIntrinsic;
 export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq' || n === 'keyeq';
 const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
 
@@ -197,6 +202,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
     else if (x.k === 'fn' && isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
+    else if (x.k === 'fn' && x.name === 'rc_inc') { r.load = true; r.trap = true; r.call = true; }
     else if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) r.trap = true;
   });
   return r;

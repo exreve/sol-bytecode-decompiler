@@ -27,6 +27,7 @@ export interface PrintCtx {
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
+  nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
 }
 
 const P = { assign: 2, cond: 3, lor: 4, land: 5, bor: 6, bxor: 7, band: 8, eq: 9, rel: 10, shift: 11, add: 12, mul: 13, unary: 15, as: 3, call: 20, prim: 21 };
@@ -227,7 +228,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
         out.push(`${I(d)}${s.dst >= 0 ? `${kw ? kw + ' ' : ''}${pr.ctx.varName(s.dst)} = ` : ''}${txt}`);
         break;
       }
-      case 'eval': out.push(`${I(d)}void ${pr.u(s.e, P.unary)}`); break;
+      case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && s.e.name === 'rc_inc' ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;
       case 'stores': {
         pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--;
         // four large constant words: a public key written in place
@@ -246,6 +247,8 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
   };
   const rec = (ns: Node[], d: number) => {
     for (const n of ns) {
+      const note = pr.ctx.nodeNote?.(n);
+      if (note) out.push(`${I(d)}// ${note}`);
       switch (n.k) {
         case 'stmt': stmt(n.s, d); break;
         case 'if': {

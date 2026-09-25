@@ -104,6 +104,18 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 				for (let o = 0n; o < W(n0); o += 8n) if (env().mem.load(W(p0 + o), 8) !== env().mem.load(W(q0 + o), 8)) return 0n
 				return 1n
 			}
+			case 'rc_inc': return () => {
+				const p = W(args[0]()), x = args[1] ? W(args[1]()) : env().mem.load(p, 8)
+				env().mem.store(p, 8, W(x + 1n))
+				if (x === M) {
+					// the abort() syscall, as a call
+					const t = env().sysTarget.get('abort')
+					if (!t) throw new EvalError('rc_inc without an abort syscall')
+					env().onCall(t, [])
+					throw new Abort('abort')
+				}
+				return 0n
+			}
 			case 'trap': return () => { throw new Abort('trap') }
 			case 'callx': return () => { const vs = args.map(f => W(f())); return W(env().onCall(`ptr:${vs[0].toString(16)}`, vs.slice(1))) }
 		}
