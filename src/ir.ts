@@ -27,7 +27,8 @@ export type Expr =
   | { k: 'lnot'; a: Expr }                                     // logical not of a boolean
   | { k: 'land'; a: Expr; b: Expr } | { k: 'lor'; a: Expr; b: Expr } // short-circuit booleans
   | { k: 'sel'; c: Expr; a: Expr; b: Expr }                    // c ? a : b
-  | { k: 'call'; t: CallTarget; args: Expr[] };
+  | { k: 'call'; t: CallTarget; args: Expr[] }
+  | { k: 'fn'; name: Intrinsic; args: Expr[] };              // pure, total helper function (see INTRINSICS)
 
 export type CallTarget =
   | { k: 'fn'; pc: number }
@@ -123,6 +124,28 @@ export function evalBswap(bits: number, a: bigint): bigint {
 
 export class Trap extends Error {}
 
+/**
+ * Pure, total helper functions the output language provides (printed as `name(args)`).
+ * They are introduced only by exact idiom rewrites (src/idioms.ts); the definitions here are
+ * the reference semantics (also implemented by test/evaluate.ts and documented in the prelude).
+ */
+export const INTRINSICS = {
+  popcount: (a: bigint[]) => { let x = a[0], n = 0n; while (x) { n += x & 1n; x >>= 1n; } return n; },
+  clz: (a: bigint[]) => BigInt(64 - bitLength(a[0])),
+  ctz: (a: bigint[]) => { if (a[0] === 0n) return 64n; let x = a[0], n = 0n; while (!(x & 1n)) { n++; x >>= 1n; } return n; },
+  rotl: (a: bigint[]) => { const n = a[1] & 63n; return u64((a[0] << n) | (a[0] >> ((64n - n) & 63n))); },
+  min: (a: bigint[]) => (a[0] < a[1] ? a[0] : a[1]),
+  max: (a: bigint[]) => (a[0] > a[1] ? a[0] : a[1]),
+  smin: (a: bigint[]) => (i64(a[0]) < i64(a[1]) ? a[0] : a[1]),
+  smax: (a: bigint[]) => (i64(a[0]) > i64(a[1]) ? a[0] : a[1]),
+} satisfies Record<string, (a: bigint[]) => bigint>;
+/** Helpers that read memory (may fault like the loads they stand for): memeq(p, q, n) = the n bytes at p and q are
+ *  equal, compared as ascending 8-byte words (word at p first), stopping at the first difference. */
+export type MemIntrinsic = 'memeq';
+export type Intrinsic = keyof typeof INTRINSICS | MemIntrinsic;
+export const isMemIntrinsic = (n: Intrinsic): n is MemIntrinsic => n === 'memeq';
+const bitLength = (v: bigint) => (v === 0n ? 0 : v.toString(2).length);
+
 export const NEG_CMP: Record<CmpOp, CmpOp | null> = {
   eq: 'ne', ne: 'eq', ugt: 'ule', uge: 'ult', ult: 'uge', ule: 'ugt',
   sgt: 'sle', sge: 'slt', slt: 'sge', sle: 'sgt', set: null,
@@ -142,6 +165,7 @@ export function mapExpr(e: Expr, f: (e: Expr) => Expr): Expr {
     case 'cmp': case 'land': case 'lor': n = { ...e, a: mapExpr(e.a, f), b: mapExpr(e.b, f) } as Expr; break;
     case 'sel': n = { ...e, c: mapExpr(e.c, f), a: mapExpr(e.a, f), b: mapExpr(e.b, f) }; break;
     case 'call': n = { ...e, t: e.t.k === 'ind' ? { k: 'ind', e: mapExpr(e.t.e, f) } : e.t, args: e.args.map(a => mapExpr(a, f)) }; break;
+    case 'fn': n = { ...e, args: e.args.map(a => mapExpr(a, f)) }; break;
     default: n = e;
   }
   return f(n);
@@ -155,6 +179,7 @@ export function walkExpr(e: Expr, f: (e: Expr) => void): void {
     case 'load': walkExpr(e.addr, f); break;
     case 'sel': walkExpr(e.c, f); walkExpr(e.a, f); walkExpr(e.b, f); break;
     case 'call': if (e.t.k === 'ind') walkExpr(e.t.e, f); e.args.forEach(a => walkExpr(a, f)); break;
+    case 'fn': e.args.forEach(a => walkExpr(a, f)); break;
   }
 }
 
@@ -165,6 +190,7 @@ export function hasSideEffectsOrMem(e: Expr): { load: boolean; call: boolean; tr
   walkExpr(e, x => {
     if (x.k === 'load') { r.load = true; r.trap = true; }
     else if (x.k === 'call') r.call = true;
+    else if (x.k === 'fn' && isMemIntrinsic(x.name)) { r.load = true; r.trap = true; }
     else if (x.k === 'bin' && isDivOp(x.op) && !(x.b.k === 'const' && x.b.v !== 0n && !(x.op[0] === 's' && (x.b.v === M64 || BigInt.asIntN(32, x.b.v) === -1n)))) r.trap = true;
   });
   return r;
@@ -185,6 +211,7 @@ export function exprEq(a: Expr, b: Expr): boolean {
     case 'load': { const c = b as typeof a; return a.size === c.size && exprEq(a.addr, c.addr); }
     case 'sel': { const c = b as typeof a; return exprEq(a.c, c.c) && exprEq(a.a, c.a) && exprEq(a.b, c.b); }
     case 'call': return false;
+    case 'fn': { const c = b as typeof a; return a.name === c.name && a.args.length === c.args.length && a.args.every((x, i) => exprEq(x, c.args[i])); }
     case 'undef': return true;
   }
 }

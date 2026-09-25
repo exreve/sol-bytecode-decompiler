@@ -45,6 +45,7 @@ export class Printer {
   ctx: PrintCtx;
   addrDepth = 0;
   retTop: Expr | null = null;
+  ltCmp = 0; // > 0: print comparisons with `<`/`<=` (inside a shift amount, see 'cmp')
   constructor(ctx: PrintCtx) { this.ctx = ctx; }
 
   /** true if printing `e` yields a signed (possibly negative) intermediate value */
@@ -86,15 +87,25 @@ export class Printer {
         }
         if (op === 'shl' || op === 'lshr') {
           const [o, p] = BIN[op];
-          return { t: `${this.u(e.a, p, false)} ${o} ${this.u(this.shiftAmt(e.b), p + 1, false)}`, prec: p };
+          const amt = this.shiftAmt(e.b);
+          const l = this.u(e.a, p, false);
+          this.ltCmp++;
+          const r = this.u(amt, p + 1, false);
+          this.ltCmp--;
+          return { t: `${l} ${o} ${r}`, prec: p };
         }
         if (op === 'ashr') return { t: `sar(${joinArgs([this.u(e.a, 0), this.u(this.shiftAmt(e.b), 0)])})`, prec: P.call };
         const fnOps: Record<string, string> = { sdiv: 'sdiv', srem: 'srem', sdiv32: 'sdiv32', srem32: 'srem32', uhmul: 'mulhu', shmul: 'mulhs' };
         if (fnOps[op]) return { t: `${fnOps[op]}(${joinArgs([this.u(e.a, 0), this.u(e.b, 0)])})`, prec: P.call };
         const [o, p] = BIN[op];
         const sOk = op !== 'udiv' && op !== 'urem';
-        // left-assoc: right operand needs strictly higher precedence
-        return { t: `${this.u(e.a, p, sOk)} ${o} ${this.u(e.b, p + 1, sOk)}`, prec: p };
+        // left-assoc: right operand needs strictly higher precedence. A `<<` operand is parenthesized:
+        // in `a << 1 | (b > (c))` TypeScript would read `<1 | (b>` as type arguments of a call
+        const opnd = (x: Expr, pp: number) => {
+          const t = this.u(x, pp, sOk);
+          return x.k === 'bin' && x.op === 'shl' && !wrapped(t) ? `(${t})` : t;
+        };
+        return { t: `${opnd(e.a, p)} ${o} ${opnd(e.b, p + 1)}`, prec: p };
       }
       case 'neg':
         if (e.a.k === 'const') return this.expr0({ k: 'const', v: BigInt.asUintN(64, -e.a.v) });
@@ -109,8 +120,9 @@ export class Printer {
         // operand order only changes evaluation order, which matters only for calls
         let hasCall = false;
         walkExpr(e, x => { if (x.k === 'call') hasCall = true; });
-        const SW: Record<string, CmpOp> = { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
-        if (SW[e.op] && !hasCall) return this.expr0({ k: 'cmp', op: SW[e.op], a: e.b, b: e.a });
+        // (as a shift amount, `c << (5 > (y as i64))` would be misparsed the same way: use `<` there)
+        const SW: Record<string, CmpOp> = this.ltCmp ? { ugt: 'ult', uge: 'ule', sgt: 'slt', sge: 'sle' } : { ult: 'ugt', ule: 'uge', slt: 'sgt', sle: 'sge' };
+        if (SW[e.op] && !hasCall) e = { k: 'cmp', op: SW[e.op], a: e.b, b: e.a };
         const signed = e.op[0] === 's';
         const o = CMPS[e.op];
         const p = o === '==' || o === '!=' ? P.eq : P.rel;
@@ -118,15 +130,17 @@ export class Printer {
         const risky = (x: Expr) => (x.k === 'bin' && (x.op === 'shl' || x.op === 'lshr')) || x.k === 'cmp';
         const side = (x: Expr, pp: number) => {
           const t = signed ? this.signedOperand(x) : this.u(x, pp, p === P.eq);
-          return risky(x) && !/^\(.*\)$/.test(t) ? `(${t})` : t;
+          return risky(x) && !wrapped(t) ? `(${t})` : t;
         };
         return { t: `${side(e.a, p)} ${o} ${side(e.b, p + 1)}`, prec: p };
       }
       case 'lnot': return { t: `!${this.expr(e.a, P.unary)}`, prec: P.unary };
       case 'land': return { t: `${this.expr(e.a, P.land)} && ${this.expr(e.b, P.land + 1)}`, prec: P.land };
       case 'lor': return { t: `${this.expr(e.a, P.lor)} || ${this.expr(e.b, P.lor + 1)}`, prec: P.lor };
-      case 'sel': return { t: `${this.expr(e.c, P.cond + 1)} ? ${this.u(e.a, P.assign)} : ${this.u(e.b, P.assign)}`, prec: P.cond };
+      // arms in unsigned form: a signed literal/intermediate would compare mathematically in `x < (c ? -1 : y)`
+      case 'sel': return { t: `${this.expr(e.c, P.cond + 1)} ? ${this.u(e.a, P.assign, false)} : ${this.u(e.b, P.assign, false)}`, prec: P.cond };
       case 'call': return { t: this.callText(e.t, e.args), prec: P.call };
+      case 'fn': return { t: `${e.name}(${joinArgs(e.args.map(x => this.u(x, P.assign)))})`, prec: P.call };
     }
   }
 
@@ -237,4 +251,17 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
   };
   rec(body, 0);
   return out;
+}
+
+/** `t` is one parenthesized group: its first `(` closes at the very end (string literals skipped). */
+function wrapped(t: string): boolean {
+  if (t[0] !== '(') return false;
+  let d = 0;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === '"') { i++; while (i < t.length && t[i] !== '"') i += t[i] === '\\' ? 2 : 1; continue; }
+    if (ch === '(') d++;
+    else if (ch === ')' && --d === 0) return i === t.length - 1;
+  }
+  return false;
 }

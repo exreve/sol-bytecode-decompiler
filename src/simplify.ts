@@ -3,10 +3,11 @@
 // across a side effect.
 import {
   type Expr, type Stmt, type CmpOp, B, C, M64, NEG_CMP, SWAP_CMP,
-  evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize,
+  evalBin, evalCmp, evalExt, evalBswap, Trap, walkExpr, hasSideEffectsOrMem, exprEq, u64, exprSize, INTRINSICS, type Intrinsic, isMemIntrinsic,
 } from './ir.ts';
 import { type VarFunc, pruneUnreachable } from './dataflow.ts';
-import { tailDuplicate, mergeBlocks, localConstProp, deadStores, globalConstProp, localCopyProp } from './cfgopt.ts';
+import { ifConvert } from './ifconv.ts';
+import { threadJumps, tailDuplicate, mergeBlocks, localConstProp, deadStores, globalConstProp, localCopyProp } from './cfgopt.ts';
 
 const bitlen = (v: bigint) => v.toString(2).length - (v === 0n ? 1 : 0);
 
@@ -32,12 +33,20 @@ export function maxBits(e: Expr): number {
         default: return 64;
       }
     case 'sel': return Math.max(maxBits(e.a), maxBits(e.b));
+    case 'fn':
+      switch (e.name) {
+        case 'popcount': case 'clz': case 'ctz': return 7;
+        case 'memeq': return 1;
+        case 'min': return Math.min(maxBits(e.args[0]), maxBits(e.args[1]));
+        case 'max': return Math.max(maxBits(e.args[0]), maxBits(e.args[1]));
+        default: return 64;
+      }
     default: return 64;
   }
 }
 
 const isPure = (e: Expr) => { const s = hasSideEffectsOrMem(e); return !s.load && !s.call && !s.trap; };
-const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n);
+const isBool = (e: Expr) => e.k === 'cmp' || e.k === 'lnot' || e.k === 'land' || e.k === 'lor' || (e.k === 'const' && e.v <= 1n) || (e.k === 'fn' && e.name === 'memeq');
 
 export function negate(c: Expr): Expr {
   if (c.k === 'cmp') { const n = NEG_CMP[c.op]; if (n) return { ...c, op: n }; }
@@ -156,11 +165,46 @@ function simp1(e: Expr): Expr {
     case 'lor':
       if (e.a.k === 'const') return e.a.v ? C(1) : e.b;
       return e;
-    case 'sel':
-      if (e.c.k === 'const') return e.c.v ? e.a : e.b;
+    case 'sel': return simpSel(e);
+    case 'fn':
+      if (!isMemIntrinsic(e.name) && e.args.every(a => a.k === 'const')) return C(INTRINSICS[e.name](e.args.map(a => (a as { v: bigint }).v)));
       return e;
     default: return e;
   }
+}
+
+/**
+ * Selects (from if-conversion). Arms of a select are evaluated lazily, so an arm may be dropped
+ * or merged with a comparison operand only if it has no calls; a repeated load re-reads the same
+ * memory (nothing is stored in between) and faults exactly when the first read does.
+ */
+function simpSel(e: Extract<Expr, { k: 'sel' }>): Expr {
+  const { c, a, b } = e;
+  if (c.k === 'const') return c.v ? a : b;
+  if (c.k === 'lnot') return simpSel({ k: 'sel', c: c.a, a: b, b: a });
+  if (exprEq(a, b) && isPure(c)) return a;
+  if (isBool(c) && a.k === 'const' && b.k === 'const') {
+    if (a.v === 1n && b.v === 0n) return c;
+    if (a.v === 0n && b.v === 1n) return negate(c);
+  }
+  if (c.k === 'cmp' && c.op === 'eq') return simpSel({ k: 'sel', c: { ...c, op: 'ne' }, a: b, b: a });
+  if (c.k !== 'cmp') return e;
+  const noCall = (x: Expr) => !hasSideEffectsOrMem(x).call;
+  const { op, a: x, b: y } = c;
+  // x < y ? x : y  ->  min(x, y)   (x <= y, x > y, x >= y and the signed forms likewise)
+  const MM: Partial<Record<CmpOp, [Intrinsic, Intrinsic]>> = {
+    ult: ['min', 'max'], ule: ['min', 'max'], ugt: ['max', 'min'], uge: ['max', 'min'],
+    slt: ['smin', 'smax'], sle: ['smin', 'smax'], sgt: ['smax', 'smin'], sge: ['smax', 'smin'],
+  };
+  const mm = MM[op];
+  if (mm && noCall(x) && noCall(y)) {
+    if (exprEq(a, x) && exprEq(b, y)) return { k: 'fn', name: mm[0], args: [x, y] };
+    if (exprEq(a, y) && exprEq(b, x)) return { k: 'fn', name: mm[1], args: [x, y] };
+  }
+  // x != 0 ? clz(x) : 64  ->  clz(x)   (clz/ctz of 0 is 64)
+  if (op === 'ne' && y.k === 'const' && y.v === 0n && a.k === 'fn' && (a.name === 'clz' || a.name === 'ctz') && exprEq(a.args[0], x) &&
+    b.k === 'const' && b.v === 64n && isPure(x)) return a;
+  return e;
 }
 
 export function simplifyExpr(e: Expr): Expr {
@@ -171,6 +215,7 @@ export function simplifyExpr(e: Expr): Expr {
     case 'cmp': case 'land': case 'lor': return simp1({ ...e, a: simplifyExpr(e.a), b: simplifyExpr(e.b) } as Expr);
     case 'sel': return simp1({ ...e, c: simplifyExpr(e.c), a: simplifyExpr(e.a), b: simplifyExpr(e.b) });
     case 'call': return { ...e, args: e.args.map(simplifyExpr) };
+    case 'fn': return simp1({ ...e, args: e.args.map(simplifyExpr) });
     default: return e;
   }
 }
@@ -197,6 +242,7 @@ function substVars(e: Expr, m: Map<number, Expr>): Expr {
       case 'load': return { ...x, addr: go(x.addr) };
       case 'sel': return { ...x, c: go(x.c), a: go(x.a), b: go(x.b) };
       case 'call': return { ...x, t: x.t.k === 'ind' ? { k: 'ind', e: go(x.t.e) } : x.t, args: x.args.map(go) };
+      case 'fn': return { ...x, args: x.args.map(go) };
       default: return x;
     }
   };
@@ -275,6 +321,8 @@ export function optimizeFunc(f: VarFunc) {
     if (!off('gconst')) changed = globalConstProp(f) || changed;
     if (!off('copy')) changed = localCopyProp(f) || changed;
     if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; }
+    if (!off('thread') && threadJumps(f)) changed = true;
+    if (!off('ifconv') && ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; }
     if (!off('dse')) changed = deadStores(f) || changed;
     if (!off('taildup') && round < 6 && tailDuplicate(f)) changed = true;
     if (!changed) break;
@@ -367,6 +415,7 @@ function inlineLocal(f: VarFunc): boolean {
         }
       }
       if (found < 0) continue;
+      if ((fx.load || fx.trap || fx.call) && useExprs(b, found).some(e => occursLazily(e, v))) continue;
       // the use itself: if the use statement is a call/store, evaluation of e still happens before its effect
       const m = new Map([[v, s.e]]);
       if (found < b.stmts.length) b.stmts[found] = mapStmtExprs(b.stmts[found], e => substVars(e, m));
@@ -383,6 +432,21 @@ function inlineLocal(f: VarFunc): boolean {
   return changed;
 }
 
+
+function useExprs(b: { stmts: Stmt[]; term: any }, j: number): Expr[] {
+  return j < b.stmts.length ? stmtExprs(b.stmts[j]) : b.term.k === 'br' ? [b.term.c] : b.term.k === 'ret' && b.term.e ? [b.term.e] : [];
+}
+
+/** v occurs where it may not be evaluated (select arms, right side of && / ||): effects must not move there. */
+function occursLazily(e: Expr, v: number): boolean {
+  let lazy = false;
+  const inside = (x: Expr) => { let h = false; walkExpr(x, y => { if (y.k === 'var' && y.id === v) h = true; }); return h; };
+  walkExpr(e, x => {
+    if (x.k === 'sel' && (inside(x.a) || inside(x.b))) lazy = true;
+    if ((x.k === 'land' || x.k === 'lor') && inside(x.b)) lazy = true;
+  });
+  return lazy;
+}
 
 /** If the definition of v at stmt i only reaches uses inside this block, return how many; else -1. */
 function localReach(b: { stmts: Stmt[]; term: any; succs: number[] }, i: number, v: number): number {
@@ -407,7 +471,7 @@ function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses
   if (!next) return false;
   let hit = false, impure = false;
   for (const e of next) { walkExpr(e, x => { if (x.k === 'var' && x.id === v) hit = true; }); const fx = hasSideEffectsOrMem(e); if (fx.load || fx.call || fx.trap) impure = true; }
-  if (!hit || impure) return false;
+  if (!hit || impure || next.some(e => occursLazily(e, v))) return false;
   if (i + 1 < b.stmts.length && b.stmts[i + 1].k === 'call' && (b.stmts[i + 1] as any).t.k === 'ind' && false) return false;
   const ce: Expr = { k: 'call', t: s.t, args: [...s.args, ...(s.extra ?? [])] };
   const m = new Map([[v, ce]]);
@@ -455,12 +519,13 @@ function dce(f: VarFunc): boolean {
 
 /** For an evaluated-for-effect expression, drop pure wrappers around a single trapping core. */
 function trappingCore(e: Expr): Expr {
-  if (e.k === 'load') return e;
+  if (e.k === 'load' || (e.k === 'fn' && isMemIntrinsic(e.name))) return e;
   if (e.k === 'bin' && (e.op === 'udiv' || e.op === 'urem' || e.op === 'sdiv' || e.op === 'srem' || e.op === 'sdiv32' || e.op === 'srem32')) return e;
   const kids: Expr[] = [];
   switch (e.k) {
     case 'bin': case 'cmp': case 'land': case 'lor': kids.push(e.a, e.b); break;
     case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': kids.push(e.a); break;
+    case 'fn': kids.push(...e.args); break;
   }
   const impure = kids.filter(k => !isPure(k));
   if (impure.length === 1 && (e.k !== 'land' && e.k !== 'lor')) return trappingCore(impure[0]);

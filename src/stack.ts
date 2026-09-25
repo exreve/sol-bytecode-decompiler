@@ -70,6 +70,7 @@ export function promoteStack(f: VarFunc & { promoted?: Promoted[] }): boolean {
       case 'cmp': case 'land': case 'lor': visit(e.a, null); visit(e.b, null); return;
       case 'sel': visit(e.c, null); visit(e.a, null); visit(e.b, null); return;
       case 'call': e.args.forEach(a => visit(a, null)); if (e.t.k === 'ind') visit(e.t.e, null); return;
+      case 'fn': e.args.forEach(a => visit(a, null)); return;
       default: return;
     }
   };
@@ -126,6 +127,7 @@ export function promoteStack(f: VarFunc & { promoted?: Promoted[] }): boolean {
       case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: rw(e.a) } as Expr;
       case 'sel': return { ...e, c: rw(e.c), a: rw(e.a), b: rw(e.b) };
       case 'call': return { ...e, args: e.args.map(rw), t: e.t.k === 'ind' ? { k: 'ind', e: rw(e.t.e) } : e.t };
+      case 'fn': return { ...e, args: e.args.map(rw) };
       default: return e;
     }
   };

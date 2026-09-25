@@ -12,7 +12,7 @@
 // the call, which is exact by definition.
 import type { Program } from './program.ts'
 import type { VarFunc } from './dataflow.ts'
-import { type Expr, type Stmt, walkExpr } from './ir.ts'
+import { type Expr, type Stmt, walkExpr, isMemIntrinsic } from './ir.ts'
 import { stmtExprs } from './simplify.ts'
 
 const AREA = -0x1000
@@ -48,6 +48,7 @@ function calleeStackArgs(f: VarFunc): number {
 			case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, inLoad); break
 			case 'sel': visit(e.c, inLoad); visit(e.a, inLoad); visit(e.b, inLoad); break
 			case 'call': e.args.forEach(a => visit(a, false)); if (e.t.k === 'ind') visit(e.t.e, false); break
+			case 'fn': e.args.forEach(a => visit(a, inLoad)); break
 		}
 	}
 	for (const b of f.blocks) {
@@ -85,6 +86,7 @@ export function rewriteStackArgs(p: Program, built: Map<number, { f: VarFunc }>)
 				case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: rw(e.a) } as Expr
 				case 'sel': return { ...e, c: rw(e.c), a: rw(e.a), b: rw(e.b) }
 				case 'call': return { ...e, args: e.args.map(rw), t: e.t.k === 'ind' ? { k: 'ind', e: rw(e.t.e) } : e.t }
+				case 'fn': return { ...e, args: e.args.map(rw) }
 				default: return e
 			}
 		}
@@ -116,7 +118,7 @@ export function rewriteStackArgs(p: Program, built: Map<number, { f: VarFunc }>)
 						case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: fixExpr(e.a) } as Expr
 						case 'load': return { ...e, addr: fixExpr(e.addr) }
 						case 'sel': return { ...e, c: fixExpr(e.c), a: fixExpr(e.a), b: fixExpr(e.b) }
-						case 'call': return { ...e, args: e.args.map(fixExpr) }
+						case 'call': case 'fn': return { ...e, args: e.args.map(fixExpr) }
 						default: return e
 					}
 		}
@@ -167,6 +169,7 @@ function elideArgArea(f: VarFunc) {
 			case 'load': scan(e.addr, false); break
 			case 'sel': scan(e.c, false); scan(e.a, false); scan(e.b, false); break
 			case 'call': e.args.forEach(a => scan(a, false)); if (e.t.k === 'ind') scan(e.t.e, false); break
+			case 'fn': e.args.forEach(a => scan(a, false)); break
 		}
 	}
 	for (const b of f.blocks) {
@@ -182,7 +185,7 @@ function elideArgArea(f: VarFunc) {
 		if ((s.k === 'store' || s.k === 'stores') && inArea(fpOff(s.addr, fpv.id))) {
 			const vals = s.k === 'store' ? [s.v] : s.vals
 			// keep evaluation of anything that could trap
-			return vals.filter(v => { let t = false; walkExpr(v, x => { if (x.k === 'load' || x.k === 'call' || (x.k === 'bin' && /div|rem/.test(x.op))) t = true }); return t }).map(v => ({ k: 'eval', e: v, pc: s.pc }))
+			return vals.filter(v => { let t = false; walkExpr(v, x => { if (x.k === 'load' || x.k === 'call' || (x.k === 'fn' && isMemIntrinsic(x.name)) || (x.k === 'bin' && /div|rem/.test(x.op))) t = true }); return t }).map(v => ({ k: 'eval', e: v, pc: s.pc }))
 		}
 		return [s]
 	})
@@ -197,7 +200,7 @@ function latestStore(stmts: Stmt[], i: number, fp: number, off: number): Expr | 
 		if (t.k === 'store' && t.size === 8 && fpOff(t.addr, fp) === off) {
 			// the stored expression must mean the same thing at the call: pure, and no variable in it redefined since
 			let ok = true
-			walkExpr(t.v, x => { if (x.k === 'load' || x.k === 'call') ok = false; if (x.k === 'var' && defined.has(x.id)) ok = false })
+			walkExpr(t.v, x => { if (x.k === 'load' || x.k === 'call' || (x.k === 'fn' && isMemIntrinsic(x.name))) ok = false; if (x.k === 'var' && defined.has(x.id)) ok = false })
 			return ok ? t.v : null
 		}
 		if (t.k === 'stores' && fpOff(t.addr, fp) !== null) {
@@ -205,7 +208,7 @@ function latestStore(stmts: Stmt[], i: number, fp: number, off: number): Expr | 
 			const idx = (off - o0) / t.size
 			if (t.size === 8 && Number.isInteger(idx) && idx >= 0 && idx < t.vals.length) {
 				let ok = true
-				walkExpr(t.vals[idx], x => { if (x.k === 'load' || x.k === 'call') ok = false; if (x.k === 'var' && defined.has(x.id)) ok = false })
+				walkExpr(t.vals[idx], x => { if (x.k === 'load' || x.k === 'call' || (x.k === 'fn' && isMemIntrinsic(x.name))) ok = false; if (x.k === 'var' && defined.has(x.id)) ok = false })
 				return ok ? t.vals[idx] : null
 			}
 		}

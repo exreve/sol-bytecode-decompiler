@@ -28,7 +28,8 @@ export class TestMem {
 	seed: bigint
 	bytes = new Map<bigint, number>()
 	events: Event[]
-	constructor(image: Image, seed: number, events: Event[]) { this.image = image; this.seed = BigInt(seed); this.events = events }
+	flat: boolean // uninitialized memory reads as zero (makes equality tests on memory take their "equal" side)
+	constructor(image: Image, seed: number, events: Event[], flat = false) { this.image = image; this.seed = BigInt(seed); this.events = events; this.flat = flat }
 	noise(a: bigint): number {
 		let x = (a ^ (this.seed * 0x9e3779b97f4a7c15n)) & M
 		x = ((x ^ (x >> 33n)) * 0xff51afd7ed558ccdn) & M
@@ -36,7 +37,7 @@ export class TestMem {
 		x ^= x >> 33n
 		// bias towards small bytes so lengths/indices/tags are plausible
 		const b = Number(x & 0xffn)
-		return (x >> 8n) & 1n ? b : (x >> 9n) & 1n ? 0 : b & 7
+		return this.flat ? 0 : (x >> 8n) & 1n ? b : (x >> 9n) & 1n ? 0 : b & 7
 	}
 	byte(a: bigint): number {
 		const w = this.bytes.get(a)

@@ -407,6 +407,7 @@ function mapExprPre(e: Expr, leaf: (x: Expr) => Expr | null): Expr {
     case 'load': return { ...e, addr: mapExprPre(e.addr, leaf) };
     case 'sel': return { ...e, c: mapExprPre(e.c, leaf), a: mapExprPre(e.a, leaf), b: mapExprPre(e.b, leaf) };
     case 'call': return { ...e, t: e.t.k === 'ind' ? { k: 'ind', e: mapExprPre(e.t.e, leaf) } : e.t, args: e.args.map(a => mapExprPre(a, leaf)) };
+    case 'fn': return { ...e, args: e.args.map(a => mapExprPre(a, leaf)) };
     default: return e;
   }
 }

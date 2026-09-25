@@ -83,6 +83,19 @@ export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: Eva
 				for (let i = 0; i < bits / 8; i++) { y = (y << 8n) | (x & 0xffn); x >>= 8n }
 				return y
 			}
+			// pure helpers (independent implementations of src/ir.ts INTRINSICS)
+			case 'popcount': { let x = W(a[0]), n = 0n; for (let i = 0; i < 64; i++) n += (x >> BigInt(i)) & 1n; return n }
+			case 'clz': { const x = W(a[0]); let n = 0n; for (let i = 63; i >= 0 && ((x >> BigInt(i)) & 1n) === 0n; i--) n++; return n }
+			case 'ctz': { const x = W(a[0]); let n = 0n; for (let i = 0; i < 64 && ((x >> BigInt(i)) & 1n) === 0n; i++) n++; return n }
+			case 'rotl': { const x = W(a[0]), n = W(a[1]) % 64n; return W((x << n) | (x >> (64n - n))) }
+			case 'min': return W(a[0]) < W(a[1]) ? W(a[0]) : W(a[1])
+			case 'max': return W(a[0]) > W(a[1]) ? W(a[0]) : W(a[1])
+			case 'smin': return BigInt.asIntN(64, a[0]) < BigInt.asIntN(64, a[1]) ? W(a[0]) : W(a[1])
+			case 'smax': return BigInt.asIntN(64, a[0]) > BigInt.asIntN(64, a[1]) ? W(a[0]) : W(a[1])
+			case 'memeq': {
+				for (let o = 0n; o < W(a[2]); o += 8n) if (env.mem.load(W(a[0] + o), 8) !== env.mem.load(W(a[1] + o), 8)) return 0n
+				return 1n
+			}
 			case 'trap': throw new Abort('trap')
 			case 'callx': return W(env.onCall(`ptr:${W(a[0]).toString(16)}`, a.slice(1).map(W)))
 		}

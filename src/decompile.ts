@@ -10,6 +10,7 @@ import { renderSingle } from './layout.ts';
 import { promoteStack } from './stack.ts';
 import { compactStores } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
+import { recognizeIdioms } from './idioms.ts';
 import { classify, type LibInfo } from './library.ts';
 
 export interface Options {
@@ -63,6 +64,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const f = recoverVars(p, f0);
     optimizeFunc(f);
     if (!opts.exactMemory && !DISABLED.has('promote') && promoteStack(f)) optimizeFunc(f);
+    if (!DISABLED.has('idioms') && recognizeIdioms(f)) optimizeFunc(f);
     built.set(f.pc, { f, body: [], irreducible: false });
   }
 
@@ -308,7 +310,7 @@ function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<nu
       case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, false); break;
       case 'load': visit(e.addr, true); break;
       case 'sel': visit(e.c, false); visit(e.a, false); visit(e.b, false); break;
-      case 'call': e.args.forEach(a => visit(a, false)); if (e.t.k === 'ind') visit(e.t.e, false); break;
+      case 'call': case 'fn': e.args.forEach(a => visit(a, false)); if (e.k === 'call' && e.t.k === 'ind') visit(e.t.e, false); break;
     }
   };
   for (const b of f.blocks) {
