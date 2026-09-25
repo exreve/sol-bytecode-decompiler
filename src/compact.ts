@@ -41,11 +41,35 @@ export function compactStores(f: VarFunc) {
 /** Compact a window of consecutive stores that share a base address expression. */
 function compactWindow(win: Store[], frame: boolean): Stmt[] {
 	const out: Stmt[] = []
+	const offs = win.map(s => baseOff(s.addr)[1])
+	const basePure = win.length > 0 && pure(baseOff(win[0].addr)[0])
 	let k = 0
 	while (k < win.length) {
 		// try the longest prefix starting at k that forms a contiguous run (any order if frame)
 		let best: { n: number; st: Stmt } | null = null
-		for (let n = win.length - k; n >= 2; n--) {
+		// Necessary conditions for tryRun to succeed on win[k..k+n) (checked cheaply first; tryRun
+		// still decides): pure base, one store size, distinct offsets aligned to that size, spanning
+		// exactly n slots, and strictly ascending as written unless frame. All but the span hold for
+		// a prefix iff they hold for every shorter prefix, which bounds n by `lim`.
+		let lim = basePure ? win.length - k : 0
+		{
+			const size = win[k].size, sz = BigInt(size), o0 = offs[k], seen = new Set<bigint>([o0])
+			for (let i = k + 1; i < k + lim; i++) {
+				const o = offs[i]
+				if (win[i].size !== size || (o - o0) % sz !== 0n || seen.has(o) || (!frame && o <= offs[i - 1])) { lim = i - k; break }
+				seen.add(o)
+			}
+		}
+		let lo = offs[k], hi = offs[k]
+		const span: boolean[] = []
+		for (let n = 1; n <= lim; n++) {
+			const o = offs[k + n - 1]
+			if (o < lo) lo = o
+			if (o > hi) hi = o
+			span[n] = hi - lo === BigInt((n - 1) * win[k].size)
+		}
+		for (let n = lim; n >= 2; n--) {
+			if (!span[n]) continue
 			const r = tryRun(win.slice(k, k + n), frame)
 			if (r) { best = { n, st: r }; break }
 		}

@@ -7,6 +7,7 @@ import { pruneUnreachable } from './dataflow.ts';
 import type { Block } from './program.ts';
 import { type Expr, type Stmt, type Term, walkExpr, hasSideEffectsOrMem } from './ir.ts';
 import { stmtExprs } from './simplify.ts';
+import { stmtInfo } from './simplify.ts';
 
 const cloneTerm = (t: Term): Term => ({ ...t } as Term);
 
@@ -117,17 +118,39 @@ export function mergeBlocks(f: VarFunc): boolean {
   return changed;
 }
 
-function substExpr(e: Expr, m: Map<number, Expr>): Expr {
-  if (!m.size) return e;
-  switch (e.k) {
-    case 'var': return m.get(e.id) ?? e;
-    case 'bin': case 'cmp': case 'land': case 'lor': return { ...e, a: substExpr(e.a, m), b: substExpr(e.b, m) } as Expr;
-    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return { ...e, a: substExpr(e.a, m) } as Expr;
-    case 'load': return { ...e, addr: substExpr(e.addr, m) };
-    case 'sel': return { ...e, c: substExpr(e.c, m), a: substExpr(e.a, m), b: substExpr(e.b, m) };
-    case 'fn': return { ...e, args: e.args.map(a => substExpr(a, m)) };
-    default: return e;
+/** Composite expressions that the historical copying substitution rebuilt (see localCopyProp). */
+const COMPOSITE = new Set(['bin', 'cmp', 'land', 'lor', 'neg', 'not', 'ext', 'bswap', 'lnot', 'load', 'sel', 'fn']);
+
+/**
+ * Rewrites the expressions of every statement of b (in order) with `sub`; `def` is called after each
+ * statement that defines a variable. Unchanged statements keep their identity (IR nodes are never
+ * mutated in place after variable recovery, so sharing them is safe).
+ */
+function rewriteBlock(b: Block, sub: (e: Expr) => Expr, def: (dst: number, ns: Stmt) => void) {
+  const ss = b.stmts;
+  for (let i = 0; i < ss.length; i++) {
+    const s = ss[i];
+    switch (s.k) {
+      case 'set': { const e = sub(s.e); const ns = e !== s.e ? (ss[i] = { ...s, e }) : s; def(s.dst, ns); break; }
+      case 'store': { const addr = sub(s.addr), v = sub(s.v); if (addr !== s.addr || v !== s.v) ss[i] = { ...s, addr, v }; break; }
+      case 'eval': { const e = sub(s.e); if (e !== s.e) ss[i] = { ...s, e }; break; }
+      case 'call': {
+        const args = subAll(s.args, sub), extra = s.extra && subAll(s.extra, sub);
+        const te = s.t.k === 'ind' ? sub(s.t.e) : undefined;
+        const ns = args !== s.args || extra !== s.extra || (s.t.k === 'ind' && te !== s.t.e) ? (ss[i] = { ...s, args, extra, t: s.t.k === 'ind' ? { k: 'ind', e: te! } : s.t }) : s;
+        if (s.dst >= 0) def(s.dst, ns);
+        break;
+      }
+    }
   }
+  const t = b.term;
+  if (t.k === 'br') t.c = sub(t.c);
+  else if (t.k === 'ret' && t.e) t.e = sub(t.e);
+}
+function subAll(es: Expr[], sub: (e: Expr) => Expr): Expr[] {
+  let out: Expr[] | undefined;
+  for (let i = 0; i < es.length; i++) { const n = sub(es[i]); if (n !== es[i]) (out ??= es.slice())[i] = n; }
+  return out ?? es;
 }
 
 /** Within each block: forward-substitute variables currently known to hold a constant. */
@@ -135,26 +158,14 @@ export function localConstProp(f: VarFunc): boolean {
   let changed = false;
   for (const b of f.blocks) {
     const m = new Map<number, Expr>();
-    const kill = (v: number) => m.delete(v);
-    const sub = (e: Expr) => { const n = substExpr(e, m); if (n !== e && JSON.stringify(n, rep) !== JSON.stringify(e, rep)) changed = true; return n; };
-    b.stmts = b.stmts.map(s => {
-      let ns: Stmt;
-      switch (s.k) {
-        case 'set': ns = { ...s, e: sub(s.e) }; kill(s.dst); if (ns.e.k === 'const' || ns.e.k === 'undef') m.set(s.dst, ns.e); break;
-        case 'store': ns = { ...s, addr: sub(s.addr), v: sub(s.v) }; break;
-        case 'eval': ns = { ...s, e: sub(s.e) }; break;
-        case 'call': ns = { ...s, args: s.args.map(sub), extra: s.extra?.map(sub), t: s.t.k === 'ind' ? { k: 'ind', e: sub(s.t.e) } : s.t }; if (s.dst >= 0) kill(s.dst); break;
-        default: ns = s;
-      }
-      return ns;
-    });
-    const t = b.term;
-    if (t.k === 'br') t.c = sub(t.c);
-    else if (t.k === 'ret' && t.e) t.e = sub(t.e);
+    const look = (v: number) => m.get(v);
+    // substConst returns a new object exactly when a variable was replaced (what the former
+    // JSON comparison of before/after detected)
+    const sub = (e: Expr) => { if (!m.size) return e; const n = substConst(e, look); if (n !== e) changed = true; return n; };
+    rewriteBlock(b, sub, (dst, ns) => { m.delete(dst); if (ns.k === 'set' && (ns.e.k === 'const' || ns.e.k === 'undef')) m.set(dst, ns.e); });
   }
   return changed;
 }
-const rep = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v);
 
 /** Variables live at the entry of each block (bitsets indexed by variable id). */
 export function liveInSets(f: VarFunc): Uint32Array[] {
@@ -183,53 +194,77 @@ export function liveInSets(f: VarFunc): Uint32Array[] {
 /** Backward variable liveness; removes dead pure assignments (multi-def variables included). */
 export function deadStores(f: VarFunc): boolean {
   const nv = f.vars.length, W = (nv + 31) >>> 5, nb = f.blocks.length;
-  const liveIn = Array.from({ length: nb }, () => new Uint32Array(W));
-  const uses = (e: Expr, set: Uint32Array) => walkExpr(e, x => { if (x.k === 'var') set[x.id >>> 5] |= 1 << (x.id & 31); });
-  const has = (set: Uint32Array, v: number) => (set[v >>> 5] >>> (v & 31)) & 1;
-  const transfer = (b: Block, out: Uint32Array, apply: boolean): { live: Uint32Array; changed: boolean } => {
-    const live = out.slice();
+  // bitsets are W-word rows of flat arrays (row id = block id): no per-block allocations
+  const liveIn = new Uint32Array(nb * W), gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
+  const setBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] |= 1 << (v & 31); };
+  const clrBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] &= ~(1 << (v & 31)); };
+  const uses = (e: Expr, a: Uint32Array, base: number) => walkExpr(e, x => { if (x.k === 'var') setBit(a, base, x.id); });
+  // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
+  const usesS = (s: Stmt, a: Uint32Array, base: number) => { for (const v of stmtInfo(s).vars) setBit(a, base, v); };
+  // The non-applying transfer is liveIn = gen | (out & ~kill); compute gen/kill once per block
+  // instead of re-walking every expression on each iteration. Liveness has a unique least fixpoint,
+  // so the result is the same.
+  for (let id = 0; id < nb; id++) {
+    const b = f.blocks[id], base = id * W;
     const t = b.term;
-    if (t.k === 'br') uses(t.c, live);
-    else if (t.k === 'ret' && t.e) uses(t.e, live);
-    let changed = false;
+    if (t.k === 'br') uses(t.c, gen, base);
+    else if (t.k === 'ret' && t.e) uses(t.e, gen, base);
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
-      if (s.k === 'set') {
-        if (apply && !has(live, s.dst)) {
-          const fx = hasSideEffectsOrMem(s.e);
-          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; uses(s.e, live); }
-          else b.stmts.splice(i, 1);
-          changed = true;
-          continue;
-        }
-        live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        uses(s.e, live);
-      } else if (s.k === 'call') {
-        if (s.dst >= 0) {
-          if (apply && !has(live, s.dst)) { b.stmts[i] = { ...s, dst: -1 }; changed = true; }
-          else live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        }
-        stmtExprs(s).forEach(e => uses(e, live));
-      } else stmtExprs(s).forEach(e => uses(e, live));
+      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { clrBit(gen, base, s.dst); setBit(kill, base, s.dst); }
+      usesS(s, gen, base);
     }
-    return { live, changed };
-  };
-  const outOf = (b: Block) => {
-    const o = new Uint32Array(W);
-    for (const s of b.succs) { const li = liveIn[s]; for (let k = 0; k < W; k++) o[k] |= li[k]; }
-    return o;
-  };
+  }
+  const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
+  for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
+  const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true; changed;) {
     changed = false;
     for (let id = nb - 1; id >= 0; id--) {
-      const b = f.blocks[id];
-      const { live } = transfer(b, outOf(b), false);
-      const li = liveIn[id];
-      for (let k = 0; k < W; k++) if (live[k] !== li[k]) { liveIn[id] = live; changed = true; break; }
+      if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
+      dirty[id] = 0;
+      const succs = f.blocks[id].succs, base = id * W;
+      let upd = false;
+      for (let k = 0; k < W; k++) {
+        let o = 0;
+        for (const s of succs) o |= liveIn[s * W + k];
+        const v = (gen[base + k] | (o & ~kill[base + k])) >>> 0;
+        if (v !== liveIn[base + k]) { liveIn[base + k] = v; upd = true; }
+      }
+      if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
     }
   }
+  // apply: walk each block backwards from its live-out (liveIn is not updated while applying)
+  const live = new Uint32Array(W);
+  const has = (v: number) => (live[v >>> 5] >>> (v & 31)) & 1;
   let any = false;
-  for (const b of f.blocks) if (transfer(b, outOf(b), true).changed) any = true;
+  for (const b of f.blocks) {
+    live.fill(0);
+    for (const s of b.succs) for (let k = 0; k < W; k++) live[k] |= liveIn[s * W + k];
+    const t = b.term;
+    if (t.k === 'br') uses(t.c, live, 0);
+    else if (t.k === 'ret' && t.e) uses(t.e, live, 0);
+    for (let i = b.stmts.length - 1; i >= 0; i--) {
+      const s = b.stmts[i];
+      if (s.k === 'set') {
+        if (!has(s.dst)) {
+          const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
+          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live, 0); }
+          else b.stmts.splice(i, 1);
+          any = true;
+          continue;
+        }
+        clrBit(live, 0, s.dst);
+        usesS(s, live, 0);
+      } else if (s.k === 'call') {
+        if (s.dst >= 0) {
+          if (!has(s.dst)) { b.stmts[i] = { ...s, dst: -1 }; any = true; }
+          else clrBit(live, 0, s.dst);
+        }
+        usesS(s, live, 0);
+      } else usesS(s, live, 0);
+    }
+  }
   return any;
 }
 
@@ -239,103 +274,129 @@ export function deadStores(f: VarFunc): boolean {
  * reaching definition assigns the same constant.
  */
 export function globalConstProp(f: VarFunc): boolean {
+  // Lattice per variable: absent (no definition on the path), const c, varying; unreached blocks
+  // (no OUT yet) are skipped. meet(x, y) = x if x === y else varying; a block's transfer sets each
+  // variable it defines to its constant (or varying). Both are pointwise per variable, so the state
+  // is tracked only for variables that are assigned a literal constant somewhere: every other
+  // variable is absent or varying everywhere and is never substituted. Dropping them does not change
+  // the value of any tracked variable at any iteration, and iteration stops once the tracked part is
+  // stable (it stays stable afterwards), so the result equals the full-map formulation, including
+  // under the 50-iteration cap. States are dense Int32Arrays: -1 absent, -2 varying, k >= 0 = the
+  // k-th interned constant.
   const nb = f.blocks.length;
-  type St = Map<number, bigint | null>; // null = varying; absent = no definition seen (unreached)
-  const IN: (St | undefined)[] = new Array(nb);
-  const params = new Set(f.vars.filter(v => v.param >= 0).map(v => v.id));
-  const entry: St = new Map();
-  for (const v of params) entry.set(v, null);
-  IN[0] = entry;
-  const xfer = (b: Block, st: St): St => {
-    const s2 = new Map(st);
+  const nv = f.vars.length;
+  const slot = new Int32Array(nv).fill(-1);
+  const slotVar: number[] = [];
+  const cval: bigint[] = [];
+  const cidOf = new Map<bigint, number>();
+  const cid = (v: bigint) => { let k = cidOf.get(v); if (k === undefined) { k = cval.length; cval.push(v); cidOf.set(v, k); } return k; };
+  for (const b of f.blocks) for (const s of b.stmts) {
+    if (s.k === 'set' && s.e.k === 'const' && slot[s.dst] < 0) { slot[s.dst] = slotVar.length; slotVar.push(s.dst); }
+  }
+  const K = slotVar.length;
+  if (!K) return false; // nothing can be substituted (an assignment only becomes constant through substitution)
+  const ABSENT = -1, VARY = -2;
+  // per-block transfer: (slot, value) pairs in statement order
+  const gen: number[][] = new Array(nb);
+  for (const b of f.blocks) {
+    const g: number[] = [];
     for (const s of b.stmts) {
-      if (s.k === 'set') s2.set(s.dst, s.e.k === 'const' ? s.e.v : null);
-      else if (s.k === 'call' && s.dst >= 0) s2.set(s.dst, null);
+      if (s.k === 'set') { const k = slot[s.dst]; if (k >= 0) g.push(k, s.e.k === 'const' ? cid(s.e.v) : VARY); }
+      else if (s.k === 'call' && s.dst >= 0) { const k = slot[s.dst]; if (k >= 0) g.push(k, VARY); }
     }
-    return s2;
-  };
-  const meet = (a: St | undefined, b: St): St => {
-    if (!a) return new Map(b);
-    const r = new Map(a);
-    for (const [k, v] of b) {
-      if (!r.has(k)) { r.set(k, v); continue; }
-      const x = r.get(k);
-      if (x !== v) r.set(k, null);
-    }
-    // variables defined on one side only: the other side reaches without a definition => varying
-    for (const k of r.keys()) if (!b.has(k)) r.set(k, null);
-    for (const k of b.keys()) if (!a.has(k)) r.set(k, null);
-    return r;
-  };
+    gen[b.id] = g;
+  }
+  const entry = new Int32Array(K).fill(ABSENT);
+  for (const v of f.vars) if (v.param >= 0 && slot[v.id] >= 0) entry[slot[v.id]] = VARY;
+  // IN/OUT states are K-wide rows of flat arrays (row = block id); hasIn/hasOut mark defined rows
+  const IN = new Int32Array(nb * K), OUT = new Int32Array(nb * K);
+  const hasIn = new Uint8Array(nb), hasOut = new Uint8Array(nb);
+  IN.set(entry, 0); hasIn[0] = 1;
   const order: number[] = [];
   { const seen = new Uint8Array(nb); const post: number[] = []; const st: [number, number][] = [[0, 0]]; seen[0] = 1;
     while (st.length) { const t = st[st.length - 1]; const b = f.blocks[t[0]]; if (t[1] < b.succs.length) { const s = b.succs[t[1]++]; if (!seen[s]) { seen[s] = 1; st.push([s, 0]); } } else { post.push(t[0]); st.pop(); } }
     order.push(...post.reverse()); }
-  const OUT: (St | undefined)[] = new Array(nb);
+  const inn = new Int32Array(K), out = new Int32Array(K); // scratch rows
+  // A block whose predecessors' OUT did not change since it was last evaluated would recompute the
+  // same IN/OUT, so it is skipped (same states and same per-iteration `changed` as re-evaluating
+  // every block each round, hence also the same behaviour under the iteration cap).
+  const dependents: number[][] = Array.from({ length: nb }, () => []);
+  for (const b of f.blocks) for (const p of b.preds) dependents[p].push(b.id);
+  const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true, it = 0; changed && it < 50; it++) {
     changed = false;
     for (const id of order) {
+      if (!dirty[id]) continue;
+      dirty[id] = 0;
       const b = f.blocks[id];
-      let inn: St | undefined = id === 0 ? entry : undefined;
-      for (const p of b.preds) if (OUT[p]) inn = inn ? meet(inn, OUT[p]!) : new Map(OUT[p]!);
-      if (id === 0 && b.preds.length) for (const p of b.preds) if (OUT[p]) inn = meet(inn, OUT[p]!);
-      if (!inn) continue;
-      const out = xfer(b, inn);
-      if (!OUT[id] || !sameSt(OUT[id]!, out)) { OUT[id] = out; IN[id] = inn; changed = true; }
-      else IN[id] = inn;
+      let any = false;
+      if (id === 0) { inn.set(entry); any = true; }
+      for (const p of b.preds) {
+        if (!hasOut[p]) continue;
+        const o = p * K;
+        if (any) { for (let k = 0; k < K; k++) if (inn[k] !== OUT[o + k]) inn[k] = VARY; } // meet
+        else { inn.set(OUT.subarray(o, o + K)); any = true; }
+      }
+      if (!any) continue;
+      out.set(inn);
+      const g = gen[id];
+      for (let i = 0; i < g.length; i += 2) out[g[i]] = g[i + 1];
+      const r = id * K;
+      let same = !!hasOut[id];
+      if (same) for (let k = 0; k < K; k++) if (OUT[r + k] !== out[k]) { same = false; break; }
+      if (!same) { OUT.set(out, r); hasOut[id] = 1; changed = true; for (const d of dependents[id]) dirty[d] = 1; }
+      IN.set(inn, r); hasIn[id] = 1;
     }
   }
   let changed = false;
   for (const b of f.blocks) {
-    const st = IN[b.id];
-    if (!st) continue;
-    const m = new Map<number, Expr>();
-    for (const [k, v] of st) if (v !== null && v !== undefined) m.set(k, { k: 'const', v });
-    const cur = new Map(m);
-    const sub = (e: Expr) => { const n = substExpr(e, cur); if (n !== e) changed = changed || JSON.stringify(n, rep) !== JSON.stringify(e, rep); return n; };
-    b.stmts = b.stmts.map(s => {
-      let ns: Stmt = s;
-      switch (s.k) {
-        case 'set': ns = { ...s, e: sub(s.e) }; cur.delete(s.dst); if (ns.e.k === 'const') cur.set(s.dst, ns.e); break;
-        case 'store': ns = { ...s, addr: sub(s.addr), v: sub(s.v) }; break;
-        case 'eval': ns = { ...s, e: sub(s.e) }; break;
-        case 'call': ns = { ...s, args: s.args.map(sub), extra: s.extra?.map(sub), t: s.t.k === 'ind' ? { k: 'ind', e: sub(s.t.e) } : s.t }; if (s.dst >= 0) cur.delete(s.dst); break;
-      }
-      return ns;
-    });
-    const t = b.term;
-    if (t.k === 'br') t.c = sub(t.c);
-    else if (t.k === 'ret' && t.e) t.e = sub(t.e);
+    if (!hasIn[b.id]) continue;
+    const st = IN.subarray(b.id * K, b.id * K + K);
+    // block-local overrides of the entry state (null = no longer known constant)
+    const loc = new Map<number, Expr | null>();
+    const look = (v: number): Expr | undefined => {
+      const l = loc.get(v);
+      if (l !== undefined) return l ?? undefined;
+      const k = slot[v];
+      return k >= 0 && st[k] >= 0 ? { k: 'const', v: cval[st[k]] } : undefined;
+    };
+    const sub = (e: Expr) => { const n = substConst(e, look); if (n !== e) changed = true; return n; };
+    rewriteBlock(b, sub, (dst, ns) => loc.set(dst, ns.k === 'set' && ns.e.k === 'const' ? ns.e : null));
   }
   return changed;
 }
 
-function sameSt(a: Map<number, bigint | null>, b: Map<number, bigint | null>) {
-  if (a.size !== b.size) return false;
-  for (const [k, v] of a) if (b.get(k) !== v || !b.has(k)) return false;
-  return true;
+/** substExpr with a lookup function; returns `e` itself when nothing was substituted (IR expressions are immutable). */
+function substConst(e: Expr, look: (v: number) => Expr | undefined): Expr {
+  switch (e.k) {
+    case 'var': return look(e.id) ?? e;
+    case 'bin': case 'cmp': case 'land': case 'lor': { const a = substConst(e.a, look), b = substConst(e.b, look); return a === e.a && b === e.b ? e : { ...e, a, b } as Expr; }
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': { const a = substConst(e.a, look); return a === e.a ? e : { ...e, a } as Expr; }
+    case 'load': { const addr = substConst(e.addr, look); return addr === e.addr ? e : { ...e, addr }; }
+    case 'sel': { const c = substConst(e.c, look), a = substConst(e.a, look), b = substConst(e.b, look); return c === e.c && a === e.a && b === e.b ? e : { ...e, c, a, b }; }
+    case 'fn': { let args: Expr[] | undefined; for (let i = 0; i < e.args.length; i++) { const x = substConst(e.args[i], look); if (x !== e.args[i]) (args ??= e.args.slice())[i] = x; } return args ? { ...e, args } : e; }
+    default: return e;
+  }
 }
 
 /** Block-local copy propagation: after `x = y`, uses of x become y until x or y is reassigned. */
-export function localCopyProp(f: VarFunc): boolean {
+export function localCopyProp(f: VarFunc, st?: { real: boolean }): boolean {
   let changed = false;
   for (const b of f.blocks) {
     const m = new Map<number, Expr>();
     const killVar = (v: number) => { m.delete(v); for (const [k, e] of m) if (e.k === 'var' && e.id === v) m.delete(k); };
-    const sub = (e: Expr) => { const n = substExpr(e, m); if (n !== e) changed = true; return n; };
-    b.stmts = b.stmts.map(s => {
-      let ns: Stmt = s;
-      switch (s.k) {
-        case 'set': ns = { ...s, e: sub(s.e) }; killVar(s.dst); if (ns.e.k === 'var' && ns.e.id !== s.dst) m.set(s.dst, ns.e); break;
-        case 'store': ns = { ...s, addr: sub(s.addr), v: sub(s.v) }; break;
-        case 'eval': ns = { ...s, e: sub(s.e) }; break;
-        case 'call': ns = { ...s, args: s.args.map(sub), extra: s.extra?.map(sub), t: s.t.k === 'ind' ? { k: 'ind', e: sub(s.t.e) } : s.t }; if (s.dst >= 0) killVar(s.dst); break;
-      }
-      return ns;
-    });
-    const t = b.term;
-    if (t.k === 'br') t.c = sub(t.c);
-    else if (t.k === 'ret' && t.e) t.e = sub(t.e);
+    const look = (v: number) => m.get(v);
+    // `changed` keeps its historical meaning: the former copying substitution returned a new object
+    // for every composite expression whenever m was non-empty, and optimizeFunc's round loop (whose
+    // round count shapes the output) is driven by it.
+    const sub = (e: Expr) => {
+      if (!m.size) return e;
+      if (COMPOSITE.has(e.k) || (e.k === 'var' && m.has(e.id))) changed = true;
+      const n = substConst(e, look);
+      if (n !== e && st) st.real = true; // an actual substitution
+      return n;
+    };
+    rewriteBlock(b, sub, (dst, ns) => { killVar(dst); if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) m.set(dst, ns.e); });
   }
   return changed;
 }
