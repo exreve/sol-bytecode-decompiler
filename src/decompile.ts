@@ -485,6 +485,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // at least half of the direct calls pass an object of that type and none one of another type (a few
   // rounds, so types flow down call chains)
   const baseTypes = new Map<number, Map<number, string>>();
+  // the type of a set's value: a typed expression, or a load of a frame slot stored exactly once (a spill)
+  // with a typed value
+  const setType = (f: VarFunc, e: Expr, ty: (id: number) => string | undefined): string | undefined => {
+    const t = exprType(views, e, ty);
+    if (t || e.k !== 'load' || e.size !== 8) return t;
+    const fpv = f.vars.find(v => v.param === 10)?.id;
+    const o = fpv === undefined ? undefined : e.addr.k === 'bin' && e.addr.op === 'add' && e.addr.a.k === 'var' && e.addr.a.id === fpv && e.addr.b.k === 'const' ? Number(BigInt.asIntN(64, e.addr.b.v)) : undefined;
+    const v = o === undefined ? undefined : spillSlots(f).get(o);
+    return v ? exprType(views, v, ty) : undefined;
+  };
   const computeTypes = (pc: number): Map<number, string> => {
     const f = built.get(pc)!.f, t = new Map<number, string>();
     for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
@@ -496,7 +506,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       grew = false;
       for (const b of f.blocks) for (const st of b.stmts) {
         if (st.k !== 'set' || t.has(st.dst) || f.vars[st.dst]?.param >= 0 || defCount(f, st.dst) !== 1) continue;
-        const ty = exprType(views, st.e, id => t.get(id));
+        const ty = setType(f, st.e, id => t.get(id));
         if (ty && views.map.has(ty)) { t.set(st.dst, ty); grew = true; }
       }
     }
@@ -742,7 +752,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         grew = false;
         for (const b of f.blocks) for (const st of b.stmts) {
           if (st.k !== 'set' || varTypes.has(st.dst) || !used.has(st.dst) || f.vars[st.dst]?.param >= 0 || defCount(f, st.dst) !== 1) continue;
-          const t = exprType(views, st.e, id => varTypes.get(id));
+          const t = setType(f, st.e, id => varTypes.get(id));
           if (t && views.map.has(t)) { varTypes.set(st.dst, t); grew = true; }
         }
       }
@@ -1048,6 +1058,28 @@ function argsVar(f: VarFunc, view: string, views: Views): number | undefined {
     if (ok && hit.size > score) { best = id; score = hit.size; }
   }
   return score >= Math.min(2, v.fields.length) ? best : undefined;
+}
+
+/**
+ * Frame slots (offsets from the frame pointer) stored exactly once in f, with an 8-byte store and no other
+ * store, stores run or copy overlapping them: offset -> the stored value.
+ */
+const spillMemo = new WeakMap<VarFunc, Map<number, Expr>>();
+function spillSlots(f: VarFunc): Map<number, Expr> {
+  let r = spillMemo.get(f);
+  if (r) return r;
+  const fpv = f.vars.find(v => v.param === 10)?.id;
+  const fo = (e: Expr) => (e.k === 'var' && e.id === fpv ? 0 : e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
+  const vals = new Map<number, Expr | null>(), spans: [number, number][] = [];
+  for (const b of f.blocks) for (const s of b.stmts) {
+    if (s.k === 'store') { const o = fo(s.addr); if (o === undefined) continue; spans.push([o, s.size]); if (s.size === 8) vals.set(o, vals.has(o) ? null : s.v); }
+    else if (s.k === 'stores') { const o = fo(s.addr); if (o === undefined) continue; spans.push([o, s.size * s.vals.length]); if (s.size === 8) s.vals.forEach((v, i) => vals.set(o + 8 * i, vals.has(o + 8 * i) ? null : v)); }
+    else if (s.k === 'copy') { const o = fo(s.dst); if (o !== undefined) spans.push([o, s.n]); }
+  }
+  r = new Map();
+  for (const [o, v] of vals) if (v && spans.filter(([a, n]) => a < o + 8 && o < a + n).length === 1) r.set(o, v);
+  spillMemo.set(f, r);
+  return r;
 }
 
 /**
