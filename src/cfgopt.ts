@@ -186,17 +186,24 @@ export function deadStores(f: VarFunc): boolean {
     }
     gen[id] = g; kill[id] = kl;
   }
+  const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
+  for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
+  const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true; changed;) {
     changed = false;
     for (let id = nb - 1; id >= 0; id--) {
+      if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
+      dirty[id] = 0;
       const b = f.blocks[id];
       const li = liveIn[id], g = gen[id], kl = kill[id];
       let o: Uint32Array | undefined;
       for (const s of b.succs) { const x = liveIn[s]; if (!o) o = x.slice(); else for (let k = 0; k < W; k++) o[k] |= x[k]; }
+      let upd = false;
       for (let k = 0; k < W; k++) {
         const v = (g[k] | ((o ? o[k] : 0) & ~kl[k])) >>> 0;
-        if (v !== li[k]) { li[k] = v; changed = true; }
+        if (v !== li[k]) { li[k] = v; upd = true; }
       }
+      if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
     }
   }
   let any = false;
@@ -252,9 +259,17 @@ export function globalConstProp(f: VarFunc): boolean {
     while (st.length) { const t = st[st.length - 1]; const b = f.blocks[t[0]]; if (t[1] < b.succs.length) { const s = b.succs[t[1]++]; if (!seen[s]) { seen[s] = 1; st.push([s, 0]); } } else { post.push(t[0]); st.pop(); } }
     order.push(...post.reverse()); }
   const OUT: (Int32Array | undefined)[] = new Array(nb);
+  // A block whose predecessors' OUT did not change since it was last evaluated would recompute the
+  // same IN/OUT, so it is skipped (same states and same per-iteration `changed` as re-evaluating
+  // every block each round, hence also the same behaviour under the iteration cap).
+  const dependents: number[][] = Array.from({ length: nb }, () => []);
+  for (const b of f.blocks) for (const p of b.preds) dependents[p].push(b.id);
+  const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true, it = 0; changed && it < 50; it++) {
     changed = false;
     for (const id of order) {
+      if (!dirty[id]) continue;
+      dirty[id] = 0;
       const b = f.blocks[id];
       let inn: Int32Array | undefined = id === 0 ? entry.slice() : undefined;
       for (const p of b.preds) { const o = OUT[p]; if (o) { if (inn) meetInto(inn, o); else inn = o.slice(); } }
@@ -265,7 +280,7 @@ export function globalConstProp(f: VarFunc): boolean {
       const prev = OUT[id];
       let same = !!prev;
       if (prev) for (let k = 0; k < K; k++) if (prev[k] !== out[k]) { same = false; break; }
-      if (!same) { OUT[id] = out; changed = true; }
+      if (!same) { OUT[id] = out; changed = true; for (const d of dependents[id]) dirty[d] = 1; }
       IN[id] = inn;
     }
   }
