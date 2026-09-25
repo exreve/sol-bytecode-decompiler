@@ -27,7 +27,7 @@ const USAGE = `usage: sbpf-decompile <program.so | program address> [-o out.ts |
   program.so        a local program binary ("-" reads it from stdin)
   program address   fetched from the RPC endpoint given with --rpc (its on-chain Anchor IDL is used when published)
   -o out.ts         write a single file (default: stdout)
-  -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, slices/
+  -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, security/
   --idl file.json   Anchor IDL (instruction args/accounts, account layouts, error names)
   --full            also decompile recognized library code (default: one-line typed stubs)`
 

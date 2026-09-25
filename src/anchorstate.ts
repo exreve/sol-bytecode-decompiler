@@ -311,7 +311,7 @@ function buildViews(views: Views, top: string, doc: string, at: Map<string, Samp
  * with constant stores to consecutive bytes from offset 0 of one base variable, each byte always with the
  * same value (the first such base in statement order).
  */
-function inlineString(ns: Node[]): string | undefined {
+export function inlineString(ns: Node[]): string | undefined {
 	const bytes = new Map<number, Map<number, number | null>>()
 	const order: number[] = []
 	const put = (addr: Expr, size: number, v: Expr) => {

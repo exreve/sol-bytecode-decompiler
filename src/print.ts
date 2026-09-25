@@ -30,6 +30,7 @@ export interface PrintCtx {
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
   nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
+  nodeLines?: (n: Node, start: number, end: number) => void; // lines [start, end) of printBody's output a node printed as (its note included)
   storeField?: (size: number, addr: Expr) => string | undefined; // field name of a store's destination
   stmtTail?: (s: Stmt, prev?: Stmt) => string | undefined; // comment at the end of a statement's line (prev: statement printed just before, same list)
   views?: Views;                                  // typed views (src/views.ts): x.field for loads/stores/addresses through typed variables
@@ -336,22 +337,31 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
     for (const n of ns) {
       const prev = prevStmt;
       prevStmt = undefined;
+      const start = out.length;
       const note = pr.ctx.nodeNote?.(n);
       if (note) out.push(`${I(d)}// ${note}`);
+      node(n, d, prev);
+      pr.ctx.nodeLines?.(n, start, out.length);
+    }
+  };
+  const node = (n: Node, d: number, prev: Stmt | undefined) => {
       switch (n.k) {
         case 'stmt': prevStmt = prev; stmt(n.s, d); prevStmt = n.s; break;
         case 'if': {
           out.push(`${I(d)}if (${pr.expr(n.c, 0)}) {`);
           rec(n.then, d + 1);
           let el = n.else;
+          const chain: [Node, number][] = [];
           while (el.length === 1 && el[0].k === 'if') {
             const e = el[0];
+            chain.push([e, out.length]);
             out.push(`${I(d)}} else if (${pr.expr(e.c, 0)}) {`);
             rec(e.then, d + 1);
             el = e.else;
           }
           if (el.length) { out.push(`${I(d)}} else {`); rec(el, d + 1); }
           out.push(`${I(d)}}`);
+          for (const [e, at] of chain) pr.ctx.nodeLines?.(e, at, out.length);
           break;
         }
         case 'block':
@@ -383,7 +393,6 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
           out.push(`${I(d)}}`);
           break;
       }
-    }
   };
   rec(body, 0);
   return out;

@@ -9,7 +9,7 @@
 import type { Result, FuncOut } from './decompile.ts'
 import { SYSCALLS } from './syscalls.ts'
 import { VIEW_NOTATION } from './views.ts'
-import { renderSlices } from './slices.ts'
+import { analyze, renderJson, renderSummary, renderIx, renderSummaryComment, type Where } from './analysis/report.ts'
 
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
 // x as u8|u16|u32: truncate | x as i8|i16|i32: truncate + sign-extend | (x as i64) < (y as i64): signed compare
@@ -68,6 +68,8 @@ declare function bswap64(x: u64): u64 // byte swap
 declare function srem(a: u64, b: u64): u64 // signed (i64) remainder
 declare function trap(msg: string): never
 declare function callx(fn: u64, ...args: u64[]): u64`
+
+const lineCount = (f: FuncOut) => { let n = 1; for (let i = f.text.indexOf('\n'); i >= 0; i = f.text.indexOf('\n', i + 1)) n++; return n }
 
 export interface Group { key: string; title: string; funcs: FuncOut[] }
 
@@ -192,7 +194,7 @@ function summary(r: Result): string[] {
 
 export function renderSingle(r: Result): string {
 	const g = groups(r)
-	const out: string[] = [PRELUDE, ...summary(r), '']
+	const out: string[] = [PRELUDE, ...summary(r), ...renderSummaryComment(analyze(r)), '']
 	const helpers = usedHelpers(r)
 	if (helpers.length) out.push(`// helpers:`, ...helpers, '')
 	const vw = usedViews(r)
@@ -214,6 +216,8 @@ export function renderProject(r: Result): Map<string, string> {
 	const home = new Map<string, string>() // function name -> module path
 	for (const grp of [g.entry, g.shared, ...g.ix]) for (const f of grp.funcs) home.set(f.name, grp.key)
 	const libNames = new Set(r.stubs.map(s => /declare function (\w+)/.exec(s)![1]))
+	const modLoc = new Map<string, { file: string; line: number }>() // function -> its module file and first line
+	const bundleLoc = new Map<string, Map<string, number>>()           // instruction -> function -> first line in bundle/<ix>.ts
 	const mod = (grp: Group) => {
 		if (!grp.funcs.length) return
 		const imports = new Map<string, Set<string>>()
@@ -229,6 +233,8 @@ export function renderProject(r: Result): Map<string, string> {
 		for (const [h, names] of imports) head.push(`import { ${[...names].sort().join(', ')} } from '${rel(h)}'`)
 		const body = grp.funcs.map(f => f.text.replace(/^function /m, 'export function ')).join('\n\n')
 		files.set(grp.key + '.ts', head.join('\n') + '\n\n' + body + '\n')
+		let at = head.length + 2
+		for (const f of grp.funcs) { modLoc.set(f.name, { file: grp.key + '.ts', line: at }); at += lineCount(f) + 1 }
 	}
 	mod(g.entry); mod(g.shared); g.ix.forEach(mod)
 	void libNames
@@ -238,26 +244,6 @@ export function renderProject(r: Result): Map<string, string> {
 	for (const i of r.instructions) idx.push(`export { ix_${i.name} } from './ix/${i.name}.ts'`)
 	idx.push(`export { entrypoint } from './entrypoint.ts'`)
 	files.set('index.ts', idx.join('\n') + '\n')
-	// security slices: derived, unverified views (separate files); reachability through every direct
-	// call of the program, library code included (library functions call back into user code)
-	const { handlers } = handlerOwners(r)
-	const handlerPcs = new Set(handlers.map(y => y.pc))
-	const reach = new Map<number, Set<string>>()
-	for (const h of handlers) {
-		const seen = new Set<number>([h.pc]), q = [h.pc]
-		while (q.length) {
-			const x = q.pop()!
-			let o = reach.get(x); if (!o) reach.set(x, (o = new Set())); o.add(h.name)
-			for (const b of r.program.funcs.get(x)?.blocks ?? []) for (const st of b.stmts)
-				if (st.k === 'call' && st.t.k === 'fn' && !seen.has(st.t.pc) && !handlerPcs.has(st.t.pc)) { seen.add(st.t.pc); q.push(st.t.pc) }
-		}
-	}
-	const slices = renderSlices(r.funcs, f => [...(reach.get(f.pc) ?? [])].sort())
-	for (const [path, text] of slices) files.set(path, text + '\n')
-	if (slices.size) {
-		const idxText = files.get('index.ts')!
-		files.set('index.ts', idxText + `// slices/: security-oriented slices, UNVERIFIED views derived from this code (not executable): ${[...slices.keys()].map(k => k.slice(7)).join(', ')}\n`)
-	}
 	// self-contained per-instruction bundles: handler + all user code it reaches + the stubs it needs
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) {
@@ -277,7 +263,25 @@ export function renderProject(r: Result): Map<string, string> {
 		const used = new Set([...order.flatMap(f => scan(f).called), ...[...declText.matchAll(CALLED)].map(m => m[1])])
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls({ ...r, funcs: order })
-		files.set(`bundle/${h.name.slice(3)}.ts`, [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, '', text, ''].join('\n'))
+		const pre = [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ''].join('\n')
+		files.set(`bundle/${h.name.slice(3)}.ts`, pre + '\n' + text + '\n')
+		const m = new Map<string, number>()
+		let at = pre.split('\n').length + 1
+		for (const f of order) { m.set(f.name, at); at += lineCount(f) + 1 }
+		bundleLoc.set(h.name.slice(3), m)
 	}
+	// security/: the program analysis (derived views, see src/analysis/report.ts), read first
+	const a = analyze(r)
+	const where: Where = (ix, at) => {
+		const b = ix === undefined ? undefined : bundleLoc.get(ix)?.get(at.fn)
+		if (b !== undefined) return { file: `bundle/${ix}.ts`, line: b + at.line - 1 }
+		const m = modLoc.get(at.fn)
+		return m && { file: m.file, line: m.line + at.line - 1 }
+	}
+	const ixFile = (ix: { name: string }) => `${ix.name}.md`
+	files.set('security/analysis.json', renderJson(a, where))
+	files.set('security/summary.md', renderSummary(a, where, ixFile))
+	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, renderIx(ix, where))
+	files.set('index.ts', files.get('index.ts')! + `// security/summary.md: read first — instructions ranked by sensitivity, their effects, privileges and checks (derived, over-approximate views; security/<ix>.md per instruction, security/analysis.json)\n`)
 	return files
 }

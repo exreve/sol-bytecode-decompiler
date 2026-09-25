@@ -239,7 +239,16 @@ const STAKE: Family = {
 const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET, STAKE_PROGRAM: STAKE }
 
 /** A described CPI: the comment, and the decoded instruction of a well-known program (guessed: the program id is not a constant). */
-export interface CpiDesc { text: string; family?: string; ix?: string; guessed?: boolean }
+export interface CpiDesc { text: string; family?: string; ix?: string; guessed?: boolean; parts?: CpiParts }
+/** The decoded parts of a CPI (for the analysis, src/analysis): program, account metas by role, data fields, signer seeds. */
+export interface CpiParts {
+	program: string
+	known?: string
+	checked?: string // how a non-constant program id is checked (see formatIx)
+	accounts: { role?: string; text: string; w?: number; s?: number }[]
+	fields: [string, string][]
+	seeds?: string
+}
 
 /** One-line description of a CPI site, or undefined when its instruction is not in the frame. */
 export function describeCpi(site: CpiSite, env: CpiEnv): string | undefined { return cpiDesc(site, env)?.text }
@@ -376,7 +385,7 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 			if (!lay) continue
 			// a guess (program not constant) must match the data length and the account count exactly
 			if (!fam && (lay.len === undefined || lay.len !== dl || (nAcc !== undefined && nAcc !== lay.accounts.length))) continue
-			const parts: string[] = []
+			const parts: string[] = [], fields: [string, string][] = []
 			accounts.forEach((a, i) => parts.push(`${lay.accounts[i] ?? `account${i}`}: ${accText(a)}`))
 			if (!accounts.length && nAcc !== undefined && nAcc !== lay.accounts.length) parts.push(`${nAcc} accounts`)
 			for (const [name, off, size] of lay.fields) {
@@ -385,10 +394,12 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 				if (size === 'key') { const k = data.key(off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : '') }
 				else { const e = data.at(off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?' }
 				parts.push(`${name}: ${v}`)
+				fields.push([name, v])
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
 			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : F === STAKE ? 'stake' : 'compute_budget'
-			return { text: `CPI ${head} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}${tail}`, family, ix: lay.name, guessed: !fam }
+			const cp: CpiParts = { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields, accounts: accounts.map((a, i) => ({ role: lay.accounts[i], text: a.text, w: a.w, s: a.s })) }
+			return { text: `CPI ${head} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}${tail}`, family, ix: lay.name, guessed: !fam, parts: cp }
 		}
 	}
 	const parts = [`program ${program.text}${check}`]
@@ -400,8 +411,11 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 	if (dl !== undefined) parts.push(`data ${dl} byte${dl === 1 ? '' : 's'}${data ? describeData(data.at, dl, env) : ''}`)
 	else if (m.dataText) parts.push(`data ${m.dataText}`)
 	if (program.text === '?' && parts.length === 1) return undefined
-	return { text: `CPI${event ? ' emit_cpi! (Anchor event self-invocation)' : ''}: ${parts.join(', ')}${tail}` }
+	return { text: `CPI${event ? ' emit_cpi! (Anchor event self-invocation)' : ''}: ${parts.join(', ')}${tail}`, parts: { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields: event ? [['event', 'emit_cpi!']] : [], accounts: accounts.map(a => ({ text: a.text, w: a.w, s: a.s })) } }
 }
+
+/** signer seeds text of a CPI, undefined when it has none */
+const signerSeeds = (s: string | undefined) => (s && !/^no signer seeds/.test(s) ? s.replace(/^signer seeds /, '') : undefined)
 
 function flags(w: number | undefined, s: number | undefined): string {
 	if (w === undefined || s === undefined) return ' (?)'

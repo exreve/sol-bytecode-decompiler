@@ -16,7 +16,7 @@ import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { builtinName } from './builtins.ts';
-import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite } from './cpi.ts';
+import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
 import { Views, exprType } from './views.ts';
@@ -24,6 +24,7 @@ import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
+import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -44,6 +45,8 @@ export interface Result {
   anchor: boolean;
   libCount: number;
   text: string;                    // single-file rendering
+  facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
+  tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
 }
 
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st']);
@@ -302,6 +305,21 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   };
   // CPI sites described by execution (cpiexec.ts): interpreter steps per program (deterministic)
   const execBudget = { steps: 250_000 };
+  // (analysis only, src/analysis: CPIs made through small user functions wrapping invoke, decoded at their
+  // call sites by a run of the caller; own budget, nothing printed)
+  const wrapBudget = { steps: 150_000 };
+  const userInvoke = new Set<number>();
+  if (opts.sugar !== false) for (const [pc, bt] of built) {
+    let n = 0, hit = false;
+    const isInv = (t: Extract<Stmt, { k: 'call' }>['t']) => (t.k === 'fn' ? invokeWrappers.has(t.pc) || invokeThunks.get(t.pc) === 'rust' || invokeThunks.get(t.pc) === 'c' : t.k === 'sys' && /^sol_invoke_signed_(c|rust)$/.test(t.name));
+    for (const b of bt.f.blocks) for (const st of b.stmts) {
+      n++;
+      if (st.k === 'call' && isInv(st.t)) hit = true;
+      if (st.k === 'set' && st.e.k === 'call' && isInv(st.e.t)) hit = true;
+      if (b.term.k === 'ret' && b.term.e?.k === 'call' && isInv(b.term.e.t)) hit = true;
+    }
+    if (hit && n <= 12 && (bt.f.nparams >= 4 || bt.f.stackArgs)) userInvoke.add(pc);
+  }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
@@ -710,6 +728,22 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return ok && hit.size >= 3;
   }
   const funcs: FuncOut[] = [];
+  const facts = new Map<number, FnFacts>();
+  // a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
+  const seedsAt = (ptr: bigint, n: bigint): string | undefined => {
+    if (n > 16n) return undefined;
+    const out: string[] = [];
+    for (let i = 0n; i < n; i++) {
+      const a = p.image.region(ptr + 16n * i, 16)?.exec === false ? p.image.read(ptr + 16n * i, 8) : undefined, l = a === undefined ? undefined : p.image.read(ptr + 16n * i + 8n, 8);
+      if (a === undefined || l === undefined || l > 64n) return undefined;
+      const s = sem.strAt(a, l);
+      if (s !== undefined && /^[\x20-\x7e]*$/.test(s)) { out.push(JSON.stringify(s)); continue; }
+      const bytes: string[] = [];
+      for (let j = 0n; j < l; j++) { const b = p.image.read(a + j, 1); if (b === undefined) return undefined; bytes.push(b.toString(16).padStart(2, '0')); }
+      out.push(`0x${bytes.join('')}`);
+    }
+    return `[${out.join(', ')}]`;
+  };
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
     // readable mode: `x = undef` (leftover register value) is shown by leaving x unassigned
@@ -794,6 +828,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
     };
+    // node -> printed lines, CPI / PDA sites (for the analysis: src/analysis/facts.ts)
+    const spans = new Map<Node, [number, number]>();
+    const siteNotes = new Map<Node, SiteNote>();
+    if (opts.sugar !== false) ctx.nodeLines = (n, a, b) => { spans.set(n, [a, b]); };
     // entrypoint: annotate fields of the serialized input (first account + header)
     const inputVar = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined;
     if (opts.sugar !== false && inputVar !== undefined) {
@@ -960,11 +998,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         };
         // (a call instruction duplicated in the IR, e.g. by tail duplication, is run once: the runs and
         // their text depend only on the function, the call and the kind; the steps are charged again)
-        const execMemo = new Map<string, { x?: { text: string }; steps: number }>();
+        const execMemo = new Map<string, { x?: CpiDesc; steps: number }>();
         ctx.nodeNote = n => {
           const s = sites.get(n);
           if (!s) return undefined;
           const d = cpiDesc(s, env);
+          if (s.abi !== 'call') siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
           const kind = execKind(s);
           if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
             const at = sitePc(n, s);
@@ -977,12 +1016,32 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
                 const m = describeByExec(p, f, at, kind, env, execBudget);
                 execMemo.set(k, (r = { x: (m && formatIx(m, env)) || undefined, steps: b0 - execBudget.steps }));
               }
-              if (r.x) return r.x.text;
+              if (r.x) { siteNotes.set(n, { kind: 'cpi', desc: r.x }); return r.x.text; }
             }
           }
           return d?.text;
         };
       }
+    }
+    if (opts.sugar !== false && fpVar !== undefined && userInvoke.size && wrapBudget.steps > 0) {
+      const env: CpiEnv = {
+        fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len), tainted: e => exprTainted(taint.get(pc), e, fpVar),
+        constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined),
+      };
+      const visit = (ns: Node[]) => {
+        for (const n of ns) {
+          if (n.k === 'stmt' && !siteNotes.has(n) && wrapBudget.steps > 0) {
+            const c = n.s.k === 'call' ? n.s : n.s.k === 'set' && n.s.e.k === 'call' ? n.s.e : undefined;
+            if (c?.t.k === 'fn' && userInvoke.has(c.t.pc) && c.t.pc !== pc) {
+              const m = describeByExec(p, f, n.s.pc, 'wrapper', env, wrapBudget);
+              const d = m && formatIx(m, env);
+              if (d) siteNotes.set(n, { kind: 'cpi', desc: d, via: fnName(c.t.pc) });
+            }
+          }
+          childLists(n).forEach(visit);
+        }
+      };
+      visit(body);
     }
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
@@ -1022,16 +1081,30 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     lines.push(`${sig} {`);
     if (frameDecl) lines.push(frameDecl);
     if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]}${varTypes.has(v.id) ? `: ${varTypes.get(v.id)}` : ''} = 0`).join(', ')}`);
+    const bodyAt = lines.length;
     lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
     lines.push('}');
+    if (opts.sugar !== false) facts.set(pc, functionFacts({
+      pc, name: f.name, body, lines, at: bodyAt, spans, sites: siteNotes, anchor: sem.anchor,
+      noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
+    }));
+    if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
+  }
+  // Anchor try-call checks: what the callee whose result they test checks (see calleeChecks)
+  if (sem.anchor) {
+    const memo = new Map<number, Set<string>>();
+    for (const ff of facts.values()) for (const c of ff.checks) if (c.before !== undefined && !c.kinds.length && c.named) {
+      const ks = calleeChecks(p, c.before, v => sem.anchorError(v), memo);
+      if (ks.size) c.via = { fn: fnName(c.before), kinds: [...ks] };
+    }
   }
   const instructions = [...sem.ixNames].filter(([pc]) => built.has(pc)).map(([pc, name]) => {
     const d = opts.idl?.instructions.find(i => i.name === name);
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf };
   res.text = renderSingle(res);
   return res;
 }
