@@ -132,9 +132,14 @@ function usedSyscalls(r: Result): string[] {
 	return out
 }
 
+/** How recovered names are marked (per-function "// names" / "// accounts" lines carry the tags). */
+export const PROVENANCE = `// recovered names carry their source: [idl] Anchor IDL · [str] the program's own strings (instruction logs, Anchor account-error
+//   names) · [known] well-known program ids and layouts · [heur] structural inference (verify); per-function "// names" lines list them.
+//   Other names are plain temporaries: a..e = parameters r1..r5, f, g, … = locals, s30 = stack object at fp - 0x30, fn_<addr> = unnamed function`
+
 function summary(r: Result): string[] {
 	const p = r.program
-	const lines = [`// program: sBPF v${p.version}, ${p.insns.length} instructions, ${p.funcs.size} functions (${r.funcs.length} decompiled, ${r.libCount} library)`]
+	const lines = [PROVENANCE, `// program: sBPF v${p.version}, ${p.insns.length} instructions, ${p.funcs.size} functions (${r.funcs.length} decompiled, ${r.libCount} library)`]
 	if (r.instructions.length) {
 		lines.push(r.anchor ? `// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data, as u64):` : `// instruction handlers (from their "Instruction: X" logs):`)
 		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) {

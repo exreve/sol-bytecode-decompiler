@@ -17,6 +17,7 @@ import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { findCpiSites, describeCpi, type CpiEnv } from './cpi.ts';
 import { Views } from './views.ts';
+import { findNameFn, anchorFn, type AnchorFn } from './anchor.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -166,6 +167,54 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
+  // Anchor: account names from the program's own account-error strings (see anchor.ts)
+  const anchorInfo = new Map<number, AnchorFn>();
+  const fnNotes = new Map<number, string[]>(); // extra header lines per function
+  // IDL: accounts and arguments of each handler
+  if (opts.sugar !== false && opts.idl) for (const [hpc, ix] of sem.ixNames) {
+    const d = opts.idl.instructions.find(i => i.name === ix);
+    if (!d || !built.has(hpc)) continue;
+    const l = fnNotes.get(hpc) ?? fnNotes.set(hpc, []).get(hpc)!;
+    l.push(`accounts [idl]: ${d.accounts.map((x, i) => `${i} ${x}`).join(', ') || '(none)'}`);
+    l.push(`args [idl]: ${d.args.join(', ') || '(none)'}`);
+  }
+  if (opts.sugar !== false && sem.anchor) {
+    const strAt = (ptr: bigint, len: bigint) => sem.strAt(ptr, len);
+    const nameFn = findNameFn([...built.values()].map(b => b.f), strAt);
+    if (nameFn !== undefined) {
+      for (const [pc, bt] of built) {
+        const a = anchorFn(bt.f, bt.body, nameFn, strAt, v => sem.anchorError(v), v => accountInfos?.get(pc)?.get(`v${v}`) === 'info');
+        if (a) anchorInfo.set(pc, a);
+      }
+      // each handler's Accounts::try_accounts: the first function it calls that names accounts
+      const taken = new Set([...p.funcs.values()].map(x => x.name));
+      for (const [hpc, ix] of sem.ixNames) {
+        const bt = built.get(hpc);
+        if (!bt) continue;
+        let tpc: number | undefined;
+        const hit = (t: number) => { if (tpc === undefined && t !== hpc && anchorInfo.has(t)) tpc = t; };
+        const inExpr = (e: Expr) => walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') hit(x.t.pc); });
+        const visit = (ns: Node[]) => {
+          for (const n of ns) {
+            if (n.k === 'stmt') { if (n.s.k === 'call' && n.s.t.k === 'fn') hit(n.s.t.pc); stmtExprs(n.s).forEach(inExpr); }
+            else if (n.k === 'if') { inExpr(n.c); visit(n.then); visit(n.else); }
+            else if (n.k === 'return' && n.e) inExpr(n.e);
+            else childLists(n).forEach(visit);
+          }
+        };
+        visit(bt.body);
+        if (tpc === undefined) continue;
+        const a = anchorInfo.get(tpc)!, fn = p.funcs.get(tpc)!;
+        if (/^fn_[0-9a-f]+$/.test(fn.name) && !taken.has(`accounts_${ix}`)) {
+          const old = fn.name;
+          fn.name = `accounts_${ix}`; taken.add(fn.name);
+          fnByAddr.set(fnAddr(p, tpc), fn.name);
+          (fnNotes.get(tpc) ?? fnNotes.set(tpc, []).get(tpc)!).push(`Anchor Accounts::try_accounts of instruction ${ix} (called by ix_${ix}; name [str]: from the handler's "Instruction: …" log; was ${old})`);
+        }
+        if (!opts.idl?.instructions.some(i => i.name === ix)) (fnNotes.get(hpc) ?? fnNotes.set(hpc, []).get(hpc)!).push(`accounts [str: the program's account-error strings, in order of first use]: ${a.accounts.join(', ')}`);
+      }
+    }
+  }
   const funcs: FuncOut[] = [];
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
@@ -196,6 +245,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       else if (v.reg === -1) names[v.id] = 'state';
     }
     for (const v of f.vars) if (names[v.id] === undefined && used.has(v.id)) names[v.id] = gen.next().value as string;
+    // recovered names (see anchor.ts), unique and distinct from every other identifier of the output
+    const an = anchorInfo.get(pc);
+    const recovered: string[] = [];
+    if (an) {
+      const taken = new Set([...names.filter(Boolean), ...globalIdents(p)]);
+      for (const [v, nm0] of [...an.varNames].sort((x, y) => x[0] - y[0])) {
+        if (!used.has(v) || f.vars[v]?.param === 10) continue;
+        let nm = nm0, k = 2;
+        while (taken.has(nm) || RESERVED_TS.has(nm)) nm = `${nm0}_${k++}`;
+        taken.add(nm);
+        names[v] = nm;
+        recovered.push(nm);
+      }
+    }
     const ctx: PrintCtx = {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
@@ -280,6 +343,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const varTypes = new Map<number, string>();
     if (opts.sugar !== false) {
       for (const [k, kind] of accTyped ?? []) if (/^v\d+$/.test(k)) varTypes.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
+      for (const v of an?.accountVars ?? []) if (!varTypes.has(v)) varTypes.set(v, 'AccountInfo');
       if (inputVar !== undefined) varTypes.set(inputVar, 'Input');
       ctx.views = views;
       ctx.varType = id => varTypes.get(id);
@@ -336,6 +400,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const sig = `function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ''}`;
     const hdr = opts.sugar === false ? undefined : sem.funcComment(f);
     if (hdr) lines.push(`// ${hdr}`);
+    for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
+    if (an) {
+      const checks = an.accounts.map(nm => { const c = an.checks.get(nm) ?? []; return c.length ? `${nm} (${c.join(', ')})` : nm; });
+      lines.push(`// account checks: account (errors raised when a check on it fails) [str: account-error names, Anchor error codes]: ${checks.join(', ')}`);
+      if (recovered.length) {
+        const idlAcc = new Set(opts.idl?.instructions.flatMap(i => i.accounts.map(x => x.split(' ')[0].split('.').pop()!)) ?? []);
+        const tag = (nm: string) => (idlAcc.has(nm.replace(/_\d+$/, '')) ? `${nm} [idl]` : nm);
+        lines.push(`// names [str: account-error string on the failing branch; which variable holds the account is inferred${idlAcc.size ? '; [idl]: also an account name in the IDL' : ''}]: ${recovered.map(tag).join(', ')}`);
+      }
+    }
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
     if (frameDecl) lines.push(frameDecl);
@@ -456,6 +530,28 @@ function declarations(f: VarFunc, body: Node[]): { decls: Map<Stmt, 'let' | 'con
     } else hoisted.push(v);
   }
   return { decls, hoisted: hoisted.sort((a, b) => a - b) };
+}
+
+function childLists(n: Node): Node[][] {
+  return n.k === 'if' ? [n.then, n.else] : n.k === 'block' || n.k === 'loop' ? [n.body] : n.k === 'switch' ? n.cases.map(c => c.body) : [];
+}
+
+const RESERVED_TS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
+  'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
+  'typeof', 'var', 'void', 'while', 'with', 'as', 'implements', 'interface', 'let', 'package', 'private', 'protected', 'public', 'static', 'yield',
+  'any', 'boolean', 'constructor', 'declare', 'get', 'module', 'require', 'number', 'set', 'string', 'symbol', 'type', 'from', 'of', 'async', 'await',
+  'input', 'fp', 'undef', 'state']);
+
+/** Identifiers the output uses at the top level (functions, helpers, syscalls, types). */
+let globalCache: { p: Program; ids: Set<string> } | undefined;
+function globalIdents(p: Program): Set<string> {
+  if (globalCache?.p === p) return globalCache.ids;
+  const ids = new Set<string>([...HELPERS, 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'at', 'ref', 'sized', 'Pubkey', 'bytes', 'AccountInfo', 'AccountRecord', 'Input']);
+  for (const f of p.funcs.values()) ids.add(f.name);
+  for (const sc of p.syscalls.values()) ids.add(sc.alias);
+  for (const n of ['ld8', 'ld16', 'ld32', 'ld64', 'st8', 'st16', 'st32', 'st64', 'bswap16', 'bswap32', 'bswap64']) ids.add(n);
+  globalCache = { p, ids };
+  return ids;
 }
 
 function usesVar(e: Expr, v: number) { let u = false; walkExpr(e, x => { if (x.k === 'var' && x.id === v) u = true; }); return u; }

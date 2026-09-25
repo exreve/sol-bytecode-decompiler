@@ -323,6 +323,14 @@ export class Semantics {
 		return undefined
 	}
 
+	/** Anchor framework error (anchor_lang ErrorCode) or custom program error named by the IDL, for an error code constant */
+	anchorError(v: bigint): string | undefined {
+		if (!this.anchor) return undefined
+		if (v >= 100n && v <= 5000n && ANCHOR_ERRORS[Number(v)]) return ANCHOR_ERRORS[Number(v)]
+		if (this.idl && v >= 6000n && v < 0x10000n) return this.idl.errors.get(Number(v))
+		return undefined
+	}
+
 	/** base58 of 32 non-text bytes in rodata at ptr (a public key compared or copied by address) */
 	keyAt(ptr: bigint): string | undefined {
 		const r = this.p.image.region(ptr, 32)

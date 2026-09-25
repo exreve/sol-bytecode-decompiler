@@ -91,6 +91,45 @@ bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stu
 
 Anchor handlers are found from their `"Instruction: <Name>"` log and named `ix_<snake_name>`.
 
+### Recovered names and their provenance
+
+Every recovered name says where it comes from, so a reader knows what to double-check:
+
+| tag | source |
+|---|---|
+| `[idl]` | the Anchor IDL (`--idl` / `--program-id`) |
+| `[str]` | the program's own strings: `"Instruction: X"` logs, Anchor account-error names |
+| `[known]` | well-known program ids, sysvars, SPL layouts |
+| `[heur]` | structural inference: verify before relying on it |
+
+Names without a tag are plain temporaries (`a..e` parameters, `f, g, …` locals, `s30` stack objects,
+`fn_<addr>` unnamed functions). Per function, `// names …` / `// accounts …` lines list what was recovered.
+
+**Anchor accounts.** Generated `Accounts::try_accounts` code maps each field's failure to
+`Error::with_account_name("<field>")`, so the program's strings name its accounts (the function is found
+as the callee most often given an identifier string as its last argument pair). From it:
+
+```ts
+// ===== instruction set_fee_authority =====
+// instruction handler: set_fee_authority (discriminator …)
+// accounts [idl]: 0 whirlpools_config [mut], 1 fee_authority [signer], 2 new_fee_authority    (with an IDL; else, from the strings:)
+// accounts [str: the program's account-error strings, in order of first use]: whirlpools_config, new_fee_authority, fee_authority
+function ix_set_fee_authority(…)
+
+// Anchor Accounts::try_accounts of instruction set_fee_authority (called by ix_set_fee_authority; …; was fn_c7d08)
+// account checks: account (errors raised when a check on it fails) […]: whirlpools_config (ConstraintMut), new_fee_authority (AccountNotEnoughKeys), fee_authority (ConstraintAddress)
+// names [str: account-error string on the failing branch; which variable holds the account is inferred]: whirlpools_config, fee_authority
+function accounts_set_fee_authority(…) {
+	const whirlpools_config: AccountInfo = ld64(s108)
+	…
+	if (whirlpools_config.is_writable == 0) { … 0x7d0 /* anchor::ConstraintMut */ … "whirlpools_config" … }
+	const o = fee_authority.key
+```
+
+A variable gets an account's name when a branch testing it fails with that account's name unconditionally
+(or it is the AccountInfo pointer loaded from the same try-result as such a variable), and it is used like
+an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte key).
+
 ### Annotations (comments only)
 
 * account fields through recognized account pointers that are not a variable (e.g. a loaded pointer)
@@ -195,6 +234,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/ifconv.ts`, `src/idioms.ts` | if-conversion to selects; bit-trick and multi-word compare idioms (popcount/clz/ctz, memeq/keyeq) |
 | `src/accounts.ts` | AccountInfo / raw account pointer recognition (view types, field-name comments) |
 | `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
+| `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |
