@@ -16,13 +16,14 @@
 import type { Program } from './program.ts'
 import type { VarFunc } from './dataflow.ts'
 import type { Node } from './structure.ts'
-import { type Expr, type Stmt } from './ir.ts'
+import { type Expr, type Stmt, walkExpr } from './ir.ts'
 import { borshSample, type IdlInfo, type SampleLeaf } from './idl.ts'
 import { Exec, ExecMem, extentOf } from './exec.ts'
 import { callTargetName } from './emu.ts'
 import { unb58 } from './semantics.ts'
 import type { Views, Field } from './views.ts'
 import { nameArg, outAliases } from './anchor.ts'
+import { stmtExprs } from './simplify.ts'
 
 /** A variable holding a (boxed) deserialized account: its account name, the view of the object, the Rust account type. */
 export interface AccountObj { name: string; view: string; rust: string }
@@ -253,6 +254,67 @@ function buildViews(views: Views, top: string, doc: string, at: Map<string, Samp
 	return name
 }
 
+/**
+ * An identifier (3–64 bytes of [a-z0-9_], starting with a letter) that a node list (recursively) writes
+ * with constant stores to consecutive bytes from offset 0 of one base variable, each byte always with the
+ * same value (the first such base in statement order).
+ */
+function inlineString(ns: Node[]): string | undefined {
+	const bytes = new Map<number, Map<number, number | null>>()
+	const order: number[] = []
+	const put = (addr: Expr, size: number, v: Expr) => {
+		const b = addr.k === 'var' ? addr.id : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.b.k === 'const' ? addr.a.id : undefined
+		const o = addr.k === 'var' ? 0 : addr.k === 'bin' && addr.b.k === 'const' ? Number(BigInt.asIntN(64, addr.b.v)) : -1
+		if (b === undefined || o < 0 || o > 64) return
+		let m = bytes.get(b)
+		if (!m) { bytes.set(b, (m = new Map())); order.push(b) }
+		for (let i = 0; i < size; i++) {
+			const x = v.k === 'const' ? Number((v.v >> BigInt(8 * i)) & 0xffn) : null
+			m.set(o + i, m.has(o + i) && m.get(o + i) !== x ? null : x)
+		}
+	}
+	const scan = (xs: Node[]) => {
+		for (const n of xs) {
+			if (n.k === 'stmt') {
+				const s = n.s
+				if (s.k === 'store') put(s.addr, s.size, s.v)
+				else if (s.k === 'stores') {
+					const [a, c] = s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.b.k === 'const' ? [s.addr.a, s.addr.b.v] : [s.addr, 0n]
+					s.vals.forEach((v, i) => put({ k: 'bin', op: 'add', a, b: { k: 'const', v: c + BigInt(i * s.size) } }, s.size, v))
+				}
+			} else if (n.k === 'if') { scan(n.then); scan(n.else) }
+			else if (n.k === 'block' || n.k === 'loop') scan(n.body)
+		}
+	}
+	scan(ns)
+	for (const b of order) {
+		const m = bytes.get(b)!
+		let s = ''
+		for (let i = 0; m.has(i); i++) { const c = m.get(i); if (c === null || c === undefined) { s = ''; break } s += String.fromCharCode(c) }
+		if (s.length >= 3 && s.length === m.size && /^[a-z][a-z0-9_]*$/.test(s)) return s
+	}
+	return undefined
+}
+
+/** does any expression of the node list (recursively) read variable v? */
+function mentionsVar(ns: Node[], v: number): boolean {
+	let hit = false
+	const e = (x: Expr) => walkExpr(x, y => { if (y.k === 'var' && y.id === v) hit = true })
+	const scan = (xs: Node[]) => {
+		for (const n of xs) {
+			if (hit) return
+			if (n.k === 'stmt') stmtExprs(n.s).forEach(e)
+			else if (n.k === 'if') { e(n.c); scan(n.then); scan(n.else) }
+			else if (n.k === 'block') scan(n.body)
+			else if (n.k === 'loop') { if (n.c) e(n.c); scan(n.body) }
+			else if (n.k === 'return' && n.e) e(n.e)
+			else if (n.k === 'switch') { hit = true; return }
+		}
+	}
+	scan(ns)
+	return hit
+}
+
 function u128(views: Views): string {
 	if (!views.opaque.has('u128')) views.opaque.set('u128', { size: 16, doc: '128-bit integer in place (value = its address)' })
 	return 'u128'
@@ -467,10 +529,22 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			org.clear(); o.forEach((x, k) => org.set(k, x))
 			varOrg.clear(); v.forEach((x, k) => varOrg.set(k, x))
 		}
+		// an account-name error built in place (with_account_name inlined): the leaving branch of a test of
+		// an object's word writes the name's bytes as constants into a fresh String buffer, and does not
+		// go on taking accounts (a later account's error inside the Ok side is not this object's)
+		const nameInline = (c: Expr, side: Node[]) => {
+			let obj: number | undefined
+			walkExpr(c, x => { if (x.k === 'var' && obj === undefined) obj = varOrg.get(x.id)?.obj })
+			if (obj === undefined || objs[obj].name || accountsP === undefined || mentionsVar(side, accountsP)) return
+			const nm = inlineString(side)
+			if (nm) objs[obj].name = nm
+		}
 		const walk = (ns: Node[]) => {
 			for (const n of ns) {
 				if (n.k === 'stmt') onStmt(n.s)
 				else if (n.k === 'if') {
+					if (exits(n.then)) nameInline(n.c, n.then)
+					else if (exits(n.else)) nameInline(n.c, n.else)
 					if (exits(n.then)) { isolated(n.then); walk(n.else) }
 					else if (exits(n.else)) { isolated(n.else); walk(n.then) }
 					else { walk(n.then); walk(n.else) }
