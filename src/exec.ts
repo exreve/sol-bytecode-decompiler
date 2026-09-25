@@ -309,7 +309,7 @@ export class Exec {
 
 /** Function extents: entry pc -> first pc after it (the next function's entry). */
 const extents = new WeakMap<Program, Map<number, number>>()
-function extentOf(p: Program, fpc: number): number {
+export function extentOf(p: Program, fpc: number): number {
 	let m = extents.get(p)
 	if (!m) {
 		m = new Map()

@@ -33,7 +33,7 @@ function callsIn(s: Stmt): Call[] {
 }
 
 /** The name carried by a call's last (pointer, length) argument pair, if it is an identifier string. */
-function nameArg(args: Expr[], strAt: (p: bigint, n: bigint) => string | undefined): string | undefined {
+export function nameArg(args: Expr[], strAt: (p: bigint, n: bigint) => string | undefined): string | undefined {
 	const p = args[args.length - 2], n = args[args.length - 1]
 	if (p?.k !== 'const' || n?.k !== 'const' || n.v > 64n) return undefined
 	const s = strAt(p.v, n.v)

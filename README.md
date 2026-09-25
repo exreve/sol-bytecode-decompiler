@@ -212,8 +212,43 @@ function fn_32bc0(a: u64, b: InitializeRewardContext, c: u64): u64 {
 	const f: InitializeRewardAccounts = b.accounts
 ```
 
-Coverage is partial: boxed accounts (`Box<Account<T>>`) are stored as the box pointer, and logic inlined into
-the handler has no Context parameter.
+Logic inlined into the handler has no Context parameter.
+
+**Deserialized accounts** (`Box<Account<T>>`): try_accounts gets each account from a callee (`<Account<T> as
+Accounts>::try_accounts`) into a frame object and copies it to the heap; the box pointer is the Accounts struct
+field. The account type is the IDL account whose discriminator the callee's code (or a callee's, within 3 calls)
+holds, or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
+an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`src/exec.ts`)
+on an account whose data is a sample of that type (Borsh from the IDL, or the SPL layout) with pseudo-random
+values and whose owner is the program id (IDL `address`) or the Token program: each value is found at its offset
+(values of 4+ bytes by their bytes, smaller ones by changing them in another run). That gives a view named after
+the type, `info` being the `&AccountInfo`, arrays of structs as element views (`x.reward_infos[1].vault`), the
+IDL type in a comment where the view type does not say it (`// i32`); the box variable (`<account>_box`) and the
+Accounts field get it (`src/anchorstate.ts`):
+
+```ts
+interface Whirlpool { // Account<Whirlpool> as deserialized in memory (… [idl names; offsets from exec] …)
+	info:                 at<0x00, ref<AccountInfo>> // &AccountInfo
+	reward_infos:         at<0x08, WhirlpoolRewardInfosElem> // [3]
+	token_mint_a:         at<0x1a8, Pubkey>
+	liquidity:            at<0x228, u128>
+	sqrt_price:           at<0x238, u128>
+	tick_current_index:   at<0x280, u32> // i32
+	…
+interface SwapAccounts {
+	whirlpool:             at<0x10, ref<Whirlpool>> // Box<Account<Whirlpool>>
+	token_owner_account_a: at<0x18, ref<TokenAccount_2>> // Box<Account<TokenAccount>>
+…
+	if ((memcmp(af + 8, whirlpool_box.token_mint_a, 0x20) as u32) == 0) {   // has_one / address constraint
+…
+	const bk: Whirlpool = m.whirlpool
+	cn = ld64(bk.sqrt_price + 8)
+```
+
+**Parameter types** (`[heur]`): a parameter (never reassigned) gets a view type when at least half of the direct
+calls pass an object of that view type and none one of another — or, with fewer, when every load and store through
+it hits a field of the view exactly and at least 3 fields: `// types [heur]: b: Whirlpool (1 of 3 calls pass one, …)`,
+then `b.tick_current_index = h`, `st64(b.liquidity, i, j)`.
 
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
@@ -393,6 +428,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/views.ts` | typed views: declarations (`at<>`), field resolution for the printer |
 | `src/anchor.ts` | Anchor account names, checks and account variables from account-error strings |
 | `src/state.ts` | IDL account data layouts: views, pointers found by discriminator checks |
+| `src/anchorstate.ts` | in-memory layouts of deserialized accounts (`Box<Account<T>>`), from runs of the deserializer |
 | `src/slices.ts` | security slices (unverified views): sinks, guards, definitions, reaching handlers |
 | `src/taint.ts` | instruction-data taint (hints on CPI fields, PDA seeds, parameters) |
 | `src/stack.ts`, `src/stackargs.ts` | stack slot promotion (escape analysis), stack-passed arguments |
