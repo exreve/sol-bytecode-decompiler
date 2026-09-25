@@ -54,7 +54,7 @@ export class Lifter {
   p: Program;
   v: number;
   pcByHash = new Map<number, number>();
-  constructor(p: Program) { this.p = p; this.v = p.version; }
+  constructor(p: Program) { this.p = p; this.v = p.version; this.memo = new Array(p.insns.length); }
 
   callTarget(pc: number, imm: number): CallTarget | null {
     const { elf, insns, version } = this.p;
@@ -90,10 +90,10 @@ export class Lifter {
    * inferSignatures gives every function its own copies of those (unshareCalls) before that.
    * Lifting is a pure function of the pc apart from registering syscalls, which the first lift does.
    */
-  private memo = new Map<number, Lifted>();
+  memo: (Lifted | undefined)[];
   liftShared(pc: number): Lifted {
-    let l = this.memo.get(pc);
-    if (!l) { l = this.lift(pc); this.memo.set(pc, l); }
+    let l = this.memo[pc];
+    if (!l) { l = this.lift(pc); this.memo[pc] = l; }
     return l;
   }
 
@@ -328,23 +328,24 @@ function discover(p: Program) {
       fnPtr((BigInt(p.insns[i + 1].imm >>> 0) << 32n) | BigInt(ins.imm >>> 0));
     }
   }
-  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, buildFunc(p, lifter, pc, starts));
+  const seen = new Int32Array(p.insns.length);
+  let stamp = 0;
+  for (const pc of [...entries].sort((a, b) => a - b)) p.funcs.set(pc, buildFunc(p, lifter, pc, starts, seen, ++stamp));
 }
 
-function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array): Func {
+function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array, seen: Int32Array, stamp: number): Func {
   // 1) find leaders via reachability
+  // seen[pc] === stamp: visited by this function (out-of-text pcs stop the walk right away)
   const leaders = new Set<number>([entry]);
-  const seen = new Set<number>();
   const work = [entry];
-  const lifted = new Map<number, Lifted>();
+  const n = p.insns.length;
   while (work.length) {
     let pc = work.pop()!;
     while (true) {
-      if (seen.has(pc)) break;
-      seen.add(pc);
-      if (pc < 0 || pc >= p.insns.length || !starts[pc]) break;
+      if (pc < 0 || pc >= n || seen[pc] === stamp) break;
+      seen[pc] = stamp;
+      if (!starts[pc]) break;
       const l = lifter.liftShared(pc);
-      lifted.set(pc, l);
       if ('next' in l) { pc = l.next; continue; }
       const t = l.term;
       const tg = t.k === 'jmp' ? [t.to] : t.k === 'br' ? [t.t, t.f] : [];
@@ -360,7 +361,8 @@ function buildFunc(p: Program, lifter: Lifter, entry: number, starts: Uint8Array
   for (const b of blocks) {
     let pc = b.start;
     while (true) {
-      const l = pc >= 0 && pc < p.insns.length && starts[pc] ? lifted.get(pc) : undefined;
+      // every pc reached here was visited (and so lifted) by the walk above
+      const l = pc >= 0 && pc < n && starts[pc] ? lifter.memo[pc] : undefined;
       if (!l) { b.term = { k: 'trap', msg: pc >= p.insns.length || pc < 0 ? 'jump outside text' : 'jump into middle of lddw' }; break; }
       b.stmts.push(...l.stmts);
       if ('term' in l) { b.term = { ...l.term }; b.end = pc; break; } // terminators are patched per function (block ids): never shared

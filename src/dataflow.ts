@@ -67,11 +67,12 @@ function stmtUseDef(p: Program, s: Stmt): { use: number; def: number } {
   if (s.k === 'call') return stmtUseDef0(p, s);
   // only call statements depend on (changing) callee signatures; statements are not mutated in
   // place (except calls, in recoverVars), so the others' masks are cached per statement object
-  let r = udCache.get(s);
-  if (!r) { r = stmtUseDef0(p, s); udCache.set(s, r); }
+  // (non-enumerable symbol property: not copied by spreads, invisible to JSON / for-in)
+  let r: { use: number; def: number } | undefined = (s as any)[UD];
+  if (!r) { r = stmtUseDef0(p, s); Object.defineProperty(s, UD, { value: r }); }
   return r;
 }
-const udCache = new WeakMap<Stmt, { use: number; def: number }>();
+const UD = Symbol('useDef');
 
 function stmtUseDef0(p: Program, s: Stmt): { use: number; def: number } {
   switch (s.k) {

@@ -272,13 +272,15 @@ export function stmtExprs(s: Stmt): Expr[] {
 
 /**
  * Per-statement summary of stmtExprs(s): every variable occurrence (with multiplicity) and the
- * union of hasSideEffectsOrMem over the expressions. Cached by statement object, which is sound
+ * union of hasSideEffectsOrMem over the expressions. Cached per statement object, which is sound
  * because statements are never mutated in place after variable recovery (rewrites create new ones).
+ * The cache lives in a non-enumerable symbol property: invisible to spreads (`{ ...s }` copies do not
+ * inherit it), JSON and for-in, and much cheaper than a WeakMap with millions of entries.
  */
 interface StmtInfo { vars: number[]; load: boolean; call: boolean; trap: boolean }
-const infoCache = new WeakMap<Stmt, StmtInfo>();
+const INFO = Symbol('stmtInfo');
 export function stmtInfo(s: Stmt): StmtInfo {
-  let r = infoCache.get(s);
+  let r: StmtInfo | undefined = (s as any)[INFO];
   if (r) return r;
   const vars: number[] = [];
   let load = false, call = false, trap = false;
@@ -288,7 +290,7 @@ export function stmtInfo(s: Stmt): StmtInfo {
     load ||= fx.load; call ||= fx.call; trap ||= fx.trap;
   }
   r = { vars, load, call, trap };
-  infoCache.set(s, r);
+  Object.defineProperty(s, INFO, { value: r });
   return r;
 }
 const countIn = (vars: number[], v: number) => { let n = 0; for (let k = 0; k < vars.length; k++) if (vars[k] === v) n++; return n; };
