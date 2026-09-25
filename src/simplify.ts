@@ -277,7 +277,7 @@ export function stmtExprs(s: Stmt): Expr[] {
  */
 interface StmtInfo { vars: number[]; load: boolean; call: boolean; trap: boolean }
 const infoCache = new WeakMap<Stmt, StmtInfo>();
-function stmtInfo(s: Stmt): StmtInfo {
+export function stmtInfo(s: Stmt): StmtInfo {
   let r = infoCache.get(s);
   if (r) return r;
   const vars: number[] = [];
@@ -533,32 +533,39 @@ function inlineCall(f: VarFunc, b: { stmts: Stmt[]; term: any }, i: number, uses
 /** Remove definitions of unused variables (keeping anything that may trap or has effects). */
 function dce(f: VarFunc): boolean {
   let changed = false;
+  // use counts are computed once and then kept equal to a recount: each pass reads the counts at
+  // its start (`uses`) and records the effect of every removed/rewritten statement in `next`
+  let uses = countUses(f);
+  const drop = (next: Int32Array, s: Stmt) => { for (const v of stmtInfo(s).vars) next[v]--; };
+  const add = (next: Int32Array, s: Stmt) => { for (const v of stmtInfo(s).vars) next[v]++; };
   for (let iter = 0; iter < 10; iter++) {
-    const uses = countUses(f);
+    const next = uses.slice();
     let any = false;
     for (const b of f.blocks) {
       const out: Stmt[] = [];
       for (const s of b.stmts) {
-        if (s.k === 'set' && s.e.k === 'var' && s.e.id === s.dst) { any = true; continue; } // x = x
+        if (s.k === 'set' && s.e.k === 'var' && s.e.id === s.dst) { any = true; drop(next, s); continue; } // x = x
         if (s.k === 'set' && uses[s.dst] === 0) {
-          const fx = hasSideEffectsOrMem(s.e);
-          if (fx.load || fx.trap || fx.call) out.push({ k: 'eval', e: s.e, pc: s.pc });
+          const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
+          if (fx.load || fx.trap || fx.call) out.push({ k: 'eval', e: s.e, pc: s.pc }); // same expression: same uses
+          else drop(next, s);
           any = true;
           continue;
         }
         if (s.k === 'call' && s.dst >= 0 && uses[s.dst] === 0) { out.push({ ...s, dst: -1 }); any = true; continue; }
         if (s.k === 'eval') {
-          const fx = hasSideEffectsOrMem(s.e);
-          if (!fx.load && !fx.trap && !fx.call) { any = true; continue; }
+          const fx = stmtInfo(s);
+          if (!fx.load && !fx.trap && !fx.call) { any = true; drop(next, s); continue; }
           // keep only the trapping sub-parts: strip pure wrappers
           const inner = trappingCore(s.e);
-          if (inner !== s.e) { out.push({ ...s, e: inner }); any = true; continue; }
+          if (inner !== s.e) { const ns: Stmt = { ...s, e: inner }; out.push(ns); drop(next, s); add(next, ns); any = true; continue; }
         }
         out.push(s);
       }
       b.stmts = out;
     }
     if (!any) break;
+    uses = next;
     changed = true;
   }
   return changed;

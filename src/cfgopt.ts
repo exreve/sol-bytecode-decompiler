@@ -6,7 +6,7 @@ import type { VarFunc } from './dataflow.ts';
 import { pruneUnreachable } from './dataflow.ts';
 import type { Block } from './program.ts';
 import { type Expr, type Stmt, type Term, walkExpr, hasSideEffectsOrMem } from './ir.ts';
-import { stmtExprs } from './simplify.ts';
+import { stmtInfo } from './simplify.ts';
 
 const cloneTerm = (t: Term): Term => ({ ...t } as Term);
 
@@ -134,6 +134,8 @@ export function deadStores(f: VarFunc): boolean {
   const liveIn = Array.from({ length: nb }, () => new Uint32Array(W));
   const uses = (e: Expr, set: Uint32Array) => walkExpr(e, x => { if (x.k === 'var') set[x.id >>> 5] |= 1 << (x.id & 31); });
   const has = (set: Uint32Array, v: number) => (set[v >>> 5] >>> (v & 31)) & 1;
+  // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
+  const usesS = (s: Stmt, set: Uint32Array) => { for (const v of stmtInfo(s).vars) set[v >>> 5] |= 1 << (v & 31); };
   const transfer = (b: Block, out: Uint32Array, apply: boolean): { live: Uint32Array; changed: boolean } => {
     const live = out.slice();
     const t = b.term;
@@ -144,21 +146,21 @@ export function deadStores(f: VarFunc): boolean {
       const s = b.stmts[i];
       if (s.k === 'set') {
         if (apply && !has(live, s.dst)) {
-          const fx = hasSideEffectsOrMem(s.e);
-          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; uses(s.e, live); }
+          const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
+          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live); }
           else b.stmts.splice(i, 1);
           changed = true;
           continue;
         }
         live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        uses(s.e, live);
+        usesS(s, live);
       } else if (s.k === 'call') {
         if (s.dst >= 0) {
           if (apply && !has(live, s.dst)) { b.stmts[i] = { ...s, dst: -1 }; changed = true; }
           else live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
         }
-        stmtExprs(s).forEach(e => uses(e, live));
-      } else stmtExprs(s).forEach(e => uses(e, live));
+        usesS(s, live);
+      } else usesS(s, live);
     }
     return { live, changed };
   };
@@ -180,8 +182,7 @@ export function deadStores(f: VarFunc): boolean {
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
       if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { g[s.dst >>> 5] &= ~(1 << (s.dst & 31)); kl[s.dst >>> 5] |= 1 << (s.dst & 31); }
-      if (s.k === 'set') uses(s.e, g);
-      else stmtExprs(s).forEach(e => uses(e, g));
+      usesS(s, g);
     }
     gen[id] = g; kill[id] = kl;
   }
