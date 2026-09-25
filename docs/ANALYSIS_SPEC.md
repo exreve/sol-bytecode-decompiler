@@ -93,3 +93,27 @@ Phase 3 additions (pattern rules over the facts, each with evidence + confidence
 - account close without zeroing data/discriminator; close followed by realloc (revival);
 - unchecked (wrapping) subtraction on value paths with no dominating bound check;
 - recipient/destination with no owner or mint binding.
+
+Status (implemented, src/analysis/phase3.ts; rules in phase2.ts): read off the printed code, whose indentation
+gives the statement tree, with per-operation budgets (40 conditions, 6000 lines scanned, 40 arithmetic sites,
+20 divisions per instruction).
+- path conditions: enclosing branches (polarity from then / else / else-if chains) and earlier sibling ifs whose
+  body exits, in the operation's function and at the call sites up to the handler; plus the relevant checks
+  (signer / owner / key / has_one / pda / custom / state) that do not dominate it, with a path when phase 2 found one;
+- authorization chains: from the authority rows (phase 2) through the stored field to the instructions writing it
+  and their signers;
+- arithmetic: `+` / `-` on value paths (value-named fields, lamports, 8-byte native fields, CPI amounts), locals
+  resolved two levels; `checked` when a comparison of all non-constant operands is on the way (Rust overflow
+  traps, checked_* error returns, bound checks), `saturating` for sat_add / sat_sub, else `unchecked`; divisions
+  (`/`, __udivti3, sdiv) by supply / balance-like values with or without a comparison of the divisor on the way;
+- proof trees for token transfers, mints / burns, lamport moves, closes, authority writes, data writes and CPIs to
+  account-supplied programs;
+- state machine: fields set to small constants (status-named, or native single bytes that are checked) and fields
+  compared with small constants in checks / branch conditions;
+- rules `state-write-ungated`, `share-price-zero-supply`, `mint-burn-authority-from-data`, `cpi-forwarder`,
+  `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound`.
+Known gaps: sees only what phase 1 recognizes (Anchor account structs written back through serialization copies,
+direct lamport moves through raw pointers and many MintTo / Burn CPIs through wrappers are often missed, so the
+state machine and the close / mint rules fire rarely); guards are matched by operand text (a check made on a copy
+under another name is missed, an unrelated comparison mentioning the operands counts); labeled-block exits
+(`break Bn`) are not followed by the path conditions.

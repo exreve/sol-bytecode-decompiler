@@ -502,7 +502,7 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 	}
 	if (a.states?.length) {
 		out.push('', '## State machine (status-like fields: set by → checked by; details in analysis.json state_machine)', '')
-		for (const x of a.states.slice(0, 8)) out.push(`- ${x.field}: set by ${x.setBy.map(w => `${w.ix} (= ${w.value})`).join(', ')}; checked by ${[...new Set(x.checkedBy.map(c => c.ix))].join(', ') || 'none found'}`)
+		for (const x of a.states.slice(0, 8)) out.push(`- ${x.field}: set by ${x.setBy.map(w => `${w.ix} (= ${w.value})`).join(', ') || 'none found'}; checked by ${[...new Set(x.checkedBy.map(c => c.ix))].join(', ') || 'none found'}`)
 		if (a.states.length > 8) out.push(`- … ${a.states.length - 8} more in analysis.json`)
 	}
 	if (a.deps.length) {

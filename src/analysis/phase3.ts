@@ -17,7 +17,7 @@ import type { Result } from '../decompile.ts'
 import type { FnFacts, OpKind } from './facts.ts'
 import type { Analysis, IxOut, OpOut, Loc, Status } from './report.ts'
 
-export interface PathCond { at: Loc; cond: string; holds: boolean; how: 'branch' | 'exit-check' | 'loop'; check?: number }
+export interface PathCond { at: Loc; cond: string; holds: boolean; how: 'branch' | 'exit-check' | 'loop' | 'before'; check?: number } // before: an earlier sibling if (either side may be taken)
 export interface PathInfo { op: number; conds: PathCond[]; notRequired: { check: number; path?: Loc[] }[]; truncated?: boolean }
 export interface ChainStep { kind: 'op' | 'signer' | 'pda' | 'stored' | 'writer' | 'none'; what: string; status?: string }
 export interface Chain { op: number; steps: ChainStep[][] } // alternatives, each a chain from the operation back to a signer
@@ -31,7 +31,7 @@ const VALUE_OPS: OpKind[] = ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'BURN
 export const isValueOp = (o: OpOut) => o.kinds.some(k => VALUE_OPS.includes(k)) || (o.kinds.includes('LAMPORT_WRITE') && o.how === '-=')
 const VALUE_FIELD = /amount|balance|lamports|supply|total|claimed|deposit|reserve|share|liquidity|fee|debt|collateral|stake|reward|fund|minted|burn|withdraw|borrow|owed|volume|principal|interest|vault|pot|prize|payout|bet|tokens?\b/i
 const SUPPLY = /supply|shares|total|balance|reserve|liquidity|deposit|lamports|staked|tvl|pool_token|\.amount\b|_amount\b|virtual/i
-const STATUS_FIELD = /status|state|phase|stage|initiali[sz]ed|is_[a-z_]+|active|paused|frozen|closed|locked|enabled|started|ended|finished|settled|resolved|claimed|round|mode|kind/i
+const STATUS_FIELD = /(^|_)(status|state|phase|stage|initiali[sz]ed|active|paused|frozen|closed|locked|enabled|started|ended|finished|settled|resolved|mode)$|(^|\.)is_[a-z_]+$/i
 const CMP = /[<>]|[!=]=/
 const EXIT = /^\s*(return\b|abort\(|trap\(|panic|throw\b)|anchor::\w|error::\w|\bErr\(|ProgramError::|sol_panic|anchor_error_from\(|panic_fmt/
 const ind = (s: string) => { let i = 0; while (s.charCodeAt(i) === 9) i++; return i }
@@ -90,6 +90,7 @@ function condsIn(ff: FnFacts, line: number, budget: { lines: number }): PathCond
 			let j = i + 1, last = ''
 			for (; j < L.length && j < i + 400 && (ind(L[j]) > k || !L[j].trim()); j++) if (L[j].trim()) last = L[j]
 			if (L[j]?.trim() === '}' && last && EXIT.test(last)) out.push({ at, cond: ic.cond, holds: false, how: 'exit-check' })
+			else out.push({ at, cond: ic.cond, holds: false, how: 'before' })
 		}
 	}
 	return out
@@ -160,15 +161,20 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		const ff = T.get(fn)?.ff
 		if (!ff || arith.length >= 40) return
 		let e = expr.trim(), l = line
-		for (let k = 0; k < 2 && /^[A-Za-z_]\w*$/.test(e); k++) { const d = defOf(ff, e, l); if (!d) return; e = d.expr.trim(); l = d.line }
+		const results: string[] = [] // (the locals holding the result: an overflow check may compare the sum with an operand)
+		for (let k = 0; k < 2 && /^[A-Za-z_]\w*$/.test(e); k++) { const d = defOf(ff, e, l); if (!d) return; results.push(e); e = d.expr.trim(); l = d.line }
 		if (/\bsat_(sub|add)\(/.test(e)) { arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind: /sat_sub/.test(e) ? 'sub' : 'add', status: 'saturating', unnamed }); return }
 		const ts = terms(e)
 		if (!ts) return
 		const kind = ts.some(([s]) => s === '-') ? 'sub' : 'add'
 		const vars = ts.map(([, t]) => t).filter(t => !isConst(t))
 		if (!vars.length) return
-		const { conds } = pathConds(r, ix, fn, l, 60)
-		const g = conds.find(c => CMP.test(c.cond) && vars.every(v => mentions(c.cond, v)))
+		const { conds } = pathConds(r, ix, fn, line, 80)
+		// (an operand copied from another local: `const am = z` — the check may name either)
+		const alias = (v: string): string[] => { const out = [v]; for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) } return out }
+		const al = vars.map(alias)
+		const hit = (c: string, vs: string[]) => vs.some(v => mentions(c, v))
+		const g = conds.find(c => CMP.test(c.cond) && (al.every(vs => hit(c.cond, vs)) || (hit(c.cond, results) && al.some(vs => hit(c.cond, vs)))))
 		arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind, status: g ? 'checked' : 'unchecked', guard: g && { at: g.at, cond: g.cond.slice(0, 120) }, caller: callerCtl(e) || undefined, unnamed: unnamed || undefined })
 	}
 	ix.ops.forEach((o, oi) => {
@@ -211,7 +217,7 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 	const paths: PathInfo[] = []
 	ix.ops.forEach((o, oi) => {
 		if (paths.length >= 30 || !o.kinds.some(k => k !== 'PDA_DERIVE') || (o.kinds.length === 1 && o.kinds[0] === 'CPI' && o.cpi?.known)) return
-		const { conds, truncated } = pathConds(r, ix, o.at.fn, o.at.line)
+		const pc = pathConds(r, ix, o.at.fn, o.at.line, 60), conds = pc.conds.filter(c => c.how !== 'before').slice(0, 40), truncated = pc.truncated
 		const acct = new Set([o.target?.split('.')[0], ...(o.cpi?.accounts ?? []).map(x => /^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1])].filter(Boolean) as string[])
 		const req = new Set(conds.map(c => c.check).filter(x => x !== undefined))
 		const notRequired: PathInfo['notRequired'] = []
