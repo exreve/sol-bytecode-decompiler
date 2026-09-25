@@ -67,12 +67,17 @@ export function computeIndClobber(p: Program, f: Func) {
 function stmtUseDef(p: Program, s: Stmt): { use: number; def: number } {
   if (s.k === 'call') return stmtUseDef0(p, s);
   // only call statements depend on (changing) callee signatures; statements are not mutated in
-  // place (except calls, in recoverVars), so the others' masks are cached per statement object
-  // (non-enumerable symbol property: not copied by spreads, invisible to JSON / for-in)
-  let r: { use: number; def: number } | undefined = (s as any)[UD];
-  if (!r) { r = stmtUseDef0(p, s); Object.defineProperty(s, UD, { value: r }); }
+  // place (except calls, in recoverVars), so the others' masks are cached per statement object, in a
+  // symbol property (invisible to JSON / for-in; assigned, not defined: defineProperty is costly)
+  // recording what they were computed from, since spread copies inherit it (see simplify.ts StmtMeta)
+  const c: UseDef | undefined = (s as any)[UD];
+  if (c && c.k === s.k && c.x === (s.k === 'store' ? s.addr : s.k === 'set' || s.k === 'eval' ? s.e : undefined)
+    && c.y === (s.k === 'store' ? s.v : s.k === 'set' ? s.dst : undefined)) return c;
+  const r = stmtUseDef0(p, s);
+  (s as any)[UD] = { use: r.use, def: r.def, k: s.k, x: s.k === 'store' ? s.addr : s.k === 'set' || s.k === 'eval' ? s.e : undefined, y: s.k === 'store' ? s.v : s.k === 'set' ? s.dst : undefined } satisfies UseDef;
   return r;
 }
+interface UseDef { use: number; def: number; k: Stmt['k']; x: unknown; y: unknown }
 const UD = Symbol('useDef');
 const GK = Symbol('blockGenKill');
 
