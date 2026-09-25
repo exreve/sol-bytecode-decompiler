@@ -450,6 +450,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const isProg = (e: Expr | undefined): boolean => {
       if (e?.k !== 'var') return false;
       if (e.id === prog) return true;
+      // (a copy of program_id made in the entry block, the variable reused later, e.g. for an error value)
+      if (hf.blocks[0].stmts.some(st => st.k === 'set' && st.dst === e.id && st.e.k === 'var' && st.e.id === prog)) return true;
       const d = defs.get(e.id);
       if (d?.length !== 1 || d[0].k !== 'load' || d[0].size !== 8) return false;
       const o = fo(d[0].addr), vals = o === undefined ? undefined : slotVals.get(o);
@@ -1265,9 +1267,12 @@ function declaredId(fs: VarFunc[], keyAt: (a: bigint) => string | undefined): st
       }
       if (b.term.k === 'br') visit(b.term.c);
     }
-    if (raises) found.forEach(k => { if (!KNOWN_KEYS[k]) keys.add(k); });
+    if (raises) found.forEach(k => keys.add(k));
   }
-  return keys.size === 1 ? [...keys][0] : undefined;
+  // (a well-known program's own id is also a known key: other known keys compared there are programs it checks)
+  if (keys.size === 1) return [...keys][0];
+  const own = [...keys].filter(k => !KNOWN_KEYS[k]);
+  return own.length === 1 ? own[0] : undefined;
 }
 
 /** Known keys (program ids by name) that the 32 bytes at `ptr` are compared with somewhere in f (keyeq, memeq, memcmp-style calls). */

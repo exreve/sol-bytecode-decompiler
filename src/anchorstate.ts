@@ -428,15 +428,25 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		return v
 	}
 	const boxAtOf = new Map<string, number>() // `${callee}:${type}` -> out word holding a box of the object
-	const infoWords = new Map<number, InfoAt | null>()
-	const infoWord = (x: number, t: string | undefined): InfoAt | undefined => {
+	const infoWords = new Map<number, (InfoAt & { type?: string }) | null>()
+	const infoWord = (x: number, t: string | undefined): (InfoAt & { type?: string }) | undefined => {
 		if (!infoWords.has(x)) {
 			// (an IDL account type: its discriminator and the program as owner, e.g. for AccountLoader<T>)
+			const run = (acc: { disc: bigint } | undefined, n = 0x400) => {
+				const data = Array.from({ length: n }, (_, i) => (i < 8 && acc ? Number((acc.disc >> BigInt(8 * i)) & 0xffn) : acc ? 0 : i & 0xff))
+				const owner = acc && idl?.address ? unb58(idl.address) : new Uint8Array(32).fill(7)
+				const b = runAccountCallee(p, x, data, owner, [1, 1, 0])
+				return b && infoIn(b, 0x40)
+			}
 			const acc = t && !t.startsWith('spl:') ? idl?.accounts.find(a => a.name === t) : undefined
-			const data = Array.from({ length: 0x400 }, (_, i) => (i < 8 && acc ? Number((acc.disc >> BigInt(8 * i)) & 0xffn) : i & 0xff))
-			const owner = acc && idl?.address ? unb58(idl.address) : new Uint8Array(32).fill(7)
-			const b = runAccountCallee(p, x, data, owner, [1, 1, 0])
-			infoWords.set(x, (b && infoIn(b, 0x40)) ?? null)
+			let r: (InfoAt & { type?: string }) | undefined = run(acc)
+			// not found with an arbitrary account: the IDL account type it accepts (a check of the
+			// discriminator the immediates did not show, e.g. compared with rodata bytes), found by running it
+			if (!r && !t && idl?.address) for (const a of idl.accounts) {
+				const i = run(a, Math.min(Math.max(0x400, (views.map.get(`${pascal(a.name)}Account`)?.size ?? 0) + 0x100), 0x40000))
+				if (i) { r = { ...i, type: a.name }; break }
+			}
+			infoWords.set(x, r ?? null)
 		}
 		return infoWords.get(x) ?? undefined
 	}
@@ -564,7 +574,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 					const w = infoWord(tpc, t)
 					if (w !== undefined) {
 						// (the other words of the out object: the Err payload an account-name error is given)
-						const id = objs.push({ callee: tpc, type: t, embed: w.embed }) - 1
+						const id = objs.push({ callee: tpc, type: t ?? w.type, embed: w.embed }) - 1
 						const n = Math.max(0x40, w.off + 0x30)
 						clobber(out, n)
 						for (let w2 = 0; w2 < n; w2 += 8) org.set(out + w2, { obj: id, off: w2 - w.off })
