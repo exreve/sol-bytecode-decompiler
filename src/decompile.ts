@@ -274,6 +274,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const c = prev?.k === 'store' && prev.size === 4 && prev.v.k === 'const' && exprEq(prev.addr, { k: 'bin', op: 'add', a: s.addr, b: { k: 'const', v: 4n } }) ? prev.v.v : undefined;
           return s.v.v === 0n && c !== undefined ? custom(c) : sem.resultTagName(s.v.v);
         }
+        // st64(p, code << 32): tag and code in one store
+        if (s.k === 'store' && s.size === 8 && s.v.k === 'const' && s.v.v !== 0n && okAt.some(x => exprEq(x, s.addr))) {
+          const tag = s.v.v & 0xffffffffn, code = s.v.v >> 32n;
+          return tag === 0n ? custom(code) : code === 0n ? sem.resultTagName(tag) : undefined;
+        }
         // st32(p, 0, code): Custom(code)
         if (s.k === 'stores' && s.size === 4 && s.vals[0].k === 'const' && okAt.some(x => exprEq(x, s.addr))) {
           const c = s.vals[1];
@@ -285,11 +290,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
-      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) : t.k === 'fn' ? invokeThunks.get(t.pc) ?? null : null));
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? 'call' : null));
       if (sites.size) {
         const env: CpiEnv = {
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: ctx.strAt,
-          constName: v => sem.constComment(v, 'value'), read: (a, n) => p.image.readConst(a, n),
+          constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
         ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
       }

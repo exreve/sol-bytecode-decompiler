@@ -19,10 +19,11 @@ import { type Expr, type Stmt, walkExpr, exprEq } from './ir.ts'
 import { KNOWN_KEYS, b58 } from './semantics.ts'
 
 interface Fact { off: number; size: number; e: Expr }
-export interface CpiSite { abi: 'c' | 'rust'; args: Expr[]; facts: Fact[] }
+export type SiteKind = 'c' | 'rust' | 'call' // CPI (C / Rust ABI), or another call taking a frame address
+export interface CpiSite { abi: SiteKind; args: Expr[]; facts: Fact[] }
 
 /** CPI call sites of a structured body, keyed by the node (statement / return) containing the call. */
-export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, { k: 'call' }>['t']) => 'c' | 'rust' | null): Map<Node, CpiSite> {
+export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, { k: 'call' }>['t']) => SiteKind | null): Map<Node, CpiSite> {
 	const sites = new Map<Node, CpiSite>()
 	const fo = (e: Expr): number | null => frameOff(e, fp)
 	const hasCall = (e: Expr) => { let c = false; walkExpr(e, x => { if (x.k === 'call') c = true }); return c }
@@ -39,7 +40,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 		walkExpr(e, x => {
 			if (x.k !== 'call' || x.t.k === 'ind') return
 			const abi = abiOf(x.t)
-			if (abi && !sites.has(n)) sites.set(n, { abi, args: x.args, facts: [...facts] })
+			if (abi && !sites.has(n) && (abi !== 'call' || x.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: x.args, facts: [...facts] })
 		})
 	}
 	const run = (ns: Node[], facts0: Fact[]): Fact[] => {
@@ -49,7 +50,7 @@ export function findCpiSites(body: Node[], fp: number, abiOf: (t: Extract<Stmt, 
 				case 'stmt': {
 					const s = n.s
 					if (s.k === 'call') {
-						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi) sites.set(n, { abi, args: s.args, facts: [...facts] }) }
+						if (s.t.k !== 'ind') { const abi = abiOf(s.t); if (abi && (abi !== 'call' || s.args.some(a => fo(a) !== null))) sites.set(n, { abi, args: s.args, facts: [...facts] }) }
 						facts = []
 					} else if (s.k === 'set') {
 						note(n, s.e, facts)
@@ -121,6 +122,7 @@ const ATA_IX = ['Create', 'CreateIdempotent', 'RecoverNested']
 
 /** One-line description of a CPI site, or undefined when its instruction is not in the frame. */
 export function describeCpi(site: CpiSite, env: CpiEnv): string | undefined {
+	if (site.abi === 'call') return describeFmt(site, env)
 	const { facts, args } = site
 	const fo = (e: Expr) => frameOff(e, env.fp)
 	const at = (o: number, size: number): Expr | undefined => {
@@ -266,4 +268,28 @@ function describeSeeds(ptr: Expr, n: Expr, at: (o: number, size: number) => Expr
 		signers.push(`[${seeds.join(', ')}]`)
 	}
 	return `signer seeds ${signers.join(', ')}`
+}
+
+/**
+ * core::fmt::Arguments built in the frame and passed to a call (format!, panic!, msg!): its first
+ * field is the `&[&str]` of literal pieces, which lives in rodata.
+ */
+function describeFmt(site: CpiSite, env: CpiEnv): string | undefined {
+	if (!env.read || !env.strAt) return undefined
+	for (const a of site.args) {
+		const o = frameOff(a, env.fp)
+		if (o === null) continue
+		const p = site.facts.find(x => x.off === o && x.size === 8)?.e, n = site.facts.find(x => x.off === o + 8 && x.size === 8)?.e
+		if (p?.k !== 'const' || n?.k !== 'const' || n.v < 1n || n.v > 12n) continue
+		const pieces: string[] = []
+		for (let i = 0n; i < n.v; i++) {
+			const sp = env.read(p.v + 16n * i, 8), sl = env.read(p.v + 16n * i + 8n, 8)
+			if (sp === undefined || sl === undefined || sl > 200n) break
+			const s = sl === 0n ? '' : env.strAt(sp, sl)
+			if (s === undefined) break
+			pieces.push(s)
+		}
+		if (pieces.length === Number(n.v) && pieces.some(s => s.length > 1)) return `fmt pieces ${JSON.stringify(pieces)}`
+	}
+	return undefined
 }
