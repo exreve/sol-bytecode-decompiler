@@ -355,7 +355,7 @@ const RULES: Rule[] = [
 	{
 		id: 'share-price-zero-supply', title: 'Division by a supply / balance-like value with no zero / minimum check on the way (empty or donated pool)',
 		run: ix => (ix.divs ?? []).filter(d => d.status === 'not_found').slice(0, 2).map(d => ({
-			accounts: [], path: [L(d.at)], evidence: [`${d.expr}`, `divisor ${d.divisor}: no comparison on it found on the way (a zero divisor aborts; a first depositor / donation can skew the ratio)`], confidence: /\.amount\b|balance|lamports/.test(d.divisor) ? 'medium' as const : 'low' as const, weight: 4,
+			accounts: [], path: [L(d.at)], evidence: [`divisor ${d.divisor}: no comparison on it found on the way (a zero divisor aborts; a first depositor / donation can skew the ratio)`, d.expr], confidence: /\.amount\b|balance|lamports/.test(d.divisor) ? 'medium' as const : 'low' as const, weight: 4,
 		})),
 	},
 	{

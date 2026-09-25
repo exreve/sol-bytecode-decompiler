@@ -148,10 +148,54 @@ function defOf(ff: FnFacts, name: string, before: number): { expr: string; line:
 	return undefined
 }
 
+const paramMemo = new WeakMap<FnFacts, string[]>()
+function paramsOf(ff: FnFacts): string[] {
+	let p = paramMemo.get(ff)
+	if (!p) {
+		const sig = ff.lines.find(l => /^(export )?function /.test(l))
+		const m = sig && /\((.*)\)/.exec(sig)
+		p = m ? m[1].split(', ').map(x => x.split(':')[0].trim()) : []
+		paramMemo.set(ff, p)
+	}
+	return p
+}
+
+/** the top-level arguments of the call whose parenthesis is at `open` */
+function argsAt(s: string, open: number): string[] {
+	const out: string[] = []
+	let depth = 0, start = open + 1
+	for (let i = open; i < s.length; i++) {
+		const c = s[i]
+		if (c === '(' || c === '[') depth++
+		else if (c === ')' || c === ']') { if (--depth === 0) { out.push(s.slice(start, i).trim()); return out } }
+		else if (c === ',' && depth === 1) { out.push(s.slice(start, i).trim()); start = i + 1 }
+	}
+	return out
+}
+
+/** calls to function `fn` in the functions of an instruction: [caller, line, arguments] (bounded) */
+function callsTo(ix: IxOut, fn: string): [string, number, string[]][] {
+	const out: [string, number, string[]][] = []
+	const T = ixText.get(ix)
+	if (!T) return out
+	for (const f of ix.functions) {
+		const ff = T.get(f)?.ff
+		if (!ff) continue
+		for (let i = ff.at; i < ff.lines.length && out.length < 4; i++) {
+			const k = ff.lines[i].indexOf(`${fn}(`)
+			if (k < 0 || /\w/.test(ff.lines[i][k - 1] ?? '') || /^(export )?function /.test(ff.lines[i])) continue
+			out.push([f, i + 1, argsAt(ff.lines[i], k + fn.length)])
+		}
+	}
+	return out
+}
+const ixText = new WeakMap<IxOut, Map<string, FnText>>()
+
 // ---- per instruction ----
 
 export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 	const T = fnText(r)
+	ixText.set(ix, T)
 	const loc = (fn: string, line: number): Loc => ({ fn, line, pc: T.get(fn)?.lineAt(line) })
 	// arithmetic on value paths
 	const arith: ArithSite[] = []
@@ -188,6 +232,22 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		for (const [k, v] of o.cpi?.fields ?? []) if (/amount|lamports|quantity/i.test(k)) site(o.at.fn, o.at.line, v, `${o.cpi!.program}.${o.cpi!.ix ?? '?'}.${k}`, oi, false)
 	})
 	ix.arith = arith
+	// (where a value comes from: locals' definitions, and a parameter's arguments at the calls in this instruction)
+	const provenance = (fn: string, e: string, line: number, depth: number, out: string[]) => {
+		if (out.length >= 12 || out.includes(e.trim())) return
+		out.push(e.trim())
+		const ff = T.get(fn)?.ff
+		if (!ff) return
+		const ids = [...new Set([...e.replace(/\bld\d+\((?:[^()]|\([^()]*\))*\)/g, '').matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w.(])/g)].map(m => m[1]))].slice(0, 4)
+		const params = paramsOf(ff)
+		for (const id of ids) {
+			const d = defOf(ff, id, line)
+			if (d) { provenance(fn, d.expr, d.line, depth, out); continue }
+			const pi = params.indexOf(id)
+			if (pi < 0 || depth <= 0) continue
+			for (const [cf, cl, args] of callsTo(ix, fn).slice(0, 3)) if (args[pi]) provenance(cf, args[pi], cl, depth - 1, out)
+		}
+	}
 	// divisions by a supply / balance-like value
 	const divs: DivSite[] = []
 	for (const fn of ix.functions) {
@@ -202,13 +262,13 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 			if (u) cands.push(u[4])
 			for (const dv of cands) {
 				if (isConst(dv.replace(/[()]/g, ''))) continue
-				let text = dv, l = i + 1
-				const seen = [dv]
-				for (let k = 0; k < 2 && /^[A-Za-z_]\w*$/.test(text); k++) { const d = defOf(ff, text, l); if (!d) break; text = d.expr; l = d.line; seen.push(text) }
+				const seen: string[] = []
+				provenance(fn, dv, i + 1, 2, seen)
 				if (!seen.some(x => SUPPLY.test(x))) continue
-				const { conds } = pathConds(r, ix, fn, i + 1, 60)
-				const g = conds.find(c => CMP.test(c.cond) && seen.some(x => /^[A-Za-z_][\w.]*$/.test(x.trim()) && mentions(c.cond, x.trim())))
-				divs.push({ at: loc(fn, i + 1), expr: s.trim().slice(0, 140), divisor: seen.join(' ← ').slice(0, 140), status: g ? 'checked' : 'not_found', guard: g && { at: g.at, cond: g.cond.slice(0, 120) } })
+				const { conds } = pathConds(r, ix, fn, i + 1, 80)
+				const names = seen.flatMap(x => /^[A-Za-z_][\w.]*$/.test(x.trim()) ? [x.trim()] : [])
+				const g = conds.find(c => CMP.test(c.cond) && names.some(x => mentions(c.cond, x)))
+				divs.push({ at: loc(fn, i + 1), expr: s.trim().slice(0, 140), divisor: seen.join(' ← ').slice(0, 160), status: g ? 'checked' : 'not_found', guard: g && { at: g.at, cond: g.cond.slice(0, 120) } })
 			}
 		}
 	}
