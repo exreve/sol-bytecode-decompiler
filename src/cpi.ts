@@ -27,7 +27,8 @@ import { KNOWN_KEYS, b58 } from './semantics.ts'
 interface Fact { off: number; size: number; e: Expr }
 // CPI (C / Rust ABI); PDA derivation: syscall argument order (seeds, n, program_id, out[, bump]) or
 // Pubkey::find/create_program_address (out, seeds, n, program_id); or another call taking a frame address
-export type SiteKind = 'c' | 'rust' | 'pda_find' | 'pda_create' | 'pda_find_out' | 'pda_create_out' | 'call'
+// 'invoke': a library wrapper (out, &Instruction, account infos, count, [signer seeds]) (see cpiexec.ts)
+export type SiteKind = 'c' | 'rust' | 'pda_find' | 'pda_create' | 'pda_find_out' | 'pda_create_out' | 'invoke' | 'call'
 export interface CpiSite { abi: SiteKind; args: Expr[]; facts: Fact[]; t?: Extract<Stmt, { k: 'call' }>['t'] }
 
 /** CPI call sites of a structured body, keyed by the node (statement / return) containing the call. */
@@ -134,11 +135,15 @@ export interface CpiEnv {
 	read?: (addr: bigint, size: number) => bigint | undefined // read-only program memory
 	/** known program ids the 32 bytes at `ptr` are compared with in this function (keyeq / memeq) */
 	programCheck?: (ptr: Expr) => string[]
+	/** name of the function at a code address (formatter functions of fmt arguments) */
+	fnAt?: (addr: bigint) => string | undefined
 	/** may the value derive from instruction data (taint.ts)? */
 	tainted?: (e: Expr) => boolean
 }
 
 const IXD = ' [ix data?]'
+/** anchor_lang::event::EVENT_IX_TAG (first 8 bytes of an emit_cpi! instruction's data, as u64) */
+const EVENT_IX_TAG = 0x1d9acb512ea545e4n
 
 /** Instruction of a well-known program: account roles, data fields (name, byte offset, size or 'key'), data length. */
 interface IxLayout { name: string; accounts: string[]; fields: [string, number, number | 'key'][]; len?: number }
@@ -207,8 +212,6 @@ const COMPUTE_BUDGET: Family = {
 }
 const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET }
 
-interface Acc { text: string; w?: number; s?: number }
-
 /** A described CPI: the comment, and the decoded instruction of a well-known program (guessed: the program id is not a constant). */
 export interface CpiDesc { text: string; family?: string; ix?: string; guessed?: boolean }
 
@@ -217,6 +220,7 @@ export function describeCpi(site: CpiSite, env: CpiEnv): string | undefined { re
 
 export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 	if (site.abi === 'call') { const t = describeFmt(site, env); return t ? { text: t } : undefined }
+	if (site.abi === 'invoke') return undefined
 	if (site.abi.startsWith('pda')) { const t = describePda(site, env); return t ? { text: t } : undefined }
 	const { facts, args } = site
 	const fo = (e: Expr) => frameOff(e, env.fp)
@@ -257,7 +261,7 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		return { text: n, known: n }
 	}
 	/** a pointer to a key: named when constant, else `*ptr` (or the pointer itself for account keys, e.g. `acc.key`) */
-	const keyPtr = (e: Expr | undefined): { text: string; known?: string; src?: Expr } => {
+	const keyPtr = (e: Expr | undefined): KeyText => {
 		if (!e) return { text: '?' }
 		if (e.k === 'const') {
 			const k = env.keyAt?.(e.v)
@@ -269,7 +273,7 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		if (o !== null) { const k = keyInFrame(o); if (k) return k }
 		return { text: `*${wrap(env.expr(e))}`, src: e }
 	}
-	let program: { text: string; known?: string; src?: Expr }
+	let program: KeyText
 	const accounts: Acc[] = []
 	let nAcc: number | undefined, dataPtr: Expr | undefined, dataLen: Expr | undefined
 	if (site.abi === 'c') {
@@ -294,6 +298,36 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 	}
 	const dl = num(dataLen)
 	const seeds = describeSeeds(args[3], args[4], at, fo, env)
+	const dOff = dataPtr ? fo(dataPtr) : null
+	return formatIx({
+		program, accounts, nAcc, dl, seeds,
+		data: dOff === null ? undefined : { at: (o, size) => at(dOff + o, size), key: o => keyInFrame(dOff + o) },
+		dataText: dl === undefined && dataPtr && dataLen ? `${wrap(env.expr(dataPtr))}[..${env.expr(dataLen)}]` : undefined,
+	}, env)
+}
+
+/** A 32-byte key: its text (known name, `key <base58>`, `*src`), the known name, the address it was read from. */
+export interface KeyText { text: string; known?: string; src?: Expr }
+export interface Acc { text: string; w?: number; s?: number }
+/**
+ * An instruction passed to a CPI, as far as it is known: program id, account metas, data (bytes
+ * relative to the data start, when it is a known object), signer seeds (text).
+ */
+export interface IxModel {
+	program: KeyText
+	accounts: Acc[]
+	nAcc?: number
+	dl?: number
+	data?: { at: At; key: (o: number) => KeyText | undefined }
+	dataText?: string // data shown as ptr[..len] when the length is not a constant
+	seeds?: string
+	note?: string     // appended to the comment (how the instruction was found)
+}
+
+/** The comment for an instruction model: decoded for well-known programs (see FAMILY), else generic. */
+export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
+	const { program, accounts, nAcc, dl, data, seeds } = m
+	const tail = (seeds ? `, ${seeds}` : '') + (m.note ? ` ${m.note}` : '')
 	const accText = (a: Acc) => `${a.text}${flags(a.w, a.s)}`
 	// program id not constant: is it compared with a known id in this function?
 	let check = ''
@@ -303,15 +337,14 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		check += ids.length ? ` (id compared with ${ids.join(' / ')} in this function)` : ' (id not a constant, and not compared with a known program id in this function)'
 	}
 	// well-known program: decode the instruction (accounts by role, data fields)
-	const dOff = dataPtr ? fo(dataPtr) : null
-	if (dl !== undefined && dOff !== null) {
+	if (dl !== undefined && data) {
 		const fam = program.known ? FAMILY[program.known] : undefined
 		const cands: Family[] = fam ? [fam] : program.known ? [] : [TOKEN, SYSTEM]
 		for (const F of cands) {
 			// the instruction tag (an empty ATA instruction is Create)
 			let tag: bigint | undefined
 			if (dl === 0 && F === ATA) tag = 0n
-			else { const e = at(dOff, F.tagSize); if (e?.k === 'const') tag = e.v }
+			else { const e = data.at(0, F.tagSize); if (e?.k === 'const') tag = e.v }
 			if (tag === undefined) continue
 			const lay: IxLayout | undefined = F.ixs[Number(tag)]
 			if (!lay) continue
@@ -323,23 +356,25 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 			for (const [name, off, size] of lay.fields) {
 				if (off >= dl) continue
 				let v: string
-				if (size === 'key') { const k = keyInFrame(dOff + off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : '') }
-				else { const e = at(dOff + off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?' }
+				if (size === 'key') { const k = data.key(off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : '') }
+				else { const e = data.at(off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?' }
 				parts.push(`${name}: ${v}`)
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
 			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : 'compute_budget'
-			return { text: `CPI ${head} { ${parts.join(', ')} }${seeds ? `, ${seeds}` : ''}`, family, ix: lay.name, guessed: !fam }
+			return { text: `CPI ${head} { ${parts.join(', ')} }${tail}`, family, ix: lay.name, guessed: !fam }
 		}
 	}
 	const parts = [`program ${program.text}${check}`]
+	// Anchor emit_cpi!: data = EVENT_IX_TAG, then the event (discriminator, Borsh fields)
+	const tag0 = dl !== undefined && dl >= 16 ? data?.at(0, 8) : undefined
+	const event = tag0?.k === 'const' && tag0.v === EVENT_IX_TAG
 	if (accounts.some(a => a.text !== '?' || a.w !== undefined)) parts.push(`accounts [${accounts.map(accText).join(', ')}]`)
 	else if (nAcc !== undefined) parts.push(`${nAcc} account${nAcc === 1 ? '' : 's'}`)
-	if (dl !== undefined) parts.push(`data ${dl} byte${dl === 1 ? '' : 's'}${dataPtr ? describeData(dataPtr, dl, at, fo, env) : ''}`)
-	else if (dataPtr && dataLen) parts.push(`data ${wrap(env.expr(dataPtr))}[..${env.expr(dataLen)}]`)
+	if (dl !== undefined) parts.push(`data ${dl} byte${dl === 1 ? '' : 's'}${data ? describeData(data.at, dl, env) : ''}`)
+	else if (m.dataText) parts.push(`data ${m.dataText}`)
 	if (program.text === '?' && parts.length === 1) return undefined
-	if (seeds) parts.push(seeds)
-	return { text: `CPI: ${parts.join(', ')}` }
+	return { text: `CPI${event ? ' emit_cpi! (Anchor event self-invocation)' : ''}: ${parts.join(', ')}${tail}` }
 }
 
 function flags(w: number | undefined, s: number | undefined): string {
@@ -350,9 +385,9 @@ function flags(w: number | undefined, s: number | undefined): string {
 
 const wrap = (t: string) => (/^[\w.]+$/.test(t) ? t : `(${t})`)
 
-function describeData(ptr: Expr, len: number, at: (o: number, size: number) => Expr | undefined, fo: (e: Expr) => number | null, env: CpiEnv): string {
-	const o = fo(ptr)
-	if (o === null || len === 0 || len > 256) return ''
+function describeData(at: At, len: number, env: CpiEnv): string {
+	const o = 0
+	if (len === 0 || len > 256) return ''
 	// the stores covering [o, o + len), in address order
 	const items: string[] = []
 	let p = o, first = true
@@ -360,7 +395,7 @@ function describeData(ptr: Expr, len: number, at: (o: number, size: number) => E
 		let e: Expr | undefined, size = 0
 		for (const s of [8, 4, 2, 1]) if (p + s <= o + len && (e = at(p, s))) { size = s; break }
 		if (!e) { if (items.length) items.push('?'); break }
-		let t = `u${size * 8} ${env.expr(e)}${env.tainted?.(e) ? IXD : ''}`
+		let t = first && size === 8 && e.k === 'const' && e.v === EVENT_IX_TAG ? 'EVENT_IX_TAG' : `u${size * 8} ${env.expr(e)}${env.tainted?.(e) ? IXD : ''}`
 		// an 8-byte constant first: an Anchor instruction discriminator
 		if (first && e.k === 'const' && size === 8) { const n = env.constName?.(e.v); if (n && !t.includes('/*')) t += ` (${n})` }
 		items.push(t)
@@ -455,14 +490,18 @@ function describeSeeds(ptr: Expr, n: Expr, at: (o: number, size: number) => Expr
 
 /**
  * core::fmt::Arguments built in the frame and passed to a call (format!, panic!, msg!): its first
- * field is the `&[&str]` of literal pieces, which lives in rodata.
+ * field is the `&[&str]` of literal pieces, which lives in rodata; another field is the `&[Argument]`
+ * of (value pointer, formatter function) pairs, also built in the frame, and one more the optional
+ * placeholder specs (None: the arguments fill the `{}` between the pieces in order):
+ *   // fmt "Initializing global config with global authority {} and bump {}" {} = *v [fn_7d078], {} = ld8(j + 0x98) [u8_fmt]
  */
 function describeFmt(site: CpiSite, env: CpiEnv): string | undefined {
 	if (!env.read || !env.strAt) return undefined
+	const word = (o: number) => site.facts.find(x => x.off === o && x.size === 8)?.e
 	for (const a of site.args) {
 		const o = frameOff(a, env.fp)
 		if (o === null) continue
-		const p = site.facts.find(x => x.off === o && x.size === 8)?.e, n = site.facts.find(x => x.off === o + 8 && x.size === 8)?.e
+		const p = word(o), n = word(o + 8)
 		if (p?.k !== 'const' || n?.k !== 'const' || n.v < 1n || n.v > 12n) continue
 		const pieces: string[] = []
 		for (let i = 0n; i < n.v; i++) {
@@ -472,7 +511,62 @@ function describeFmt(site: CpiSite, env: CpiEnv): string | undefined {
 			if (s === undefined) break
 			pieces.push(s)
 		}
-		if (pieces.length === Number(n.v) && pieces.some(s => s.length > 1)) return `fmt pieces ${JSON.stringify(pieces)}`
+		if (pieces.length !== Number(n.v) || !pieces.some(s => s.length > 1)) continue
+		const args = fmtArgs(site, o, env)
+		if (!args) return `fmt pieces ${JSON.stringify(pieces)}`
+		const list = args.list.map(x => `{} = ${x}`).join(', ')
+		// no placeholder specs: pieces[0] {} pieces[1] {} … (as many {} as arguments)
+		if (!args.specs && (pieces.length === args.list.length || pieces.length === args.list.length + 1)) {
+			let s = ''
+			pieces.forEach((x, i) => { s += x + (i < args.list.length ? '{}' : '') })
+			return `fmt ${JSON.stringify(s)}${list ? ' ' + list : ''}`
+		}
+		return `fmt pieces ${JSON.stringify(pieces)} (with placeholder specs), arguments: ${args.list.join(', ') || '(none)'}`
 	}
 	return undefined
+}
+
+/**
+ * The `&[Argument]` of a fmt::Arguments at frame offset o (after the pieces): a (frame pointer, count)
+ * pair among the object's words whose entries are (value pointer, formatter function address); and
+ * whether the placeholder-specs word (the remaining one) is set. Values: what the frame holds at the
+ * value pointer (an 8-byte value, `*src` for 32 bytes copied from src), else `*ptr`; with the
+ * formatter's name.
+ */
+function fmtArgs(site: CpiSite, o: number, env: CpiEnv): { list: string[]; specs: boolean } | undefined {
+	const word = (k: number) => site.facts.find(x => x.off === k && x.size === 8)?.e
+	// Arguments { pieces: &[&str], fmt: Option<&[Placeholder]>, args: &[Argument] } (48 bytes; pieces
+	// first, the order of the other two is the compiler's)
+	for (const k of [16, 32]) {
+		const ap = word(o + k), an = word(o + k + 8)
+		if (!ap || an?.k !== 'const' || an.v > 16n) continue
+		const A = an.v === 0n ? null : frameOff(ap, env.fp)
+		if (an.v !== 0n && A === null) continue
+		const list: string[] = []
+		let ok = true
+		for (let i = 0; i < Number(an.v) && ok; i++) {
+			const v = word(A! + 16 * i), f = word(A! + 16 * i + 8)
+			const fn = f?.k === 'const' ? env.fnAt?.(f.v) : undefined
+			if (!v || !fn) { ok = false; break }
+			list.push(`${fmtValue(v, site, env)} [${fn}]`)
+		}
+		if (!ok) continue
+		// the other field: the placeholder specs (pointer 0 = None)
+		const s = word(o + (k === 16 ? 32 : 16))
+		const specs = !(s?.k === 'const' && s.v === 0n)
+		return { list, specs }
+	}
+	return undefined
+}
+
+/** A fmt argument's value pointer: what the frame holds there (see fmtArgs). */
+function fmtValue(v: Expr, site: CpiSite, env: CpiEnv): string {
+	const vo = frameOff(v, env.fp)
+	if (vo !== null) {
+		const at = (k: number, size: number) => site.facts.find(x => x.off === k && x.size === size)?.e
+		const w0 = at(vo, 8)
+		if (w0?.k === 'load' && w0.size === 8 && [1, 2, 3].every(i => { const w = at(vo + 8 * i, 8); return w?.k === 'load' && exprEq(w.addr, addOff(w0.addr, 8 * i)) })) return `*${wrap(env.expr(w0.addr))}`
+		for (const size of [8, 4, 2, 1]) { const e = at(vo, size); if (e) return env.expr(e) }
+	}
+	return `*${wrap(env.expr(v))}`
 }

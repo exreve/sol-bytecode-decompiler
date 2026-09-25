@@ -61,13 +61,32 @@ export class TestMem {
 	}
 }
 
-export interface CallHook { (target: string, args: bigint[]): bigint }
+export interface CallHook { (target: string, args: bigint[], pc: number): bigint }
 
-export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; alias?: boolean }
+export interface EmuResult { ret?: bigint; abort?: string; steps: number; limit?: boolean; alias?: boolean; retTaint?: number }
 
-/** Execute one function starting at `pc` with registers r1..r5 = args, r10 = fp. */
+/**
+ * Input taint for analysis runs (exec.ts), as bits: 1 = the value may depend on the inputs' data,
+ * 2 = on control flow that depends on them (it was computed after an input-dependent branch, up to the
+ * branch's immediate post-dominator `ipdom`, unless `forced` says the run does not follow the inputs
+ * there). Loads take the taint of the bytes and of the address register, stores set it, ALU results take
+ * their operands'; calls pass `args` (r1..r5) and `ctl` (control taint at the call) out and read `ret` back.
+ */
+export interface TaintHooks {
+	init: number[]; base: number
+	mem: (addr: bigint, size: number) => number; set: (addr: bigint, size: number, t: number) => void
+	forced?: (pc: number) => boolean; ipdom?: (pc: number) => number
+	args?: number[]; ctl?: number; ret?: number
+}
+
+/**
+ * Execute one function starting at `pc` with registers r1..r5 = args, r10 = fp.
+ * Analysis runs (see exec.ts) only: `frameCheck: false` allows accesses to the frame through other
+ * pointers; `branch` may override the outcome of conditional jumps.
+ */
 export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem: TestMem, onCall: CallHook, maxSteps: number,
-	argRegs: (t: string) => number[], extraIn: bigint[] = [], stackArgs: (t: string) => number = () => 0): EmuResult {
+	argRegs: (t: string) => number[], extraIn: bigint[] = [], stackArgs: (t: string) => number = () => 0,
+	opts: { frameCheck?: boolean; branch?: (pc: number, taken: boolean) => boolean; taint?: TaintHooks } = {}): EmuResult {
 	const v = p.version
 	const v2 = v === 2
 	const pqr = v2, sx = v2, swapSub = v2, noNeg = v2, noLddw = v2, noLe = v2, movMem = v2, staticSys = v >= 3, jmp32 = v >= 3
@@ -80,14 +99,20 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 	const fr = new Array<boolean>(11).fill(false)
 	fr[10] = true
 	const flo = fp - 0x1000n, fhi = fp
-	const checkFrame = (base: number, addr: bigint) => { if (!fr[base] && addr >= flo && addr < fhi) throw new FrameAlias() }
+	const noCheck = opts.frameCheck === false, branch = opts.branch
+	const tt = opts.taint, rt = tt ? tt.init.slice(0, 11) : []
+	const ctlStack: number[] = [] // ipdoms of the input-dependent branches being inside
+	const ctl = () => (tt ? tt.base | (ctlStack.length ? 2 : 0) : 0)
+	const checkFrame = (base: number, addr: bigint) => { if (!noCheck && !fr[base] && addr >= flo && addr < fhi) throw new FrameAlias() }
 	const signExt = (x: bigint) => (sx ? u32(x) : u64(BigInt.asIntN(32, x)))
 	let steps = 0
 	const doCall = (t: string) => {
 		let a = argRegs(t).map(i => r[i])
 		const ns = stackArgs(t)
 		if (ns) a = [r[1], r[2], r[3], r[4], ...Array.from({ length: ns }, (_, k) => mem.load(u64(r[5] - 0x1000n + BigInt(8 * k)), 8)), ...argRegs(t).filter(i => i === 0 || i > 5).map(i => r[i])]
-		r[0] = u64(onCall(t, a))
+		if (tt) { tt.args = rt.slice(1, 6); tt.ctl = ctl(); tt.ret = undefined }
+		r[0] = u64(onCall(t, a, pc))
+		if (tt) { rt[0] = (tt.ret ?? 1) | ctl(); for (let i = 1; i <= 5; i++) rt[i] = 1 }
 		for (let i = 1; i <= 5; i++) r[i] = UNDEF // clobbered
 		for (let i = 0; i <= 5; i++) fr[i] = false
 	}
@@ -111,6 +136,27 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 			else if (alu64 && (op0 === 0x00 || op0 === 0x10)) nfr = fr[dst] || (isReg && fr[src]) // add/sub
 			else if (ins.opc !== 0x05 && (ins.opc & 7) !== 5 && (ins.opc & 7) !== 2 && (ins.opc & 7) !== 3) nfr = false // other writes to dst
 			if (movMem && (ins.opc & 7) === 7 && (op0 === 0x20 || op0 === 0x30 || op0 === 0x80 || op0 === 0x90)) nfr = null // v2 stores
+			// input taint of the value written to dst (analysis runs only)
+			let tv: number | null = null
+			if (tt) {
+				while (ctlStack.length && ctlStack[ctlStack.length - 1] === pc) ctlStack.pop()
+				const o = ins.opc, c = ctl()
+				const size = (x: number) => (x === 0x71 || x === 0x72 || x === 0x73 || x === 0x2c || x === 0x27 || x === 0x2f ? 1 : x === 0x69 || x === 0x6a || x === 0x6b || x === 0x3c || x === 0x37 || x === 0x3f ? 2 : x === 0x61 || x === 0x62 || x === 0x63 || x === 0x8c || x === 0x87 || x === 0x8f ? 4 : 8)
+				const isLd = movMem ? o === 0x2c || o === 0x3c || o === 0x8c || o === 0x9c : o === 0x61 || o === 0x69 || o === 0x71 || o === 0x79
+				const isStI = movMem ? o === 0x27 || o === 0x37 || o === 0x87 || o === 0x97 : o === 0x62 || o === 0x6a || o === 0x72 || o === 0x7a
+				const isStX = movMem ? o === 0x2f || o === 0x3f || o === 0x8f || o === 0x9f : o === 0x63 || o === 0x6b || o === 0x73 || o === 0x7b
+				if (isLd) tv = tt.mem(u64(S + off), size(o)) | rt[src] | c
+				else if (isStI) tt.set(u64(D + off), size(o), c)
+				else if (isStX) tt.set(u64(D + off), size(o), rt[src] | c)
+				else if (o === 0x18 && !noLddw) tv = c
+				else if (pqr && cls0 === 6) tv = rt[dst] | (isReg ? rt[src] : 0) | c
+				else if (cls0 === 4 || cls0 === 7) tv = (op0 === 0xb0 ? (isReg ? rt[src] : 0) : op0 === 0x80 || op0 === 0xd0 ? rt[dst] : rt[dst] | (isReg ? rt[src] : 0)) | c
+				else if ((cls0 === 5 || (jmp32 && cls0 === 6)) && o !== 0x05 && o !== 0x85 && o !== 0x8d && o !== 0x95 && o !== 0x9d && tt.ipdom
+					&& (rt[dst] | (isReg ? rt[src] : 0)) && !tt.forced?.(pc)) {
+					const d = tt.ipdom(pc)
+					if (d !== pc && ctlStack[ctlStack.length - 1] !== d) ctlStack.push(d)
+				}
+			}
 			let handled = true
 			if (!movMem) {
 				switch (ins.opc) {
@@ -257,6 +303,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 						case 0xc: t = i64(D) < i64(b); break
 						default: t = i64(D) <= i64(b); break
 					}
+					if (branch) t = branch(pc, t)
 					if (t) next = pc + 1 + ins.off
 				} else if (jmp32 && cls === 6 && [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd].includes(code)) {
 					const bb = ins.opc & 8 ? S : immU
@@ -275,6 +322,7 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 						case 0xc: t = sx32 < sy32; break
 						default: t = sx32 <= sy32; break
 					}
+					if (branch) t = branch(pc, t)
 					if (t) next = pc + 1 + ins.off
 				} else if (ins.opc === 0x85) {
 					if (staticSys) {
@@ -286,10 +334,11 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 					const reg = v === 2 ? src : v >= 3 ? dst : ins.imm
 					doCall(`ptr:${r[reg].toString(16)}`)
 				} else if (ins.opc === 0x95) {
-					return { ret: r[0], steps }
+					return { ret: r[0], steps, retTaint: tt ? rt[0] | ctl() : undefined }
 				} else throw new Abort(`invalid instruction 0x${ins.opc.toString(16)}`)
 			}
 			if (nfr !== null) fr[dst] = nfr
+			if (tv !== null) rt[dst] = tv
 			pc = next
 		}
 	} catch (e) {

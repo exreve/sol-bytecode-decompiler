@@ -289,9 +289,22 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   When the program id is not a constant, the comment says whether it is compared with a known program id in the
   same function, and a data/account shape matching SPL Token or System is decoded as such, marked as a guess:
   `// CPI program *(q + 8) (id not a constant, and not compared with a known program id in this function) — data and accounts match SPL Token TransferChecked; if it is SPL Token: { source: i.key (w), mint: h.key, … }`.
-  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`.
+  Anything else: `// CPI: program <name or key>, accounts [...], data 24 bytes [u64 0x… (ix:swap), …], signer seeds ["vault", …]`;
+  Anchor `emit_cpi!` self-invocations (data starting with `EVENT_IX_TAG`) are labeled as such.
   Small functions whose one CPI is decoded are named after it: `cpi_token_transfer_checked` (`[known]` when the program id
   is a constant, `[heur]` when only the data shape matches);
+* CPIs whose instruction the frame does not show (built on the heap, by builder functions such as
+  `spl_token::instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
+  are described from two runs of the function in the reference interpreter (`src/exec.ts`, `src/cpiexec.ts`), marked
+  `[exec]`: the parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two runs),
+  branches are forced towards the call when only one side can reach it (and away from panics in callees), and library
+  wrappers are given no account infos (their RefCell checks are skipped; the run checks that the wrapper passes the
+  instruction on unchanged). The instruction reaching the CPI syscall is read back and each part traced with input taint
+  (bits for data and for input-dependent control flow): the same untainted bytes in both runs are constants, values an
+  8-byte load produced are `ld64(<address traced the same way>)`, 32 bytes read at an address are `*<address>`; anything
+  computed, or selected by input-dependent branches, is `?`:
+  `// CPI SYSTEM_PROGRAM.Transfer { from: *b.key (w,s), to: *c.key (w), lamports: p7 }, signer seeds p5[..p6] [exec]`
+  (bump seeds and PDAs are never taken for constants: the PDA syscall models differ between the runs);
 * PDA derivations (`sol_try_find_program_address` / `sol_create_program_address`, thin wrappers, and
   `Pubkey::find/create_program_address`) whose seed list is built in the frame:
   `// PDA find_program_address(["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2)], program *(ld64(s2b0)))`
@@ -301,7 +314,11 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   call results and callee writes are not followed). CPI data fields and PDA seeds that may derive from it are
   marked `[ix data?]` (a program id: `[id from ix data]`), and functions list the parameters it may reach:
   `// instruction data may reach [heur: …]: c (points to it), d (value)`;
-* calls receiving a `fmt::Arguments` built in the frame: `// fmt pieces ["Failed to borrow AccountInfo.lamports: "]`.
+* calls receiving a `fmt::Arguments` built in the frame (format!, msg!, panic!): the literal pieces with the
+  arguments in place of the `{}`, each argument as what the frame holds at its value pointer (`*src` for 32
+  bytes copied from `src`, else `*ptr`) and its formatter function:
+  `// fmt "Initializing vault for global config {} with mint {}" {} = *l [fn_7d078], {} = *m [fn_7d078]`
+  (with placeholder specs, e.g. `{:?}` or `{0}`: `// fmt pieces [...] (with placeholder specs), arguments: …`).
 
 ## Library code
 
@@ -400,6 +417,7 @@ v1.41 are run inside an `ubuntu:24.04`-based container because they require glib
 | `src/structure.ts` | structuring (stackifier: correct by construction; irreducible CFGs made reducible by node splitting, state machine only past a size budget) |
 | `src/stmtidioms.ts` | statement idioms on the structured body (rc_inc / rc_dec) |
 | `src/cpi.ts` | CPI and format-string descriptions (comments) |
+| `src/exec.ts`, `src/cpiexec.ts` | concrete runs with every call followed and input taint (analysis only); CPIs described from them |
 | `src/compact.ts` | store/copy run compaction |
 | `src/print.ts`, `src/layout.ts` | TypeScript printer, output layout |
 | `src/semantics.ts`, `src/library.ts`, `src/fingerprint.ts` | Solana knowledge, library recognition |

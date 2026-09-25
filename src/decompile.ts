@@ -15,7 +15,9 @@ import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { statementIdioms } from './stmtidioms.ts';
-import { findCpiSites, describeCpi, cpiDesc, type CpiEnv } from './cpi.ts';
+import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite } from './cpi.ts';
+import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
+import { callTargetName } from './emu.ts';
 import { Views, exprType } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
@@ -257,6 +259,34 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const abi = calls.length === 1 && t?.k === 'sys' ? invokeAbi(t.name) : null;
     if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
   }
+  // library CPI wrappers taking (out, &Instruction, account infos, their count, [signer seeds]):
+  // solana_program::program::invoke / invoke_signed and wrappers of them (see cpiexec.ts)
+  const invokeWrappers = new Set<number>();
+  {
+    const INVOKE = /^(program_invoke(_signed)?|invoke(_signed)?(_unchecked)?|solana_cpi_invoke\w*)(_?[0-9a-f]+)?$/;
+    // library code reaching the CPI syscall within two calls
+    const reaches = (pc: number, depth: number): boolean => {
+      const fn = p.funcs.get(pc);
+      if (!fn || !isLib(pc)) return false;
+      if (INVOKE.test(fn.name)) return true;
+      for (const b of fn.blocks) for (const st of b.stmts) if (st.k === 'call') {
+        if (st.t.k === 'sys' && (st.t.name === 'sol_invoke_signed_rust' || st.t.name === 'sol_invoke_signed_c')) return true;
+        if (depth > 0 && st.t.k === 'fn' && reaches(st.t.pc, depth - 1)) return true;
+      }
+      return false;
+    };
+    for (const pc of libs.keys()) { const fn = p.funcs.get(pc); if (fn && (fn.nparams >= 4 || fn.stackArgs) && reaches(pc, 2)) invokeWrappers.add(pc); }
+  }
+  // the call instruction of each (function, target) pair, when there is exactly one (sites in return expressions)
+  const callInsns = (fpc: number, target: string): number[] => {
+    const out: number[] = [];
+    const starts = [...p.funcs.keys()];
+    let end = p.insns.length;
+    for (const x of starts) if (x > fpc && x < end) end = x;
+    for (let pc = fpc; pc < end; pc++) if (p.insns[pc].opc === 0x85 && callTargetName(p, pc, p.insns[pc].imm) === target) out.push(pc);
+    return out;
+  };
+  let execBudget = 40; // CPI sites described by execution per program (see cpiexec.ts)
   const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
   const views = new Views();
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
@@ -593,15 +623,39 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
-      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? 'call' : null));
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
       if (sites.size) {
         const env: CpiEnv = {
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           tainted: e => exprTainted(taint.get(pc), e, fpVar),
           fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
-          constName: v => sem.constComment(v, 'value'), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
+          constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
-        ctx.nodeNote = n => { const s = sites.get(n); return s && describeCpi(s, env); };
+        // sites the frame contents do not describe as a well-known instruction: run the function (cpiexec.ts)
+        const execKind = (s: CpiSite): ExecSiteKind | undefined => s.t?.k === 'sys' ? (s.abi === 'c' || s.abi === 'rust' ? 'sys' : undefined)
+          : s.t?.k === 'fn' ? (invokeThunks.has(s.t.pc) && (s.abi === 'c' || s.abi === 'rust') ? 'thunk' : invokeWrappers.has(s.t.pc) ? 'wrapper' : undefined) : undefined;
+        const sitePc = (n: Node, s: CpiSite): number | undefined => {
+          if (n.k === 'stmt' && n.s.k === 'call') return n.s.pc;
+          const t = s.t?.k === 'fn' ? `fn:${s.t.pc}` : s.t?.k === 'sys' ? `sys:${s.t.name}` : undefined;
+          const l = t ? callInsns(pc, t) : [];
+          return l.length === 1 ? l[0] : undefined;
+        };
+        ctx.nodeNote = n => {
+          const s = sites.get(n);
+          if (!s) return undefined;
+          const d = cpiDesc(s, env);
+          const kind = execKind(s);
+          if (kind && !(d?.family && !d.guessed) && execBudget > 0) {
+            const at = sitePc(n, s);
+            if (at !== undefined) {
+              execBudget--;
+              const m = describeByExec(p, f, at, kind, env);
+              const x = m && formatIx(m, env);
+              if (x) return x.text;
+            }
+          }
+          return d?.text;
+        };
       }
     }
     const { decls, hoisted } = declarations(f, body);
