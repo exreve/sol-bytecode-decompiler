@@ -131,60 +131,26 @@ export function localConstProp(f: VarFunc): boolean {
 /** Backward variable liveness; removes dead pure assignments (multi-def variables included). */
 export function deadStores(f: VarFunc): boolean {
   const nv = f.vars.length, W = (nv + 31) >>> 5, nb = f.blocks.length;
-  const liveIn = Array.from({ length: nb }, () => new Uint32Array(W));
-  const uses = (e: Expr, set: Uint32Array) => walkExpr(e, x => { if (x.k === 'var') set[x.id >>> 5] |= 1 << (x.id & 31); });
-  const has = (set: Uint32Array, v: number) => (set[v >>> 5] >>> (v & 31)) & 1;
+  // bitsets are W-word rows of flat arrays (row id = block id): no per-block allocations
+  const liveIn = new Uint32Array(nb * W), gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
+  const setBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] |= 1 << (v & 31); };
+  const clrBit = (a: Uint32Array, base: number, v: number) => { a[base + (v >>> 5)] &= ~(1 << (v & 31)); };
+  const uses = (e: Expr, a: Uint32Array, base: number) => walkExpr(e, x => { if (x.k === 'var') setBit(a, base, x.id); });
   // variable reads of a statement (= walking its stmtExprs), from the per-statement cache
-  const usesS = (s: Stmt, set: Uint32Array) => { for (const v of stmtInfo(s).vars) set[v >>> 5] |= 1 << (v & 31); };
-  const transfer = (b: Block, out: Uint32Array, apply: boolean): { live: Uint32Array; changed: boolean } => {
-    const live = out.slice();
-    const t = b.term;
-    if (t.k === 'br') uses(t.c, live);
-    else if (t.k === 'ret' && t.e) uses(t.e, live);
-    let changed = false;
-    for (let i = b.stmts.length - 1; i >= 0; i--) {
-      const s = b.stmts[i];
-      if (s.k === 'set') {
-        if (apply && !has(live, s.dst)) {
-          const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
-          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live); }
-          else b.stmts.splice(i, 1);
-          changed = true;
-          continue;
-        }
-        live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        usesS(s, live);
-      } else if (s.k === 'call') {
-        if (s.dst >= 0) {
-          if (apply && !has(live, s.dst)) { b.stmts[i] = { ...s, dst: -1 }; changed = true; }
-          else live[s.dst >>> 5] &= ~(1 << (s.dst & 31));
-        }
-        usesS(s, live);
-      } else usesS(s, live);
-    }
-    return { live, changed };
-  };
-  const outOf = (b: Block) => {
-    const o = new Uint32Array(W);
-    for (const s of b.succs) { const li = liveIn[s]; for (let k = 0; k < W; k++) o[k] |= li[k]; }
-    return o;
-  };
+  const usesS = (s: Stmt, a: Uint32Array, base: number) => { for (const v of stmtInfo(s).vars) setBit(a, base, v); };
   // The non-applying transfer is liveIn = gen | (out & ~kill); compute gen/kill once per block
   // instead of re-walking every expression on each iteration. Liveness has a unique least fixpoint,
   // so the result is the same.
-  const gen: Uint32Array[] = new Array(nb), kill: Uint32Array[] = new Array(nb);
   for (let id = 0; id < nb; id++) {
-    const b = f.blocks[id];
-    const g = new Uint32Array(W), kl = new Uint32Array(W);
+    const b = f.blocks[id], base = id * W;
     const t = b.term;
-    if (t.k === 'br') uses(t.c, g);
-    else if (t.k === 'ret' && t.e) uses(t.e, g);
+    if (t.k === 'br') uses(t.c, gen, base);
+    else if (t.k === 'ret' && t.e) uses(t.e, gen, base);
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
-      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { g[s.dst >>> 5] &= ~(1 << (s.dst & 31)); kl[s.dst >>> 5] |= 1 << (s.dst & 31); }
-      usesS(s, g);
+      if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { clrBit(gen, base, s.dst); setBit(kill, base, s.dst); }
+      usesS(s, gen, base);
     }
-    gen[id] = g; kill[id] = kl;
   }
   const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
   for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
@@ -194,20 +160,48 @@ export function deadStores(f: VarFunc): boolean {
     for (let id = nb - 1; id >= 0; id--) {
       if (!dirty[id]) continue; // inputs unchanged since last evaluation: same result
       dirty[id] = 0;
-      const b = f.blocks[id];
-      const li = liveIn[id], g = gen[id], kl = kill[id];
-      let o: Uint32Array | undefined;
-      for (const s of b.succs) { const x = liveIn[s]; if (!o) o = x.slice(); else for (let k = 0; k < W; k++) o[k] |= x[k]; }
+      const succs = f.blocks[id].succs, base = id * W;
       let upd = false;
       for (let k = 0; k < W; k++) {
-        const v = (g[k] | ((o ? o[k] : 0) & ~kl[k])) >>> 0;
-        if (v !== li[k]) { li[k] = v; upd = true; }
+        let o = 0;
+        for (const s of succs) o |= liveIn[s * W + k];
+        const v = (gen[base + k] | (o & ~kill[base + k])) >>> 0;
+        if (v !== liveIn[base + k]) { liveIn[base + k] = v; upd = true; }
       }
       if (upd) { changed = true; for (const u of users[id]) dirty[u] = 1; }
     }
   }
+  // apply: walk each block backwards from its live-out (liveIn is not updated while applying)
+  const live = new Uint32Array(W);
+  const has = (v: number) => (live[v >>> 5] >>> (v & 31)) & 1;
   let any = false;
-  for (const b of f.blocks) if (transfer(b, outOf(b), true).changed) any = true;
+  for (const b of f.blocks) {
+    live.fill(0);
+    for (const s of b.succs) for (let k = 0; k < W; k++) live[k] |= liveIn[s * W + k];
+    const t = b.term;
+    if (t.k === 'br') uses(t.c, live, 0);
+    else if (t.k === 'ret' && t.e) uses(t.e, live, 0);
+    for (let i = b.stmts.length - 1; i >= 0; i--) {
+      const s = b.stmts[i];
+      if (s.k === 'set') {
+        if (!has(s.dst)) {
+          const fx = stmtInfo(s); // = hasSideEffectsOrMem(s.e)
+          if (fx.load || fx.trap || fx.call) { b.stmts[i] = { k: 'eval', e: s.e, pc: s.pc }; usesS(s, live, 0); }
+          else b.stmts.splice(i, 1);
+          any = true;
+          continue;
+        }
+        clrBit(live, 0, s.dst);
+        usesS(s, live, 0);
+      } else if (s.k === 'call') {
+        if (s.dst >= 0) {
+          if (!has(s.dst)) { b.stmts[i] = { ...s, dst: -1 }; any = true; }
+          else clrBit(live, 0, s.dst);
+        }
+        usesS(s, live, 0);
+      } else usesS(s, live, 0);
+    }
+  }
   return any;
 }
 
@@ -240,25 +234,26 @@ export function globalConstProp(f: VarFunc): boolean {
   if (!K) return false; // nothing can be substituted (an assignment only becomes constant through substitution)
   const ABSENT = -1, VARY = -2;
   // per-block transfer: (slot, value) pairs in statement order
-  const gen: Int32Array[] = new Array(nb);
+  const gen: number[][] = new Array(nb);
   for (const b of f.blocks) {
     const g: number[] = [];
     for (const s of b.stmts) {
       if (s.k === 'set') { const k = slot[s.dst]; if (k >= 0) g.push(k, s.e.k === 'const' ? cid(s.e.v) : VARY); }
       else if (s.k === 'call' && s.dst >= 0) { const k = slot[s.dst]; if (k >= 0) g.push(k, VARY); }
     }
-    gen[b.id] = Int32Array.from(g);
+    gen[b.id] = g;
   }
   const entry = new Int32Array(K).fill(ABSENT);
   for (const v of f.vars) if (v.param >= 0 && slot[v.id] >= 0) entry[slot[v.id]] = VARY;
-  const IN: (Int32Array | undefined)[] = new Array(nb);
-  IN[0] = entry;
-  const meetInto = (r: Int32Array, b: Int32Array) => { for (let k = 0; k < K; k++) if (r[k] !== b[k]) r[k] = VARY; };
+  // IN/OUT states are K-wide rows of flat arrays (row = block id); hasIn/hasOut mark defined rows
+  const IN = new Int32Array(nb * K), OUT = new Int32Array(nb * K);
+  const hasIn = new Uint8Array(nb), hasOut = new Uint8Array(nb);
+  IN.set(entry, 0); hasIn[0] = 1;
   const order: number[] = [];
   { const seen = new Uint8Array(nb); const post: number[] = []; const st: [number, number][] = [[0, 0]]; seen[0] = 1;
     while (st.length) { const t = st[st.length - 1]; const b = f.blocks[t[0]]; if (t[1] < b.succs.length) { const s = b.succs[t[1]++]; if (!seen[s]) { seen[s] = 1; st.push([s, 0]); } } else { post.push(t[0]); st.pop(); } }
     order.push(...post.reverse()); }
-  const OUT: (Int32Array | undefined)[] = new Array(nb);
+  const inn = new Int32Array(K), out = new Int32Array(K); // scratch rows
   // A block whose predecessors' OUT did not change since it was last evaluated would recompute the
   // same IN/OUT, so it is skipped (same states and same per-iteration `changed` as re-evaluating
   // every block each round, hence also the same behaviour under the iteration cap).
@@ -271,23 +266,29 @@ export function globalConstProp(f: VarFunc): boolean {
       if (!dirty[id]) continue;
       dirty[id] = 0;
       const b = f.blocks[id];
-      let inn: Int32Array | undefined = id === 0 ? entry.slice() : undefined;
-      for (const p of b.preds) { const o = OUT[p]; if (o) { if (inn) meetInto(inn, o); else inn = o.slice(); } }
-      if (!inn) continue;
-      const out = inn.slice();
+      let any = false;
+      if (id === 0) { inn.set(entry); any = true; }
+      for (const p of b.preds) {
+        if (!hasOut[p]) continue;
+        const o = p * K;
+        if (any) { for (let k = 0; k < K; k++) if (inn[k] !== OUT[o + k]) inn[k] = VARY; } // meet
+        else { inn.set(OUT.subarray(o, o + K)); any = true; }
+      }
+      if (!any) continue;
+      out.set(inn);
       const g = gen[id];
       for (let i = 0; i < g.length; i += 2) out[g[i]] = g[i + 1];
-      const prev = OUT[id];
-      let same = !!prev;
-      if (prev) for (let k = 0; k < K; k++) if (prev[k] !== out[k]) { same = false; break; }
-      if (!same) { OUT[id] = out; changed = true; for (const d of dependents[id]) dirty[d] = 1; }
-      IN[id] = inn;
+      const r = id * K;
+      let same = !!hasOut[id];
+      if (same) for (let k = 0; k < K; k++) if (OUT[r + k] !== out[k]) { same = false; break; }
+      if (!same) { OUT.set(out, r); hasOut[id] = 1; changed = true; for (const d of dependents[id]) dirty[d] = 1; }
+      IN.set(inn, r); hasIn[id] = 1;
     }
   }
   let changed = false;
   for (const b of f.blocks) {
-    const st = IN[b.id];
-    if (!st) continue;
+    if (!hasIn[b.id]) continue;
+    const st = IN.subarray(b.id * K, b.id * K + K);
     // block-local overrides of the entry state (null = no longer known constant)
     const loc = new Map<number, Expr | null>();
     const look = (v: number): Expr | undefined => {
