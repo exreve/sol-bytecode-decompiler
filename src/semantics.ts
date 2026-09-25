@@ -401,11 +401,34 @@ export function stringAddr(image: Image, s: string): bigint | undefined {
 	const needle = Buffer.from(s, 'utf8')
 	let at: bigint | undefined
 	for (const r of image.regions) {
+		if (!mayContain(r, needle)) continue // (no occurrence: indexOf would return -1)
 		const i = Buffer.from(r.bytes.buffer, r.bytes.byteOffset, r.bytes.byteLength).indexOf(needle)
 		if (i >= 0) { at = r.vaddr + BigInt(i); break }
 	}
 	m.set(s, at)
 	return at
+}
+
+/**
+ * Filter for the byte search in large regions (the code comes first in address order, so every
+ * string used to be searched for in all of it): a bit per 24-bit hash of each 4-byte window of the
+ * region. A needle occurring in the region has all its windows there, so when one of its windows'
+ * bits is clear it does not occur. Never a false "no"; small regions and needles shorter than 4
+ * bytes are just searched.
+ */
+const windowBits = new WeakMap<Uint8Array, Uint32Array>()
+const winHash = (b: Uint8Array, i: number) => Math.imul(b[i] | b[i + 1] << 8 | b[i + 2] << 16 | b[i + 3] << 24, 0x9e3779b1) >>> 8
+function mayContain(r: { bytes: Uint8Array }, needle: Uint8Array): boolean {
+	const b = r.bytes
+	if (b.length < 0x10000 || needle.length < 4) return true
+	let bits = windowBits.get(b)
+	if (!bits) {
+		bits = new Uint32Array(1 << 19)
+		for (let i = 0; i + 4 <= b.length; i++) { const h = winHash(b, i); bits[h >>> 5] |= 1 << (h & 31) }
+		windowBits.set(b, bits)
+	}
+	for (let i = 0; i + 4 <= needle.length; i++) { const h = winHash(needle, i); if (!((bits[h >>> 5] >>> (h & 31)) & 1)) return false }
+	return true
 }
 
 export function constsIn(e: Expr, out: Set<bigint>) { walkExpr(e, x => { if (x.k === 'const') out.add(x.v) }) }
