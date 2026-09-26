@@ -32,6 +32,7 @@ interface Cls {
 	ptr: Map<number, number>       // offset -> node the 8-byte field there points to
 	members: { pc: number; v: number }[]
 	data: { pc: number; v: number }[] // account data pointers (acc.data.ptr) it holds
+	isData?: boolean // the data of a DataCell (its pointers are account data pointers)
 	opaque: boolean
 }
 
@@ -348,6 +349,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		for (const [k, x] of A.acc) { const y = B.acc.get(k); if (y) y.n += x.n; else B.acc.set(k, { ...x }) }
 		B.members.push(...A.members)
 		B.data.push(...A.data)
+		B.isData ||= A.isData
 		B.opaque ||= A.opaque
 		const pend: [number, number][] = []
 		for (const [o, t] of A.ptr) { const u = B.ptr.get(o); if (u === undefined) B.ptr.set(o, t); else pend.push([t, u]) }
@@ -420,7 +422,12 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	}
 	const known = (root: number, view: string) => {
 		viewOf.set(find(root), view)
-		for (const [o, t] of cls[find(root)].ptr) { const r = views.resolve(view, o); if (r?.last.k === 'ref' && views.map.has(r.last.to) && !viewOf.has(find(t))) known(t, r.last.to) }
+		for (const [o, t] of cls[find(root)].ptr) {
+			const r = views.resolve(view, o)
+			if (r?.last.k === 'ref' && views.map.has(r.last.to) && !viewOf.has(find(t))) known(t, r.last.to)
+			// (the data a DataCell points to: account data, its own view)
+			else if (view === 'DataCell' && o === 0x18 && r?.last.k === 'ref' && !empty(t)) cls[find(t)].isData = true
+		}
 	}
 	const build = (root: number, hint: string): string | undefined => {
 		root = find(root)
@@ -439,7 +446,8 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		// the name: after a parameter it is (the first function's), else after the field pointing to it
 		const m = [...c.members].sort((x, y) => x.pc - y.pc)[0]
 		let name = hint
-		const dm = [...c.data].sort((x, y) => x.pc - y.pc)[0]
+		let dm = [...c.data].filter(x => x.v >= 0).sort((x, y) => x.pc - y.pc)[0]
+		if (!dm && c.isData) for (const [pc, memo] of nodeOf) { for (const [v, n] of memo) if (n !== null && find(n) === root) { dm = { pc, v }; break } if (dm) break }
 		if (dm) name = `Data_${cfg.fnName(dm.pc).replace(/^fn_/, '')}`
 		else if (m) {
 			const info = cfg.built.get(m.pc)!.f.vars[m.v]
@@ -479,6 +487,8 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		return name
 	}
 	const out = new Map<number, Map<number, string>>()
+	// (views of the parameters' objects first: a known view found there makes the data its RefCell points to account data)
+	for (const [pc, memo] of nodeOf) for (const [v, n] of memo) if (n !== null && cfg.built.get(pc)!.f.vars[v].param >= 0) build(n, `S_${cfg.fnName(pc).replace(/^fn_/, '')}_local`)
 	for (const [pc, memo] of nodeOf) for (const [v, n] of memo) {
 		if (n === null || f0(pc, v)) continue
 		const t = build(n, `S_${cfg.fnName(pc).replace(/^fn_/, '')}_local`)
@@ -509,6 +519,6 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	if (rename.size) for (const nm of synth) for (const x of views.map.get(nm)!.fields) if (x.t.k === 'ref' && rename.has(x.t.to)) x.t = { k: 'ref', to: rename.get(x.t.to)! }
 	for (const m of out.values()) for (const [v, t] of m) if (rename.has(t)) m.set(v, rename.get(t)!)
 	// (locals: typed through their pointer field, except account data pointers)
-	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 && !direct.has(`${pc}:${v}`) && !cls[find(nodeOf.get(pc)!.get(v)!)].data.some(x => x.pc === pc && x.v === v) }
+	function f0(pc: number, v: number) { const c = cls[find(nodeOf.get(pc)!.get(v)!)]; return cfg.built.get(pc)!.f.vars[v].param < 0 && !direct.has(`${pc}:${v}`) && !c.isData && !c.data.some(x => x.pc === pc && x.v === v) }
 	return { types: out, synth }
 }
