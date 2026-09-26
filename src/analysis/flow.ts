@@ -367,6 +367,8 @@ export interface AnchorEval {
  * layout), the RcBoxes of its lamports / data, pointers to its key / owner / lamports / data; values a call
  * returns in an object the caller passes are the callee's single store there.
  */
+/** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
+const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
 	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' }
 	const D = defsOf(H.f, cl)
@@ -423,9 +425,15 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 			if (j < 0 || pv === undefined) return undefined
 			const off = z - CD.fpOff(c.args[j])!
 			const GD = defsOf(g.f, cl)
-			const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
-			const vs: [Expr, number][] = []
-			for (let bi = 0; bi < g.f.blocks.length; bi++) g.f.blocks[bi].stmts.forEach((s, i) => { if (s.k === 'store' && s.size === 8 && at(s.addr) === off) vs.push([s.v, bi << 16 | i]) })
+			const vk = `${pv}|${off}`
+			let vm = outStores.get(g.f), vs = vm?.get(vk)
+			if (!vs) {
+				const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
+				const l: [Expr, number][] = vs = []
+				for (let bi = 0; bi < g.f.blocks.length; bi++) g.f.blocks[bi].stmts.forEach((s, i) => { if (s.k === 'store' && s.size === 8 && at(s.addr) === off) l.push([s.v, bi << 16 | i]) })
+				if (!vm) outStores.set(g.f, (vm = new Map()))
+				vm.set(vk, vs)
+			}
 			if (!vs.length || vs.length > 8) return undefined
 			const rs = new Map<number, HVal>()
 			c.args.forEach((a, k) => { const x = ev(a, p, d + 1); const q = g.f.vars.find(u => u.param === k + 1)?.id; if (x && q !== undefined && k !== j) rs.set(q, x) })
@@ -599,6 +607,18 @@ export function anchorEval(r: Result, H: FuncOut): AnchorEval {
 	return a
 }
 
+const visitMemo = new WeakMap<VarFunc, number[]>()
+/** positions (block << 16 | index) of the statements calleeWrites looks at: calls of functions, stores, copies */
+function visitPos(f: VarFunc): number[] {
+	let r = visitMemo.get(f)
+	if (!r) {
+		r = []
+		for (let bi = 0; bi < f.blocks.length; bi++) f.blocks[bi].stmts.forEach((s, i) => { if (s.k === 'store' || s.k === 'stores' || s.k === 'copy' || callOf(s)?.t.k === 'fn') r!.push(bi << 16 | i) })
+		visitMemo.set(f, r)
+	}
+	return r
+}
+
 /**
  * Writes the handler's logic makes in the functions it calls with pointers into its frame (the Context
  * holding &Accounts, the Accounts struct, AccountInfo copies; 3 levels of calls): a store to a field of an
@@ -618,7 +638,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		const ff = r.facts.get(C.pc)
 		if (!ff || exits.has(C.pc) || tryPc === C.pc) return
 		const X = ctxOf(C, roots, 2)
-		C.f.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => {
+		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
 			if (c?.t.k === 'fn' && depth > 0 && !exits.has(c.t.pc)) {
@@ -648,7 +668,9 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			if (a.k !== 'fr' || a.ctx.fo !== H || C === H) return
 			for (const o of objs) for (const x of o.ex.fields) if (a.z < o.X + x.off + x.size && o.X + x.off < a.z + n)
 				push(o.acct, x.name, ['ACCOUNT_DATA_WRITE'], `an object of the handler ${H.name}'s frame, serialized back by ${o.exit}`)
-		}))
+		}
+		const bs = C.f.blocks
+		for (const q of visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
 	}
 	visit(H, new Map(), 3)
 }
@@ -1215,28 +1237,69 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 		if (c) for (let j = 0; j < c.args.length; j++) { const p = fpOff(c.args[j]); if (p !== undefined && p <= o && o < p + (callee ? callWrites(c.t, j, callee) : 0x80)) return loose ? { k: 'call', t: c.t, args: c.args } : null }
 		return undefined
 	}
-	const endMemo = new Map<string, [Expr, number] | null>()
+	// (per (key, loose): block -> the definition reaching its end)
+	const endMemo = new Map<number, Map<number, [Expr, number] | null>>()
+	// (per block, lazily: the statements a frame slot / a variable may be affected by (where effect is not
+	// undefined for some key), ascending; the others are skipped)
+	const slotAt: (number[] | undefined)[] = [], varAt: (Map<number, number[]> | undefined)[] = []
+	const slotStmts = (b: number): number[] => {
+		let r = slotAt[b]
+		if (r) return r
+		r = slotAt[b] = []
+		const ss = f.blocks[b].stmts
+		for (let i = 0; i < ss.length; i++) {
+			const s = ss[i]
+			if (s.k === 'store' ? fpOff(s.addr) !== undefined : s.k === 'stores' ? fpOff(s.addr) !== undefined : s.k === 'copy' ? fpOff(s.dst) !== undefined : !!callOf(s)) r.push(i)
+		}
+		return r
+	}
+	const varStmts = (b: number): Map<number, number[]> => {
+		let r = varAt[b]
+		if (r) return r
+		r = varAt[b] = new Map()
+		const ss = f.blocks[b].stmts
+		for (let i = 0; i < ss.length; i++) {
+			const s = ss[i]
+			if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { const l = r.get(s.dst); if (l) l.push(i); else r.set(s.dst, [i]) }
+		}
+		return r
+	}
+	// (the search from a block's preds is a function of the block, the key and endMemo: a search that added nothing to
+	// endMemo and stayed within the step budget is repeated as long as endMemo stays the same (n entries); its result
+	// is endMemo's own array, or rebuilt from the statement as the search builds it)
+	const predMemo = new Map<number, Map<number, { r: [Expr, number] | null; n: number }>>()
+	const memoed = new WeakSet<object>()
 	/** the definition of key reaching position p (the same one on every path), with its position */
 	const reaching = (key: number, p: number, loose = false): [Expr, number] | null => {
 		const path = new Set<number>()
-		let steps = 0, cyc = false
+		let steps = 0, cyc = false, over = false
+		const mkey = key * 2 + (loose ? 1 : 0)
+		let em = endMemo.get(mkey)
+		if (!em) endMemo.set(mkey, (em = new Map()))
+		const memo = em
 		// (undefined: only paths around a loop back to a block being searched)
 		const go = (b: number, from: number): [Expr, number] | null | undefined => {
 			const ss = f.blocks[b].stmts
-			for (let i = from - 1; i >= 0; i--) { const x = effect(ss[i], key, loose); if (x !== undefined) return x && [x, b << 16 | i] }
+			const cand = key >= 0 ? varStmts(b).get(key) : slotStmts(b)
+			if (cand) for (let j = cand.length - 1; j >= 0; j--) {
+				const i = cand[j]
+				if (i >= from) continue
+				const x = effect(ss[i], key, loose)
+				if (x !== undefined) return x && [x, b << 16 | i]
+			}
 			const preds = f.blocks[b].preds
-			if (!preds.length || ++steps > 400) return null
+			if (!preds.length) return null
+			if (++steps > 400) { over = true; return null }
 			let r: [Expr, number] | undefined
 			path.add(b)
 			for (const q of preds) {
-				const mk = `${q}|${key}${loose ? '~' : ''}`
-				let x = endMemo.get(mk)
+				let x = memo.get(q)
 				if (x === undefined) {
 					if (path.has(q)) { cyc = true; continue }
 					const c0 = cyc
 					cyc = false
 					const y = go(q, f.blocks[q].stmts.length)
-					if (!cyc && y !== undefined) endMemo.set(mk, y)
+					if (!cyc && y !== undefined) { memo.set(q, y); if (y) memoed.add(y) }
 					cyc ||= c0
 					if (y === undefined) continue
 					x = y
@@ -1247,7 +1310,21 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 			path.delete(b)
 			return r
 		}
-		return go(p >> 16, p & 0xffff) ?? null
+		const b0 = p >> 16, ss = f.blocks[b0].stmts, from = p & 0xffff
+		const cand = key >= 0 ? varStmts(b0).get(key) : slotStmts(b0)
+		if (cand) for (let j = cand.length - 1; j >= 0; j--) {
+			const i = cand[j]
+			if (i >= from) continue
+			const x = effect(ss[i], key, loose)
+			if (x !== undefined) return x && [x, b0 << 16 | i]
+		}
+		let pm = predMemo.get(mkey)
+		if (!pm) predMemo.set(mkey, (pm = new Map()))
+		const n = memo.size, c = pm.get(b0)
+		if (c && c.n === n) { const r = c.r; return !r || memoed.has(r) ? r : [effect(f.blocks[r[1] >> 16].stmts[r[1] & 0xffff], key, loose)!, r[1]] }
+		const r = go(b0, 0) ?? null
+		if (!over && memo.size === n) pm.set(b0, { r, n })
+		return r
 	}
 	d0 = { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching }
 	defsMemo.set(f, d0)
