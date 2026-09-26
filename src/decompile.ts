@@ -49,6 +49,7 @@ export interface Result {
   text: string;                    // single-file rendering
   facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
   tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
+  acctLayouts?: Map<number, import('./views.ts').Field[]>; // Anchor: handler pc -> the Accounts struct's fields, offsets in try_accounts' out object (the analysis)
   programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
   sigs: Map<number, FnSig>;        // per-function signatures of the lifted bytecode (fingerprint.ts), by function pc
   libPcs: Set<number>;             // recognized library functions
@@ -337,6 +338,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const fnNotes = new Map<number, string[]>(); // extra header lines per function
   const strAccounts = new Map<number, string[]>(); // handler pc -> account names from strings
   const tryOf = new Map<number, number>();          // handler pc -> its Accounts::try_accounts function
+  const acctLayouts = new Map<number, import('./views.ts').Field[]>(); // handler pc -> the Accounts struct's fields (offsets in try_accounts' out object)
   const paramTypes = new Map<number, Map<number, [string, string]>>(); // fn pc -> param var -> [view, provenance note]
   // IDL: accounts and arguments of each handler
   if (opts.sugar !== false && opts.idl) for (const [hpc, ix] of sem.ixNames) {
@@ -418,6 +420,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (ty) acctFieldType.set(`${ix}:${off}`, { ty, embed });
     }
     if (!fields.length) continue;
+    acctLayouts.set(hpc, fields);
     const P = ix.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
     if (views.map.has(`${P}Accounts`) || views.map.has(`${P}Context`)) continue;
     // the Accounts and Context views, once the Context's layout is known from a call site (see below);
@@ -1115,7 +1118,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
+  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }
