@@ -1,0 +1,464 @@
+{
+	"address": "GVau311111111111111111111111111111111111111",
+	"metadata": {
+		"name": "g_a31_vault",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "open_vault",
+			"discriminator": [181, 248, 228, 67, 6, 175, 37, 167],
+			"accounts": [
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "withdraw",
+			"discriminator": [183, 18, 70, 156, 148, 109, 161, 34],
+			"accounts": [
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "close_vault",
+			"discriminator": [141, 103, 17, 126, 72, 75, 29, 29],
+			"accounts": [
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "setup",
+			"discriminator": [137, 0, 196, 175, 166, 131, 77, 178],
+			"accounts": [
+				{
+					"name": "payer",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "config",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "beneficiary",
+					"type": "pubkey"
+				}
+			]
+		},
+		{
+			"name": "sweep",
+			"discriminator": [40, 23, 234, 175, 14, 61, 154, 177],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "forward",
+			"discriminator": [45, 165, 201, 116, 206, 225, 241, 18],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "escrow",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "target_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "claim",
+			"discriminator": [62, 198, 214, 193, 213, 159, 108, 210],
+			"accounts": [
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "position",
+					"writable": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "bump",
+					"type": "u8"
+				}
+			]
+		},
+		{
+			"name": "register",
+			"discriminator": [211, 124, 67, 15, 211, 194, 178, 240],
+			"accounts": [
+				{
+					"name": "profile",
+					"writable": true
+				},
+				{
+					"name": "authority",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "fee",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "touch",
+			"discriminator": [80, 157, 106, 220, 181, 72, 101, 81],
+			"accounts": [
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "clock"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "move_points",
+			"discriminator": [244, 138, 6, 67, 62, 196, 58, 59],
+			"accounts": [
+				{
+					"name": "from",
+					"writable": true
+				},
+				{
+					"name": "to",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "distribute",
+			"discriminator": [191, 44, 223, 207, 164, 236, 126, 61],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		}
+	],
+	"accounts": [
+		{
+			"name": "Vault",
+			"discriminator": [211, 8, 232, 43, 2, 152, 117, 119]
+		},
+		{
+			"name": "Config",
+			"discriminator": [155, 12, 170, 224, 30, 250, 204, 130]
+		},
+		{
+			"name": "Treasury",
+			"discriminator": [238, 239, 123, 238, 89, 1, 168, 253]
+		},
+		{
+			"name": "Position",
+			"discriminator": [170, 188, 143, 228, 122, 64, 247, 208]
+		},
+		{
+			"name": "Profile",
+			"discriminator": [184, 101, 165, 188, 95, 63, 127, 188]
+		},
+		{
+			"name": "Market",
+			"discriminator": [219, 190, 213, 55, 0, 227, 198, 154]
+		},
+		{
+			"name": "Wallet",
+			"discriminator": [24, 89, 59, 139, 81, 154, 232, 95]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "math"
+		},
+		{
+			"code": 6001,
+			"name": "empty"
+		},
+		{
+			"code": 6002,
+			"name": "paused"
+		},
+		{
+			"code": 6003,
+			"name": "limit"
+		},
+		{
+			"code": 6004,
+			"name": "claimed"
+		},
+		{
+			"code": 6005,
+			"name": "sameAccount"
+		},
+		{
+			"code": 6006,
+			"name": "badConfig"
+		},
+		{
+			"code": 6007,
+			"name": "noDest"
+		},
+		{
+			"code": 6008,
+			"name": "badDest"
+		},
+		{
+			"code": 6009,
+			"name": "alreadyInitialized"
+		},
+		{
+			"code": 6010,
+			"name": "notOpen"
+		}
+	],
+	"types": [
+		{
+			"name": "Vault",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "balance",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Config",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "beneficiary",
+						"type": "pubkey"
+					},
+					{
+						"name": "initialized",
+						"type": "bool"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Treasury",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Position",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "reward",
+						"type": "u64"
+					},
+					{
+						"name": "claimed",
+						"type": "bool"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Profile",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "authority",
+						"type": "pubkey"
+					},
+					{
+						"name": "fee",
+						"type": "u64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Market",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "opens_at",
+						"type": "i64"
+					},
+					{
+						"name": "last_ts",
+						"type": "i64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Wallet",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "points",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}

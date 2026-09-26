@@ -1,0 +1,305 @@
+{
+	"address": "GPoo311111111111111111111111111111111111111",
+	"metadata": {
+		"name": "g_a31_pool",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_pool",
+			"discriminator": [116, 233, 199, 204, 115, 159, 171, 36],
+			"accounts": [
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "open_stake",
+			"discriminator": [136, 215, 163, 130, 234, 194, 229, 229],
+			"accounts": [
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "pool"
+				},
+				{
+					"name": "stake",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "stake",
+			"discriminator": [206, 176, 202, 18, 200, 209, 179, 108],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "stake",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "user_token",
+					"writable": true
+				},
+				{
+					"name": "pool_vault",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "unstake",
+			"discriminator": [90, 95, 107, 42, 205, 124, 50, 225],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "stake",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "pool_auth"
+				},
+				{
+					"name": "pool_vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "shares",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "set_fee",
+			"discriminator": [18, 154, 24, 18, 237, 214, 19, 80],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "value",
+					"type": "u16"
+				}
+			]
+		},
+		{
+			"name": "set_paused",
+			"discriminator": [91, 60, 125, 192, 176, 225, 166, 218],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "value",
+					"type": "bool"
+				}
+			]
+		},
+		{
+			"name": "set_limit",
+			"discriminator": [51, 224, 252, 238, 154, 84, 60, 174],
+			"accounts": [
+				{
+					"name": "pool",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "value",
+					"type": "u64"
+				}
+			]
+		}
+	],
+	"accounts": [
+		{
+			"name": "Pool",
+			"discriminator": [241, 154, 109, 4, 17, 177, 109, 188]
+		},
+		{
+			"name": "Stake",
+			"discriminator": [150, 197, 176, 29, 55, 132, 112, 149]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "math"
+		},
+		{
+			"code": 6001,
+			"name": "empty"
+		},
+		{
+			"code": 6002,
+			"name": "paused"
+		},
+		{
+			"code": 6003,
+			"name": "limit"
+		},
+		{
+			"code": 6004,
+			"name": "claimed"
+		},
+		{
+			"code": 6005,
+			"name": "sameAccount"
+		},
+		{
+			"code": 6006,
+			"name": "badConfig"
+		},
+		{
+			"code": 6007,
+			"name": "noDest"
+		},
+		{
+			"code": 6008,
+			"name": "badDest"
+		},
+		{
+			"code": 6009,
+			"name": "alreadyInitialized"
+		},
+		{
+			"code": 6010,
+			"name": "notOpen"
+		}
+	],
+	"types": [
+		{
+			"name": "Pool",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "total_staked",
+						"type": "u64"
+					},
+					{
+						"name": "total_shares",
+						"type": "u64"
+					},
+					{
+						"name": "fee_bps",
+						"type": "u16"
+					},
+					{
+						"name": "paused",
+						"type": "bool"
+					},
+					{
+						"name": "limit",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Stake",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "pool",
+						"type": "pubkey"
+					},
+					{
+						"name": "shares",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}

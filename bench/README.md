@@ -10,6 +10,24 @@ and prints TP / FP / FN, recall, precision and F1 per category, then one `score`
 categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. Without a filter it
 also scores the eval pairs (`eval/analyze.ts`, below); `node bench/run.ts pairs` runs only those. ~40 s (~7 s with a filter).
 
+## Generated programs (bench/gen)
+
+`node bench/gen/gen.ts` writes 7 programs from instruction templates (`bench/gen/anchor.ts`, `bench/gen/native.ts`):
+`g_a31_vault`, `g_a31_pool` (Anchor 0.31.1), `g_a29_vault`, `g_a29_pool` (the same templates under Anchor 0.29.0 /
+solana-program 1.16.27), `g_n_bank`, `g_n_amm` (solana-program 2.2.1, spl-token), `g_p_jar` (pinocchio 0.8.4). Each
+template instruction is clean as written and names the properties its `v_<id>` features remove (signer, has_one /
+stored key, owner, discriminator / type tag, CPI program id, stored bump, uninitialized check, sysvar address,
+duplicate-account check, remaining-account key, close zeroing, checked arithmetic, zero-supply guard, token mint /
+authority, one of several instructions' validation). The generator writes the crates (`bench/gen/programs`,
+`bench/gen/programs29`: two cargo workspaces), the IDLs (`bench/idl/g_*.json`) and `bench/expected/g_*.json` with
+`"generated": true`; build with `WS=bench/gen/programs sh bench/build.sh g_` and `WS=bench/gen/programs29 sh
+bench/build.sh g_` (binaries in `bench/bin/`).
+
+`bench/run.ts` scores them for rules only, apart from the six categories: a variant is caught when one of its accepted
+rules is reported at its instruction (`~consistency`: a validation_consistency inconsistency there); every finding on a
+generated base is a false finding (inconsistencies on a base are counted as informational noise); findings a variant
+adds besides its expected ones are listed as unexpected (`--verbose`).
+
 ## Eval pairs
 
 `eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
