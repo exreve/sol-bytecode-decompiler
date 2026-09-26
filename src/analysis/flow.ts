@@ -700,6 +700,8 @@ export function indirectTargets(r: Result): Indirect {
 	}
 	const ro = (a: bigint) => { const g = p.image.region(a, 8); return !!g && !g.exec && /^\.(rodata|data\.rel\.ro)$/.test(g.name) }
 	const discs = new Set(r.instructions.map(i => i.disc))
+	// (a constant: the functions it designates, as an address or a read-only table of them)
+	const constFns = new Map<bigint, number[]>()
 	for (const fo of r.funcs) {
 		const out = new Set<number>()
 		const consts = new Map<number, { v: bigint; b: number }[]>() // var -> the constants it is set to (in which block)
@@ -710,14 +712,20 @@ export function indirectTargets(r: Result): Indirect {
 				else if (s.k === 'call' && s.dst >= 0) other.add(s.dst)
 				for (const e of stmtExprs(s)) walkExpr(e, x => {
 					if (x.k !== 'const') return
-					const t = fnAt(x.v)
-					if (t !== undefined && p.addressTaken.has(t)) out.add(t)
-					else if (ro(x.v)) for (let k = 0; k < 12; k++) {
-						const w = p.image.readConst(x.v + BigInt(8 * k), 8)
-						const t2 = w === undefined ? undefined : fnAt(w)
-						if (t2 !== undefined && p.addressTaken.has(t2)) out.add(t2)
-						else if (w === undefined || w > 0x10000n) break
+					let ts = constFns.get(x.v)
+					if (!ts) {
+						ts = []
+						const t = fnAt(x.v)
+						if (t !== undefined && p.addressTaken.has(t)) ts.push(t)
+						else if (ro(x.v)) for (let k = 0; k < 12; k++) {
+							const w = p.image.readConst(x.v + BigInt(8 * k), 8)
+							const t2 = w === undefined ? undefined : fnAt(w)
+							if (t2 !== undefined && p.addressTaken.has(t2)) ts.push(t2)
+							else if (w === undefined || w > 0x10000n) break
+						}
+						constFns.set(x.v, ts)
 					}
+					for (const t of ts) out.add(t)
 				})
 			}
 		})

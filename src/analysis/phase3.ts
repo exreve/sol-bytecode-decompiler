@@ -107,6 +107,23 @@ function provenance(I: IrT, ctx: IxCtx | undefined, fn: number, e: Expr, p: numb
 
 // ---- per instruction ----
 
+const divMemo = new WeakMap<object, { bi: number; si: number; s: Stmt; cands: [Expr, boolean][] }[]>()
+/** a function's statements dividing by a non-constant (the divisors; wide: a 128-bit division helper's), in block order */
+function divCands(r: Result, f: { blocks: { stmts: Stmt[] }[] }): { bi: number; si: number; s: Stmt; cands: [Expr, boolean][] }[] {
+	let out = divMemo.get(f)
+	if (out) return out
+	out = []
+	f.blocks.forEach((bl, bi) => bl.stmts.forEach((s, si) => {
+		const cands: [Expr, boolean][] = []
+		for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv' || x.op === 'sdiv32') && x.b.k !== 'const') cands.push([x.b, false]) })
+		const c = callOf(s)
+		if (c?.t.k === 'fn' && /^__u?divti3/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && c.args[3] && c.args[3].k !== 'const') cands.push([c.args[3], true])
+		if (cands.length) out!.push({ bi, si, s, cands })
+	}))
+	divMemo.set(f, out)
+	return out
+}
+
 export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 	const T = fnText(r), I = irOf(r), ctx = ix.ctx
 	ixText.set(ix, T)
@@ -194,15 +211,10 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		if (!ff || !fo || divs.length >= 20) continue
 		const g = cfgOf(fo)
 		const R = !r.anchor ? accountResolver(fo, { f: x => I.byPc.get(x)?.f, name: x => r.program.funcs.get(x)?.name ?? '' }) : undefined
-		fo.f.blocks.forEach((bl, bi) => {
-			if (g.rpo[bi] < 0 || divs.length >= 20 || (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi))) return
-			bl.stmts.forEach((s, si) => {
-				if (divs.length >= 20) return
+		for (const { bi, si, s, cands } of divCands(r, fo.f)) {
+			if (g.rpo[bi] < 0 || divs.length >= 20 || (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi))) continue
+			{
 				const p = bi << 16 | si
-				const cands: [Expr, boolean][] = []
-				for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv' || x.op === 'sdiv32') && x.b.k !== 'const') cands.push([x.b, false]) })
-				const c = callOf(s)
-				if (c?.t.k === 'fn' && /^__u?divti3/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && c.args[3] && c.args[3].k !== 'const') cands.push([c.args[3], true])
 				for (const [dv, wide] of cands) {
 					const seen = provenance(I, ctx, ff.pc, dv, p)
 					// (a supply-like name, or a 128-bit product divided by a value read from an account's data)
@@ -220,8 +232,8 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 					const line = ff.pcLine.get(s.pc) ?? ff.at + 1
 					divs.push({ at: loc(ff.name, line), expr: ff.lines[line - 1]?.trim().slice(0, 140) ?? '', divisor: seen.join(' ← ').slice(0, 160), status: gc ? 'checked' : 'not_found', guard: gc && guardOf(gc) })
 				}
-			})
-		})
+			}
+		}
 	}
 	ix.divs = divs
 	// path conditions to the sensitive operations
