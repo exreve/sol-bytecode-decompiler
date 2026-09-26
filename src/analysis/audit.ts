@@ -125,11 +125,13 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 	}
 	// (an account the instruction sets a byte / word of to 1 (is_initialized, a state) behind a condition on the way reading
 	// its data (its state unpacked and tested): an initialization gated by the account's state)
-	if (ctx) {
+	// (native: a flag at a fixed place of the data, the state unpacked by the program itself; Anchor's accounts carry a
+	// discriminator instead)
+	if (ctx && !r.anchor) {
 		const gated = new Set<string>()
 		for (const o of ix.ops) {
-			if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || !o.target || o.fnPc === undefined || o.at.pc === undefined || !/^(0x0*)?1$/.test(o.value ?? '')) continue
-			const acct = o.target.split('.')[0]
+			if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || !/\.data\[\d+\.\.\d+\]$/.test(o.target ?? '') || o.fnPc === undefined || o.at.pc === undefined || !/^(0x0*)?1$/.test(o.value ?? '')) continue
+			const acct = o.target!.split('.')[0]
 			if (gated.has(acct)) continue
 			const conds = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc))
 			if (conds.some(k => k.how !== 'before' && src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data'))) gated.add(acct)

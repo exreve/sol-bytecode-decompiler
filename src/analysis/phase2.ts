@@ -837,7 +837,10 @@ const RULES: Rule[] = [
 			// its first bytes): reinit-unchecked's when the account may be live)
 			// (or one it sets a flag / state of to 1 behind a test of its current data: is_initialized)
 			const tagged = new Set([...ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]), ...ix.audit?.initGated ?? []])
-			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => gate.includes(k))))
+			// (a raw constraint gates a write only when it can bind who calls: a key comparison (32 bytes) or a flag it reads;
+			// e.g. not two counters compared)
+			const gates = (c: CheckOut) => c.kinds.some(k => gate.includes(k) && (k !== 'raw' || !!c.sides || /memcmp|memeq|keyeq|is_signer|, 0x20\)/.test(c.cond)))
+			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => gates(ix.checks[i])))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
 			const anyGuard = ws.some(o => (o.guards ?? []).length)

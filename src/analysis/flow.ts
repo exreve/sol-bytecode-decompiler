@@ -393,7 +393,7 @@ const objLo = (o: FrameObj) => Math.min(...o.ex.fields.map(x => x.off))
  * position `at`); an account's &AccountInfo (info), the RcBox of its lamports (rc) / data (drc), a pointer
  * to its lamports (lam) / data (data, at `off`); ty: the account's type.
  */
-export type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data' | 'keyp' | 'ownp' | 'rem'; acct: string; ty?: string; off: number; guess?: boolean; seq?: string[] } // keyp / ownp: a pointer to its key / owner; rem: into the remaining accounts' AccountInfo array; guess: the account by the words around an account object
+export type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data' | 'keyp' | 'ownp' | 'rem' | 'obj' | 'objp'; acct: string; ty?: string; off: number; guess?: boolean; seq?: string[]; fo?: number; vo?: boolean } // keyp / ownp: a pointer to its key / owner; rem: into the remaining accounts' AccountInfo array; guess: the account by the words around an account object; obj: into a boxed account object (Box<Account<T>>, its deserialized T); objp: into the heap buffer a word of it (at fo) points to (a Vec field's elements); vo: at a variable offset past off
 export interface EvCtx { fo: FuncOut; D: Defs; ev: (e: Expr, p: number, d?: number) => HVal | undefined }
 export interface AnchorEval {
 	ctxOf: (fo: FuncOut, roots: Map<number, HVal>, depth: number) => EvCtx
@@ -443,7 +443,7 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 		return !!y && y[0].k === 'var' && y[0].id === accountsParam
 	}
 	/** the account whose &AccountInfo the handler's frame word z holds (at position at): copies followed back to try_accounts' out object */
-	const infoAcct = (z0: number, at0: number): { acct: string; ty?: string; guess?: boolean; word?: number } | undefined => {
+	const infoAcct = (z0: number, at0: number): { acct: string; ty?: string; guess?: boolean; word?: number; box?: boolean } | undefined => {
 		// (the Accounts struct's layout; else the account object's own words: among its fields, or its &AccountInfo right
 		// before / after them)
 		const ow = () => { for (const o of objs) if (z0 >= o.X + objLo(o) - 8 && z0 < ((o.X + o.size + 7) & ~7) + 8 && !o.ex.fields.some(x => z0 < o.X + x.off + x.size && o.X + x.off < z0 + 8)) return { acct: o.acct, ty: o.ex.type, guess: true }; return undefined }
@@ -460,6 +460,9 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 				const bv = T === undefined ? undefined : ti?.words?.get(z - T)
 				if (bv) return { acct: bv[0], word: bv[1] }
 				const f = T === undefined ? undefined : layout.find(x => (T + x.off === z && isInfo(x.t)) || (x.t.k === 'embed' && r.views.map.get(x.t.type)?.fields.some(y => T + x.off + y.off === z && isInfo(y.t))))
+				// (a boxed account object's pointer)
+				const bx = f || T === undefined ? undefined : layout.find(x => T + x.off === z && x.t.k === 'ref' && /boxed account object/.test(x.doc ?? ''))
+				if (bx) return { acct: bx.name, ty: (bx.t as { to: string }).to === 'Box' ? undefined : (bx.t as { to: string }).to, box: true }
 				return f ? { acct: f.name, ty: f.t.k === 'embed' ? f.t.type : /account of type (\w+)/.exec(f.doc ?? '')?.[1] } : ow()
 			}
 			const w = e.k === 'load' && e.size === 8 ? D.fpOff(e.addr) : undefined
@@ -536,6 +539,8 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 				}
 				case 'ext': return ev(e.a, p, d + 1)
 				case 'bin': {
+					// (into a boxed account object's heap buffer at a variable index: an element of that field)
+					if (e.op === 'add' && e.b.k !== 'const') { for (const x of [e.a, e.b]) { const a = ev(x, p, d + 1); if (a?.k === 'objp') return { ...a, vo: true } } return undefined }
 					if (e.op !== 'add' || e.b.k !== 'const') return undefined
 					const a = ev(e.a, p, d + 1), c = sNum(e.b.v)
 					// (an &AccountInfo of try_accounts' slice plus k AccountInfos: the k-th account after it)
@@ -554,9 +559,12 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 						if (v) return v
 						const ia = a.ctx.fo === H ? infoAcct(a.z, a.at) : undefined
 						if (ia?.word !== undefined) { const k = INFO_WORD[cl.legacy ? ia.word - 8 : ia.word]; return k ? { k, acct: ia.acct, off: 0 } : undefined }
+						if (ia?.box) return { k: 'obj', acct: ia.acct, ty: ia.ty, off: 0 }
 						return ia ? { k: 'info', ...ia, off: 0 } : undefined
 					}
-					if (!a || a.k === 'lam' || a.k === 'data' || a.k === 'keyp' || a.k === 'ownp') return undefined
+					// (a word of a boxed account object: a pointer to its heap buffer (a Vec field's elements))
+					if (a?.k === 'obj' && !a.vo) return { k: 'objp', acct: a.acct, ty: a.ty, off: 0, fo: a.off }
+					if (!a || a.k === 'lam' || a.k === 'data' || a.k === 'keyp' || a.k === 'ownp' || a.k === 'obj' || a.k === 'objp') return undefined
 					// (a word of the i-th AccountInfo (0x30 bytes) of the remaining accounts)
 					if (a.k === 'rem') {
 						const i = Math.floor(a.off / 0x30), w = a.off - 0x30 * i
@@ -642,6 +650,51 @@ export function tryInfo(r: Result, H: FuncOut): TryInfo | undefined {
 				return [e, p]
 			}
 			const fpOf = (e: Expr | undefined) => e === undefined ? undefined : D.fpOff(e) ?? (e.k === 'var' && D.defs.has(e.id) ? D.fpOff(D.defs.get(e.id)!) : undefined)
+			// (a pointer the function copies an account's try call out object to (memcpy / copy, the whole object): that account)
+			// (the copies a statement makes: a copy, a memcpy call, also one in another call's arguments)
+			const copiesIn = (st: Stmt): [Expr, Expr, number][] => {
+				const out: [Expr, Expr, number][] = []
+				if (st.k === 'copy') out.push([st.dst, st.src, st.n])
+				const c0 = callOf(st)
+				const cs = c0 ? [c0] : []
+				for (const e of stmtExprs(st)) walkExpr(e, x => { if (x.k === 'call' && x !== c0) cs.push(x) })
+				for (const c of cs) { const mc = memcpyOf(c, calleeOf(r)); if (mc) out.push(mc) }
+				return out
+			}
+			const boxOf = (v: Expr, p: number): { name: string; ty?: string } | undefined => {
+				const key = (e: Expr) => JSON.stringify(e, (_, x) => typeof x === 'bigint' ? x.toString() : x)
+				// (the expressions a pointer is, through variables' reaching definitions and a select's arms (an allocation's
+				// null check))
+				const chain = (e: Expr, q: number): Set<string> => {
+					const out = new Set<string>()
+					const go = (x: Expr, w: number, d: number) => {
+						if (d > 5) return
+						out.add(key(x))
+						if (x.k === 'sel') { go(x.a, w, d + 1); go(x.b, w, d + 1) }
+						if (x.k !== 'var') return
+						const y: [Expr, number] | null = D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : D.multi.has(x.id) ? D.reaching(x.id, w) : null
+						if (y && y[0].k !== 'call') go(y[0], y[1], d + 1)
+					}
+					go(e, q, 0)
+					return out
+				}
+				const vs = chain(v, p)
+				for (const [bj, b2] of T.f.blocks.entries()) for (const [ij, s2] of b2.stmts.entries()) for (const cp of copiesIn(s2)) {
+					const [dst, src, n] = cp
+					if (n < 0x20) continue
+					const q = bj << 16 | ij
+					if (![...chain(dst, q)].some(x => vs.has(x) && x !== '{"k":"const","v":"0"}')) continue
+					const so = D.fpOff(src)
+					const z = so !== undefined ? D.reaching(D.SLOT(so), q, true) : null
+					const c = z?.[0].k === 'call' && z[0].t.k === 'fn' ? z[0] : undefined
+					if (!c) continue
+					const cpc = (c.t as { pc: number }).pc, callPc = T.f.blocks[z![1] >> 16]?.stmts[z![1] & 0xffff]?.pc ?? -1
+					const k = named.filter(x => x.before === cpc && x.pc! > callPc).sort((x, w) => x.pc! - w.pc!)[0]
+					if (!k?.named) continue
+					return { name: k.named, ty: r.idl?.accounts?.find(a => a.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() === k.named)?.name }
+				}
+				return undefined
+			}
 			let most = 0
 			T.f.blocks.forEach((b, bi) => { const bl: Field[] = [], wordOf = new Map<number, number | undefined>(); let nst = 0; b.stmts.forEach((s, i) => {
 				if (s.k !== 'store' || s.size !== 8 || out === undefined) return
@@ -653,6 +706,9 @@ export function tryInfo(r: Result, H: FuncOut): TryInfo | undefined {
 				nst++
 				// (the value: a word a call left in the frame, through variables)
 				const y = follow(s.v, bi << 16 | i)
+				// (a Box<Account<T>>: a heap copy of the account's object, the out object of a call the check right after names)
+				const bx = y && y[0].k !== 'call' ? boxOf(s.v, bi << 16 | i) : undefined
+				if (bx) { if (!bl.some(x => x.name === bx.name)) { wordOf.set(off, 0); bl.push({ name: bx.name, off, t: { k: 'ref', to: bx.ty ?? 'Box' }, doc: `the analysis: a boxed account object try_accounts stores (a heap copy of its try call's out object)${bx.ty ? `; account of type ${bx.ty}` : ''}` }) } return }
 				if (!y || y[0].k !== 'call' || y[0].t.k !== 'fn') {
 					// (else an &AccountInfo taken straight from the accounts slice (no try call, e.g. an UncheckedAccount): the
 					// variable the code names after the account a check names)
@@ -1039,6 +1095,14 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				if (kinds[0] === 'LAMPORT_WRITE' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
 				if (kinds[0] === 'ACCOUNT_DATA_WRITE' && AUTHORITY.test(field)) kinds.push('AUTHORITY_WRITE')
 				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: s.k === 'store' ? arithHow(X.D, s.v, p) : '=', value: v, exit: note, handler: C === H ? undefined : H.pc })
+			}
+			// (a boxed account object: its field by the exit function serializing its type, else its data; an element of a
+			// field it points to (a Vec's heap buffer))
+			if (a.k === 'obj' || a.k === 'objp') {
+				const ex = a.ty ? [...exits.values()].flatMap(exitObjs).find(x => x.type === a.ty) : undefined
+				const fl = a.k === 'obj' && !a.vo ? ex?.fields.find(x => a.off < x.off + x.size && x.off < a.off + n)?.name : undefined
+				push(a.acct, fl ?? 'data', ['ACCOUNT_DATA_WRITE'], `through ${a.acct}'s boxed account object${a.k === 'objp' ? ' (a buffer it points to)' : ''}, serialized back on exit (handler ${H.name})`)
+				return
 			}
 			if (a.k === 'lam' && a.off === 0 && n === 8) push(a.acct, 'lamports', ['LAMPORT_WRITE'], `through the RefCell'd lamports of ${a.acct}'s AccountInfo (handler ${H.name})`)
 			if (a.k === 'data' && a.off === -8 && n === 8) push(a.acct, 'data_len', ['ACCOUNT_REALLOC'], `the length before the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
