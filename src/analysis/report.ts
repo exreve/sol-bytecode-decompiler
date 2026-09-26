@@ -368,6 +368,10 @@ function analyze0(r: Result): Analysis {
 					if (d && k && d !== k) {
 						sides = [`${d}.${kinds.includes('has_one') ? k : kinds.includes('token_mint') ? 'mint' : kinds.includes('token_owner') ? 'owner' : 'data'}`, `${k}.key`]
 						if (!account || account.endsWith('?')) account = d
+					} else if (!key && ac.length === 2 && kinds.includes('token_mint')) {
+						// (token::mint = <account>.<field>: two data sides, the token account's first)
+						const [t, o] = ac.map(x => canon(x.acct))
+						if (t && o && t !== o) { sides = [`${t}.mint`, `${o}.data`]; if (!account || account.endsWith('?')) account = t }
 					}
 				}
 				const at = loc(ff, c.line, c.pc)

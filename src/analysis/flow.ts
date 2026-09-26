@@ -1214,7 +1214,8 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 		if (b.k === 'var' && !direct) { const a = acctVar?.(b.id); if (a) return { acct: a, direct } }
 		return b.k === 'load' && b.size === 8 ? prov(b.addr, q, false, d + 1) : undefined
 	}
-	return ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
+	const res = ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
+	return res
 }
 
 /** a memcpy / memmove of a constant size: [dst, src, n] */
