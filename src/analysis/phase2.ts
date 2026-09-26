@@ -356,7 +356,7 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
-	findings.push(...incidentFindings(a, r))
+	findings.push(...incidentFindings(a, r, findings))
 	a.fundMovers = fundMovers(a, r)
 	const rank = { high: 3, medium: 2, low: 1, info: 0 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))

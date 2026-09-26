@@ -20,9 +20,10 @@ import { walkExpr } from '../ir.ts'
 import type { Analysis, IxOut, Loc, OpOut } from './report.ts'
 import type { Finding } from './phase2.ts'
 import type { FnFacts } from './facts.ts'
-import { irOf, defsIn, valueKey, posAt } from './paths.ts'
-import { cfgOf, callOf } from './flow.ts'
+import { irOf, defsIn, valueKey, posAt, stmtAt } from './paths.ts'
+import { cfgOf, callOf, anchorEval } from './flow.ts'
 import { sourceCtx, type Source } from './sources.ts'
+import { evaluatorsFor } from './audit.ts'
 
 type F = Omit<Finding, 'title'>
 export interface FundMover { instruction: string; authority: string; kind: string; from?: string; at: string }
@@ -30,6 +31,8 @@ export interface FundMover { instruction: string; authority: string; kind: strin
 export const INCIDENT_RULES: Record<string, string> = {
 	'introspection-unchecked': 'Instructions sysvar parsed without its key check, the loaded instruction\'s program id check, or with an index from instruction data',
 	'flash-repay-unbound': 'Flash-loan introspection: the found instruction\'s accounts / amount are not compared with this instruction\'s',
+	'signer-to-untrusted-program': 'PDA signature or a signer forwarded to a CPI whose program id is an account key no check pins',
+	'oracle-unvalidated': 'Oracle (Pyth) price used without its status / staleness (/ confidence, before a value move) read',
 }
 
 const M64 = (1n << 64n) - 1n
@@ -280,12 +283,219 @@ function introspection(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	return out
 }
 
-export function incidentFindings(a: Analysis, r: Result): Finding[] {
+// ---- oracle (Pyth price accounts) ----
+
+const PYTH_MAGIC = 0xa1b2c3d4n
+// (Pyth price account: magic @0, ptype @16, expo @20, valid_slot @40, timestamp @96 (v2), aggregate price @208, conf @216,
+// status @224, pub_slot @232; the SPL token-lending layout of 2021 keeps the aggregate at the same offsets)
+const PYTH_FIELDS = new Set([0, 0x10, 0x14, 0x20, 0x28, 0x60, 0xd0, 0xd8, 0xe0, 0xe8])
+const magicMemo = new WeakMap<Result, boolean>()
+/** the program compares a word with the Pyth magic somewhere */
+function pythAware(r: Result): boolean {
+	let m = magicMemo.get(r)
+	if (m === undefined) {
+		m = false
+		for (const fo of r.funcs) {
+			for (const b of fo.f.blocks) {
+				const es = [...b.stmts.flatMap(stmtExprs), ...(b.term.k === 'br' ? [b.term.c] : [])]
+				for (const e of es) walkExpr(e, x => { if (x.k === 'cmp' && ((x.a.k === 'const' && (x.a.v & 0xffffffffn) === PYTH_MAGIC) || (x.b.k === 'const' && (x.b.v & 0xffffffffn) === PYTH_MAGIC))) m = true })
+				if (m) break
+			}
+			if (m) break
+		}
+		magicMemo.set(r, m)
+	}
+	return m
+}
+
+interface Access { fn: Fn; p: number; size: number; off: number; base: string; e: Expr }
+/** loads at the Pyth field offsets, by base (the canonical key of the pointer they are read through) */
+function pythLoads(r: Result, ix: IxOut, sc: Fn[]): Access[] {
+	const I = irOf(r), out: Access[] = []
+	eachExpr(sc, (fn, x, p) => {
+		if (x.k !== 'load') return
+		const s = sumOf(x.addr)
+		const off = Number(s.c > 0xffffn ? -1n : s.c)
+		if (!PYTH_FIELDS.has(off) || !s.terms.length || s.terms.length > 2) return
+		const base = s.terms.map(t => valueKey(I, ix.ctx, fn.pc, t, p)).sort().join(' ')
+		if ((globalThis as { __incDebug?: boolean }).__incDebug && off === 0xd0) console.error('d0', ix.name, base)
+		if (base.startsWith('fp') || base === '?' || /^#/.test(base)) return
+		out.push({ fn, p, size: x.size, off, base, e: x })
+	})
+	return out
+}
+
+function oracle(r: Result, ix: IxOut, sc: Fn[]): F[] {
+	if (!pythAware(r)) return []
+	const loads = pythLoads(r, ix, sc)
+	const prices = loads.filter(x => x.off === 0xd0 && x.size === 8)
+	if (!prices.length) return []
+	const by = new Map<string, Access[]>()
+	for (const x of loads) { let l = by.get(x.base); if (!l) by.set(x.base, (l = [])); l.push(x) }
+	// (a Pyth object: its aggregate price read, with its magic compared or its expo / price type read)
+	const I = irOf(r)
+	const magicAt = new Set<string>()
+	for (const k of compares(r, sc)) {
+		const [c, o] = k.a.k === 'const' ? [k.a, k.b] : [k.b, k.a]
+		if (c.k !== 'const' || (c.v & 0xffffffffn) !== PYTH_MAGIC) continue
+		const y = o.k === 'ext' ? o.a : o
+		if (y.k === 'load') { const s = sumOf(y.addr); if (s.c === 0n) magicAt.add(s.terms.map(t => valueKey(I, ix.ctx, k.fn.pc, t, k.p)).sort().join(' ')) }
+	}
+	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('oracle', ix.name, [...by].filter(([, xs]) => xs.some(x => x.off === 0xd0)).map(([b, xs]) => `${b.slice(0, 60)}: ${xs.map(x => `${x.off.toString(16)}/${x.size}`).join(',')}`).join(' || '), [...magicAt])
+	const objs = [...by].filter(([b, xs]) => xs.some(x => x.off === 0xd0 && x.size === 8) && (magicAt.has(b) || xs.some(x => (x.off === 0x14 || x.off === 0x10) && x.size === 4)))
+	if (!objs.length) return []
+	const all = objs.flatMap(([, xs]) => xs)
+	const has = (offs: number[]) => all.some(x => offs.includes(x.off) && (x.off !== 0xe0 || x.size <= 4))
+	const status = has([0xe0]), conf = has([0xd8]), stale = has([0x60, 0x28, 0x20, 0xe8])
+	const moves = ix.ops.filter(VALUE_MOVE)
+	const missing = [...(status ? [] : ['status (aggregate status == Trading, @224)']), ...(stale ? [] : ['staleness (publish time / slot vs Clock)']), ...(conf || !moves.length ? [] : ['confidence (aggregate conf vs price, @216)'])]
+	if (!missing.length) return []
+	const price = objs[0][1].find(x => x.off === 0xd0)!
+	const src = srcOf(r, ix)
+	const accts = [...new Set(src(price.fn.pc, price.e, price.p).filter(y => y.kind === 'data' || y.kind === 'remaining').map(y => y.acct!))]
+	const at = locOf(price.fn, price.p)
+	return [{ rule: 'oracle-unvalidated', ix: ix.name, accounts: accts, path: [L(at), ...moves.slice(0, 1).map(o => L(o.at))], evidence: [`Pyth price account read (aggregate price @208: ${lineText(price.fn, price.p).slice(0, 90)})${accts.length ? ` from ${accts.join(', ')}` : ''}${magicAt.size ? '; magic 0xa1b2c3d4 compared' : ''}`, `no read of its ${missing.join(', ')} found in the instruction`, ...(moves.length ? [`the price gates a value move: ${moves[0].text.slice(0, 100)}`] : [])], confidence: status && stale ? 'low' : 'medium', weight: 5 }]
+}
+
+// ---- signer / PDA authority forwarded to an account-supplied program ----
+
+/** the arguments of the call to fn a parent entry names (a call statement, or a call nested in a statement / returned expression), with its position */
+function callAt(I: ReturnType<typeof irOf>, fn: number, par: { fn: number; pc?: number; ret?: Expr } | undefined): [Expr[], number] | undefined {
+	if (!par) return undefined
+	let found: Expr[] | undefined
+	const look = (e: Expr) => walkExpr(e, x => { if (!found && x.k === 'call' && x.t.k === 'fn' && x.t.pc === fn) found = x.args })
+	if (par.pc !== undefined) {
+		const st = stmtAt(I, par.fn, par.pc)
+		if (!st) return undefined
+		const c = callOf(st[0])
+		if (c && c.t.k === 'fn' && c.t.pc === fn) return [c.args, st[1]]
+		for (const e of stmtExprs(st[0])) look(e)
+		return found ? [found, st[1]] : undefined
+	}
+	const q = par.ret ? posAt(I, par.fn, undefined, par.ret) : undefined
+	if (par.ret) look(par.ret)
+	return found && q !== undefined ? [found, q] : undefined
+}
+
+const INVOKE = /^(solana_program::program::)?(program_)?invoke(_signed)?(_unchecked)?$|^sol_invoke_signed_(rust|c)$/
+const ld8 = (e: Expr): Expr => ({ k: 'load', size: 8, addr: e })
+/** an account's key is pinned: an address / key / PDA / has_one constraint, or a comparison of its key with a constant */
+function pinned(ix: IxOut, cmps: () => Cmp[], src: ReturnType<typeof srcOf>, acct: string): boolean {
+	const row = ix.accounts.find(x => x.name === acct)
+	if (row && ['address', 'key', 'pda', 'has_one', 'executable'].some(k => row.constraints[k] && row.constraints[k].status !== 'not_found')) return true
+	if (ix.checks.some(c => c.account === acct && c.kinds.some(k => k === 'address' || k === 'key' || k === 'executable'))) return true
+	return cmps().some(k => {
+		const [A, B] = [sideSrc(src, k, k.a), sideSrc(src, k, k.b)]
+		const key = (s: Source[]) => s.some(y => y.kind === 'key' && y.acct === acct)
+		// (a 32-byte comparison with a constant / stored bytes, or a word of it with a 64-bit constant)
+		const other = (e: Expr, S: Source[]) => (k.n === 32 && (e.k === 'const' || S.some(y => y.kind === 'data'))) || (!k.n && e.k === 'const' && e.v > 0xffffffffn)
+		return (key(A) && other(k.b, B)) || (key(B) && other(k.a, A))
+	})
+}
+const isSigner = (ix: IxOut, acct: string) => { const x = ix.accounts.find(y => y.name === acct); return !!x && (!!x.expected.signer || (!!x.constraints.signer && x.constraints.signer.status !== 'not_found')) }
+
+function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
+	const I = irOf(r), src = srcOf(r, ix), out: F[] = []
+	let cm: Cmp[] | undefined
+	const cmps = () => (cm ??= compares(r, sc))
+	const E = r.anchor && ix.ctx ? evaluatorsFor(r, ix.ctx) : undefined
+	const keyAcct = (fn: number, e: Expr, p: number) => {
+		const a = [...src(fn, e, p), ...src(fn, ld8(e), p)].find(y => y.kind === 'key')?.acct
+		if (a || !E) return a
+		// (Anchor: the evaluation of the pointer (an AccountInfo's key pointer, or the AccountInfo))
+		const C = E(fn), D = defsIn(I, fn), H = I.byPc.get(ix.ctx!.handler), A = H && anchorEval(r, H)
+		if (!C || !D) return undefined
+		const def = (x: Expr): [Expr, number] | undefined => x.k === 'var' && D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : undefined
+		// (an &AccountInfo: evaluated as one, or a word of the handler's Accounts struct holding one)
+		const info = (x: Expr, q: number, d: number): string | undefined => {
+			const h = C.ev(x, q)
+			if (h?.k === 'info' && !h.guess) return h.acct
+			const y = def(x)
+			if (y && d < 4) return info(y[0], y[1], d + 1)
+			if (x.k !== 'load') return undefined
+			const g = C.ev(x.addr, q)
+			const w = g?.k === 'fr' && g.ctx.fo === H ? A?.frameAcct(g.z, 8, g.at) : undefined
+			if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('  info', JSON.stringify(g, (k, v) => k === 'ctx' ? undefined : v), g?.k === 'fr' && g.ctx.fo === H, g?.k === 'fr' && g.ctx.fo.name, H?.name, JSON.stringify(w))
+			return w?.info ? w.acct : undefined
+		}
+		const key = (x: Expr, q: number, d: number): string | undefined => {
+			const h = C.ev(x, q)
+			if (h && (h.k === 'keyp' || h.k === 'info') && !h.guess) return h.acct
+			const y = def(x)
+			if (y && d < 4) return key(y[0], y[1], d + 1)
+			return x.k === 'load' ? info(x.addr, q, d + 1) : undefined
+		}
+		return key(e, p, 0)
+	}
+	const report = (prog: string, at: string, pda: boolean, fwd: string[], text: string, raw: boolean) => {
+		if (!pda && !fwd.length) return
+		out.push({ rule: 'signer-to-untrusted-program', ix: ix.name, accounts: [prog, ...fwd], path: [at], evidence: [text.slice(0, 140), `the program id is ${prog}'s key, and no check pins it (no address / key constraint, no comparison with a known id): the caller picks the program`, pda ? 'the program signs the CPI with its PDA seeds: the callee gets the PDA\'s authority (e.g. over its token accounts)' : `the caller's signature is forwarded (${fwd.join(', ')} signs the CPI)${raw ? '; CPI not decoded: the instruction has a signer check' : ''}`, 'see also cpi-unchecked-program'], confidence: pda ? 'high' : raw ? 'low' : 'medium', weight: pda ? 6 : 4 })
+	}
+	const seen = new Set(ix.ops.filter(o => o.cpi && o.fnPc !== undefined).map(o => `${o.fnPc}:${o.at.pc}`))
+	for (const o of ix.ops) {
+		if (!o.cpi || o.cpi.known || o.fnPc === undefined || o.at.pc === undefined || !o.cpi.src?.program) continue
+		const st = stmtAt(I, o.fnPc, o.at.pc)
+		if (!st) continue
+		let prog = keyAcct(o.fnPc, o.cpi.src.program, st[1])
+		// (Anchor, the program account not resolved: the one account named like a program other than the well-known ones; an
+		// address constraint no account was attributed to pins it)
+		const cands = r.anchor && !prog ? ix.accounts.filter(x => /program/i.test(x.name) && !/^(system|token|token_2022|associated_token|rent|metadata|memo|compute_budget)_program$/.test(x.name)) : []
+		if (cands.length === 1 && !ix.checks.some(c => !c.account && /ConstraintAddress|ConstraintExecutable/.test(c.error))) prog = cands[0].name
+		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('fwd', ix.name, o.text.slice(0, 60), prog, JSON.stringify(src(o.fnPc, o.cpi.src.program, st[1])), JSON.stringify(src(o.fnPc, ld8(o.cpi.src.program), st[1])), prog && pinned(ix, cmps, src, prog), E && !!E(o.fnPc), JSON.stringify(E?.(o.fnPc)?.ev(o.cpi.src.program, st[1]), (k, v) => k === 'ctx' ? undefined : typeof v === 'bigint' ? String(v) : v), JSON.stringify(o.cpi.src.program, (k, v) => typeof v === 'bigint' ? String(v) : v).slice(0, 200), ix.ctx?.parents.get(o.fnPc))
+		if (!prog || pinned(ix, cmps, src, prog)) continue
+		let fwd = o.cpi.accounts.flatMap((x, i) => { const e = o.cpi!.src?.accounts[i]; const a = x.s && e ? keyAcct(o.fnPc!, e, st[1]) : undefined; return a && isSigner(ix, a) ? [a] : [] })
+		// (a signer meta whose account is not resolved, no signer seeds: the instruction's signers)
+		if (!fwd.length && !signs(r, ix, o) && o.cpi.accounts.some((x, i) => x.s && !keyAcct(o.fnPc!, o.cpi!.src?.accounts[i] ?? { k: 'undef' }, st[1]))) fwd = ix.accounts.filter(x => isSigner(ix, x.name)).map(x => x.name)
+		report(prog, L(o.at), signs(r, ix, o), [...new Set(fwd)], o.text, false)
+	}
+	// (invoke / invoke_signed calls the facts did not decode (e.g. nested in an expression): the Instruction's program id
+	// (@0x30: accounts Vec, data Vec, program_id), the signer seeds' length (the stack argument after the slice pointer))
+	eachCall(sc, (fn, name, args, p, pc) => {
+		if (!INVOKE.test(name) || seen.has(`${fn.pc}:${pc}`) || args.length < 2) return
+		const ixp = /sol_invoke/.test(name) ? args[0] : args[1]
+		// (the Instruction a wrapper (invoke → invoke_signed) is passed: at its call site)
+		let [f0, e0, p0] = [fn.pc, ixp, p]
+		for (let d = 0; d < 3 && e0.k === 'var'; d++) {
+			const v = I.byPc.get(f0)?.f.vars[e0.id], par = v && v.param >= 1 && v.param < 100 ? ix.ctx!.parents.get(f0) : undefined
+			const at = callAt(I, f0, par)
+			if (!at || !at[0][v!.param - 1]) break
+			;[f0, e0, p0] = [par!.fn, at[0][v!.param - 1], at[1]]
+		}
+		const prog = keyAcct(f0, { k: 'bin', op: 'add', a: e0, b: { k: 'const', v: 0x30n } }, p0)
+		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('raw', ix.name, name, fn.ff?.name, prog, prog && pinned(ix, cmps, src, prog), JSON.stringify(src(fn.pc, ld8({ k: 'bin', op: 'add', a: ixp, b: { k: 'const', v: 0x30n } }), p)))
+		if (!prog || pinned(ix, cmps, src, prog)) return
+		const D = defsIn(I, fn.pc)
+		let pda = false
+		if (/invoke_signed/.test(name) && D) { const y = D.reaching(D.SLOT(-0x1000 + 8), p); pda = !(y && y[0].k === 'const' && y[0].v === 0n) }
+		let signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => x.name)
+		if (!signers.length && ix.checks.some(c => c.kinds.includes('signer'))) signers = ['(a signer the checks name)']
+		report(prog, L(locOf(fn, p)), pda, pda ? [] : signers, `${name}(…) ${lineText(fn, p)}`, true)
+	}, r)
+	return out
+}
+
+/**
+ * The incident rules' findings. `prior`: the rule engine's (phase2.ts); a signer-to-untrusted-program finding on a CPI
+ * cpi-unchecked-program already reports is merged into it (escalated to high when the PDA signs, its evidence appended).
+ */
+export function incidentFindings(a: Analysis, r: Result, prior: Finding[] = []): Finding[] {
 	const out: Finding[] = []
 	for (const ix of a.ixs) {
 		if (!ix.ctx) continue
 		const sc = scope(r, ix)
-		for (const f of introspection(r, ix, sc)) out.push({ ...f, title: INCIDENT_RULES[f.rule] })
+		for (const rule of [introspection, signerForward, oracle]) {
+			// (a rule failing on an unexpected shape reports nothing, the analysis goes on)
+			try {
+				for (const f of rule(r, ix, sc)) {
+					const same = f.rule === 'signer-to-untrusted-program' ? (prior.find(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix && x.path[0] === f.path[0]) ?? prior.find(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix)) : undefined
+					if (same) {
+						if (f.confidence === 'high') same.confidence = 'high'
+						same.evidence.push(`signer-to-untrusted-program: ${f.evidence[2] ?? ''}`)
+						same.accounts = [...new Set([...same.accounts, ...f.accounts])]
+					} else out.push({ ...f, title: INCIDENT_RULES[f.rule] })
+				}
+			} catch { /* nothing */ }
+		}
 	}
 	return out
 }
