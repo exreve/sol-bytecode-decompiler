@@ -58,7 +58,7 @@
 // `at` = { fn, line (1-based, in the function's text), pc? (sBPF instruction index), file?, file_line? (the line in that file) }.
 // constraint kinds: signer, writable, owner, discriminator, initialized, pda, address, executable, has_one, key, state,
 //   custom (IDL error), raw, rent_exempt, count, token_mint, token_owner, …; op kinds: see facts.ts OpKind.
-import type { Result } from '../decompile.ts'
+import type { FuncOut, Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
@@ -166,6 +166,17 @@ function analyze0(r: Result): Analysis {
 	const splits = new Map<number, DispatchGroup[]>()
 	if (!r.anchor) for (const h of roots) if (!h.name.startsWith('ix_')) { const g = splitDispatch(r, h, rootPcs); if (g) splits.set(h.pc, g) }
 	const ixs: IxOut[] = []
+	// (per function: the last call statement of each pc, with its position)
+	const callAtMemo = new Map<FuncOut, Map<number, { pos: number; c: ReturnType<typeof callOf> }>>()
+	const callAt = (fo: FuncOut) => {
+		let m = callAtMemo.get(fo)
+		if (!m) {
+			const mm = m = new Map()
+			fo.f.blocks.forEach((b, bi) => b.stmts.forEach((st, i) => { const c = callOf(st); if (c) mm.set(st.pc, { pos: bi << 16 | i, c }) }))
+			callAtMemo.set(fo, m)
+		}
+		return m
+	}
 	// (the functions a library function calls, in order)
 	const libCallsMemo = new Map<number, number[]>()
 	const libCalls = (pc: number): number[] => {
@@ -311,8 +322,8 @@ function analyze0(r: Result): Analysis {
 			const par = fn !== h.pc && d < 6 ? parents.get(fn) : undefined
 			const PR = par?.pc !== undefined ? resolverFor(par.fn, d + 1) : undefined
 			const pf = par && byPc.get(par.fn)
-			let pos = -1, c: ReturnType<typeof callOf> | undefined
-			pf?.f.blocks.forEach((b, bi) => b.stmts.forEach((st, i) => { if (st.pc === par!.pc && callOf(st)) { pos = bi << 16 | i; c = callOf(st) } }))
+			const at = pf && par!.pc !== undefined ? callAt(pf).get(par!.pc) : undefined
+			const pos = at?.pos ?? -1, c = at?.c
 			const seed = new Map<number, AcctVal>()
 			if (PR && c && c.t.k === 'fn' && c.t.pc === fn) c.args.forEach((a, j) => {
 				const v = PR.av(a, pos), pv = fo.f.vars.find(x => x.param === j + 1)?.id
