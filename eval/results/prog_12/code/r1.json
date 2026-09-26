@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "set_admin", "accounts": ["counter"], "issue": "no signer and no has_one admin; anyone sets counter.admin from instruction data and takes over admin-gated instructions", "confidence": 0.95}], "tokens_read": 92557}

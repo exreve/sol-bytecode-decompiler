@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "burn_cash", "accounts": ["author_fee_destination", "protocol_fee_destination"], "issue": "fee destination token accounts have no mint/address binding; burner can redirect fees (conditional on Crate program)", "confidence": 0.4}], "tokens_read": 123704}

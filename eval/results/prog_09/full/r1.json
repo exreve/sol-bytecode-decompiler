@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "update_reserve_config", "accounts": ["reserve", "lending_market", "lending_market_authority", "lending_market_owner"], "issue": "never checks reserve.lending_market == lending_market key; attacker with own market + authority + signer can overwrite config of a victim reserve", "confidence": 0.6}], "tokens_read": 96607}

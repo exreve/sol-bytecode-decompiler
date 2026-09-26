@@ -1,0 +1,1 @@
+{"findings": [], "reviewer_notes_on_security_folder": "check-bypassable (92) and signer-not-related-to-authority (52) judged false positives: OWNER_ASSIGN ops are writes to LamportsCell/DataCell RefCell borrow flag (+0x10) and Rc weak count (+0x08); a 'signer' check at fn_32e00:41 is a WAD-math zero test", "tokens_read": 124380}
