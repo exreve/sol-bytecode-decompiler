@@ -470,6 +470,8 @@ const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] =>
 	// (Anchor's close constraint on an account bound by has_one: the rent goes to the target its stored data names, e.g. a
 	// permissionless trade closing the maker's escrow to the maker)
 	const closed = o.anchorClose && o.target ? o.target.split('.')[0] + '.' : undefined
+	// (the close helper's own view of it, its target a parameter of the helper: the copies mapped to accounts are judged)
+	if (closed && !ix.accounts.some(x => `${x.name}.` === closed)) return []
 	if (closed && (ix.relations ?? []).some(x => (x.kind === 'has_one' || x.kind === 'field_eq') && ((x.a.startsWith(closed) && x.b.endsWith('.key')) || (x.b.startsWith(closed) && x.a.endsWith('.key'))))) return []
 	if (initWrite(ix, o)) return []
 	// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
