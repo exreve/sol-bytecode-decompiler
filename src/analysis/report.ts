@@ -70,7 +70,7 @@ import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
@@ -182,7 +182,7 @@ function analyze0(r: Result): Analysis {
 	if (!roots.length) roots = r.funcs.filter(f => f.f.isEntry)
 	const rootPcs = new Set(roots.map(f => f.pc))
 	// native programs: the instructions a processor / the entrypoint dispatches on the tag (flow.ts)
-	const splits = new Map<number, DispatchGroup[]>()
+	const splits = new Map<number, DispatchGroups>()
 	if (!r.anchor) for (const h of roots) if (!h.name.startsWith('ix_')) { const g = splitDispatch(r, h, rootPcs); if (g) splits.set(h.pc, g) }
 	const ixs: IxOut[] = []
 	// (per function: the last call statement of each pc, with its position)
@@ -528,7 +528,9 @@ function analyze0(r: Result): Analysis {
 		// unverified expected privileges raise the rank
 		for (const x of accounts) for (const [k, ev] of Object.entries(x.constraints)) if (ev.status === 'not_found' && (k === 'signer' || k === 'pda' || k === 'address')) score += 2
 		const kind: IxOut['kind'] = grp ? 'native' : !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
-		const dispatch = grp && `${grp.tags.length ? `tag ${grp.tags.join(', ')}` : 'paths leaving before the tag is matched'} (instruction data) matched in ${grp.dispatchers.join(', ')}; name ${grp.source === 'str' ? '[str: its "Instruction: …" log]' : grp.source === 'known' ? '[heur: the layout of a well-known program with these tags]' : '[the tag]'}`
+		// (a handler of its own the dispatch hands some tags over to)
+		const via = grp ? undefined : [...splits].map(([pc, g]) => [pc, g.via?.get(h.pc)] as const).find(x => x[1])
+		const dispatch = via ? `tag ${via[1]!.join(', ')} (instruction data) matched in ${splits.get(via[0])![0].dispatchers.join(', ')}, handled by ${h.name}` : grp && `${grp.tags.length ? `tag ${grp.tags.join(', ')}` : 'paths leaving before the tag is matched'} (instruction data) matched in ${grp.dispatchers.join(', ')}; name ${grp.source === 'str' ? '[str: its "Instruction: …" log]' : grp.source === 'known' ? '[heur: the layout of a well-known program with these tags]' : '[the tag]'}`
 		// (a tag region doing nothing the analysis sees, e.g. the invalid-tag default of the match: left out)
 		if (grp && !ops.length && !checks.length) continue
 		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect, dispatch, ctx })

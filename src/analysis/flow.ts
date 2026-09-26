@@ -29,6 +29,7 @@ export interface Cfg {
 	condBlock: Map<Expr, number>   // a branch condition (by identity) -> its block
 	condKey?: Map<string, number[]> // (lazily) a branch condition's shape up to negation -> its blocks
 	retBlock: Map<Expr, number>    // a returned expression (by identity) -> its block
+	pcCopies: Map<number, number[]> // a pc in several blocks (code the IR duplicated, e.g. a match arms' shared tail): all of them
 }
 
 const cfgMemo = new WeakMap<FuncOut, Cfg>()
@@ -38,15 +39,19 @@ export function cfgOf(fo: FuncOut): Cfg {
 	const f = fo.f
 	const { order, rpo } = computeRpo(f)
 	const idom = dominators(f, order, rpo)
-	const pcBlock = new Map<number, number>(), condBlock = new Map<Expr, number>(), retBlock = new Map<Expr, number>()
+	const pcBlock = new Map<number, number>(), condBlock = new Map<Expr, number>(), retBlock = new Map<Expr, number>(), pcCopies = new Map<number, number[]>()
 	f.blocks.forEach((b, i) => {
 		if (rpo[i] < 0) return
-		for (const s of b.stmts) if (!pcBlock.has(s.pc)) pcBlock.set(s.pc, i)
+		for (const s of b.stmts) {
+			const j = pcBlock.get(s.pc)
+			if (j === undefined) pcBlock.set(s.pc, i)
+			else if (j !== i) { const l = pcCopies.get(s.pc); if (!l) pcCopies.set(s.pc, [j, i]); else if (!l.includes(i)) l.push(i) }
+		}
 		if (!pcBlock.has(b.end)) pcBlock.set(b.end, i)
 		if (b.term.k === 'br') condBlock.set(b.term.c, i)
 		else if (b.term.k === 'ret' && b.term.e) retBlock.set(b.term.e, i)
 	})
-	g = { fo, rpo, idom, pcBlock, condBlock, retBlock }
+	g = { fo, rpo, idom, pcBlock, condBlock, retBlock, pcCopies }
 	cfgMemo.set(fo, g)
 	return g
 }
@@ -1179,6 +1184,8 @@ export interface DispatchGroup {
 	allowed: (fn: number, b: number) => boolean  // the same for a block of fn
 	tag: { fn: number; v: number }               // the variable holding the tag (read from the instruction data) in the first dispatcher
 }
+/** the instructions of a dispatch; via: the tags whose blocks hand over to another handler (an ix_ function), by handler */
+export type DispatchGroups = DispatchGroup[] & { via?: Map<number, number[]> }
 
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').replace(/\W+/g, '_').replace(/^_|_$/g, '').toLowerCase()
 
@@ -1287,7 +1294,7 @@ function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
  * "Instruction: X" log only its blocks make, else from a well-known program's layout when the tags
  * match one, else the tag. Code reached by no tag in particular (paths of invalid tags) is left out.
  */
-export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): DispatchGroup[] | undefined {
+export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): DispatchGroups | undefined {
 	const byPc = new Map(r.funcs.map(x => [x.pc, x]))
 	const q: [number, number][] = [[root.pc, 0]], seen = new Set([root.pc])
 	// (the first function whose matching splits into instructions: e.g. not the entrypoint's error-code conversion after the processor returns)
@@ -1303,7 +1310,7 @@ export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): Dis
 	return undefined
 }
 
-function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<number, FuncOut>): DispatchGroup[] | undefined {
+function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<number, FuncOut>): DispatchGroups | undefined {
 	// nested dispatchers: callees the tag is passed to
 	const ds: TagStates[] = [first]
 	const tried = new Set([first.fo.pc])
@@ -1352,35 +1359,47 @@ function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<nu
 			for (let j = 0; j < 9; j++) if (t[j] & mask[j]) return true
 			return false
 		}
-		const keep = (fn: number, pc: number) => { const i = dIdx.get(fn); if (i === undefined) return true; const b = cfgOf(ds[i].fo).pcBlock.get(pc); return b === undefined || allowed(fn, b) }
+		// (a pc in several blocks: also kept when a copy is reached with some tags only, these among them, e.g. the call
+		// two arms' shared tail makes)
+		const keep = (fn: number, pc: number) => {
+			const i = dIdx.get(fn); if (i === undefined) return true
+			const g = cfgOf(ds[i].fo), b = g.pcBlock.get(pc)
+			return b === undefined || allowed(fn, b) || !!g.pcCopies.get(pc)?.some(x => { const t = ds[i].inS[x]; return !!t && !isAll(t) && allowed(fn, x) })
+		}
 		return { mask, allowed, keep }
 	}
 	const lineText = (fn: number, pc: number) => { const ff = r.facts.get(fn); const l = ff?.pcLine.get(pc); return l === undefined ? '' : ff!.lines[l - 1] ?? '' }
 	const cand: { tags: number[]; logs: Set<string>; acts: number; other: boolean }[] = []
+	// (tags whose blocks call another handler (an ix_ function): that handler's tags)
+	const via = new Map<number, number[]>(), viaRest: [number, number][] = []
 	for (const [k, tags] of sig) {
 		const { mask } = mk(tags)
 		let other = false, acts = 0
-		const logs = new Set<string>()
+		const logs = new Set<string>(), hs = new Set<number>()
 		for (const part of k.split(',')) {
 			const [i, b] = part.split(':').map(Number)
 			const d = ds[i], t = d.inS[b]!
 			const excl = t.every((w, j) => (w & ~mask[j]) === 0)
 			const term = d.fo.f.blocks[b].term
-			if (term.k === 'ret' && term.e) walkExpr(term.e, x => { if (x.k === 'call') { acts++; if (x.t.k === 'fn' && roots.has(x.t.pc)) other = true } })
+			if (term.k === 'ret' && term.e) walkExpr(term.e, x => { if (x.k === 'call') { acts++; if (x.t.k === 'fn' && roots.has(x.t.pc)) { other = true; if (excl) hs.add(x.t.pc) } } })
 			for (const s of d.fo.f.blocks[b].stmts) {
 				const c = callOf(s)
-				if (c?.t.k === 'fn' && roots.has(c.t.pc)) other = true
+				if (c?.t.k === 'fn' && roots.has(c.t.pc)) { other = true; if (excl) hs.add(c.t.pc) }
 				if (c || (s.k === 'store' || s.k === 'stores')) acts++
 				if (excl && c?.t.k === 'sys' && /log/.test(c.t.name)) { const m = /"Instruction: ([^"]+)"/.exec(lineText(d.fo.pc, s.pc)); if (m) logs.add(snake(m[1])) }
 			}
 		}
 		if (!other && acts && tags[0] < 256) cand.push({ tags, logs, acts, other })
+		if (other && hs.size === 1 && tags[0] < 256) { const h = [...hs][0]; if (tags.length <= 4) via.set(h, [...via.get(h) ?? [], ...tags]); else if (tags.length > 16) viaRest.push([h, tags[0]]) }
 	}
 	// (the default branch of a match over 0..n-1: the next tag; other large tag sets are invalid tags)
 	const small = cand.filter(c => c.tags.length <= 4)
 	const maxSmall = Math.max(-1, ...small.flatMap(c => c.tags))
 	const rest = cand.filter(c => c.tags.length > 16).sort((a, b) => b.acts - a.acts)[0]
 	if (rest && rest.tags[0] === maxSmall + 1 && small.length >= 1) small.push({ ...rest, tags: [rest.tags[0]] })
+	// (the same for a default branch handing over to another handler: its first tag, when the other arms cover every tag below it)
+	const covered = new Set([...small.flatMap(c => c.tags), ...[...via.values()].flat()])
+	for (const [h, t] of viaRest) if (t > 0 && !via.has(h) && Array.from({ length: t }, (_, v) => v).every(v => covered.has(v))) via.set(h, [t])
 	let groups: DispatchGroup[] = small.map(c => {
 		const { allowed, keep } = mk(c === small[small.length - 1] && rest && c.tags.length === 1 && c.tags[0] === rest.tags[0] ? rest.tags : c.tags)
 		const name = c.logs.size === 1 ? [...c.logs][0] : c.tags.length === 1 ? `tag_${c.tags[0]}` : `tags_${c.tags.join('_')}`
@@ -1409,7 +1428,7 @@ function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<nu
 	groups = groups.sort((a, b) => (a.tags[0] ?? -1) - (b.tags[0] ?? -1))
 	const names = new Map<string, number>()
 	for (const x of groups) { const n = names.get(x.name) ?? 0; names.set(x.name, n + 1); if (n) x.name += `_${n + 1}` }
-	return groups
+	return Object.assign(groups, { via })
 }
 
 const evalCmpN = (op: string, a: bigint, b: bigint): boolean => {
