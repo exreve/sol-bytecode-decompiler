@@ -86,7 +86,7 @@ ${bankChecks({ signer: 'no_signer', owner: 'no_owner', tag: 'no_tag', key: 'no_k
 }`,
 		variants: [
 			{ id: 'no_signer', rules: ['value-move-no-signer', 'state-write-ungated'] },
-			{ id: 'no_owner', rules: ['unverified-account-data'] },
+			{ id: 'no_owner', rules: ['unverified-account-data'], notExploitable: 'the unowned account is debited and its data written; the runtime rejects both for an account the program does not own' },
 			{ id: 'no_tag', rules: ['account-type-unchecked', 'unverified-account-data'] },
 			{ id: 'no_key', rules: ['signer-not-related-to-authority'] },
 			{ id: 'wrapping_sub', rules: ['unchecked-arithmetic'] },
@@ -258,7 +258,7 @@ fn payout(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Program
 	Ok(())
 }`,
 		variants: [
-			{ id: 'cpi_unchecked', rules: ['cpi-unchecked-program'] },
+			{ id: 'cpi_unchecked', rules: ['cpi-unchecked-program'], notExploitable: 'spl_token::instruction::transfer(token_program.key, ..) rejects any program id other than spl_token::ID, so the removed check is redundant' },
 			{ id: 'bump_from_ix', rules: ['pda-bump-from-ix'] },
 			{ id: 'recipient_unbound', rules: ['recipient-unbound', 'token-mint-unrelated'] },
 		],
@@ -324,7 +324,7 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Progr
 }`,
 		variants: [
 			{ id: 'no_signer', rules: ['value-move-no-signer', 'state-write-ungated'] },
-			{ id: 'no_owner', rules: ['unverified-account-data'] },
+			{ id: 'no_owner', rules: ['unverified-account-data'], notExploitable: 'the unowned account is debited and its data written; the runtime rejects both for an account the program does not own' },
 			{ id: 'no_key', rules: ['signer-not-related-to-authority'] },
 			{ id: 'wrapping_sub', rules: ['unchecked-arithmetic'] },
 		],

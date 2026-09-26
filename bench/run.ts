@@ -54,7 +54,7 @@ async function main() {
 			if (!existsSync(so)) { console.error(`missing binary ${prog}@${v}.so`); continue }
 			jobs.push({ id: jobs.length, prog, variant: v, so, idl: idl && ve.idl ? patchIdl(idl, ve.idl) : idl })
 		}
-		for (const f of readdirSync(join(ROOT, 'bin'))) if (f.startsWith(prog + '@') && !exp.variants?.[f.slice(prog.length + 1, -3)]) console.error(`no expectation for ${f}`)
+		for (const f of readdirSync(join(ROOT, 'bin'))) if (f.startsWith(prog + '@') && !exp.variants?.[f.slice(prog.length + 1, -3)] && !exp.discarded?.[f.slice(prog.length + 1, -3)]) console.error(`no expectation for ${f}`)
 	}
 	if (withEval) for (const e of evalJobs()) jobs.push({ id: jobs.length, prog: '', so: e.so, idl: e.idl, evalKey: e.key })
 	const out = await runAll(jobs)

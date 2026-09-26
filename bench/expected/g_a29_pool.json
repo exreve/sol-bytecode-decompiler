@@ -43,13 +43,15 @@
 			"ix": "unstake",
 			"rules": ["recipient-unbound", "token-mint-unrelated"]
 		},
-		"cpi_token_unchecked": {
-			"ix": "unstake",
-			"rules": ["cpi-unchecked-program", "caller-controlled-sensitive-param"]
-		},
 		"inconsistent": {
 			"ix": "set_limit",
 			"rules": ["~consistency", "signer-not-related-to-authority", "state-write-ungated"]
+		}
+	},
+	"discarded": {
+		"cpi_token_unchecked": {
+			"ix": "unstake",
+			"reason": "anchor_spl token::transfer invokes the constant spl_token::ID; the unchecked token_program account is not the invoked program"
 		}
 	}
 }

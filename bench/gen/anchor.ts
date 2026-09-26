@@ -453,7 +453,7 @@ export const poolUnits: Unit[] = [
 		variants: [
 			{ id: 'no_token_mint', rules: ['token-mint-unrelated', 'recipient-unbound'] },
 			{ id: 'no_token_auth', rules: R.recipient },
-			{ id: 'cpi_token_unchecked', rules: R.cpi },
+			{ id: 'cpi_token_unchecked', rules: R.cpi, notExploitable: 'anchor_spl token::transfer invokes the constant spl_token::ID; the unchecked token_program account is not the invoked program' },
 		],
 	},
 	adminIx('set_fee', 'fee_bps', 'u16', 'u16', false),

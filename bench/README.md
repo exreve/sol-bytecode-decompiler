@@ -197,3 +197,9 @@ excluded, one per account and instruction), `caller-controlled-sensitive-param` 
 `unchecked-arithmetic` 58 → 39; new behavior-based `sysvar-account-unchecked` 2 (info, account not identified),
 `reinit-unchecked` (native) 4 in 1 program.
 
+
+Generated variants can be marked `notExploitable` in the templates (bench/gen): they are still built but listed under
+`discarded` in the expected file (with the reason) and not scored. Currently: the Anchor pools' `cpi_token_unchecked`
+(anchor_spl invokes the constant token program id), g_n_amm `cpi_unchecked` (the spl-token instruction builder rejects
+other program ids) and the native/pinocchio `no_owner` withdraws (the runtime rejects debiting or writing an account the
+program does not own).

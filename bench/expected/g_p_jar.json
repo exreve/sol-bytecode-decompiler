@@ -29,10 +29,6 @@
 			"ix": "withdraw",
 			"rules": ["value-move-no-signer", "state-write-ungated"]
 		},
-		"no_owner": {
-			"ix": "withdraw",
-			"rules": ["unverified-account-data"]
-		},
 		"no_key": {
 			"ix": "withdraw",
 			"rules": ["signer-not-related-to-authority"]
@@ -48,6 +44,12 @@
 		"div_zero": {
 			"ix": "redeem",
 			"rules": ["share-price-zero-supply"]
+		}
+	},
+	"discarded": {
+		"no_owner": {
+			"ix": "withdraw",
+			"reason": "the unowned account is debited and its data written; the runtime rejects both for an account the program does not own"
 		}
 	}
 }

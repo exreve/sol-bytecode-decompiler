@@ -17,10 +17,6 @@
 			"ix": "deposit",
 			"rules": ["share-price-zero-supply"]
 		},
-		"cpi_unchecked": {
-			"ix": "payout",
-			"rules": ["cpi-unchecked-program"]
-		},
 		"bump_from_ix": {
 			"ix": "payout",
 			"rules": ["pda-bump-from-ix"]
@@ -28,6 +24,12 @@
 		"recipient_unbound": {
 			"ix": "payout",
 			"rules": ["recipient-unbound", "token-mint-unrelated"]
+		}
+	},
+	"discarded": {
+		"cpi_unchecked": {
+			"ix": "payout",
+			"reason": "spl_token::instruction::transfer(token_program.key, ..) rejects any program id other than spl_token::ID, so the removed check is redundant"
 		}
 	}
 }
