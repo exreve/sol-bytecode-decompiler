@@ -500,7 +500,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 						helperCall(n, c, main, err)
 						if (/realloc|resize/i.test(nm)) facts.ops.push({ line: lineOf(n) + 1, pc: n.s.pc, kinds: ['ACCOUNT_REALLOC'], text: lines[lineOf(n)]?.trim() ?? '', main, errPath: err })
 					}
-					if (cs.length) before = cs[cs.length - 1]
+					// (the call made last: the statement's own, after the calls in its arguments)
+					if (cs.length) before = n.s.k === 'call' && n.s.t.k === 'fn' ? n.s.t.pc : n.s.k === 'set' && n.s.e.k === 'call' && n.s.e.t.k === 'fn' ? n.s.e.t.pc : cs[cs.length - 1]
 					break
 				}
 				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, ret: n.e, callee: c, main, errPath: err }); break
