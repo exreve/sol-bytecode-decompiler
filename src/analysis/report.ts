@@ -70,11 +70,14 @@ import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal, type EvCtx } from './flow.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
 import { libCpiOps } from './libcpi.ts'
+import { evaluatorsFor } from './audit.ts'
+type CpiAcct = NonNullable<OpOut['cpi']>['accounts'][number]
+import { irOf, stmtAt } from './paths.ts'
 import type { RoleView, Inconsistency } from './consistency.ts'
 import type { FundMover } from './incidents.ts'
 
@@ -495,6 +498,30 @@ function analyze0(r: Result): Analysis {
 		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(f.name)).map(f => f.pc)), tag: grp?.tag }
 		// (CPIs of Anchor helpers the library database does not name: libcpi.ts)
 		ops.push(...libCpiOps(r, ctx, fns, keep, fn => !!main.get(fn)))
+		// (Anchor: a CPI a function the handler calls makes (e.g. a library helper given a CpiContext): an account the printed
+		// code does not name, by where its key comes from up the call path (the expression at the call, else the variable the
+		// text names, e.g. a key pointer given to an instruction builder))
+		if (r.anchor) {
+			let E: ((fn: number) => EvCtx | undefined) | undefined
+			for (const o of ops) {
+				const src = o.cpi?.src, fo = o.fnPc !== undefined ? byPc.get(o.fnPc) : undefined
+				if (!src || !fo || o.at.pc === undefined) continue
+				// (the facts' CPI is shared by the instructions reaching the function: renamed in a copy)
+				let accs: CpiAcct[] | undefined
+				o.cpi!.accounts.forEach((x, i) => {
+					const t = x.text.replace(/^\*/, '')
+					if (known.has(canon(refOf(t, new Map())?.acct ?? t) ?? '')) return
+					const nv = /^[A-Za-z_]\w*$/.test(t) ? fo.names.indexOf(t) : -1
+					const e = src.accounts[i] ?? (nv >= 0 ? { k: 'var' as const, id: nv } : undefined)
+					if (!e) return
+					E ??= evaluatorsFor(r, ctx)
+					const st = stmtAt(irOf(r), fo.pc, o.at.pc!)
+					const v = st && E(fo.pc)?.ev(e, st[1])
+					if (v && (v.k === 'keyp' || v.k === 'info') && v.off === 0 && !v.guess && known.has(v.acct)) (accs ??= o.cpi!.accounts.map(y => ({ ...y })))[i].text = v.acct
+				})
+				if (accs) o.cpi = { ...o.cpi!, accounts: accs }
+			}
+		}
 		dominance(r, checks, ops, ctx)
 		for (const [acct, k, ci, via] of pend) note(acct, k, { status: checks[ci].status, at: checks[ci].at, via })
 		// runtime model: what the Solana runtime enforces for the operations made

@@ -685,7 +685,9 @@ const RULES: Rule[] = [
 			const d = dest && /^\*?([A-Za-z_]\w*)/.exec(dest.text)?.[1]
 			if (!d || !ix.accounts.some(x => x.name === d)) return []
 			const row = ix.accounts.find(x => x.name === d)
-			const related = row && (row.constraints.token_mint || row.constraints.associated) || (ix.relations ?? []).some(x => (x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`)) && /mint/.test(x.a + x.b))
+			// (an account at a program address (PDA): only the program creates it, with the mint it sets)
+			const pda = !!row?.constraints.pda && row.constraints.pda.status !== 'not_found'
+			const related = row && (row.constraints.token_mint || row.constraints.associated || pda) || (ix.relations ?? []).some(x => (x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`)) && /mint/.test(x.a + x.b))
 			return related ? [] : [{ accounts: [d], path: [L(o.at)], evidence: [o.text.slice(0, 140), `no token::mint constraint / mint relation found for ${d}`], confidence: 'low' as const, weight: wOf(o) }]
 		}),
 	},
@@ -910,8 +912,12 @@ const RULES: Rule[] = [
 			const seg = (n: string) => snakeName(n).split('_')[0]
 			// (an account the IDL declares a signer counts: a Signer<'info> check the analysis missed is not taken for none)
 			const signers = ix.accounts.filter(x => x.expected.signer || x.constraints.signer && x.constraints.signer.status !== 'not_found')
+			// (the party: an account of the instruction named so, bound to the program's state (a stored key compared with it),
+			// e.g. an offer's maker; not the destination itself, nor one of its own accounts)
 			const who = /^account\[/.test(d!) ? undefined : seg(d!)
-			const third = !!who && !signers.some(x => seg(x.name) === who) && ix.accounts.some(x => x.name !== d && seg(x.name) === who)
+			const party = who ? ix.accounts.find(x => x.name !== d && snakeName(x.name) === who) : undefined
+			const bound = !!party && (ix.relations ?? []).some(x => x.kind !== 'address' && (x.a === `${party.name}.key` || x.b === `${party.name}.key`))
+			const third = bound && !signers.some(x => seg(x.name) === who)
 			const conf = !signers.length || third ? (o.cpi?.seeds ? 'medium' as const : 'low' as const) : 'info' as const
 			// (outflows the program signs for are the ones where an unbound destination matters most)
 			return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: no owner / mint / key / PDA / relation check found${o.cpi?.seeds ? '; the program signs this outflow (PDA)' : ''}${!signers.length ? '; no signer check in the instruction' : third ? `; named after ${who}, who does not sign` : ''}`], confidence: conf, weight: wOf(o) }]

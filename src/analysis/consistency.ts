@@ -106,7 +106,8 @@ export function consistency(a: Analysis, r: Result): RoleView[] {
 		return [...out]
 	}
 	function initializes(ix: IxOut, x: IxOut['accounts'][number]) {
-		return /^(init|initialize|create)(_|$)/i.test(snake(ix.name)) || has(x, 'zero') || has(x, 'init')
+		// (Anchor: the rent exemption check init / zero make)
+		return /^(init|initialize|create)(_|$)/i.test(snake(ix.name)) || has(x, 'zero') || has(x, 'init') || (!!r.anchor && has(x, 'rent_exempt'))
 			|| ix.ops.some(o => o.kinds.includes('ACCOUNT_CREATE') && o.cpi?.accounts.some(y => y.text === x.name))
 	}
 	// members by role

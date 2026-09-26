@@ -1526,9 +1526,10 @@ function writesInfo(f: VarFunc) {
 	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { const l = defs.get(s.dst); if (s.k === 'call' || l === null) defs.set(s.dst, null); else if (l) l.push(s.e); else defs.set(s.dst, [s.e]) }
 	const fpv = f.vars.find(v => v.param === 10)?.id ?? -1
 	const fst: [number, Expr][] = []
-	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined) fst.push([z, s.v]) }
+	// (8-byte words stored to the frame, one by one or several at once)
+	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' || s.k === 'stores') && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined) { if (s.k === 'store') fst.push([z, s.v]); else s.vals.forEach((v, i) => fst.push([z + 8 * i, v])) } }
 	const ys = [...new Set(fst.map(x => x[0]))].sort((a, b) => a - b), hit = new Set<number>()
-	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' && s.size !== 8) || s.k === 'stores' || s.k === 'copy') {
+	for (const b of f.blocks) for (const s of b.stmts) if (((s.k === 'store' || s.k === 'stores') && s.size !== 8) || s.k === 'copy') {
 		const z = offOf(s.k === 'copy' ? s.dst : s.addr, fpv)
 		if (z === undefined) continue
 		const hi = z + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n)
@@ -1625,6 +1626,7 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 		outer: for (const b of f.blocks) for (const s of b.stmts) {
 			// (the parameter spilled to the frame: not an escape)
 			if (s.k === 'store' && s.size === 8 && spill.get(offOf(s.addr, fpv) ?? NaN)) continue
+			if (s.k === 'stores' && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined && s.vals.every((v, i) => off(v) === undefined || spill.get(z + 8 * i))) continue }
 			if (s.k === 'store' || s.k === 'stores' || s.k === 'copy') {
 				const a = off(s.k === 'copy' ? s.dst : s.addr)
 				if (a !== undefined) n = Math.max(n, a + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n))
@@ -1632,7 +1634,9 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 				if (s.k === 'store' && off(s.v) !== undefined || s.k === 'stores' && s.vals.some(v => off(v) !== undefined)) { n = Math.max(n, 0x80); break outer }
 			}
 			const c = callOf(s)
-			if (c) for (let k = 0; k < c.args.length; k++) { const a = off(c.args[k]); if (a !== undefined) n = Math.max(n, a + callWrites(c.t, k, cl, depth - 1)) }
+			// (a memcpy / memmove of a constant size: that many bytes at its destination)
+			const mc = c && memcpyOf(c, cl)
+			if (c) for (let k = 0; k < c.args.length; k++) { const a = off(c.args[k]); if (a !== undefined) n = Math.max(n, a + (mc && k === 0 ? mc[2] : callWrites(c.t, k, cl, depth - 1))) }
 		}
 	} else n = 0x80
 	memo.set(key, n)

@@ -522,7 +522,10 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (!kinds.includes('initialized') && /AccountAlreadyInitialized|UninitializedAccount/.test(error)) add('initialized')
 		let named: string | undefined
 		const nm = /Error_with_account_name\([^\n]*?"(\w+)"/.exec(ft)
+		// (Anchor: a call given the account's name as a &str (pointer, its length), e.g. a local copy of Error::with_account_name)
+		const sm = !nm && inp.anchor ? [...ft.matchAll(/\b\w+\([^\n]*?, "([a-z_][a-z0-9_]*)", (0x[0-9a-f]+|\d+)\)/g)].find(x => Number(x[2]) === x[1].length) : undefined
 		if (nm) named = nm[1]
+		else if (sm) named = sm[1]
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes) ?? shortName(ft)
 		// (native: a 32-byte comparison of values the function does not know as accounts (e.g. an AccountInfo parameter):
 		// kept without kinds, for the instruction's context to resolve (report.ts))
