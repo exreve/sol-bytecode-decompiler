@@ -696,6 +696,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "g_a31_risk"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "g_a31_vault"
 version = "0.1.0"
 dependencies = [
@@ -713,6 +721,13 @@ dependencies = [
 
 [[package]]
 name = "g_n_bank"
+version = "0.1.0"
+dependencies = [
+ "solana-program",
+]
+
+[[package]]
+name = "g_n_risk"
 version = "0.1.0"
 dependencies = [
  "solana-program",

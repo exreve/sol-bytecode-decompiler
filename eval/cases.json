@@ -11,7 +11,8 @@
 		"type-confusion": "an account of another type (or unchecked data) is deserialized as the expected type",
 		"pda-bump": "a PDA is derived with a caller-supplied bump",
 		"input-validation": "an instruction argument / derived amount is not range-checked (zero, bounds)",
-		"arithmetic": "rounding / overflow / underflow in value computations"
+		"arithmetic": "rounding / overflow / underflow in value computations",
+		"oracle-unvalidated": "an oracle price is used without validating its status, confidence or staleness"
 	},
 	"cases": [
 		{
@@ -215,6 +216,50 @@
 				"description": "deposit computes the token_0 / token_1 amounts for the requested lp_token_amount (rounded up) but does not reject a result where one side is zero (nor lp_token_amount == 0); with a skewed pool a depositor gets LP tokens while paying only one token, and repeated deposit / withdraw drains the pool. The fix adds require_gt!(lp_token_amount, 0) and zero checks on the computed amounts (also in withdraw and swap_base_output)."
 			},
 			"packets": { "vuln": "prog_10", "fixed": "prog_20" }
+		},
+		{
+			"id": "spl_lending_oracle_status",
+			"source": "real",
+			"program": "SPL token-lending (native)",
+			"repo": "https://github.com/solana-labs/solana-program-library",
+			"path": "token-lending/program",
+			"commits": { "vuln": "eaca634995313f451ec91970fed3dcbc6610678e", "fixed": "0b8961597b3adf7355e48506d7e81b3925bbacd0" },
+			"links": ["https://github.com/solana-labs/solana-program-library/pull/2618"],
+			"date": "2021-12-04",
+			"framework": "native",
+			"idl": false,
+			"category": "oracle-unvalidated",
+			"ground_truth": {
+				"instruction": "refresh_reserve",
+				"aliases": ["refresh_reserve", "RefreshReserve", "process_refresh_reserve", "tag_3", "tag 3", "init_reserve", "tag_2"],
+				"accounts": ["reserve_liquidity_oracle_info", "pyth price", "accounts[1]", "account 1"],
+				"target": { "instructions": ["refresh_reserve", "tag_3", "init_reserve", "tag_2"], "accounts": ["*"], "rules": ["oracle-unvalidated"] },
+				"keywords": ["pyth", "oracle", "status", "Trading", "agg.status", "price"],
+				"description": "get_pyth_price (refresh_reserve tag 3, account 1; init_reserve tag 2) accepts the Pyth aggregate price whatever its status (unknown / halted / auction), so a non-trading aggregate prices the reserve; the fix requires agg.status == Trading."
+			},
+			"packets": {}
+		},
+		{
+			"id": "solend_oracle_conf",
+			"source": "real",
+			"program": "Solend token-lending (fork of SPL token-lending, native)",
+			"repo": "https://github.com/solendprotocol/solana-program-library",
+			"path": "token-lending/program",
+			"commits": { "vuln": "6c23c1918af2ef807f288683db5a235cc2e61475", "fixed": "12ea2cd586641b3a878f279ed2051c9966473acc" },
+			"links": ["https://github.com/solendprotocol/solana-program-library/pull/52"],
+			"date": "2021-12-15",
+			"framework": "native",
+			"idl": false,
+			"category": "oracle-unvalidated",
+			"ground_truth": {
+				"instruction": "refresh_reserve",
+				"aliases": ["refresh_reserve", "RefreshReserve", "process_refresh_reserve", "tag_3", "tag 3", "init_reserve", "tag_2"],
+				"accounts": ["pyth_price_info", "pyth price", "accounts[1]", "account 1"],
+				"target": { "instructions": ["refresh_reserve", "tag_3", "init_reserve", "tag_2"], "accounts": ["*"], "rules": ["oracle-unvalidated"] },
+				"keywords": ["pyth", "oracle", "confidence", "conf", "status", "Trading"],
+				"description": "get_pyth_price (via get_price in refresh_reserve tag 3 and init_reserve tag 2) uses the Pyth aggregate price without checking its status or its confidence interval; the fix rejects non-Trading prices and prices with conf * 10 > price."
+			},
+			"packets": {}
 		},
 		{
 			"id": "bench_a_vault_no_has_one",
