@@ -252,7 +252,7 @@ export class Exec {
 	/** 1: the models of the PDA syscalls derive other bump seeds (so runs 0 and 1 disagree on them) */
 	variant = 0
 	private pdaCalls = 0
-	private force?: { reach: Set<number>; target: number }
+	private force?: { reach: PcSet; target: number }
 	constructor(p: Program, mem: ExecMem, opts: { maxSteps?: number; maxDepth?: number; taint?: boolean } = {}) {
 		this.p = p; this.mem = mem; this.maxSteps = opts.maxSteps ?? 200_000; this.maxDepth = opts.maxDepth ?? 24; this.taint = !!opts.taint
 	}
@@ -280,7 +280,7 @@ export class Exec {
 	}
 
 	/** Branch decisions (forced when only one side can reach `reach`; flips, see `flip`) and the sticky predicate. */
-	private forcer(fpc: number, depth: number, reach: Set<number> | undefined): { branch: (pc: number, taken: boolean, tainted: boolean) => boolean; sticky: (pc: number) => boolean } {
+	private forcer(fpc: number, depth: number, reach: PcSet | undefined): { branch: (pc: number, taken: boolean, tainted: boolean) => boolean; sticky: (pc: number) => boolean } {
 		const insns = this.p.insns
 		const forced = (pc: number) => !!reach && reach.has(pc + 1 + insns[pc].off) !== reach.has(pc + 1)
 		return {
@@ -430,7 +430,7 @@ export function extentOf(p: Program, fpc: number): number {
  * Machine-level control flow of a function (instructions within its extent): predecessor and successor
  * lists; exits are returns; calls to noreturn functions end their path.
  */
-interface Cfg { preds: Map<number, number[]>; succs: Map<number, number[]>; exits: number[]; end: number }
+interface Cfg { predStart: Int32Array; preds: Int32Array; exits: number[]; lo: number; end: number } // predecessors of pc: preds[predStart[pc - lo] .. predStart[pc - lo + 1])
 const cfgCache = new WeakMap<Program, Map<number, Cfg>>()
 function cfgOf(p: Program, fpc: number): Cfg {
 	let c = cfgCache.get(p)
@@ -439,11 +439,10 @@ function cfgOf(p: Program, fpc: number): Cfg {
 	if (r) return r
 	const end = extentOf(p, fpc)
 	const v3 = p.version >= 3, noLddw = p.version === 2
-	const preds = new Map<number, number[]>(), succs = new Map<number, number[]>(), exits: number[] = []
+	const from: number[] = [], to: number[] = [], exits: number[] = []
 	const edge = (a: number, b: number) => {
 		if (b < fpc || b >= end) return
-		let l = preds.get(b); if (!l) preds.set(b, (l = [])); l.push(a)
-		let s = succs.get(a); if (!s) succs.set(a, (s = [])); s.push(b)
+		from.push(a); to.push(b)
 	}
 	for (let pc = fpc; pc < end; pc++) {
 		const ins = p.insns[pc]
@@ -457,42 +456,60 @@ function cfgOf(p: Program, fpc: number): Cfg {
 			if (!noret) edge(pc, pc + 1)
 			continue
 		}
-		if ((cls === 5 || (v3 && cls === 6)) && [1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd].includes(code) && ins.opc !== 0x8d) { edge(pc, pc + 1); edge(pc, pc + 1 + ins.off); continue }
+		if ((cls === 5 || (v3 && cls === 6)) && JCC_CODES.has(code) && ins.opc !== 0x8d) { edge(pc, pc + 1); edge(pc, pc + 1 + ins.off); continue }
 		edge(pc, pc + 1)
 	}
-	r = { preds, succs, exits, end }
+	// (compressed predecessor lists)
+	const n = Math.max(end - fpc, 0), predStart = new Int32Array(n + 1), preds = new Int32Array(to.length)
+	for (const b of to) predStart[b - fpc + 1]++
+	for (let i = 0; i < n; i++) predStart[i + 1] += predStart[i]
+	const fill = predStart.slice(0, n)
+	for (let k = 0; k < to.length; k++) preds[fill[to[k] - fpc]++] = from[k]
+	r = { predStart, preds, exits, lo: fpc, end }
 	c.set(fpc, r)
 	return r
 }
+const JCC_CODES = new Set([1, 2, 3, 4, 5, 6, 7, 0xa, 0xb, 0xc, 0xd])
 
-function backward(preds: Map<number, number[]>, seeds: number[]): Set<number> {
-	const reach = new Set<number>(seeds), q = [...seeds]
-	while (q.length) for (const x of preds.get(q.pop()!) ?? []) if (!reach.has(x)) { reach.add(x); q.push(x) }
-	return reach
+/** A set of instructions of one function (lo: its entry): pc -> member. */
+export class PcSet {
+	private lo: number
+	private m: Uint8Array
+	constructor(lo: number, m: Uint8Array) { this.lo = lo; this.m = m }
+	has(pc: number): boolean { const i = pc - this.lo; return i >= 0 && i < this.m.length && this.m[i] === 1 }
+}
+function backward(g: Cfg, seeds: number[]): PcSet {
+	const m = new Uint8Array(g.predStart.length - 1), q: number[] = []
+	for (const s of seeds) if (!m[s - g.lo]) { m[s - g.lo] = 1; q.push(s) }
+	while (q.length) {
+		const x = q.pop()! - g.lo
+		for (let k = g.predStart[x]; k < g.predStart[x + 1]; k++) { const y = g.preds[k]; if (!m[y - g.lo]) { m[y - g.lo] = 1; q.push(y) } }
+	}
+	return new PcSet(g.lo, m)
 }
 
 /**
  * Instructions of the function at fpc from which `target` can be reached (within the function; calls
  * fall through). Cached (the several runs towards one call share it); callers must not modify it.
  */
-const reachCache = new WeakMap<Program, Map<string, Set<number> | undefined>>()
-export function reaching(p: Program, fpc: number, target: number): Set<number> | undefined {
+const reachCache = new WeakMap<Program, Map<string, PcSet | undefined>>()
+export function reaching(p: Program, fpc: number, target: number): PcSet | undefined {
 	let c = reachCache.get(p)
 	if (!c) reachCache.set(p, (c = new Map()))
 	const k = `${fpc}:${target}`
 	if (c.has(k)) return c.get(k)
-	const { preds, end } = cfgOf(p, fpc)
-	const r = target < fpc || target >= end ? undefined : backward(preds, [target])
+	const g = cfgOf(p, fpc)
+	const r = target < fpc || target >= g.end ? undefined : backward(g, [target])
 	c.set(k, r)
 	return r
 }
 
 /** Instructions of the function at fpc from which it can return (not only abort / panic). */
-const retCache = new WeakMap<Program, Map<number, Set<number>>>()
-export function returning(p: Program, fpc: number): Set<number> {
+const retCache = new WeakMap<Program, Map<number, PcSet>>()
+export function returning(p: Program, fpc: number): PcSet {
 	let c = retCache.get(p)
 	if (!c) retCache.set(p, (c = new Map()))
 	let r = c.get(fpc)
-	if (!r) { const { preds, exits } = cfgOf(p, fpc); r = backward(preds, exits); c.set(fpc, r) }
+	if (!r) { const g = cfgOf(p, fpc); r = backward(g, g.exits); c.set(fpc, r) }
 	return r
 }
