@@ -437,15 +437,14 @@ const initWrite = (ix: IxOut, o: OpOut) => {
 	const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
 	if (!t) return false
 	const z = t.constraints.zero
-	const none = (k: string) => !t.constraints[k] || t.constraints[k].status === 'not_found'
-	// (Anchor: typed fields written into an account try_accounts neither deserialized (no discriminator check) nor checked the
-	// owner of (the runtime's only): an `init` account, its creation not seen)
 	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && t.constraints.discriminator?.status !== 'found')
-		|| (ix.kind === 'anchor' && none('discriminator') && none('initialized') && (none('owner') || t.constraints.owner.status === 'runtime'))
 }
 
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
 const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
+
+/** a signer of the instruction whose key is checked against a constant (an admin address) */
+const adminGated = (ix: IxOut) => ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found' && addressChecked(ix, x.name))
 
 /** a source that is the key of an account the instruction checks to be a signer */
 const signerKey = (ix: IxOut, src: string) => { const m = /^(.+)\.key$/.exec(src); const c = m && ix.accounts.find(x => x.name === m[1])?.constraints.signer; return !!c && c.status !== 'not_found' }
@@ -546,7 +545,8 @@ const L = (at: Loc) => `${at.fn}:${at.line}`
 const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => (ix.authority ?? []).flatMap(row => {
 	const o = ix.ops[row.op]
 	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
-	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
+	// (a signer checked against a constant address: a known admin, related to no stored field by design)
+	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o) || row.enabledBy.some(e => e.kind === 'signer' && addressChecked(ix, e.what))) return []
 	// (Anchor's close constraint on an account bound by has_one: the rent goes to the target its stored data names, e.g. a
 	// permissionless trade closing the maker's escrow to the maker)
 	const closed = o.anchorClose && o.target ? o.target.split('.')[0] + '.' : undefined
@@ -554,6 +554,11 @@ const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] =>
 	if (closed && !ix.accounts.some(x => `${x.name}.` === closed)) return []
 	if (closed && (ix.relations ?? []).some(x => (x.kind === 'has_one' || x.kind === 'field_eq') && ((x.a.startsWith(closed) && x.b.endsWith('.key')) || (x.b.startsWith(closed) && x.a.endsWith('.key'))))) return []
 	if (initWrite(ix, o)) return []
+	// (Anchor: the signer's own key stored into an account try_accounts neither deserialized (no discriminator check) nor
+	// checked the owner of: an `init` account whose creation is not seen (r.admin = admin.key()))
+	const t = o.kinds.includes('AUTHORITY_WRITE') && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
+	const none = (k: string) => !t!.constraints[k] || t!.constraints[k].status === 'not_found'
+	if (t && ix.kind === 'anchor' && none('discriminator') && none('initialized') && (none('owner') || t.constraints.owner.status === 'runtime') && (o.sources ?? []).some(s => s.param === o.target && signerKey(ix, s.source))) return []
 	// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 	// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
 	if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
@@ -672,7 +677,10 @@ const RULES: Rule[] = [
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
 		// (an authority set to the key of an account that signed, or while initializing: the usual assignments)
 		// (a CPI program id from an account: cpi-unchecked-program's, which weighs the checks of that account)
-		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && ((s.param === 'program' && !(o.cpi && progAccount(ix, o))) || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o)))).slice(0, 2).map(s => ({
+		// (a program id from the instruction data / the remaining accounts as a whole: the taint's over-approximation (any
+		// argument of a call reaching its result), not reported; an authority assignment in an instruction whose signer is
+		// an admin checked against a constant address: gated)
+		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && ((s.param === 'program' && !(o.cpi && progAccount(ix, o)) && s.source !== 'instruction data' && s.source !== 'remaining accounts') || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o) && !adminGated(ix)))).slice(0, 2).map(s => ({
 			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
 	},
@@ -799,7 +807,10 @@ const RULES: Rule[] = [
 			if (ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))) return []
 			// (no signer anywhere: a key binding (has_one, token owner) to an account nobody signs for gates nothing)
 			const gate = GATE.filter(k => !['has_one', 'key', 'token_owner', 'associated'].includes(k))
-			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => gate.includes(k))))
+			// (an initialization: an account the instruction creates, or whose type tag / discriminator it writes (a constant into
+			// its first bytes): reinit-unchecked's when the account may be live)
+			const tagged = new Set(ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]))
+			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => gate.includes(k))))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
 			const anyGuard = ws.some(o => (o.guards ?? []).length)
@@ -845,7 +856,8 @@ const RULES: Rule[] = [
 	{
 		id: 'close-without-zeroing', title: 'Account close without zeroing the data / discriminator, or followed by a realloc (revival)',
 		run: ix => ix.ops.flatMap((o, oi) => {
-			if (!o.kinds.includes('ACCOUNT_CLOSE') || o.cpi?.known) return []
+			// (a close made by a CPI (e.g. the token program's CloseAccount, its id not resolved): the callee's accounts, which it clears)
+			if (!o.kinds.includes('ACCOUNT_CLOSE') || o.cpi?.known || o.cpi?.family) return []
 			const z = closeZeroing(ix, oi)
 			if (z.revived) return [{ accounts: [o.target ?? '?'], path: [L(o.at)], evidence: [o.text.slice(0, 120), `realloc after the close: ${z.revived}`], confidence: 'medium' as Finding['confidence'], weight: 5 }]
 			if (z.zeroed) return []
@@ -854,7 +866,8 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'unchecked-arithmetic', title: 'Wrapping (unchecked) addition / subtraction on a value path with no bound check on the way',
-		run: ix => (ix.arith ?? []).filter(x => x.status === 'unchecked').sort((x, y) => Number(!!y.caller) - Number(!!x.caller) || (x.kind === 'sub' ? -1 : 1)).slice(0, 3).map(x => ({
+		// (not an expression that cannot wrap: x - min(x, ..) / x - sat_sub(x, ..), a counter incremented by a small constant)
+		run: ix => (ix.arith ?? []).filter(x => x.status === 'unchecked' && !/^(.+?) - (?:min|sat_sub)\(\1, /.test(x.expr) && !(x.kind === 'add' && / \+ (?:0x[0-9a-f]{1,2}|\d{1,3})$/.test(x.expr))).sort((x, y) => Number(!!y.caller) - Number(!!x.caller) || (x.kind === 'sub' ? -1 : 1)).slice(0, 3).map(x => ({
 			accounts: [x.target.split('.')[0]], path: [L(x.at)], evidence: [`${x.target} ← ${x.expr} (${x.kind})`, `no comparison of the operands found on the way${x.caller ? '; operands include instruction data' : ''}${x.unnamed ? '; field not named (native layout)' : ''}`], confidence: x.caller && x.kind === 'sub' ? 'medium' as const : 'low' as const, weight: x.kind === 'sub' ? 3 : 2,
 		})),
 	},
@@ -898,6 +911,9 @@ const RULES: Rule[] = [
 
 function rules(ix: IxOut, a: Analysis): Finding[] {
 	const out: Finding[] = []
+	// (Anchor's generated IDL instructions: framework code (its authority checks the analysis does not always see), not
+	// the program's logic)
+	if (a.program.anchor && /^idl_(create_account|resize_account|close_account|set_buffer|set_authority|create_buffer|write)$/.test(ix.name)) return out
 	for (const r of RULES) for (const f of r.run(ix, a)) out.push({ rule: r.id, title: r.title, ix: ix.name, ...f })
 	return out
 }

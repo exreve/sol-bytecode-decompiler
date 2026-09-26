@@ -217,11 +217,13 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 				const p = bi << 16 | si
 				for (const [dv, wide] of cands) {
 					const seen = provenance(I, ctx, ff.pc, dv, p)
-					// (a supply-like name, or a 128-bit product divided by a value read from an account's data)
+					// (a supply-like name, or a 128-bit product divided by a value read from an account's data: not a call's out
+					// object or result parts (val / lo / hi), nor the first word of an object (a fixed-point number's value, e.g. a
+					// Decimal helper dividing by its argument))
 					let acct = false
 					if (wide && !seen.some(x => SUPPLY.test(x))) {
 						const [fe, fq] = follow(I, ff.pc, dv, p)
-						acct = fe.k === 'load' && (R ? /^data/.test(R.valueRef(fe, stmtOfPos(I, ff.pc, fq) ?? s)?.field ?? '') : seen.some(x => /\bld(?:32|64)\(accounts\b|\.accounts\.|[A-Za-z_]\w*\.(?!data\b)[a-z_]\w*\)?$/.test(x) && !/\b(?:res|ret|arg|prod|quot|rem)(?:_\d+)?\.f0x[0-9a-f]+_\w+\)?$/.test(x)))
+						acct = fe.k === 'load' && (R ? /^data/.test(R.valueRef(fe, stmtOfPos(I, ff.pc, fq) ?? s)?.field ?? '') : seen.some(x => /\bld(?:32|64)\(accounts\b|\.accounts\.|[A-Za-z_]\w*\.(?!data\b)[a-z_]\w*\)?$/.test(x) && !/\b(?:res|ret|arg|prod|quot|rem)(?:_\d+)?\.f0x[0-9a-f]+_\w+\)?$|\.f0x0_\w+\)?$|\.(?:val|lo|hi|tag)\)?$/.test(x)))
 					}
 					if (!seen.some(x => SUPPLY.test(x)) && !acct) continue
 					const k = valueKey(I, ctx, ff.pc, dv, p)
