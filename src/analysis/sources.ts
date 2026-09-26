@@ -28,6 +28,8 @@ export interface SourceCtx {
 	of: (fn: number, e: Expr, p: number) => Source[]
 	/** Anchor: the account whose key / AccountInfo a word of a frame object at a position holds (e.g. a CpiContext's copies) */
 	frameAccount: (fn: number, off: number, p: number) => string | undefined
+	/** the n constant bytes a pointer points to (read-only memory, or constant stores into a frame up the call path) */
+	bytesAt: (fn: number, e: Expr, p: number, n: number) => Uint8Array | undefined
 }
 
 const ctxMemo = new WeakMap<IxOut, SourceCtx>()
@@ -193,5 +195,67 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 		const h = evIn(fn)?.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: { k: 'var', id: D.fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(off)) } } }, p)
 		return h && (h.k === 'keyp' || h.k === 'info') && !h.guess ? h.acct : undefined
 	}
-	return { of, frameAccount }
+	// (a value as a constant or an address in a function's frame (at a position): through variables, frame words and
+	// parameters up the call path)
+	type Loc = { c: bigint } | { fn: number; off: number; p: number }
+	const valOf = (fn: number, e: Expr, p: number, d = 0): Loc | undefined => {
+		const D = defsIn(I, fn), fo = I.byPc.get(fn)
+		if (!D || !fo || d > 16) return undefined
+		if (e.k === 'const') return { c: e.v }
+		const o = D.fpOff(e)
+		if (o !== undefined) return { fn, off: o, p }
+		if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') {
+			const a = valOf(fn, e.a, p, d + 1), k = BigInt.asIntN(64, e.b.v)
+			return !a ? undefined : 'c' in a ? { c: BigInt.asUintN(64, a.c + k) } : { ...a, off: a.off + Number(k) }
+		}
+		if (e.k === 'var') {
+			const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null
+			if (y) return y[0].k === 'call' ? undefined : valOf(fn, y[0], y[1], d + 1)
+			const v = fo.f.vars[e.id]
+			const par = v && v.param >= 1 && v.param !== 10 && ctx && fn !== ctx.handler ? ctx.parents.get(fn) : undefined
+			const st = par?.pc !== undefined ? stmtAt(I, par.fn, par.pc) : undefined
+			const c = st && callOf(st[0])
+			const i = v ? (v.param < 100 ? v.param - 1 : 4 + (v.param - 100)) : -1
+			return c && c.t.k === 'fn' && c.t.pc === fn && c.args[i] ? valOf(par!.fn, c.args[i], st![1], d + 1) : undefined
+		}
+		if (e.k === 'load' && e.size === 8) {
+			const a = valOf(fn, e.addr, p, d + 1)
+			if (!a) return undefined
+			if ('c' in a) { const b = r.program.image.bytesAt(a.c, 8); return b && r.program.image.region(a.c, 8)?.exec === false ? { c: b.reduce((x, y, j) => x | BigInt(y) << BigInt(8 * j), 0n) } : undefined }
+			const DA = defsIn(I, a.fn)
+			const y = DA?.reaching(DA.SLOT(a.off), a.p)
+			return y && y[0].k !== 'call' ? valOf(a.fn, y[0], y[1], d + 1) : undefined
+		}
+		return undefined
+	}
+	/** a frame byte: the constant the last store covering it writes, on the straight-line code before the position */
+	const frameByte = (fn: number, off: number, p: number): number | undefined => {
+		const fo = I.byPc.get(fn), D = defsIn(I, fn)
+		if (!fo || !D) return undefined
+		let b = p >> 16, i = p & 0xffff
+		for (let n = 0; n < 200; n++) {
+			if (--i < 0) { const ps = fo.f.blocks[b].preds; if (ps.length !== 1) return undefined; b = ps[0]; i = fo.f.blocks[b].stmts.length; continue }
+			const st = fo.f.blocks[b].stmts[i]
+			if (st.k === 'store' || st.k === 'stores') {
+				const a = D.fpOff(st.addr), vs = st.k === 'store' ? [st.v] : st.vals
+				if (a === undefined || off < a || off >= a + st.size * vs.length) continue
+				const v = vs[Math.floor((off - a) / st.size)]
+				return v.k === 'const' ? Number((v.v >> BigInt(8 * ((off - a) % st.size))) & 0xffn) : undefined
+			}
+			if (st.k === 'copy') { const a = D.fpOff(st.dst); if (a === undefined || (off >= a && off < a + st.n)) return undefined; continue }
+			// (a call given a pointer into the frame may write it)
+			const c = callOf(st)
+			if (c && c.args.some(x => D.fpOff(x) !== undefined && D.fpOff(x)! <= off)) return undefined
+		}
+		return undefined
+	}
+	const bytesAt = (fn: number, e: Expr, p: number, n: number): Uint8Array | undefined => {
+		const a = valOf(fn, e, p)
+		if (!a) return undefined
+		if ('c' in a) { const g = r.program.image.region(a.c, n); return g && !g.exec ? r.program.image.bytesAt(a.c, n) ?? undefined : undefined }
+		const out = new Uint8Array(n)
+		for (let k = 0; k < n; k++) { const x = frameByte(a.fn, a.off + k, a.p); if (x === undefined) return undefined; out[k] = x }
+		return out
+	}
+	return { of, frameAccount, bytesAt }
 }

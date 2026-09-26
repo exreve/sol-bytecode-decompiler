@@ -237,6 +237,14 @@ const STAKE: Family = {
 	},
 }
 const FAMILY: Record<string, Family> = { TOKEN_PROGRAM: TOKEN, TOKEN_2022_PROGRAM: TOKEN, SYSTEM_PROGRAM: SYSTEM, ASSOCIATED_TOKEN_PROGRAM: ATA, COMPUTE_BUDGET_PROGRAM: COMPUTE_BUDGET, STAKE_PROGRAM: STAKE }
+/** A well-known program's instruction by its tag (the data's first 1 / 4 bytes, little-endian): family, name, account roles (the analysis). */
+export function knownIx(known: string, data: Uint8Array): { family: string; ix: string; accounts: string[] } | undefined {
+	const F = FAMILY[known]
+	if (!F || data.length < F.tagSize) return undefined
+	const lay = F.ixs[F.tagSize === 1 ? data[0] : data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24]
+	return lay && { family: famName(known, F), ix: lay.name, accounts: lay.accounts }
+}
+const famName = (known: string | undefined, F: Family) => known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : F === STAKE ? 'stake' : 'compute_budget'
 /** The instruction layouts of the well-known programs (by the known-id label), for naming a program's own instructions. */
 export const knownFamilies = (): [string, { label: string; ixs: Record<number, { name: string; accounts: string[] }> }][] => Object.entries(FAMILY)
 
@@ -401,7 +409,7 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 				fields.push([name, v])
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
-			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : F === STAKE ? 'stake' : 'compute_budget'
+			const family = famName(program.known, F)
 			const cp: CpiParts = { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields, accounts: accounts.map((a, i) => ({ role: lay.accounts[i], text: a.text, w: a.w, s: a.s })), src: { program: program.src, accounts: accounts.map(a => a.src), fields: fsrc } }
 			return { text: `CPI ${head} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}${tail}`, family, ix: lay.name, guessed: !fam, parts: cp }
 		}

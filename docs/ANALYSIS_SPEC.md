@@ -77,7 +77,9 @@ keys / data / lamports / owners (native: the account model; Anchor: the Accounts
 objects serialized back), remaining accounts, sysvars and CPI return data by the syscalls producing them; the
 printed text only for parameters without an expression (seeds)); relations from equality checks and Anchor
 has_one; authority graph; rules `cpi-unchecked-program`, `value-move-no-signer`,
-`signer-not-related-to-authority`, `check-bypassable`, `token-mint-unrelated`,
+`signer-not-related-to-authority` (also, Anchor: a stored authority field another instruction writes, named like a
+signer of this one (the has_one convention), not compared with it here, before an operation other than a CPI that
+signer signs), `check-bypassable`, `token-mint-unrelated`,
 `caller-controlled-sensitive-param`, `unverified-account-data`. Phase-1 gaps closed alongside: Anchor
 fields written back on exit, native instruction split on the tag dispatch (with account[i] resolution),
 function pointers / tables / vtables, Anchor checks naming the account with a heap-built string.
@@ -151,8 +153,10 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
 - CPIs by library helper (anchor_lang::system_program, anchor_spl::token*: name, CpiContext accounts, signer
   seeds; CpiContext accounts the printed text leaves unnamed: its AccountInfo copies, the program's first, then the
   accounts struct's in field order), instruction builders and TokenInstruction::pack tags before an undecoded invoke
-  (native: the builder's arguments give the accounts); unnamed create / find_program_address by their syscall
-  (analysis only);
+  (native: the builder's arguments give the accounts); a program id the printed text leaves unnamed: the instruction
+  struct followed up the call path (read-only memory, constant stores into a caller's frame on straight-line code) to
+  a known id, its instruction by the tag (e.g. pinocchio-system); unnamed create / find_program_address by their
+  syscall (analysis only);
 - Anchor stores in a function several handlers call (e.g. a close helper) named with one handler's accounts count
   only for that handler's instruction.
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in

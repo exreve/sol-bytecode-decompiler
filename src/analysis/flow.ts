@@ -272,7 +272,7 @@ export function addExitWrites(r: Result) {
 		const sites = [...stmtsOf(fo)].filter(s => { const c = callOf(s); return c?.t.k === 'fn' && exits.has(c.t.pc) })
 		if (!sites.length) { objsMemo.set(fo, []); if (fo.name.startsWith('ix_')) calleeWrites(r, fo, [], exits); continue }
 		const g = cfgOf(fo)
-		const defs = singleDefs(fo)
+		const defs = singleDefs(fo), D = defsOf(fo.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
 		const objs: FrameObj[] = []
 		for (const s0 of sites) {
 			const c = callOf(s0)!
@@ -289,7 +289,9 @@ export function addExitWrites(r: Result) {
 			// word only when other words are copied with the same offset)
 			const deltasOf = (s: Extract<Stmt, { k: 'store' | 'stores' }>, A: number) => {
 				const vals = s.k === 'store' ? [s.v] : s.vals
-				const srcs = vals.map(v => { const d = v.k === 'var' ? defs.get(v.id) : v; return d?.k === 'load' ? offOf(d.addr, fp) : undefined })
+				// (a variable assigned on several paths: its definition reaching the store)
+				const at = D.pos.get(s)
+				const srcs = vals.map(v => { const d = v.k !== 'var' ? v : defs.get(v.id) ?? (at !== undefined && D.multi.has(v.id) ? D.reaching(v.id, at)?.[0] : undefined); return d?.k === 'load' ? offOf(d.addr, fp) : undefined })
 				const deltas = srcs.map((o, i) => (o === undefined ? undefined : o - (A + i * s.size))).filter(d => d !== undefined)
 				return deltas.length > 0 && deltas.every(d => d === deltas[0] && d !== 0) && vals.every((v, i) => srcs[i] !== undefined || v.k === 'var') ? deltas : []
 			}

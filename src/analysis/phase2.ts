@@ -20,6 +20,9 @@ import { structFields } from '../idl.ts'
 import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
 import type { Expr } from '../ir.ts'
+import { knownIx } from '../cpi.ts'
+import { cpiKinds } from './facts.ts'
+import { b58, KNOWN_KEYS } from '../semantics.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
@@ -191,6 +194,24 @@ export function phase2(a: Analysis, r: Result) {
 		}
 		// (on the IR where the parameter's expression is known: sources.ts; else by the printed text)
 		const S = sourceCtx(r, ix), I = irOf(r)
+		// (a CPI whose program id the printed text does not name: the instruction built up the call path (e.g. a library's
+		// instruction struct passed to its invoke function): a known program's id, its instruction by the tag)
+		for (const o of ix.ops) {
+			if (!o.cpi || o.cpi.known || o.fnPc === undefined || o.at.pc === undefined) continue
+			const st = stmtAt(I, o.fnPc, o.at.pc), c = st && callOf(st[0])
+			const nm = c?.t.k === 'sys' ? c.t.name : ''
+			if (!c?.args[0] || !/^sol_invoke_signed_(c|rust)$/.test(nm)) continue
+			const w = (k: number): Expr => ({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: c.args[0], b: { k: 'const', v: BigInt(k) } } })
+			const rust = nm.endsWith('rust')
+			const id = rust ? S.bytesAt(o.fnPc, { k: 'bin', op: 'add', a: c.args[0], b: { k: 'const', v: 48n } }, st![1], 32) : S.bytesAt(o.fnPc, w(0), st![1], 32)
+			const known = id && (id.every(x => x === 0) ? 'SYSTEM_PROGRAM' : KNOWN_KEYS[b58(id)])
+			if (!known) continue
+			// (the data pointer: SolInstruction.data, StableInstruction.data.ptr)
+			const data = S.bytesAt(o.fnPc, w(24), st![1], 4) ?? S.bytesAt(o.fnPc, w(24), st![1], 1)
+			const k = data && knownIx(known, data)
+			o.cpi = { ...o.cpi, program: known, known, checked: undefined, ...(k ? { family: k.family, ix: k.ix, accounts: o.cpi.accounts.map((x, i) => ({ ...x, role: x.role ?? k.accounts[i] })) } : {}) }
+			if (k) o.kinds = [...new Set([...o.kinds, ...cpiKinds(k.family, k.ix)])]
+		}
 		// (Anchor CPI helpers: the accounts of the CpiContext not named by the printed text, by the AccountInfo copies' key
 		// words (the program's copy first, then the accounts struct's in field order, 0x30 bytes each, after 0x18 bytes))
 		if (r.anchor) for (const o of ix.ops) {
@@ -285,13 +306,13 @@ export function phase2(a: Analysis, r: Result) {
 	// phase 3 views (after every instruction's authority rows: the chains follow the writers), then the rules
 	for (const ix of a.ixs) phase3Ix(r, ix, a)
 	a.states = stateMachine(a)
+	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
 	const rank = { high: 3, medium: 2, low: 1 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
-	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 }
 
 /**
@@ -363,6 +384,18 @@ const W: Partial<Record<OpKind, number>> = { TOKEN_TRANSFER: 5, LAMPORT_TRANSFER
 const wOf = (o: OpOut) => Math.max(0, ...o.kinds.map(k => W[k] ?? 0))
 const L = (at: Loc) => `${at.fn}:${at.line}`
 
+/** value movements / authority changes a signer enables with no stored authority related to it (and no PDA signature) */
+const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => (ix.authority ?? []).flatMap(row => {
+	const o = ix.ops[row.op]
+	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
+	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
+	if (initWrite(ix, o)) return []
+	// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
+	// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
+	if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
+	return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
+})
+
 const RULES: Rule[] = [
 	{
 		id: 'cpi-unchecked-program', title: 'CPI to an account-supplied program id with no dominating check against a known id',
@@ -390,16 +423,24 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'signer-not-related-to-authority', title: 'Value movement or authority change with a signer but no relation between the signer key and a stored authority field',
-		run: ix => (ix.authority ?? []).flatMap(row => {
-			const o = ix.ops[row.op]
-			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
-			if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
-			if (initWrite(ix, o)) return []
-			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
-			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
-			if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
-			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
-		}),
+		run: (ix, a) => {
+			const out = signerUnrelated(ix)
+			if (out.length) return out
+			// (Anchor's has_one convention: an authority field another instruction stores, named like a signer of this one, with
+			// no relation between the two here; e.g. a PDA-signed outflow from a per-user account whose owner is not checked)
+			const signers = new Set(ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => x.name))
+			// (not a movement of the signer's own funds: a CPI the signer signs, e.g. a deposit)
+			const own = (o: OpOut) => !!o.cpi?.accounts.some(x => x.s && signers.has(/^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1] ?? ''))
+			const row = (ix.authority ?? []).find(x => !initMechanics(ix, ix.ops[x.op]) && !initWrite(ix, ix.ops[x.op]) && !own(ix.ops[x.op]))
+			if (!a.program.anchor || !row) return []
+			return (a.authorityFields ?? []).flatMap(({ field, writtenBy }) => {
+				const [acct, f] = [field.slice(0, field.indexOf('.')), field.slice(field.indexOf('.') + 1)]
+				if (!signers.has(f) || writtenBy.includes(ix.name) || !ix.accounts.some(x => x.name === acct)) return []
+				if ((ix.relations ?? []).some(x => x.a === field || x.b === field || ((x.a === `${f}.key` || x.b === `${f}.key`) && (x.a.startsWith(`${acct}.`) || x.b.startsWith(`${acct}.`))))) return []
+				const o = ix.ops[row.op]
+				return [{ accounts: [f, acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${field} (the stored authority ${writtenBy.join(', ')} writes) is not compared with the signer ${f}`], confidence: 'low' as const, weight: wOf(o) }]
+			}).slice(0, 1)
+		},
 	},
 	{
 		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
