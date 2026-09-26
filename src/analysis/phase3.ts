@@ -450,6 +450,9 @@ export function closeZeroing(ix: IxOut, oi: number): { zeroed?: string; revived?
 		if (x.kinds.includes('ACCOUNT_DATA_WRITE') && x.target && /discriminator|data\[0\.\.|\.data$/.test(x.target)) res.zeroed ??= `discriminator written ${x.at.fn}:${x.at.line}`
 	})
 	if (!res.zeroed && /memset|fill\(/.test(o.text)) res.zeroed = 'memset in the close'
+	// (the closing function reassigns / resizes the account: AccountInfo::assign / realloc, e.g. anchor_lang::common::close)
+	const cf = ixText.get(ix)?.get(o.at.fn)?.ff
+	if (!res.zeroed && cf?.lines.some(l => /\bAccountInfo_(assign|realloc|resize)\w*\(/.test(l))) res.zeroed = `AccountInfo::assign / realloc in ${o.at.fn}`
 	return res
 }
 

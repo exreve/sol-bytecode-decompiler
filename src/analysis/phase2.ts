@@ -107,7 +107,9 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 		const o = ops[oi]
 		if (!isValueOrAuth(o)) continue
 		const accts = opAccounts(o)
-		const cand = checks.map((c, ci) => ci).filter(ci => !o.guards!.includes(ci) && checks[ci].kinds.some(k => GUARD_KINDS.includes(k)) && (checks[ci].kinds.includes('signer') || (checks[ci].account && accts.has(checks[ci].account!.replace(/\?$/, '')))))
+		const cand = checks.map((c, ci) => ci).filter(ci => !o.guards!.includes(ci) && checks[ci].kinds.some(k => GUARD_KINDS.includes(k)) && (checks[ci].kinds.includes('signer') || (checks[ci].account && accts.has(checks[ci].account!.replace(/\?$/, ''))))
+			// (a check made after the operation on every path, e.g. in the exit code, is not one it could bypass)
+			&& !pointsOf[oi].some(p => siteOf[ci].some(s => s.fn === p.fn && s.b !== p.b && dom(s.fn, p, s))))
 		for (const ci of cand.slice(0, 3)) {
 			for (const s of siteOf[ci]) {
 				const p = pointsOf[oi].find(x => x.fn === s.fn)
@@ -354,7 +356,8 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
-		run: ix => ix.ops.filter(o => !runtimeAuthorized(o) && !initMechanics(ix, o)).flatMap(o => (o.bypass ?? []).map(b => {
+		// (Anchor: a branch raising no error (e.g. the exit's `owner == program_id && !is_closed` before serializing back) is control flow)
+		run: (ix, a) => ix.ops.filter(o => !runtimeAuthorized(o) && !initMechanics(ix, o)).flatMap(o => (o.bypass ?? []).filter(b => !(a.program.anchor && ix.checks[b.check].error === 'return')).map(b => {
 			const c = ix.checks[b.check]
 			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`], confidence: 'medium' as const, weight: wOf(o) + 1 }
 		})),
