@@ -95,23 +95,25 @@ function scope(r: Result, ix: IxOut): Fn[] {
 }
 
 const stmtExprs = (s: Stmt): Expr[] => s.k === 'set' || s.k === 'eval' ? [s.e] : s.k === 'store' ? [s.addr, s.v] : s.k === 'stores' ? [s.addr, ...s.vals] : s.k === 'copy' ? [s.dst, s.src] : s.k === 'call' ? s.args : []
-/** every expression of the scope (sub-expressions included), with its function and position */
+/** the loads and the divisions of the scope (sub-expressions included), with their function and position */
 type ExprAt = [e: Expr, p: number, top: Expr]
-const exprMemo = new WeakMap<FuncOut, ExprAt[][]>()
-function exprsOf(fo: FuncOut, b: number): ExprAt[] {
+interface BlockExprs { load: ExprAt[]; div: ExprAt[] }
+const exprMemo = new WeakMap<FuncOut, BlockExprs[]>()
+function exprsOf(fo: FuncOut, b: number): BlockExprs {
 	let m = exprMemo.get(fo)
 	if (!m) exprMemo.set(fo, (m = []))
 	let out = m[b]
 	if (out) return out
-	out = m[b] = []
-	const bl = fo.f.blocks[b], o = out
-	bl.stmts.forEach((s, i) => { for (const e of stmtExprs(s)) walkExpr(e, x => { o.push([x, b << 16 | i, e]) }) })
-	if (bl.term.k === 'br') { const c = bl.term.c; walkExpr(c, x => { o.push([x, b << 16 | bl.stmts.length, c]) }) }
-	else if (bl.term.k === 'ret' && bl.term.e) { const c = bl.term.e; walkExpr(c, x => { o.push([x, b << 16 | bl.stmts.length, c]) }) }
+	const o: BlockExprs = out = m[b] = { load: [], div: [] }
+	const add = (x: Expr, p: number, e: Expr) => { if (x.k === 'load') o.load.push([x, p, e]); else if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv')) o.div.push([x, p, e]) }
+	const bl = fo.f.blocks[b]
+	bl.stmts.forEach((s, i) => { for (const e of stmtExprs(s)) walkExpr(e, x => add(x, b << 16 | i, e)) })
+	if (bl.term.k === 'br') { const c = bl.term.c; walkExpr(c, x => add(x, b << 16 | bl.stmts.length, c)) }
+	else if (bl.term.k === 'ret' && bl.term.e) { const c = bl.term.e; walkExpr(c, x => add(x, b << 16 | bl.stmts.length, c)) }
 	return out
 }
-function eachExpr(sc: Fn[], f: (fn: Fn, e: Expr, p: number, top: Expr) => void) {
-	for (const fn of sc) for (const b of fn.blocks) for (const [x, p, e] of exprsOf(fn.fo, b)) f(fn, x, p, e)
+function eachExpr(sc: Fn[], k: keyof BlockExprs, f: (fn: Fn, e: Expr, p: number, top: Expr) => void) {
+	for (const fn of sc) for (const b of fn.blocks) for (const [x, p, e] of exprsOf(fn.fo, b)[k]) f(fn, x, p, e)
 }
 /** the calls of the scope (statements and calls nested in expressions), with their position */
 type CallAt = [name: string, args: Expr[], p: number, pc: number, target: number | undefined]
@@ -134,8 +136,15 @@ function callsOf(fo: FuncOut, b: number, r: Result): CallAt[] {
 	if (t) walkExpr(t, x => { if (x.k === 'call') o.push([nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined]) })
 	return out
 }
+const scopeCalls = new WeakMap<Fn[], [Fn, CallAt][]>()
 function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number, target?: number) => void, r: Result) {
-	for (const fn of sc) for (const b of fn.blocks) for (const [name, args, p, pc, t] of callsOf(fn.fo, b, r)) f(fn, name, args, p, pc, t)
+	let l = scopeCalls.get(sc)
+	if (!l) {
+		l = []
+		for (const fn of sc) for (const b of fn.blocks) for (const c of callsOf(fn.fo, b, r)) l.push([fn, c])
+		scopeCalls.set(sc, l)
+	}
+	for (const [fn, [name, args, p, pc, t]] of l) f(fn, name, args, p, pc, t)
 }
 
 /** a sum's terms: the non-constant ones and the constant */
@@ -165,7 +174,13 @@ const lineText = (fn: Fn, p: number) => { const at = locOf(fn, p); return (fn.ff
 
 interface Cmp { fn: Fn; p: number; a: Expr; b: Expr; n?: number; e: Expr } // n: bytes compared (memcmp-like)
 const MEMCMP = /^(memcmp|memeq|bcmp|sol_memcmp_?|memcmp_\w+)$/
+const cmpMemo = new WeakMap<Fn[], Cmp[]>()
 function compares(r: Result, sc: Fn[]): Cmp[] {
+	let m = cmpMemo.get(sc)
+	if (!m) cmpMemo.set(sc, (m = compares0(r, sc)))
+	return m
+}
+function compares0(r: Result, sc: Fn[]): Cmp[] {
 	const I = irOf(r), out: Cmp[] = []
 	for (const fn of sc) {
 		const D = defsIn(I, fn.pc)
@@ -195,7 +210,7 @@ const SYSVAR_NAME = /^(instructions?|ixs|ix_sysvar|instructions?_sysvar|sysvar_i
 function introSites(r: Result, ix: IxOut, sc: Fn[]): Intro[] {
 	const out: Intro[] = []
 	const src = srcOf(r, ix)
-	eachExpr(sc, (fn, x, p) => {
+	eachExpr(sc, 'load', (fn, x, p) => {
 		if (x.k !== 'load' || x.size !== 2) return
 		const s = sumOf(x.addr)
 		if (s.terms.length !== 2) return
@@ -382,7 +397,7 @@ interface Access { fn: Fn; p: number; size: number; off: number; base: string; e
 /** loads at the Pyth field offsets, by base (the canonical key of the pointer they are read through) */
 function pythLoads(r: Result, ix: IxOut, sc: Fn[]): Access[] {
 	const I = irOf(r), out: Access[] = []
-	eachExpr(sc, (fn, x, p) => {
+	eachExpr(sc, 'load', (fn, x, p) => {
 		if (x.k !== 'load') return
 		const s = sumOf(x.addr)
 		const off = Number(s.c > 0xffffn ? -1n : s.c)
@@ -762,7 +777,7 @@ function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	}
 	const fromAcct = (fn: Fn, e: Expr, p: number) => src(fn.pc, e, p).some(y => y.kind === 'data')
 	const isCeil = (nk: string, dk: string) => nk.startsWith('(+ ') && / #-1\)$/.test(nk) && keyIn(nk, dk)
-	eachExpr(sc, (fn, x, p) => {
+	eachExpr(sc, 'div', (fn, x, p) => {
 		if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv') && x.b.k !== 'const' && fromAcct(fn, x.b, p)) {
 			const nk = K(fn, x.a, p), dk = K(fn, x.b, p)
 			if (!product(fn, x.a, p) && !isCeil(nk, dk)) return

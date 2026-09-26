@@ -2,7 +2,7 @@
 // per instruction: accounts whose data the logic borrows itself (flow.ts dataReads), PDA bumps from instruction
 // data, CPI results never read, narrowing casts of value-path amounts, remaining accounts the checks read,
 // authority writes of an init_if_needed account not gated by its state. DERIVED and OVER-APPROXIMATE.
-import type { Result } from '../decompile.ts'
+import type { Result, FuncOut } from '../decompile.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
@@ -10,6 +10,7 @@ import type { IxCtx, IxOut, Loc } from './report.ts'
 import { irOf, stmtAt, defsIn, pathTo, blockAt, valueKey } from './paths.ts'
 import { dataReads, callOf, cfgOf, anchorEval, tryInfo, ctxResolver, calleeOf, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
+import type { FnFacts } from './facts.ts'
 
 export interface AuditFacts {
 	dataReads: string[]                                           // Anchor: accounts whose data the logic borrows itself
@@ -453,6 +454,42 @@ function reads(E: EvCtx, e: Expr, p: number): [string, string][] {
 	return out
 }
 
+const factsByName = new WeakMap<Result, Map<string, FnFacts>>()
+const namesId = new WeakMap<FnFacts, boolean>()
+const i64 = (x: Expr) => x.k === 'const' ? BigInt.asIntN(64, x.v) : undefined
+const exprKey = (e: Expr) => JSON.stringify(e, (_, v) => typeof v === 'bigint' ? String(v) : v)
+const scanMemo = new WeakMap<FuncOut, { bases: string[]; cands: [Expr, number, string][] }[]>()
+/** a block's 2-byte loads (sysvarReads): the bases read at no offset (their keys), the candidate reads by their address' shape */
+function sysvarScan(fo: FuncOut, D: NonNullable<ReturnType<typeof defsIn>>, bi: number): { bases: string[]; cands: [Expr, number, string][] } {
+	let m = scanMemo.get(fo)
+	if (!m) scanMemo.set(fo, (m = []))
+	if (m[bi]) return m[bi]
+	const def = (e: Expr, p: number): [Expr, number] => {
+		for (let k = 0; k < 4 && e.k === 'var'; k++) { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) break; [e, p] = y }
+		return [e, p]
+	}
+	const minus2 = (e: Expr, p: number): boolean => { const [x] = def(e, p); return x.k === 'bin' && ((x.op === 'sub' && i64(x.b) === 2n) || (x.op === 'add' && i64(x.b) === -2n)) }
+	const twiceplus2 = (e: Expr, p: number): boolean => {
+		const [x, q] = def(e, p)
+		if (x.k !== 'bin' || x.op !== 'add' || i64(x.b) !== 2n) return false
+		const [y] = def(x.a, q)
+		return y.k === 'bin' && ((y.op === 'shl' && i64(y.b) === 1n) || (y.op === 'mul' && i64(y.b) === 2n))
+	}
+	const bases: string[] = [], cands: [Expr, number, string][] = []
+	const scan = (e: Expr, p: number) => walkExpr(e, x => {
+		if (x.k !== 'load' || x.size !== 2) return
+		const a = x.addr
+		if (a.k !== 'bin' || a.op !== 'add') { bases.push(exprKey(a)); return }
+		// (data + (len - 2), or (data + len) - 2)
+		if (minus2(a.b, p)) cands.push([a.a, p, 'Instructions (current index: the last 2 bytes)'])
+		else if (i64(a.b) === -2n && a.a.k === 'bin' && a.a.op === 'add') cands.push([a.a.a, p, 'Instructions (current index: the last 2 bytes)'])
+		else if (twiceplus2(a.b, p)) cands.push([a.a, p, 'Instructions (an instruction\'s offset: u16 at 2 + 2 * index)'])
+	})
+	const b = fo.f.blocks[bi]
+	b.stmts.forEach((s, si) => { for (const e of stmtExprs(s)) scan(e, bi << 16 | si) })
+	if (b.term.k === 'br') scan(b.term.c, bi << 16 | b.stmts.length)
+	return (m[bi] = { bases, cands })
+}
 /**
  * Accounts whose data the instruction parses as the Instructions sysvar (by behavior, whatever the account is named):
  * the current instruction's index, a u16 read from the last 2 bytes (load_current_index), or an instruction's offset,
@@ -461,45 +498,25 @@ function reads(E: EvCtx, e: Expr, p: number): [string, string][] {
  */
 function sysvarReads(r: Result, ix: IxOut, src: (fn: number, e: Expr, p: number) => { kind: string; acct?: string }[]): NonNullable<AuditFacts['sysvarReads']> {
 	const I = irOf(r), out: NonNullable<AuditFacts['sysvarReads']> = []
-	const byName = new Map([...r.facts.values()].map(f => [f.name, f]))
+	let byName = factsByName.get(r)
+	if (!byName) factsByName.set(r, (byName = new Map([...r.facts.values()].map(f => [f.name, f]))))
 	// (the id materialized anywhere in the instruction's code: compared with a key (load_instruction_at_checked, an explicit
 	// check); the account it is compared with is not always known)
-	const idCompared = ix.functions.some(n => byName.get(n)?.lines.some(l => /SYSVAR_INSTRUCTIONS/.test(l)))
-	const i64 = (x: Expr) => x.k === 'const' ? BigInt.asIntN(64, x.v) : undefined
+	const idCompared = ix.functions.some(n => { const f = byName.get(n); if (!f) return false; let y = namesId.get(f); if (y === undefined) namesId.set(f, (y = f.lines.some(l => /SYSVAR_INSTRUCTIONS/.test(l)))); return y })
 	for (const fname of ix.functions) {
 		const ff = byName.get(fname), fo = ff && I.byPc.get(ff.pc), D = ff && defsIn(I, ff.pc)
 		if (!ff || !fo || !D || out.length >= 4) continue
-		const def = (e: Expr, p: number): [Expr, number] => {
-			for (let k = 0; k < 4 && e.k === 'var'; k++) { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) break; [e, p] = y }
-			return [e, p]
-		}
-		const minus2 = (e: Expr, p: number): boolean => { const [x] = def(e, p); return x.k === 'bin' && ((x.op === 'sub' && i64(x.b) === 2n) || (x.op === 'add' && i64(x.b) === -2n)) }
-		const twiceplus2 = (e: Expr, p: number): boolean => {
-			const [x, q] = def(e, p)
-			if (x.k !== 'bin' || x.op !== 'add' || i64(x.b) !== 2n) return false
-			const [y] = def(x.a, q)
-			return y.k === 'bin' && ((y.op === 'shl' && i64(y.b) === 1n) || (y.op === 'mul' && i64(y.b) === 2n))
-		}
 		const bases0 = new Set<string>(), cands: [Expr, number, string][] = []
-		const key = (e: Expr) => JSON.stringify(e, (_, v) => typeof v === 'bigint' ? String(v) : v)
-		const scan = (e: Expr, p: number) => walkExpr(e, x => {
-			if (x.k !== 'load' || x.size !== 2) return
-			const a = x.addr
-			if (a.k !== 'bin' || a.op !== 'add') { bases0.add(key(a)); return }
-			// (data + (len - 2), or (data + len) - 2)
-			if (minus2(a.b, p)) cands.push([a.a, p, 'Instructions (current index: the last 2 bytes)'])
-			else if (i64(a.b) === -2n && a.a.k === 'bin' && a.a.op === 'add') cands.push([a.a.a, p, 'Instructions (current index: the last 2 bytes)'])
-			else if (twiceplus2(a.b, p)) cands.push([a.a, p, 'Instructions (an instruction\'s offset: u16 at 2 + 2 * index)'])
-		})
 		const ctx = ix.ctx
-		fo.f.blocks.forEach((b, bi) => {
+		fo.f.blocks.forEach((_, bi) => {
 			// (a dispatcher's function shared by instructions: the blocks this instruction's tags reach)
 			if (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi)) return
-			b.stmts.forEach((s, si) => { for (const e of stmtExprs(s)) scan(e, bi << 16 | si) })
-			if (b.term.k === 'br') scan(b.term.c, bi << 16 | b.stmts.length)
+			const y = sysvarScan(fo, D, bi)
+			for (const k of y.bases) bases0.add(k)
+			cands.push(...y.cands)
 		})
 		for (const [base, p, what] of cands) {
-			if (what.includes('offset') && !bases0.has(key(base))) continue
+			if (what.includes('offset') && !bases0.has(exprKey(base))) continue
 			const accts = [...new Set(src(ff.pc, base, p).filter(x => x.kind === 'data' && x.acct).map(x => x.acct!))]
 			// (native: the account model along the instruction's call path (pointers into a caller's accounts struct))
 			if (!accts.length && !r.anchor && ix.ctx) {
