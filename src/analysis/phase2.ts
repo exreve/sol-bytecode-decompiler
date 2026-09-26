@@ -640,6 +640,12 @@ const RULES: Rule[] = [
 		id: 'init-if-needed-reinit', title: 'Authority / state field of an init_if_needed account overwritten with no initialized check (reinitialization)',
 		run: ix => (ix.audit?.reinit ?? []).slice(0, 1).map(x => { const o = ix.ops[x.op]; return { accounts: [x.acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${x.acct} may exist already (init_if_needed: its owner check on the existing account's path); no condition on the way reads its state: a second call overwrites ${o.target}`], confidence: 'medium' as const, weight: 5 } }),
 	},
+	{
+		id: 'reinit-unchecked', title: 'Account initialized (its type discriminator written) with no check that it is uninitialized (reinitialization)',
+		run: ix => (ix.audit?.initWrites ?? []).slice(0, 1).map(x => {
+			return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the ${x.type} discriminator into ${x.acct}'s data${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (discriminator == 0 / Anchor \`zero\` / an is_initialized flag): calling it again on a live ${x.type} overwrites it (e.g. its authority)`], confidence: 'medium' as const, weight: 5 }
+		}),
+	},
 	// ---- phase 3 pattern rules (phase3.ts facts) ----
 	{
 		id: 'state-write-ungated', title: 'Instruction writes program state with no signer check and no constraint gating the write',

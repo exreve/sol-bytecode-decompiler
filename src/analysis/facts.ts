@@ -365,7 +365,14 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const text = s.desc?.text ?? s.text ?? lines[l]?.trim() ?? ''
 		if (s.kind === 'pda') {
 			const m = /^PDA (\w+)\((.*), program (.*)\)$/.exec(text)
-			facts.ops.push({ line: l + 1, pc, kinds: ['PDA_DERIVE'], text, main, errPath: err, pda: m ? { fn: m[1], seeds: m[2], program: m[3] } : { fn: 'find_program_address', seeds: '?', program: '?' } })
+			const pda = m ? { fn: m[1], seeds: m[2], program: m[3] } : { fn: 'find_program_address', seeds: '?', program: '?' }
+			// (a constant seed list (&[&[u8]] in read-only memory, its pointers relocated) the site's text leaves unknown)
+			const c = n.k === 'stmt' ? (n.s.k === 'call' ? n.s : n.s.k === 'set' && n.s.e.k === 'call' ? n.s.e : undefined) : undefined
+			if (pda.seeds.startsWith('?') && c && c.args[1]?.k === 'const' && c.args[2]?.k === 'const') {
+				const seeds = inp.seedsAt?.(c.args[1].v, c.args[2].v)
+				if (seeds) { pda.seeds = seeds; if (pda.program === '?') pda.program = /, (\w+)\)$/.exec(lines[l]?.trim() ?? '')?.[1] ?? '?' }
+			}
+			facts.ops.push({ line: l + 1, pc, kinds: ['PDA_DERIVE'], text, main, errPath: err, pda })
 			return
 		}
 		const d = s.desc

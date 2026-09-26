@@ -5,7 +5,7 @@
 import type { Result } from '../decompile.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
-import type { IxOut } from './report.ts'
+import type { IxOut, Loc } from './report.ts'
 import { irOf, stmtAt, defsIn, pathTo, blockAt } from './paths.ts'
 import { dataReads, callOf, cfgOf, anchorEval, tryInfo, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
@@ -19,7 +19,9 @@ export interface AuditFacts {
 	ownerCmp?: string[]                                           // Anchor: accounts whose owner a check compares
 	reinit: { op: number; acct: string }[]                        // authority writes to an init_if_needed account, no state read on the way
 	sameType?: { fn: string; n: number; type?: string; accts: string[] } // Anchor: an account type try_accounts deserializes more than once (its try call, the accounts it names)
+	initWrites?: InitWrite[]                                      // an account type's discriminator written into an account's data with no state check before
 }
+export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean } // owner: a check compares the account's owner
 
 const VALUE_OPS = new Set(['LAMPORT_WRITE', 'LAMPORT_TRANSFER', 'TOKEN_TRANSFER', 'MINT', 'BURN'])
 
@@ -117,8 +119,100 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 			if (!gated) out.reinit.push({ op: oi, acct })
 		})
 	}
+	if (ctx) out.initWrites = initWrites(r, ix, out.ownerCmp ?? [])
 	return out
 }
+
+/**
+ * Initialization writes (reinit-unchecked): an account type's discriminator (an IDL account type's, or a printed
+ * `account:T` constant) stored at offset 0 of an account's data, directly or as the start of a buffer copied there
+ * (by bytes or memcpy), by an instruction that does not create the account (no system CreateAccount / Allocate /
+ * Assign CPI, no CPI to a program not decoded), does not compare anything with that discriminator (an Account<T>
+ * deserialization: the account is initialized, the write is its serialization on exit), and has no condition on the
+ * way to the write (dominating branches, the checks of try_accounts before the handler's body) reading the account's
+ * data (discriminator == 0 / Anchor `zero`, an is_initialized flag).
+ */
+function initWrites(r: Result, ix: IxOut, ownerCmp: string[]): InitWrite[] {
+	const ctx = ix.ctx!, I = irOf(r), H = I.byPc.get(ctx.handler)
+	if (!H) return []
+	const fns = [ctx.handler, ...ctx.parents.keys()]
+	const discs = new Map<bigint, string>((r.idl?.accounts ?? []).map(a => [a.disc, a.name]))
+	for (const fn of fns) for (const m of I.byPc.get(fn)?.text.matchAll(/0x([0-9a-f]{9,16}) \/\* account:(\w+) \*\//g) ?? []) discs.set(BigInt('0x' + m[1]), m[2])
+	if (!discs.size) return []
+	// (created here, or by a program the analysis does not decode)
+	if (ix.ops.some(o => o.kinds.includes('ACCOUNT_CREATE') || (o.cpi && (/^SYSTEM/.test(o.cpi.known ?? '') || o.cpi.family === 'system' || (!o.cpi.known && !o.cpi.family))))) return []
+	const E = evaluators(r, ix)
+	const out: InitWrite[] = []
+	// (the types compared anywhere: deserialized as that type)
+	const compared = new Set<string>()
+	for (const fn of fns) for (const b of I.byPc.get(fn)?.f.blocks ?? []) if (b.term.k === 'br') walkExpr(b.term.c, x => { if (x.k === 'const' && discs.has(x.v)) compared.add(discs.get(x.v)!) })
+	/** the base of an address (a variable offset dropped) and whether it had one */
+	const baseOf = (e: Expr): [Expr, boolean] => e.k === 'bin' && e.op === 'add' && e.b.k !== 'const' ? [e.a, true] : [e, false]
+	for (const fn of fns) {
+		const fo = I.byPc.get(fn), Ev = E(fn), D = defsIn(I, fn)
+		if (!fo || !Ev || !D) continue
+		// (buffers starting with a discriminator: the variable / frame slot it is stored at)
+		const bufV = new Map<number, string>(), bufF = new Map<number, string>()
+		let any = false
+		for (const b of fo.f.blocks) for (const s of b.stmts) {
+			const v = s.k === 'store' && s.size === 8 ? s.v : s.k === 'stores' && s.size === 8 ? s.vals[0] : undefined
+			if (!v || v.k !== 'const' || !discs.has(v.v)) continue
+			any = true
+			const a = (s as { addr: Expr }).addr, z = D.fpOff(a)
+			if (z !== undefined) bufF.set(z, discs.get(v.v)!)
+			else if (a.k === 'var') bufV.set(a.id, discs.get(v.v)!)
+		}
+		if (!any) continue
+		const bufOf = (e: Expr): string | undefined => { const [b] = baseOf(e); const z = D.fpOff(b); return z !== undefined ? bufF.get(z) : b.k === 'var' ? bufV.get(b.id) : undefined }
+		fo.f.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => {
+			const p = bi << 16 | i
+			let dst: Expr | undefined, type: string | undefined
+			if (s.k === 'store' || s.k === 'stores') {
+				const v = s.k === 'store' ? s.v : s.vals[0]
+				dst = s.addr
+				type = v.k === 'const' ? discs.get(v.v) : v.k === 'load' ? bufOf(v.addr) : undefined
+			} else {
+				const c = callOf(s), mc = s.k === 'copy' ? [s.dst, s.src] : c && c.t.k === 'fn' && /memcpy|memmove/.test(r.program.funcs.get(c.t.pc)?.name ?? '') ? [c.args[0], c.args[1]] : c && c.t.k === 'sys' && /memcpy|memmove/.test(c.t.name) ? [c.args[0], c.args[1]] : undefined
+				if (mc) { dst = mc[0]; type = bufOf(mc[1]) }
+			}
+			if (!dst || !type) return
+			const [base, varOff] = baseOf(dst)
+			const h = Ev.ev(base, p)
+			if (h?.k !== 'data' || (h.off !== 0 && !varOff) || compared.has(type) || out.some(x => x.acct === h.acct)) return
+			// (a condition on the way reading the account's data: dominating branches, try_accounts' checks)
+			const T = tryInfo(r, H)?.tryPc
+			const conds = pathTo(I, ctx, fn, bi).filter(k => k.how !== 'before').map(k => [k.fn, k.c, k.pos] as const)
+			const tf = T !== undefined ? I.byPc.get(T) : undefined
+			if (tf) tf.f.blocks.forEach((tb, tbi) => { if (tb.term.k === 'br') conds.push([T!, tb.term.c, tbi << 16 | tb.stmts.length]) })
+			if (conds.some(([f2, c2, q]) => readsData(r, ix, f2, c2, q, h.acct))) return
+			if (ix.checks.some(k => k.account === h.acct && k.kinds.some(x => x === 'discriminator' || x === 'zero' || x === 'initialized' || x === 'state'))) return
+			const ff = r.facts.get(fn)
+			out.push({ acct: h.acct, type, at: { fn: ff?.name ?? fo.name, line: ff?.pcLine.get(s.pc) ?? 0, pc: s.pc }, owner: ownerCmp.includes(h.acct) || ix.checks.some(k => k.account === h.acct && k.kinds.includes('owner')) })
+		}))
+	}
+	return out
+}
+
+/** whether a value reads an account's data (a load through a pointer into it), through variables */
+function readsData(r: Result, ix: IxOut, fn: number, e: Expr, p: number, acct: string): boolean {
+	const I = irOf(r), E = evaluators(r, ix)(fn), D = defsIn(I, fn)
+	if (!E || !D) return false
+	const go = (e: Expr, p: number, d: number): boolean => {
+		if (d > 6) return false
+		let hit = false
+		walkExpr(e, x => {
+			if (hit) return
+			if (x.k === 'load') { const h = E.ev(baseOfAddr(x.addr), p); hit = h?.k === 'data' && h.acct === acct }
+			else if (x.k === 'var') {
+				const y: [Expr, number] | null = D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : D.multi.has(x.id) ? D.reaching(x.id, p) : null
+				if (y && y[0].k !== 'call') hit = go(y[0], y[1], d + 1)
+			}
+		})
+		return hit
+	}
+	return go(e, p, 0)
+}
+const baseOfAddr = (e: Expr): Expr => e.k === 'bin' && e.op === 'add' && e.b.k !== 'const' ? e.a : e
 
 /** whether a statement after position p (in its block, or in a block reachable from it) reads the frame bytes [O, O + n) */
 function readAfter(I: ReturnType<typeof irOf>, fn: number, p: number, fpOff: (e: Expr) => number | undefined, O: number, n: number): boolean {
@@ -236,7 +330,7 @@ function paramWidth(I: ReturnType<typeof irOf>, ctx: IxOut['ctx'], fn: number, d
 function evaluators(r: Result, ix: IxOut): (fn: number) => EvCtx | undefined {
 	const I = irOf(r), ctx = ix.ctx!
 	const H = I.byPc.get(ctx.handler)
-	const A = H && anchorEval(r, H)
+	const A = H && anchorEval(r, H), T = H && tryInfo(r, H)
 	const memo = new Map<number, EvCtx | undefined>()
 	const evIn = (fn: number, d = 0): EvCtx | undefined => {
 		if (!A || d > 8) return undefined
@@ -253,6 +347,8 @@ function evaluators(r: Result, ix: IxOut): (fn: number) => EvCtx | undefined {
 			if (P && c) {
 				const roots = new Map<number, HVal>()
 				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = fo.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) roots.set(pv, v) })
+				// (try_accounts before &AccountInfo fields: the variables holding an account's &AccountInfo (byValueTry))
+				if (fn === T?.tryPc) for (const [id, acct] of T.ptrs ?? []) roots.set(id, { k: 'info', acct, off: 0 })
 				x = A.ctxOf(fo, roots, 2)
 			}
 		}

@@ -302,6 +302,22 @@
 				"treasury"
 			],
 			"note": "the destination comes from ctx.remaining_accounts[0], its key compared with config.beneficiary"
+		},
+		"register": {
+			"accounts": {
+				"profile": [
+					"writable",
+					"owner"
+				],
+				"authority": [
+					"signer"
+				]
+			},
+			"writes": [
+				"profile.data[0..8]",
+				"profile.data[8..48]?"
+			],
+			"note": "manual initialization of a client-allocated account: requires its discriminator to be zero first"
 		}
 	},
 	"variants": {
@@ -359,6 +375,12 @@
 			"ix": "distribute",
 			"rules": [
 				"remaining-account-unchecked"
+			]
+		},
+		"reinit_unchecked": {
+			"ix": "register",
+			"rules": [
+				"reinit-unchecked"
 			]
 		}
 	}
