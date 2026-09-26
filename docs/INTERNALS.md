@@ -247,7 +247,8 @@ one after the field (`S_27d8_b_0x10`), a local object after its function (`S_367
 words (at most 4 fields, no pointer, no known names) are shared by every object with that layout and named after it:
 `S_u64_u64` (fields one after the other from offset 0), `S_0x8u64_0x18u32` (else). try_accounts' out object gets the Accounts struct's account names. A class
 whose accesses — and those through its pointers, followed — all fit `AccountInfo` exactly (3+ fields), with a flag
-byte accessed or its data / lamports RefCell box followed to the borrow flag and value, gets `AccountInfo` instead
+byte accessed or its data / lamports RefCell box followed to the borrow flag and value, gets `AccountInfo` instead (and
+one whose accesses are exactly a RefCell box's borrow flag, data pointer and length, `DataCell`)
 (`// types [heur]: b: AccountInfo (its accesses, and those through the pointers it holds, fit the view …)`):
 
 ```ts
@@ -277,10 +278,16 @@ one data byte is decoded from the runs it is 1 in, checked by two runs of pseudo
 copied bytes, cut at their natural alignment (8 bytes at most), are the fields, named after their offset in the
 account data, discriminator included: `whirlpool_box.d0x49_u64` is the 8 bytes at data offset 0x49. Fields after a
 variable-length one (Option, Vec, String, enum payload) are not found (their offset moves with the data). The view,
-box variables and Accounts fields follow as for IDL types. A native program's deserializer — a user function called
-as `f(out, acc.data.ptr, acc.data.len)` (Borsh `try_from_slice`, `Pack::unpack`, …) — is run the same way (data of
-the length a run on zeros reads, else 10 KiB): the fields of its out object's inferred view that are data bytes
-copied in order are renamed `dN_uS`. An account's data pointer (`acc.data.ptr`) held in a variable or passed to a
+box variables and Accounts fields follow as for IDL types. A native program's deserializer — a function called as
+`f(out, acc.data.ptr, acc.data.len)` (Borsh `try_from_slice`, `Pack::unpack_from_slice`, …: a user function writing only
+its out parameter, or a library one of such a name) — is run the same way, on data of the length a run on zeros
+reads (try_from_slice wants every byte read), else of a length it compares its length parameter with (Pack's `LEN`),
+else 10 KiB; again with the first byte 1 throughout when that finds nothing (a version / is_initialized byte). The
+fields of its out object's inferred view that are data bytes copied in order are renamed `dN_uS`, except the words
+its error path writes constants to (the `Result`'s tag and error); a library deserializer's out object gets a view of
+its own, `Deser_<function>`, the copied bytes at their natural alignment. These names describe the object as the
+call returns it on success: after a failed call the same bytes hold the error. An account's data pointer
+(`acc.data.ptr`, also of an AccountInfo or RefCell box recognized by its accesses) held in a variable or passed to a
 call gets an inferred view `Data_<function>` of its fixed-offset accesses (`f0x2d_u8`: the byte at data offset 0x2d).
 
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
