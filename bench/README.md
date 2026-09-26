@@ -45,3 +45,10 @@ categories). `--verbose` lists the variants (caught / MISSED), every miss and ev
 
 To add a program: a crate under `programs/` (add it to the workspace), `v_*` features, `bench/build.sh <crate>`,
 an IDL for Anchor, and `expected/<crate>.json`.
+
+## Corpus noise of the audit rules
+
+Programs of the 400-program corpus with >= 1 finding (decompile project mode): `sysvar-account-unchecked` 0,
+`pda-bump-from-ix` 5 (7 findings), `duplicate-mutable-accounts` 0, `account-type-unchecked` 3, `cpi-result-ignored` 1,
+`truncating-cast` 0, `remaining-account-unchecked` 1, `init-if-needed-reinit` 0; `cpi-unchecked-program` high
+(PDA-signed) in 19 of its 92 programs. Rules are kept under ~5% of the programs.
