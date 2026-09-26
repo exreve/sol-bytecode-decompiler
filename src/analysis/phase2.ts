@@ -378,9 +378,24 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'unverified-account-data', title: 'Operation parameter read from the data of an account whose owner is not verified',
-		run: ix => ix.ops.flatMap(o => (o.sources ?? []).filter(s => !/\.key$/.test(s.source) && s.source !== 'instruction data' && !s.source.startsWith('ix.') && s.trust === 'caller-controlled' && isValueOrAuth(o)).slice(0, 1).map(s => ({
-			accounts: [s.source.split('.')[0]], path: [L(o.at)], evidence: [`${s.param} ← ${s.source}: the account's owner is not verified (no check found)`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
-		}))),
+		run: ix => {
+			const out = ix.ops.flatMap(o => (o.sources ?? []).filter(s => !/\.key$/.test(s.source) && s.source !== 'instruction data' && !s.source.startsWith('ix.') && s.trust === 'caller-controlled' && isValueOrAuth(o)).slice(0, 1).map(s => ({
+				accounts: [s.source.split('.')[0]], path: [L(o.at)], evidence: [`${s.param} ← ${s.source}: the account's owner is not verified (no check found)`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
+			})))
+			if (out.length) return out
+			// (a check deciding a value move compares the data of an account whose owner the program does not check:
+			// an account of another owner with chosen data passes it)
+			const checked = (a: string) => { const c = ix.accounts.find(x => x.name === a)?.constraints.owner; return !!c && (c.status === 'found' || c.status === 'partial') }
+			for (const o of ix.ops) {
+				if (!isValueOrAuth(o) || runtimeAuthorized(o)) continue
+				for (const ci of o.guards ?? []) {
+					const c = ix.checks[ci]
+					const a = (c.sides ?? []).map(s => /^([A-Za-z_]\w*(?:\[\d+\])?)\.data\b/.exec(s)?.[1]).find(x => x && !checked(x))
+					if (a) return [{ accounts: [a], path: [L(c.at), L(o.at)], evidence: [`check ${L(c.at)} reads ${a}'s data (${c.sides!.join(' == ')}); ${a}'s owner is not checked`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o) }]
+				}
+			}
+			return []
+		},
 	},
 	// ---- phase 3 pattern rules (phase3.ts facts) ----
 	{
