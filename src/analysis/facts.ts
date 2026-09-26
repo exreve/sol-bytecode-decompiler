@@ -296,7 +296,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 			return
 		}
 		const b = BUILDER.exec(path)
-		if (b) { const [program, family] = helperProgram(b[1]); facts.ixHints.push({ line: l + 1, program, family, ix: pascal(b[3]), how: path, call: n.k === 'stmt' ? { fn: inp.pc, pc: n.s.pc } : undefined }); return }
+		if (b) { const [program, family] = helperProgram(b[1]); facts.ixHints.push({ line: l + 1, program, family, ix: pascal(b[2]), how: path, call: n.k === 'stmt' ? { fn: inp.pc, pc: n.s.pc } : undefined }); return }
 		// (TokenInstruction::pack(out, &self): the enum's tag stored into self before)
 		if (/TokenInstruction::pack$/.test(path) || /^TokenInstruction_pack/.test(inp.calleeName(callee))) {
 			const self = /\(([^,]+), ([^,)]+)\)$/.exec(t)?.[2]?.trim()
