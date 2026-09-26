@@ -27,6 +27,8 @@ jobs:
         run: |
           node src/cli.ts samples/svault_v3.so -o out/svault/
           node --stack-size=65500 test/equiv.ts samples/svault_v3.so 1
+      - name: Compatibility set (C, Zig, asm, Solang, BPFLoader1, sBPF v2/v3, other SVM chains; compat/README.md)
+        run: node compat/run.ts
       - name: Analysis benchmark (minimum score 85)
         run: |
           node bench/run.ts | tee bench.log
