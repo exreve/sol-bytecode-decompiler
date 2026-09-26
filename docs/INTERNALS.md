@@ -229,8 +229,12 @@ parameter when its accesses fit. Both directions are repeated to a fixed point o
 
 **Inferred struct views** (`[heur]`, `src/structs.ts`): pointers still without a view get one made from the program's
 own fixed-offset accesses through them. A pointer is a parameter never reassigned, a variable defined once as a
-word loaded from such an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to), or a frame object passed
-to a call (the stores building it right before the call). Objects are unified (one view) along the data flow,
+word loaded from such an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to), a frame object passed
+to a call (the stores building it right before the call), a word loaded from a call's out object in the frame
+(the last call before the load, through single-predecessor blocks, given a frame address at most 0x100 below it:
+that field of the callee's object, when the callee accesses it as a word), a word reloaded from a frame slot every
+store of which holds the same value (a spilled pointer: one object per slot), an inline heap allocation, or a
+variable every definition of which is one of these. Objects are unified (one view) along the data flow,
 Steensgaard style — a parameter with the arguments calls pass it, a loaded pointer with every other pointer loaded
 from or stored at the same field of the same object — and a merge is made only when the layouts agree (no access of
 one overlaps an access of another size of the other, recursively through their pointer fields). Pointers used in
@@ -239,7 +243,9 @@ library and noreturn functions get none. Each field is named after its offset an
 whose value is used as such a pointer `f0x10_ref: at<0x10, ref<S_…>>` (x.f = p stores the pointer); at each offset
 the most used access, the others (overlapping it) stay raw; 2+ fields. The view is named after the first function
 whose parameter it is: `S_<function>_<parameter>` (`S_27d8_ret`, `S_accounts_swap_c`), a pointed-to object without
-one after the field (`S_27d8_b_0x10`). try_accounts' out object gets the Accounts struct's account names. A class
+one after the field (`S_27d8_b_0x10`), a local object after its function (`S_3670_local`). Small layouts of plain
+words (at most 4 fields, no pointer, no known names) are shared by every object with that layout and named after it:
+`S_u64_u64` (fields one after the other from offset 0), `S_0x8u64_0x18u32` (else). try_accounts' out object gets the Accounts struct's account names. A class
 whose accesses — and those through its pointers, followed — all fit `AccountInfo` exactly (3+ fields), with a flag
 byte accessed or its data / lamports RefCell box followed to the borrow flag and value, gets `AccountInfo` instead
 (`// types [heur]: b: AccountInfo (its accesses, and those through the pointers it holds, fit the view …)`):
