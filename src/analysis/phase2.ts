@@ -374,7 +374,9 @@ const RULES: Rule[] = [
 		id: 'state-write-ungated', title: 'Instruction writes program state with no signer check and no constraint gating the write',
 		run: ix => {
 			if (ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))) return []
-			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => GATE.includes(k))))
+			// (no signer anywhere: a key binding (has_one, token owner) to an account nobody signs for gates nothing)
+			const gate = GATE.filter(k => !['has_one', 'key', 'token_owner', 'associated'].includes(k))
+			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => gate.includes(k))))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
 			const anyGuard = ws.some(o => (o.guards ?? []).length)
