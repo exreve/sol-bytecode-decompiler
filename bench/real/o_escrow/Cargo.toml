@@ -1,0 +1,27 @@
+[package]
+name = "o_escrow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+v_take_no_mint_b = []
+v_take_dest_unbound = []
+v_refund_no_signer = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
+anchor-spl = { workspace = true }

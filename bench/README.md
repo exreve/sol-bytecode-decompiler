@@ -53,6 +53,42 @@ funds to a destination of its choosing. It must not be a finding (every base fin
 analysis.json as `fund_movers: [{ instruction, authority, ... }]` (authority: the account name, or `account[index]`
 for native); `bench/run.ts` prints `fund movers listed n/m` (missing section: all NOT LISTED).
 
+## Realistic and open-source sets (bench/real, bench/real29)
+
+Hand-labelled programs of realistic size, scored for rules only and apart from the six categories and the generated
+(template) set; `expected.set` selects the set. Build with `WS=bench/real sh bench/build.sh <crate>` (Anchor 0.31.1,
+solana-program 2.2.1, pinocchio 0.8.4) and `WS=bench/real29 sh bench/build.sh r_a29_` (Anchor 0.29.0); IDLs with
+`node bench/real/idl.ts`.
+
+- `realistic` (r_*): programs written for the bench in the styles real code uses, each meant to be correct as written:
+  `r_a31_staking` (Anchor 0.31, 16 instructions: upgrade-authority-gated init, has_one / address / constraint with
+  custom errors, a helper doing the admin check, two-step admin, token / associated_token constraints, PDA vault
+  signers, zero-copy stats, events, permissionless crank / reward funding / payer-funded position / batch sync over
+  remaining accounts validated one by one, Anchor close, checked u128 math), `r_n_vesting` (solana-program, 11:
+  assert_* helpers with custom errors, loaders checking owner / length / tag / PDA from the stored bump, hard-coded
+  admin, Clock sysvar address, system CPIs with invoke_signed, permissionless release and batch release bound to stored
+  keys), `r_p_crowdfund` (pinocchio, 10: the same by hand, a state machine, permissionless finalize and batch refund),
+  `r_a29_market` (Anchor 0.29, 10: SOL-priced token listings, PDA fee vault, token close_account, permissionless sweep).
+  Every finding on them is false. `instructions.<ix>.why` says why each account is safely validated.
+- `oss` (o_*): open-source programs with permissive licenses, logic unmodified: `o_multisig` (coral-xyz/multisig,
+  Apache-2.0), `o_escrow` (solana-developers/program-examples tokens/escrow/anchor, MIT), `o_record` (spl-record 0.3.0,
+  Apache-2.0), `o_spl_token` (spl-token 8.0.0, Apache-2.0). The clean build is a clean case (every finding false);
+  each `v_*` feature removes exactly one validation (signer, has_one / key equality, PDA seeds, mint binding) and is
+  kept only when the removal is exploitable: `variants.<v>` gives `removed`, `impact` (which instruction / account
+  becomes unvalidated and the attack) and `verified`; `discarded` lists the removals left out as redundant or harmless,
+  with the reason.
+
+`node bench/real/verify.ts [--write] [filter]` is the label check: it decompiles each variant and its clean build and
+prints, at the variant's instruction, the check-related tokens of the decompiled code that differ (Anchor error
+constants, ProgramError returns, logged messages, `Signer::try_accounts`, memcmp / sol_memcmp, PDA derivations, calls of
+the function returning MissingRequiredSignature), the same over the whole program, and the per-account checks the
+analysis finds in one build only; `--write` records them in `variants.<v>.verified` (`note`: a hand-written addition
+where the tokens do not show it, e.g. a Signer replaced by a SystemAccount).
+
+`bench/run.ts` prints one line per set: clean programs, false findings on them (+ validation_consistency
+inconsistencies, instructions the analysis does not find), and for `oss` the variants caught: an accepted rule reported
+at the variant's instruction that the clean build does not already report there.
+
 ## Eval pairs
 
 `eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a

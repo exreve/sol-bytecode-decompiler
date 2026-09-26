@@ -1,0 +1,14 @@
+# Realistic clean Anchor 0.29 program (bench/README.md); Cargo.lock from bench/gen/programs29
+[workspace]
+resolver = "2"
+members = ["r_a29_market"]
+
+[workspace.dependencies]
+anchor-lang = "=0.29.0"
+anchor-spl = { version = "=0.29.0", default-features = false, features = ["token", "token_2022"] }
+solana-program = "=1.16.27"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
