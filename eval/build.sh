@@ -97,3 +97,9 @@ build spl_lending_flashloan vuln solana-labs/solana-program-library e8861b275d4d
 build spl_lending_flashloan fixed solana-labs/solana-program-library 23c487dd9c . spl-token-lending spl_token_lending v1.41
 build spl_lending_rounding vuln solana-labs/solana-program-library c24bc966f133fbac5c789f7fb2841e47764ee0f2 . spl-token-lending spl_token_lending v1.41
 build spl_lending_rounding fixed solana-labs/solana-program-library c2b287788b . spl-token-lending spl_token_lending v1.41
+
+# oracle validation: Pyth aggregate status (SPL #2618), confidence + status (Solend #52)
+build spl_lending_oracle_status vuln solana-labs/solana-program-library eaca634995313f451ec91970fed3dcbc6610678e . spl-token-lending spl_token_lending v1.41
+build spl_lending_oracle_status fixed solana-labs/solana-program-library 0b8961597b3adf7355e48506d7e81b3925bbacd0 . spl-token-lending spl_token_lending v1.41
+build solend_oracle_conf vuln solendprotocol/solana-program-library 6c23c1918af2ef807f288683db5a235cc2e61475 . spl-token-lending spl_token_lending v1.41
+build solend_oracle_conf fixed solendprotocol/solana-program-library 12ea2cd586641b3a878f279ed2051c9966473acc . spl-token-lending spl_token_lending v1.41

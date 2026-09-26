@@ -1,0 +1,494 @@
+{
+	"address": "GRisk31111111111111111111111111111111111111",
+	"metadata": {
+		"name": "g_a31_risk",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_reserve",
+			"discriminator": [138, 245, 71, 225, 153, 4, 3, 43],
+			"accounts": [
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "reserve",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault"
+				},
+				{
+					"name": "oracle"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "min_liquidity",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "open_ledger",
+			"discriminator": [54, 103, 189, 232, 236, 251, 119, 42],
+			"accounts": [
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "ledger",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "deposit",
+			"discriminator": [242, 35, 198, 137, 82, 225, 242, 182],
+			"accounts": [
+				{
+					"name": "reserve",
+					"writable": true
+				},
+				{
+					"name": "ledger",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "src",
+					"writable": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "withdraw",
+			"discriminator": [183, 18, 70, 156, 148, 109, 161, 34],
+			"accounts": [
+				{
+					"name": "reserve",
+					"writable": true
+				},
+				{
+					"name": "ledger",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "assets",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "flash_borrow",
+			"discriminator": [166, 221, 220, 25, 61, 73, 127, 240],
+			"accounts": [
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "borrower",
+					"signer": true
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "instructions"
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				},
+				{
+					"name": "repay_index",
+					"type": "u16"
+				}
+			]
+		},
+		{
+			"name": "flash_repay",
+			"discriminator": [182, 143, 19, 23, 39, 221, 184, 78],
+			"accounts": [
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "payer",
+					"signer": true
+				},
+				{
+					"name": "src",
+					"writable": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "borrow",
+			"discriminator": [228, 253, 131, 202, 207, 116, 89, 18],
+			"accounts": [
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "ledger",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "oracle"
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "route",
+			"discriminator": [229, 23, 203, 151, 122, 227, 173, 42],
+			"accounts": [
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "ledger"
+				},
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "swap_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "swap_user",
+			"discriminator": [66, 10, 177, 217, 202, 237, 113, 168],
+			"accounts": [
+				{
+					"name": "owner",
+					"signer": true
+				},
+				{
+					"name": "src",
+					"writable": true
+				},
+				{
+					"name": "swap_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "admin_sweep",
+			"discriminator": [98, 231, 31, 170, 146, 98, 102, 35],
+			"accounts": [
+				{
+					"name": "reserve"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "reserve_auth"
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": []
+		}
+	],
+	"accounts": [
+		{
+			"name": "Reserve",
+			"discriminator": [43, 242, 204, 202, 26, 247, 59, 127]
+		},
+		{
+			"name": "Ledger",
+			"discriminator": [43, 41, 21, 213, 180, 176, 95, 32]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "math"
+		},
+		{
+			"code": 6001,
+			"name": "empty"
+		},
+		{
+			"code": 6002,
+			"name": "paused"
+		},
+		{
+			"code": 6003,
+			"name": "limit"
+		},
+		{
+			"code": 6004,
+			"name": "claimed"
+		},
+		{
+			"code": 6005,
+			"name": "sameAccount"
+		},
+		{
+			"code": 6006,
+			"name": "badConfig"
+		},
+		{
+			"code": 6007,
+			"name": "noDest"
+		},
+		{
+			"code": 6008,
+			"name": "badDest"
+		},
+		{
+			"code": 6009,
+			"name": "alreadyInitialized"
+		},
+		{
+			"code": 6010,
+			"name": "notOpen"
+		},
+		{
+			"code": 6011,
+			"name": "badIx"
+		},
+		{
+			"code": 6012,
+			"name": "badRepay"
+		},
+		{
+			"code": 6013,
+			"name": "badOracle"
+		},
+		{
+			"code": 6014,
+			"name": "stale"
+		}
+	],
+	"types": [
+		{
+			"name": "Reserve",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "vault",
+						"type": "pubkey"
+					},
+					{
+						"name": "oracle",
+						"type": "pubkey"
+					},
+					{
+						"name": "total_assets",
+						"type": "u64"
+					},
+					{
+						"name": "total_shares",
+						"type": "u64"
+					},
+					{
+						"name": "min_liquidity",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Ledger",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "reserve",
+						"type": "pubkey"
+					},
+					{
+						"name": "shares",
+						"type": "u64"
+					},
+					{
+						"name": "deposited",
+						"type": "u64"
+					},
+					{
+						"name": "borrowed",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}
