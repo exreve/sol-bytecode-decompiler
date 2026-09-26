@@ -1112,7 +1112,16 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 				if (o !== undefined) {
 					if (arr !== undefined && e.size === 8 && o >= arr && (o - arr) % 8 === 0 && o - arr < 8 * 64) return { k: 'rec', i: (o - arr) / 8, off: 0 }
 					const y = e.size === 8 ? reaching(SLOT(o), p) : null
-					return y ? ev(y[0], y[1], d + 1) : undefined
+					if (y) return ev(y[0], y[1], d + 1)
+					// (a Ref / RefMut an AccountInfo::try_borrow_(mut_)data / lamports call returned in the frame: its value
+					// pointer, at +8 of the out object, points to the RefCell's value)
+					const z = e.size === 8 && callee ? reaching(SLOT(o), p, true) : null
+					const c = z?.[0].k === 'call' && z[0].t.k === 'fn' ? z[0] : undefined
+					const m = c && /try_borrow_(?:mut_)?(data|lamports)/.exec(callee!.name((c.t as { pc: number }).pc))
+					if (!m || fpOff(c!.args[0]) !== o - 8) return undefined
+					const a = ev(c!.args[1], z![1], d + 1)
+					if (a?.k === 'slice' && a.off % 0x30 === 0) return { k: 'rc', i: a.off / 0x30, f: m[1] as 'data' | 'lamports', off: 0x18 }
+					return undefined
 				}
 				return deref(ev(e.addr, p, d + 1), e.size)
 			}
@@ -1226,10 +1235,21 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	}
 	const store = (s: Stmt): AcctRef | undefined => {
 		const p = pos.get(s)
-		if ((s.k !== 'store' && s.k !== 'stores') || p === undefined) return undefined
+		if (p === undefined) return undefined
+		// (memset / memcpy into an account's data, e.g. zeroing it on close)
+		const c = callOf(s)
+		const nm = c?.t.k === 'sys' ? c.t.name : c?.t.k === 'fn' ? callee?.name(c.t.pc) ?? '' : ''
+		if (c && /^(sol_)?(memset|memcpy|memmove)_?$/.test(nm) && c.args.length >= 3) {
+			const a = ev(c.args[0], p), n = c.args[2].k === 'const' ? Number(c.args[2].v) : undefined
+			const d = a?.k === 'ptr' && a.f === 'data' ? [a.i, a.off] : a?.k === 'rec' && a.off >= 0x58 ? [a.i, a.off - 0x58] : undefined
+			return d && { index: d[0], field: n === undefined ? (d[1] ? `data[${d[1]}..]` : 'data') : `data[${d[1]}..${d[1] + n}]` }
+		}
+		if (s.k !== 'store' && s.k !== 'stores') return undefined
 		const a = ev(s.addr, p)
 		const n = s.k === 'store' ? s.size : s.size * s.vals.length
 		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
+		// (the owner pubkey rewritten: AccountInfo::assign)
+		if (a?.k === 'ptr' && a.f === 'owner' || a?.k === 'rec' && a.off >= 0x28 && a.off < 0x48) return { index: a.i, field: 'owner' }
 		if (a?.k === 'rec' && a.off === 0x48 && s.k === 'store' && s.size === 8) return { index: a.i, field: 'lamports' }
 		if (a?.k === 'rec' && a.off >= 0x58) return { index: a.i, field: `data[${a.off - 0x58}..${a.off - 0x58 + n}]` }
 		return undefined

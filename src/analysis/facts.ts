@@ -279,14 +279,20 @@ export function functionFacts(inp: FnInput): FnFacts {
 	// stores: lamports, account data fields (typed), account record fields
 	const store = (n: Node, main: boolean, err: boolean) => {
 		const s = n.k === 'stmt' ? n.s : undefined
-		if (!s || (s.k !== 'store' && s.k !== 'stores')) return
+		if (!s || (s.k !== 'store' && s.k !== 'stores' && s.k !== 'call' && s.k !== 'set')) return
 		const l = lineOf(n)
 		const t = lines[l]?.trim() ?? ''
 		// (native: an account's lamports / data reached through temporaries, by the IR)
 		const ir = inp.irStore?.(s)
+		if (s.k === 'call' || s.k === 'set') {
+			// (a memset / memcpy into the data: the value written, as its arguments say)
+			const a = /\(([^,]+), ([^,]+), ([^)]+)\)/.exec(t)
+			if (ir?.field) facts.ops.push({ line: l + 1, pc: s.pc, kinds: ['ACCOUNT_DATA_WRITE'], text: t, main, errPath: err, target: { acct: `account[${ir.index}]`, field: ir.field }, how: '=', value: /memset/.test(t) ? a?.[2] ?? '?' : a ? `bytes at ${a[2]}` : '?' })
+			return
+		}
 		if (ir?.field) {
 			const v = /^st(?:8|16|32|64)\((.*)\)$/.exec(t)?.[1]?.split(', ').slice(1).join(', ') ?? t
-			const kinds: OpKind[] = ir.field === 'lamports' ? ['LAMPORT_WRITE'] : ['ACCOUNT_DATA_WRITE']
+			const kinds: OpKind[] = ir.field === 'lamports' ? ['LAMPORT_WRITE'] : ir.field === 'owner' ? ['OWNER_ASSIGN'] : ['ACCOUNT_DATA_WRITE']
 			if (ir.field === 'lamports' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
 			// (a copy in 8-byte words, e.g. a key: one write of the whole range)
 			const prev = facts.ops[facts.ops.length - 1], r = /^data\[(\d+)\.\.(\d+)\]$/.exec(ir.field)

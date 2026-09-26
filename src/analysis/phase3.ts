@@ -431,7 +431,7 @@ export function closeZeroing(ix: IxOut, oi: number): { zeroed?: string; revived?
 		if (x.kinds.includes('OWNER_ASSIGN')) res.zeroed ??= `owner reassigned ${x.at.fn}:${x.at.line}`
 		if (x.kinds.includes('ACCOUNT_REALLOC') && /realloc\([^,]+, [^,]+, 0\b|space: 0\b/.test(x.text)) res.zeroed ??= `realloc to 0 ${x.at.fn}:${x.at.line}`
 		else if (x.kinds.includes('ACCOUNT_REALLOC') && (x.at.fn !== o.at.fn || x.at.line > o.at.line)) res.revived ??= `${x.text.slice(0, 80)} (${x.at.fn}:${x.at.line})`
-		if (x.kinds.includes('ACCOUNT_DATA_WRITE') && x.target && /discriminator|data\[0\.\.8\]/.test(x.target)) res.zeroed ??= `discriminator written ${x.at.fn}:${x.at.line}`
+		if (x.kinds.includes('ACCOUNT_DATA_WRITE') && x.target && /discriminator|data\[0\.\.|\.data$/.test(x.target)) res.zeroed ??= `discriminator written ${x.at.fn}:${x.at.line}`
 	})
 	if (!res.zeroed && /memset|fill\(/.test(o.text)) res.zeroed = 'memset in the close'
 	return res
