@@ -188,3 +188,12 @@ resolves no account), 0, 4 / 6 (+ 8 informational: the caller's own signature fo
 `rounding-favors-user` (experimental, low) 4/4, 0, 0 / 0. Eval: spl_lending_oracle_status and solend_oracle_conf vuln
 finding / fixed clean; wormhole_bridge tag_7 finding without the account (Solitaire's account struct: the parse's
 account is not resolved, so account[3] is not named). Fund movers: 2/2 admin_sweep listed.
+
+Precision pass (findings on the 400 programs, before → after, baseline refreshed first): all 3042 → 826;
+`cpi-unchecked-program` 1596 → 82 (a program id traced to an account key only, checked accounts / token builders
+excluded, one per account and instruction), `caller-controlled-sensitive-param` 325 → 39, `share-price-zero-supply`
+269 → 1 (spot-checked hits were fixed-point helpers, products, a divisor of 1), `close-without-zeroing` 181 → 102,
+`signer-not-related-to-authority` 218 → 184, `value-move-no-signer` 204 → 190, `state-write-ungated` 78 → 57,
+`unchecked-arithmetic` 58 → 39; new behavior-based `sysvar-account-unchecked` 2 (info, account not identified),
+`reinit-unchecked` (native) 4 in 1 program.
+

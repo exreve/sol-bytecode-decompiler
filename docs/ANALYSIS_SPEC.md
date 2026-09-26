@@ -138,7 +138,13 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
   key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote,
   also word by word: all 4 words of the output compared, the key's account possibly unresolved, e.g. taken from an
-  accounts iterator; a PDA is `compared` when such a check is in the deriving function or a caller of it);
+  accounts iterator; a PDA is `compared` when such a check is in the deriving function (comparing that derivation's
+  output, through copies: the call's pointer arguments) or a caller of it);
+  an accounts iterator's cursor a callee advances (a structure holding the cursor's address passed to it, the callee
+  storing cursor + 0x30, 2 levels): the next account; a pointer into a caller's frame (an accounts struct of
+  AccountInfo copies, an argument object) is read with the caller's words at the call, for out objects and along the
+  instruction's call path (pinocchio's record arrays by their own evidence); a callee variable defined differently by
+  path: the one account value its definitions give;
   a lamport write is a store into the u64 itself (LamportsCell.value.amount, an input record's lamports), never a
   pointer stored into an AccountInfo (struct copy / clone) nor an Rc box's counts / flag; a DataCell's slice pointer /
   length moved by `Write for &mut [u8]` is neither a data write nor a realloc (the u64 before the data is);
@@ -178,17 +184,24 @@ hit no depth limit, callWrites is memoized per depth, seeded account resolvers b
 
 Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/programs/a_audit seeds one bug per rule):
 - `sysvar-account-unchecked` (medium): an account named like a sysvar (clock, rent, instructions, slot_hashes, …) whose
-  data the logic borrows itself (AccountInfo::try_borrow_data; not Sysvar<T> / from_account_info / get()), with no
-  address check on it;
+  data the logic borrows itself (AccountInfo::try_borrow_data, by name or behavior; not Sysvar<T> / from_account_info /
+  get()), with no address check on it; and by behavior, whatever the name (native too): an account's data parsed with
+  the Instructions sysvar's layout (a u16 read from its last 2 bytes: load_current_index; a u16 at 2 + 2 * index after
+  the count at 0: load_instruction_at), no key check on the account, no comparison with the sysvar id in the
+  instruction (informational when the account is not identified);
 - `pda-bump-from-ix` (medium): create_program_address whose last seed (one byte, the bump) is loaded straight from
   instruction data (not through a call's results, e.g. a deserialized stored bump);
 - `duplicate-mutable-accounts` (medium with a += / -= write, else low; Anchor): try_accounts deserializes one account
   type (the try call checking a discriminator) for several accounts, all writable, the instruction writes data of that
-  type, and no check compares two account keys;
+  type, and no check compares two account keys; native (medium): two program-owned accounts written at the same data
+  offset (a debit and a credit) with no key equality between them;
 - `account-type-unchecked` (medium; Anchor): the logic borrows an account's data itself, its owner is checked (a
   constraint, or a check comparing its owner) but no discriminator check is found (type confusion; an owner not
   checked at all is `unverified-account-data`'s); not an AccountLoader load (a discriminator check after the borrow);
-- `cpi-unchecked-program`: high when the CPI is PDA-signed;
+- `cpi-unchecked-program`: only a program id traced to an account's key (the IR sources; a hand-built Instruction's
+  program_id passed to invoke), with no key / address / PDA / stored-key check of that account dominating the CPI, no
+  comparison with a known id (the call site, a token builder function); one finding per program account and
+  instruction; high when the CPI is PDA-signed;
 - `cpi-result-ignored` (medium): a CPI through a function returning its Result in an out object (invoke, the Anchor
   helpers, a wrapper) that no statement after the call reads (not the syscall itself: a failed CPI aborts);
 - `truncating-cast` (medium from instruction data, else low): a value-path amount (lamports stored, a CPI helper's
