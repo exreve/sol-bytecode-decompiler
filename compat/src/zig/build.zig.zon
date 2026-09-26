@@ -1,0 +1,13 @@
+.{
+    .fingerprint = 0xb2b2d2203f53184c,
+    .name = .zig_counter,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .solana_program_sdk = .{
+            .url = "https://api.github.com/repos/joncinque/solana-program-sdk-zig/tarball/refs/tags/v0.18.0",
+            .hash = "solana_program_sdk-0.18.0-wGj9UCPlAAC_UeDyaPG9rZdoAt0Z-uqfgzQim7M-w9jJ",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

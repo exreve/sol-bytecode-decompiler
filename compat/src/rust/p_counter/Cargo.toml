@@ -1,0 +1,18 @@
+[package]
+name = "p_counter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+v_no_signer = []
+v_ungated = []
+
+
+[dependencies]
+pinocchio = "=0.8.4"
+pinocchio-system = "=0.2.3"
