@@ -1,0 +1,17 @@
+[package]
+name = "r_n_vesting"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
+[dependencies]
+solana-program = { workspace = true }

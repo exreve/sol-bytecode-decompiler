@@ -1,0 +1,318 @@
+{
+	"address": "msigUdDBsR4zSUYqYEDrc1LcgtmuSDDM7KxpRUXNC6U",
+	"metadata": {
+		"name": "o_multisig",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "create_multisig",
+			"discriminator": [148, 146, 240, 10, 226, 215, 167, 174],
+			"accounts": [
+				{
+					"name": "multisig",
+					"writable": true,
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "owners",
+					"type": {
+						"vec": "pubkey"
+					}
+				},
+				{
+					"name": "threshold",
+					"type": "u64"
+				},
+				{
+					"name": "nonce",
+					"type": "u8"
+				}
+			]
+		},
+		{
+			"name": "create_transaction",
+			"discriminator": [227, 193, 53, 239, 55, 126, 112, 105],
+			"accounts": [
+				{
+					"name": "multisig"
+				},
+				{
+					"name": "transaction",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "proposer",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "pid",
+					"type": "pubkey"
+				},
+				{
+					"name": "accs",
+					"type": {
+						"vec": {
+							"defined": {
+								"name": "TransactionAccount"
+							}
+						}
+					}
+				},
+				{
+					"name": "data",
+					"type": "bytes"
+				}
+			]
+		},
+		{
+			"name": "approve",
+			"discriminator": [69, 74, 217, 36, 115, 117, 97, 76],
+			"accounts": [
+				{
+					"name": "multisig"
+				},
+				{
+					"name": "transaction",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "set_owners_and_change_threshold",
+			"discriminator": [55, 144, 74, 245, 249, 230, 14, 53],
+			"accounts": [
+				{
+					"name": "multisig",
+					"writable": true
+				},
+				{
+					"name": "multisig_signer",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "owners",
+					"type": {
+						"vec": "pubkey"
+					}
+				},
+				{
+					"name": "threshold",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "set_owners",
+			"discriminator": [134, 145, 42, 122, 94, 64, 76, 218],
+			"accounts": [
+				{
+					"name": "multisig",
+					"writable": true
+				},
+				{
+					"name": "multisig_signer",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "owners",
+					"type": {
+						"vec": "pubkey"
+					}
+				}
+			]
+		},
+		{
+			"name": "change_threshold",
+			"discriminator": [146, 151, 213, 63, 121, 79, 9, 29],
+			"accounts": [
+				{
+					"name": "multisig",
+					"writable": true
+				},
+				{
+					"name": "multisig_signer",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "threshold",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "execute_transaction",
+			"discriminator": [231, 173, 49, 91, 235, 24, 68, 19],
+			"accounts": [
+				{
+					"name": "multisig"
+				},
+				{
+					"name": "multisig_signer"
+				},
+				{
+					"name": "transaction",
+					"writable": true
+				}
+			],
+			"args": []
+		}
+	],
+	"accounts": [
+		{
+			"name": "Multisig",
+			"discriminator": [224, 116, 121, 186, 68, 161, 79, 236]
+		},
+		{
+			"name": "Transaction",
+			"discriminator": [11, 24, 174, 129, 203, 117, 242, 23]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "invalidOwner"
+		},
+		{
+			"code": 6001,
+			"name": "invalidOwnersLen"
+		},
+		{
+			"code": 6002,
+			"name": "notEnoughSigners"
+		},
+		{
+			"code": 6003,
+			"name": "transactionAlreadySigned"
+		},
+		{
+			"code": 6004,
+			"name": "overflow"
+		},
+		{
+			"code": 6005,
+			"name": "unableToDelete"
+		},
+		{
+			"code": 6006,
+			"name": "alreadyExecuted"
+		},
+		{
+			"code": 6007,
+			"name": "invalidThreshold"
+		},
+		{
+			"code": 6008,
+			"name": "uniqueOwners"
+		}
+	],
+	"types": [
+		{
+			"name": "Multisig",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owners",
+						"type": {
+							"vec": "pubkey"
+						}
+					},
+					{
+						"name": "threshold",
+						"type": "u64"
+					},
+					{
+						"name": "nonce",
+						"type": "u8"
+					},
+					{
+						"name": "owner_set_seqno",
+						"type": "u32"
+					}
+				]
+			}
+		},
+		{
+			"name": "Transaction",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "multisig",
+						"type": "pubkey"
+					},
+					{
+						"name": "program_id",
+						"type": "pubkey"
+					},
+					{
+						"name": "accounts",
+						"type": {
+							"vec": {
+								"defined": {
+									"name": "TransactionAccount"
+								}
+							}
+						}
+					},
+					{
+						"name": "data",
+						"type": "bytes"
+					},
+					{
+						"name": "signers",
+						"type": {
+							"vec": "bool"
+						}
+					},
+					{
+						"name": "did_execute",
+						"type": "bool"
+					},
+					{
+						"name": "owner_set_seqno",
+						"type": "u32"
+					}
+				]
+			}
+		},
+		{
+			"name": "TransactionAccount",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "pubkey",
+						"type": "pubkey"
+					},
+					{
+						"name": "is_signer",
+						"type": "bool"
+					},
+					{
+						"name": "is_writable",
+						"type": "bool"
+					}
+				]
+			}
+		}
+	]
+}

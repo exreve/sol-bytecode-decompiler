@@ -1,0 +1,491 @@
+{
+	"address": "E8kSAFnyqQdXis8mCgX3pAXyG3ZLasYJX9AYEAVyRhZh",
+	"metadata": {
+		"name": "r_a29_market",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_market",
+			"discriminator": [33, 253, 15, 116, 89, 25, 127, 236],
+			"accounts": [
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "fee_vault",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "fee_bps",
+					"type": "u16"
+				}
+			]
+		},
+		{
+			"name": "set_fee",
+			"discriminator": [18, 154, 24, 18, 237, 214, 19, 80],
+			"accounts": [
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "fee_bps",
+					"type": "u16"
+				}
+			]
+		},
+		{
+			"name": "set_paused",
+			"discriminator": [91, 60, 125, 192, 176, 225, 166, 218],
+			"accounts": [
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "paused",
+					"type": "bool"
+				}
+			]
+		},
+		{
+			"name": "transfer_admin",
+			"discriminator": [42, 242, 66, 106, 228, 10, 111, 156],
+			"accounts": [
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "new_admin",
+					"signer": true
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "withdraw_fees",
+			"discriminator": [198, 212, 171, 109, 144, 215, 174, 89],
+			"accounts": [
+				{
+					"name": "market"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "fee_vault",
+					"writable": true
+				},
+				{
+					"name": "destination",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "list",
+			"discriminator": [54, 174, 193, 67, 17, 41, 132, 38],
+			"accounts": [
+				{
+					"name": "seller",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "market"
+				},
+				{
+					"name": "mint"
+				},
+				{
+					"name": "seller_token",
+					"writable": true
+				},
+				{
+					"name": "listing",
+					"writable": true
+				},
+				{
+					"name": "escrow",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "price",
+					"type": "u64"
+				},
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "update_price",
+			"discriminator": [61, 34, 117, 155, 75, 34, 123, 208],
+			"accounts": [
+				{
+					"name": "listing",
+					"writable": true
+				},
+				{
+					"name": "seller",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "price",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "cancel_listing",
+			"discriminator": [41, 183, 50, 232, 230, 233, 157, 70],
+			"accounts": [
+				{
+					"name": "seller",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "listing",
+					"writable": true
+				},
+				{
+					"name": "escrow",
+					"writable": true
+				},
+				{
+					"name": "seller_token",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "buy",
+			"discriminator": [102, 6, 61, 18, 1, 218, 235, 234],
+			"accounts": [
+				{
+					"name": "buyer",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "market"
+				},
+				{
+					"name": "listing",
+					"writable": true
+				},
+				{
+					"name": "escrow",
+					"writable": true
+				},
+				{
+					"name": "seller",
+					"writable": true
+				},
+				{
+					"name": "fee_vault",
+					"writable": true
+				},
+				{
+					"name": "buyer_token",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				},
+				{
+					"name": "max_price",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "sweep_listing",
+			"discriminator": [248, 66, 126, 7, 234, 169, 178, 76],
+			"accounts": [
+				{
+					"name": "listing",
+					"writable": true
+				},
+				{
+					"name": "escrow",
+					"writable": true
+				},
+				{
+					"name": "seller",
+					"writable": true
+				},
+				{
+					"name": "token_program"
+				}
+			],
+			"args": []
+		}
+	],
+	"accounts": [
+		{
+			"name": "Market",
+			"discriminator": [219, 190, 213, 55, 0, 227, 198, 154]
+		},
+		{
+			"name": "Listing",
+			"discriminator": [218, 32, 50, 73, 43, 134, 26, 58]
+		}
+	],
+	"events": [
+		{
+			"name": "Listed",
+			"discriminator": [243, 173, 136, 195, 125, 241, 12, 99]
+		},
+		{
+			"name": "Sold",
+			"discriminator": [205, 203, 210, 202, 96, 11, 192, 10]
+		},
+		{
+			"name": "FeesWithdrawn",
+			"discriminator": [234, 15, 0, 119, 148, 241, 40, 21]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "unauthorized"
+		},
+		{
+			"code": 6001,
+			"name": "feeTooHigh"
+		},
+		{
+			"code": 6002,
+			"name": "paused"
+		},
+		{
+			"code": 6003,
+			"name": "invalidAmount"
+		},
+		{
+			"code": 6004,
+			"name": "priceChanged"
+		},
+		{
+			"code": 6005,
+			"name": "invalidEscrow"
+		},
+		{
+			"code": 6006,
+			"name": "notSoldOut"
+		},
+		{
+			"code": 6007,
+			"name": "insufficientFees"
+		},
+		{
+			"code": 6008,
+			"name": "mathOverflow"
+		}
+	],
+	"types": [
+		{
+			"name": "Market",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "fee_bps",
+						"type": "u16"
+					},
+					{
+						"name": "paused",
+						"type": "bool"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					},
+					{
+						"name": "fee_vault_bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Listing",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "seller",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "escrow",
+						"type": "pubkey"
+					},
+					{
+						"name": "price",
+						"type": "u64"
+					},
+					{
+						"name": "remaining",
+						"type": "u64"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					},
+					{
+						"name": "escrow_bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Listed",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "listing",
+						"type": "pubkey"
+					},
+					{
+						"name": "seller",
+						"type": "pubkey"
+					},
+					{
+						"name": "mint",
+						"type": "pubkey"
+					},
+					{
+						"name": "price",
+						"type": "u64"
+					},
+					{
+						"name": "amount",
+						"type": "u64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Sold",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "listing",
+						"type": "pubkey"
+					},
+					{
+						"name": "buyer",
+						"type": "pubkey"
+					},
+					{
+						"name": "amount",
+						"type": "u64"
+					},
+					{
+						"name": "cost",
+						"type": "u64"
+					},
+					{
+						"name": "fee",
+						"type": "u64"
+					}
+				]
+			}
+		},
+		{
+			"name": "FeesWithdrawn",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "amount",
+						"type": "u64"
+					},
+					{
+						"name": "destination",
+						"type": "pubkey"
+					}
+				]
+			}
+		}
+	]
+}

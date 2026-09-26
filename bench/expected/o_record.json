@@ -1,0 +1,99 @@
+{
+	"kind": "native",
+	"set": "oss",
+	"source": "spl-record 0.3.0 (solana-program-library record program, crates.io spl-record-0.3.0, Apache-2.0): bench/real/o_record",
+	"about": "Open-source program, unmodified logic: the clean build is expected to have no finding; each variant removes exactly one validation and expects one of its rules at its instruction. Scored for rules only. Instructions by RecordInstruction tag; accounts in index order.",
+	"instructions": {
+		"initialize": {
+			"tag": 0,
+			"accounts": {},
+			"why": {
+				"record": "Written (authority, version): the runtime only lets the owning program write, so it is a record-program account; version != 1 required (AccountAlreadyInitialized), so an initialized record cannot be re-initialized.",
+				"authority": "Only its key is recorded, no signature by design (as spl-token InitializeAccount): the record account is created and initialized in one transaction by its payer."
+			}
+		},
+		"write": {
+			"tag": 1,
+			"accounts": {},
+			"why": {
+				"record": "Initialized (version) and written: record-program owned (runtime); the write range is bounded by the account length.",
+				"authority": "check_authority: key == record.authority (IncorrectAuthority) and is_signer (MissingRequiredSignature)."
+			}
+		},
+		"set_authority": {
+			"tag": 2,
+			"accounts": {},
+			"why": {
+				"record": "Initialized, written: record-program owned (runtime).",
+				"authority": "check_authority: key == record.authority and is_signer.",
+				"new_authority": "Any key, chosen by the current authority."
+			}
+		},
+		"close_account": {
+			"tag": 3,
+			"accounts": {},
+			"why": {
+				"record": "Initialized; its lamports are debited to 0, which the runtime only allows the owning program to do.",
+				"authority": "check_authority: key == record.authority and is_signer.",
+				"destination": "Any account, chosen by the authority (checked_add of the lamports). The data is not zeroed: a zero-lamport account is purged at the end of the transaction, and refunding it within the same transaction only revives the closer's own record with the same authority: no privilege gained."
+			}
+		},
+		"reallocate": {
+			"tag": 4,
+			"accounts": {},
+			"why": {
+				"record": "Initialized; realloc is only allowed on an account the program owns (runtime).",
+				"authority": "check_authority: key == record.authority and is_signer."
+			}
+		}
+	},
+	"variants": {
+		"write_no_signer": {
+			"ix": "write",
+			"rules": ["state-write-ungated", "signer-not-related-to-authority"],
+			"removed": "write: check_authority's is_signer check (key equality kept; the other instructions keep the full check)",
+			"impact": "Anyone overwrites any record's data by passing the authority's public key unsigned. Nothing else in Write involves a signature (no CPI).",
+			"verified": {
+				"program": "+1 log \"Incorrect record authority provided\", +1 memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\", -1 call of a function returning MissingRequiredSignature",
+				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key"
+			}
+		},
+		"set_authority_no_signer": {
+			"ix": "set_authority",
+			"rules": ["state-write-ungated", "signer-not-related-to-authority"],
+			"removed": "set_authority: check_authority's is_signer check (key equality kept)",
+			"impact": "Anyone sets itself as the authority of any record (passing the current authority's key unsigned), then writes, reallocates or closes it and takes its lamports.",
+			"verified": {
+				"program": "+1 log \"Incorrect record authority provided\", +1 memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\", -1 call of a function returning MissingRequiredSignature, +1 Err(ProgramError::InvalidAccountData), +1 Err(ProgramError::UninitializedAccount), +1 log \"Record account not initialized\"",
+				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key"
+			}
+		},
+		"close_no_key": {
+			"ix": "close_account",
+			"rules": ["signer-not-related-to-authority", "value-move-no-signer"],
+			"removed": "close_account: check_authority's key == record.authority (signer check kept)",
+			"impact": "Any signer closes any record and sends its lamports to a destination of its choice: theft of the rent and destruction of the data. The signer is not related to the record by anything else.",
+			"verified": {
+				"program": "+1 Err(ProgramError::MissingRequiredSignature), +2 Err(ProgramError::NotEnoughAccountKeys), +1 log \"Record authority signature missing\"",
+				"code": "-1 log \"Incorrect record authority provided\", -2 memcmp",
+				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key; in the variant only: account[1].signer"
+			}
+		}
+	},
+	"discarded": [
+		{
+			"removal": "owner checks",
+			"reason": "none in the source to remove: every instruction writes the record's data or debits its lamports, which the runtime only allows for accounts owned by the record program."
+		},
+		{
+			"removal": "reallocate: is_signer",
+			"reason": "low impact: realloc can only grow the record within the lamports it already holds (the runtime rejects leaving a rent-exempt account non-exempt) and writes no data; griefing at most."
+		},
+		{
+			"removal": "initialize: version != 1 (already initialized)",
+			"reason": "not one of the account-validation kinds of this set (re-initialization); the a_audit / generated sets cover reinit-unchecked."
+		}
+	]
+}
