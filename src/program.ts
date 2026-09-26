@@ -299,6 +299,20 @@ export function loadProgram(bytes: Uint8Array, opts: { lazyBlocks?: boolean } = 
   return p;
 }
 
+/**
+ * Reachable instructions (in the functions' blocks) that are invalid under the program's declared sBPF
+ * version (e_flags): e.g. v2 encodings (hor64, moved memory classes, PQR) in a binary declaring v3, as early
+ * platform-tools `sbpfv3` builds emit. Their pcs.
+ */
+export function invalidInstructions(p: Program): number[] {
+  const out = new Set<number>()
+  for (const f of p.funcs.values()) for (const b of f.blocks) {
+    const t = b.term
+    if (t.k === 'trap' && t.msg.startsWith('invalid instruction')) out.add(Number(/at pc (\d+)/.exec(t.msg)?.[1] ?? b.end))
+  }
+  return [...out].sort((a, b) => a - b)
+}
+
 /** True when `pc` begins an instruction (not the second slot of lddw). */
 function instructionStarts(p: Program): Uint8Array {
   const starts = new Uint8Array(p.insns.length);

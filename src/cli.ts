@@ -80,6 +80,12 @@ if (inputs.length === 2) {
 
 const { bytes, idl, loader } = await load(inputs[0], opt('--idl'))
 const res = decompile(bytes, { full: flag('--full'), idl, loader })
+{
+	// opcodes the declared sBPF version (e_flags) does not have: probably built for another version
+	const { invalidInstructions } = await import('./program.ts')
+	const bad = invalidInstructions(res.program)
+	if (bad.length) console.error(`warning: ${bad.length} reachable instruction${bad.length > 1 ? 's are' : ' is'} invalid for the declared sBPF v${res.program.version} (first at pc ${bad[0]}, opcode 0x${res.program.insns[bad[0]].opc.toString(16)}): built for another sBPF version? The output follows the declared version.`)
+}
 if (out && (out.endsWith('/') || (existsSync(out) && statSync(out).isDirectory()))) {
 	for (const [path, text] of renderProject(res)) {
 		mkdirSync(dirname(join(out, path)), { recursive: true })

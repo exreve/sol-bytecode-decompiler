@@ -1550,7 +1550,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		const note = (x: Expr) => {
 			if (x.k !== 'load') return
 			const a = ev(x.addr, p)
-			if (a?.k === 'base' && a.off >= 0 && a.off < 0x30 * 64) {
+			if (a?.k === 'base' && a.v !== input && a.off >= 0 && a.off < 0x30 * 64) { // (the entrypoint's input is the serialized input, not a slice)
 				const c = a.off
 				if (INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
 				if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
