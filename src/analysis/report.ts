@@ -73,6 +73,7 @@ import { addExitWrites, indirectTargets, splitDispatch, accountResolver, calleeO
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
+import { libCpiOps } from './libcpi.ts'
 import type { RoleView, Inconsistency } from './consistency.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
@@ -466,6 +467,8 @@ function analyze0(r: Result): Analysis {
 		}
 		// check statuses from real dominators (across calls), then the per-account constraints
 		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(f.name)).map(f => f.pc)), tag: grp?.tag }
+		// (CPIs of Anchor helpers the library database does not name: libcpi.ts)
+		ops.push(...libCpiOps(r, ctx, fns, keep, fn => !!main.get(fn)))
 		dominance(r, checks, ops, ctx)
 		for (const [acct, k, ci, via] of pend) note(acct, k, { status: checks[ci].status, at: checks[ci].at, via })
 		// runtime model: what the Solana runtime enforces for the operations made

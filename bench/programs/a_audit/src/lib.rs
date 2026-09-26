@@ -1,7 +1,7 @@
 // Audit-rule targets: one instruction per rule, clean as written; each v_* feature seeds exactly one bug.
 // sysvar read (touch), stored PDA bump (claim), two accounts of one type (move_points), typed config
 // (admin_withdraw), PDA-signed CPI (forward), CPI result (deposit), amount width (payout), remaining accounts
-// (distribute), init_if_needed (init_config).
+// (distribute), init_if_needed (init_config), manual initialization (register).
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{program::{invoke, invoke_signed}, system_instruction};
 
@@ -121,6 +121,17 @@ pub mod a_audit {
 		dest.add_lamports(amount)?;
 		Ok(())
 	}
+
+	pub fn register(ctx: Context<Register>, fee: u64) -> Result<()> {
+		let info = ctx.accounts.profile.to_account_info();
+		let mut data = info.try_borrow_mut_data()?;
+		#[cfg(not(feature = "v_reinit_unchecked"))]
+		require!(data[..8] == [0u8; 8], AuditError::AlreadyInitialized);
+		let p = Profile { authority: ctx.accounts.authority.key(), fee };
+		data[..8].copy_from_slice(Profile::DISCRIMINATOR);
+		p.serialize(&mut &mut data[8..])?;
+		Ok(())
+	}
 }
 
 #[account]
@@ -160,6 +171,12 @@ pub struct Treasury {
 #[account]
 pub struct Stats {
 	pub deposited: u64,
+}
+
+#[account]
+pub struct Profile {
+	pub authority: Pubkey,
+	pub fee: u64,
 }
 
 #[derive(Accounts)]
@@ -273,4 +290,13 @@ pub enum AuditError {
 	BadConfig,
 	NoDest,
 	BadDest,
+	AlreadyInitialized,
+}
+
+#[derive(Accounts)]
+pub struct Register<'info> {
+	/// CHECK: initialized here, allocated by the client (v_reinit_unchecked: not required to be uninitialized)
+	#[account(mut, owner = crate::ID)]
+	pub profile: UncheckedAccount<'info>,
+	pub authority: Signer<'info>,
 }

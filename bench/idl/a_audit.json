@@ -309,6 +309,35 @@
 					"type": "u64"
 				}
 			]
+		},
+		{
+			"name": "register",
+			"discriminator": [
+				211,
+				124,
+				67,
+				15,
+				211,
+				194,
+				178,
+				240
+			],
+			"accounts": [
+				{
+					"name": "profile",
+					"writable": true
+				},
+				{
+					"name": "authority",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "fee",
+					"type": "u64"
+				}
+			]
 		}
 	],
 	"accounts": [
@@ -389,6 +418,19 @@
 				36,
 				238
 			]
+		},
+		{
+			"name": "Profile",
+			"discriminator": [
+				184,
+				101,
+				165,
+				188,
+				95,
+				63,
+				127,
+				188
+			]
 		}
 	],
 	"errors": [
@@ -419,6 +461,10 @@
 		{
 			"code": 6006,
 			"name": "bad_dest"
+		},
+		{
+			"code": 6007,
+			"name": "already_initialized"
 		}
 	],
 	"types": [
@@ -525,6 +571,22 @@
 				"fields": [
 					{
 						"name": "deposited",
+						"type": "u64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Profile",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "authority",
+						"type": "pubkey"
+					},
+					{
+						"name": "fee",
 						"type": "u64"
 					}
 				]
