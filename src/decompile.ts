@@ -284,6 +284,15 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const abi = calls.length === 1 && t?.k === 'sys' ? invokeAbi(t.name) : null;
     if (abi && n <= 8) invokeThunks.set(fn.pc, abi);
   }
+  // (analysis only, nothing printed) unnamed Pubkey::create_program_address / find_program_address: small
+  // functions of 4+ parameters (out, seeds, their count, program id) making the one PDA syscall
+  const pdaWrappers = new Map<number, 'pda_create_out' | 'pda_find_out'>();
+  if (opts.sugar !== false) for (const fn of p.funcs.values()) {
+    if (fn.nparams < 4 || fn.blocks.length > 40 || invokeThunks.has(fn.pc) || pdaAbi(fn.name)) continue;
+    const sys = fn.blocks.flatMap(b => b.stmts.flatMap(s => (s.k === 'call' && s.t.k === 'sys' ? [s.t.name] : [])));
+    const pda = sys.filter(x => x === 'sol_create_program_address' || x === 'sol_try_find_program_address');
+    if (pda.length === 1 && sys.length <= 3) pdaWrappers.set(fn.pc, pda[0] === 'sol_create_program_address' ? 'pda_create_out' : 'pda_find_out');
+  }
   // library CPI wrappers taking (out, &Instruction, account infos, their count, [signer seeds]):
   // solana_program::program::invoke / invoke_signed and wrappers of them (see cpiexec.ts)
   const invokeWrappers = new Set<number>();
@@ -978,7 +987,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
     if (opts.sugar !== false && fpVar !== undefined) {
-      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
+      const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? pdaWrappers.get(t.pc) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
       if (sites.size) {
         // exec descriptions (cpiexec.ts) are expressions of the parameters: variables defined (once) as such
         // an expression print as that variable
@@ -1015,6 +1024,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (!s) return undefined;
           const d = cpiDesc(s, env);
           if (s.abi !== 'call') siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
+          // (a PDA function recognized by its syscall: for the analysis only, printed as a plain call)
+          if (s.t?.k === 'fn' && pdaWrappers.has(s.t.pc)) return cpiDesc({ ...s, abi: 'call' }, env)?.text;
           const kind = execKind(s);
           if (kind && !(d?.family && !d.guessed) && execBudget.steps > 0) {
             const at = sitePc(n, s);
