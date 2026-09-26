@@ -719,8 +719,22 @@ const RULES: Rule[] = [
 	{
 		id: 'duplicate-mutable-accounts', title: 'Two writable accounts of one type with no key comparison between them (the same account passed twice)',
 		// (Anchor: try_accounts deserializes one account type several times; the instruction writes account data; no check compares two account keys)
-		run: ix => {
+		run: (ix, a) => {
 			const t = ix.audit?.sameType
+			// (native: two program-owned accounts written at the same data range (one debited, the other credited: the same
+			// field of one layout), no key equality between them: passing one account twice makes the second write win)
+			if (!a.program.anchor) {
+				const owned = (n: string) => found(ix, n, 'owner')
+				const ws = ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') && /^account\[\d+\]\.data\[\d+\.\.\d+\]$/.test(o.target ?? '') && owned(o.target!.split('.')[0]))
+				for (const x of ws) for (const y of ws) {
+					const [ax, ay] = [x.target!.split('.')[0], y.target!.split('.')[0]]
+					if (ax >= ay || x.target!.slice(ax.length) !== y.target!.slice(ay.length)) continue
+					if ((ix.relations ?? []).some(r => (r.a === `${ax}.key` && r.b === `${ay}.key`) || (r.a === `${ay}.key` && r.b === `${ax}.key`))) continue
+					if (!/ - /.test(x.text + y.text) || !/ \+ /.test(x.text + y.text)) continue
+					return [{ accounts: [ax, ay], path: [L(x.at), L(y.at)], evidence: [`${ax} and ${ay} (both owned by the program) are written at the same offset (${x.target!.slice(ax.length + 1)}): ${x.text.slice(0, 60)} / ${y.text.slice(0, 60)}`, 'no comparison of their keys found: passing one account twice makes both views of it, the last one written back wins (e.g. a debit undone by the credit)'], confidence: 'medium' as const, weight: 4 }]
+				}
+				return []
+			}
 			if (!t || ix.checks.some(c => c.keyCmp)) return []
 			const w = ix.accounts.filter(x => x.expected.writable).map(x => x.name)
 			// (data of that type written: an account it names, or an object named after the type)
@@ -740,9 +754,10 @@ const RULES: Rule[] = [
 		run: ix => {
 			if (!ix.ops.some(o => isValueOrAuth(o) && !runtimeAuthorized(o))) return []
 			const own = (a: string) => found(ix, a, 'owner') || !!ix.audit?.ownerCmp?.includes(a)
-			return (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator') && own(a)).slice(0, 2).map(a => ({
-				accounts: [a], path: [], evidence: [`the logic reads ${a}'s data itself; its owner is checked, no discriminator check on it found`, 'another account type of the same program with a matching layout passes the checks made on this data'], confidence: 'medium' as const, weight: 3,
+			const out = (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator') && own(a)).slice(0, 2).map(a => ({
+				accounts: [a], path: [] as string[], evidence: [`the logic reads ${a}'s data itself; its owner is checked, no discriminator check on it found`, 'another account type of the same program with a matching layout passes the checks made on this data'], confidence: 'medium' as const, weight: 3,
 			}))
+			return out
 		},
 	},
 	{
@@ -857,6 +872,14 @@ const RULES: Rule[] = [
 			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
 			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
+			// (a token account bound by its mint only, on an outflow the program signs: whoever holds it receives; informational
+			// (the signer usually picks its own account))
+			const drel = (ix.relations ?? []).filter(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
+			const mintOnly = (bind.length ? bind.every(b => b === 'token_mint') : drel.length > 0) && drel.every(x => /\.mint\b/.test(x.a + ' ' + x.b) && !/owner|authority/.test(x.a + x.b))
+			// (a token owner check the analysis names after a local copy of the account (dest_acc for dest): its owner bound)
+			const aliasOwner = ix.checks.some(c => c.kinds.includes('token_owner') && !!c.account && c.account.startsWith(`${d}_`))
+			if (mintOnly && !aliasOwner && o.cpi?.seeds && k.includes('TOKEN_TRANSFER'))
+				return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: its mint is checked, its owner (token::authority) is not; the program signs this outflow (PDA)`], confidence: 'info' as const, weight: wOf(o) }]
 			if (bind.length || rel) return []
 			// (a finding when anyone may call it (no signer check) or the destination is named after another party of the
 			// instruction that does not sign it (maker_ata_b while the taker signs); a destination the signer picks for

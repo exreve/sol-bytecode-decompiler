@@ -1446,6 +1446,7 @@ export interface AcctResolver {
 	refs: (e: Expr, b?: number) => AcctRef[]              // account fields an expression (a branch condition, else evaluated at the end of block b) reads
 	store: (s: Stmt) => (AcctRef & { how?: '=' | '+=' | '-=' }) | undefined // the account field a store writes (lamports, data[a..b]), how (a sum / difference stored)
 	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
+	pdaBufs: (c: Expr, b?: number) => number[]                // the PDA derivations a condition compares (a 32-byte comparison's bytes, the words of one compared word by word): the frame offsets of their calls' pointer arguments
 	valueRef: (e: Expr, s: Stmt) => AcctRef | undefined     // the account field an expression of a statement is (a key: the pointer to it)
 	valueAt: (e: Expr, p: number) => AcctRef | undefined     // the same at a position (block << 16 | index)
 	av: (e: Expr, p: number) => AcctVal | undefined          // the abstract value (to bind a callee's parameters)
@@ -2252,7 +2253,25 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		const x = p0 === undefined ? undefined : pdaChain(c, p0)
 		return x && pdaEqs(c, p0!).find(([, , y]) => y === x)?.[1]
 	}
-	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32, pdaEq }
+	const pdaBufs = (c: Expr, b?: number): number[] => {
+		const p0 = at(c, b)
+		if (p0 === undefined) return []
+		const out = new Set<number>()
+		for (const [o] of pdaEqs(c, p0)) out.add(o)
+		// (a 32-byte comparison: its pointer arguments into a PDA output, through variables holding the call's result)
+		const seen = new Set<Expr>()
+		const scan = (e: Expr, p: number, d: number) => walkExpr(e, x => {
+			if (seen.has(x)) return
+			seen.add(x)
+			const ca = cmpArgs(x)
+			// (the derivation call the compared bytes come from (through copies): its pointer arguments' offsets)
+			if (ca) for (const a of ca) { const [y, q] = follow(a, p); const g = fpOff(y) !== undefined ? origin(y, q) : undefined; if (g && pdaCall(g.t)) for (const z of g.args) { const o = fpOff(z); if (o !== undefined) out.add(o) } }
+			if (x.k === 'var' && d < 3) { const y: [Expr, number] | null = defs.has(x.id) ? [defs.get(x.id)!, defPos.get(x.id)!] : multi.has(x.id) ? reaching(x.id, p) : null; if (y) scan(y[0], y[1], d + 1) }
+		})
+		scan(c, p0, 0)
+		return [...out]
+	}
+	res = { byName, refs, store, sides, pdaBufs, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32, pdaEq }
 	let m = seedMemo.get(fo.f)
 	if (!m) seedMemo.set(fo.f, (m = new Map()))
 	m.set(sk, res)

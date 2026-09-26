@@ -89,6 +89,7 @@ export interface AccountRow {
 export interface CheckOut {
 	at: Loc; status: 'found' | 'partial'; account?: string; kinds: string[]; cond: string; failsIf: boolean; error: string; via?: string
 	sides?: [string, string]              // native: the two account fields an equality compares (by the IR)
+	pdaBufs?: number[]                    // (internal, native) the PDA derivations the check compares (their calls' pointer arguments' frame offsets)
 	fnPc: number; c?: Expr; passPc?: number; main: boolean // (internal: the dominance analysis, phase2.ts)
 	keyCmp?: boolean                      // (internal, Anchor: a 32-byte comparison of account keys only, no data, no constant)
 }
@@ -426,7 +427,8 @@ function analyze0(r: Result): Analysis {
 				else if (ls) { sides = ls; if (!account || account.endsWith('?')) account = ls.find(z => !z.endsWith('.key'))?.split('.')[0] ?? ls[0].split('.')[0] }
 				const at = loc(ff, c.line, c.pc)
 				const keyCmp = !!ac?.length && ac.every(x => !x.direct) && !kinds.some(k => k === 'address' || k === 'pda') || undefined
-				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main, keyCmp })
+				const pdaBufs = R && c.c && kinds.includes('pda') ? R.pdaBufs(c.c, cb) : undefined
+				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main, keyCmp, ...(pdaBufs?.length ? { pdaBufs } : {}) })
 				const ci = checks.length - 1
 				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])
 				if (lAddr) pend.push([lAddr, 'address', ci, undefined])
@@ -541,6 +543,15 @@ function analyze0(r: Result): Analysis {
 
 	// program-level views: PDAs, state writes, read/write dependencies
 	const pdas = new Map<string, PdaOut>()
+	/** a derivation's out buffers: the frame offsets of its call's pointer arguments */
+	const pdaOuts = (o: OpOut): number[] => {
+		const fo = o.fnPc !== undefined ? byPc.get(o.fnPc) : undefined
+		if (!fo || o.at.pc === undefined) return []
+		const st = fo.f.blocks.flatMap(b => b.stmts).find(s => s.pc === o.at.pc), c = st && callOf(st)
+		if (!c) return []
+		const D = defsOf(fo.f, calleeOf(r))
+		return c.args.map(a => D.fpOff(a)).filter((x): x is number => x !== undefined)
+	}
 	const pda = (seeds: string, program: string) => {
 		const k = `${seeds}|${program}`
 		let x = pdas.get(k)
@@ -558,8 +569,16 @@ function analyze0(r: Result): Analysis {
 			if (o.pda) {
 				const x = pda(o.pda.seeds, o.pda.program)
 				add(x.derivedIn, ix.name)
-				for (const a of pdaAccts) { add(x.accounts, `${ix.name}.${a.name}`); if (RANK[a.constraints.pda.status] > RANK[x.compared]) x.compared = a.constraints.pda.status }
-				for (const c of pdaChecks) if ((c.fnPc === o.fnPc || facts.get(c.fnPc)?.calls.some(y => y.callee === o.fnPc)) && RANK[c.status] > RANK[x.compared]) x.compared = c.status
+				// (a check in the deriving function comparing known PDA derivations: this one among them (the same call's
+				// pointer arguments); checks in callers, or comparing unknown bytes, as before)
+				const outs = pdaOuts(o)
+				const mine = (c: CheckOut) => c.fnPc !== o.fnPc || !c.pdaBufs?.length || !outs.length || c.pdaBufs.some(b => outs.includes(b))
+				for (const a of pdaAccts) {
+					const cs = ix.checks.filter(c => c.account === a.name && c.kinds.includes('pda'))
+					if (cs.length && !cs.some(mine)) continue
+					add(x.accounts, `${ix.name}.${a.name}`); if (RANK[a.constraints.pda.status] > RANK[x.compared]) x.compared = a.constraints.pda.status
+				}
+				for (const c of pdaChecks) if ((c.fnPc === o.fnPc || facts.get(c.fnPc)?.calls.some(y => y.callee === o.fnPc)) && mine(c) && RANK[c.status] > RANK[x.compared]) x.compared = c.status
 			}
 			if (o.cpi?.seeds) add(pda(o.cpi.seeds, '(caller: this program)').signsIn, ix.name)
 			if (o.target && o.kinds.some(k => k === 'ACCOUNT_DATA_WRITE' || k === 'LAMPORT_WRITE')) {
