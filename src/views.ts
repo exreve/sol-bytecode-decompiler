@@ -183,6 +183,32 @@ export const BUILTIN_VIEWS: View[] = [
 	},
 ]
 
+/**
+ * The deprecated loader's (BPFLoader1111…) unaligned input (see accounts.ts unalignedInput): replaces
+ * Input; only the fields before the data have fixed offsets (the owner, executable and rent_epoch follow it).
+ */
+export const UNALIGNED_VIEWS: View[] = [
+	{
+		name: 'UnalignedAccount', doc: 'serialized account in the deprecated loader\'s unaligned input (BPFLoader1111…): owner [32], executable (u8) and rent_epoch (u64) follow the data',
+		fields: [
+			{ name: 'dup_marker', off: 0x00, t: S(1), doc: '0xff: not a duplicate; else the index of the account it duplicates (and nothing else follows)' },
+			{ name: 'is_signer', off: 0x01, t: S(1) },
+			{ name: 'is_writable', off: 0x02, t: S(1) },
+			{ name: 'key', off: 0x03, t: EMB('Pubkey') },
+			{ name: 'lamports', off: 0x23, t: S(8) },
+			{ name: 'data_len', off: 0x2b, t: S(8) },
+			{ name: 'data', off: 0x33, t: EMB('bytes') },
+		],
+	},
+	{
+		name: 'Input', doc: 'program input (entrypoint parameter) of the deprecated loader (unaligned): account count, then the first serialized account',
+		fields: [
+			{ name: 'num_accounts', off: 0, t: S(8) },
+			{ name: 'acc0', off: 8, t: EMB('UnalignedAccount') },
+		],
+	},
+]
+
 const hex = (n: number) => '0x' + n.toString(16).padStart(2, '0')
 const TS_SCALAR: Record<number, string> = { 1: 'u8', 2: 'u16', 4: 'u32', 8: 'u64' }
 

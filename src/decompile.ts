@@ -12,7 +12,7 @@ import { promoteStack } from './stack.ts';
 import { compactStores, sinkFrameLoads } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
-import { findAccounts, accountField, accountAddr } from './accounts.ts';
+import { findAccounts, accountField, accountAddr, unalignedInput } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { sigShape, shapeSignature, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
@@ -21,7 +21,7 @@ import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
-import { Views, exprType, BUILTIN_VIEWS, type View } from './views.ts';
+import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
@@ -35,6 +35,7 @@ export interface Options {
   full?: boolean;        // decompile library functions too (default: typed stubs only)
   exactMemory?: boolean; // no stack promotion / stack-arg elision (exact even for memory-unsafe executions)
   idl?: IdlInfo;         // Anchor IDL of the program (names, accounts, args, error codes)
+  loader?: string;       // owner of the program account when known (fetched): BPFLoader1111… serializes the input unaligned
 }
 
 export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
@@ -360,8 +361,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     if (hit && n <= 80 && (bt.f.nparams >= 4 || bt.f.stackArgs)) userInvoke.add(pc);
   }
-  const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
+  // input serialization: the deprecated loader's unaligned layout (by the owner when known, else by the entrypoint's deserializer)
+  const unaligned = opts.loader !== undefined ? opts.loader.startsWith('BPFLoader1111') : unalignedInput(p)
+  const accountInfos = opts.sugar !== false ? findAccounts(built, unaligned) : undefined;
   const views = new Views();
+  if (unaligned) for (const v of UNALIGNED_VIEWS) views.add(v)
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
   const dataVars = opts.sugar !== false && opts.idl ? accountDataVars(built, accountViews(opts.idl, views), t => views.recordOf(t)) : new Map<number, Map<number, string>>();
   // Anchor: account names from the program's own account-error strings (see anchor.ts)
@@ -618,7 +622,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   };
   const computeTypes = (pc: number): Map<number, string> => {
     const f = built.get(pc)!.f, t = new Map<number, string>();
-    for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
+    for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : kind === 'raw1' ? 'UnalignedAccount' : 'AccountRecord');
     for (const v of anchorInfo.get(pc)?.accountVars ?? []) if (!t.has(v)) t.set(v, 'AccountInfo');
     for (const [v, o] of objVars.get(pc)?.boxes ?? []) if (!t.has(v)) t.set(v, o.view);
     for (const [v, [ty]] of paramTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
@@ -735,7 +739,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (!r.callers.includes(nm)) r.callers.push(nm);
         }
         for (const [v, { ty, n, of, callers }] of seen) {
-          if (!ty || !views.map.has(ty) || ['AccountRecord', 'Input'].includes(ty)) continue;
+          if (!ty || !views.map.has(ty) || ['AccountRecord', 'UnalignedAccount', 'Input'].includes(ty)) continue;
           let pt = paramTypes.get(cpc); if (!pt) paramTypes.set(cpc, (pt = new Map()));
           if (pt.has(v) || baseTypes.get(cpc)!.has(v)) continue;
           if (n * 2 < of && !fitsView(built.get(cpc)!.f, v, ty)) continue;
@@ -896,7 +900,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (e.k === 'load') {
           const a = e.addr;
           const off = a.k === 'var' && a.id === inputVar ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === inputVar && a.b.k === 'const' ? Number(a.b.v) : -1;
-          const fld = off >= 0 ? inputField(off, e.size) : undefined;
+          const fld = off >= 0 ? inputField(off, e.size, unaligned) : undefined;
           if (fld) return `ld${e.size * 8}(${pr(a, 0)} /* ${fld} */)`;
         }
         return prev?.(e, pr);
@@ -920,7 +924,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr });
       if (fld || inputVar === undefined) return fld;
       const off = addr.k === 'var' && addr.id === inputVar ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === inputVar && addr.b.k === 'const' ? Number(addr.b.v) : -1;
-      return off >= 0 ? inputField(off, size) : undefined;
+      return off >= 0 ? inputField(off, size, unaligned) : undefined;
     };
     let inAddr = false; // printing the address of an annotated load
     if (accTyped?.size) {
@@ -1701,7 +1705,7 @@ const RESERVED_TS = new Set(['break', 'case', 'catch', 'class', 'const', 'contin
 let globalCache: { p: Program; ids: Set<string> } | undefined;
 function globalIdents(p: Program): Set<string> {
   if (globalCache?.p === p) return globalCache.ids;
-  const ids = new Set<string>([...HELPERS, 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'at', 'ref', 'sized', 'Pubkey', 'bytes', 'AccountInfo', 'AccountRecord', 'Input']);
+  const ids = new Set<string>([...HELPERS, 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'at', 'ref', 'sized', 'Pubkey', 'bytes', 'AccountInfo', 'AccountRecord', 'UnalignedAccount', 'Input']);
   for (const f of p.funcs.values()) ids.add(f.name);
   for (const sc of p.syscalls.values()) ids.add(sc.alias);
   for (const n of ['ld8', 'ld16', 'ld32', 'ld64', 'st8', 'st16', 'st32', 'st64', 'bswap16', 'bswap32', 'bswap64']) ids.add(n);
@@ -1877,10 +1881,16 @@ function stripUndef(ns: Node[], only: Set<number>): Node[] {
 }
 
 /** Field of the serialized program input at a fixed offset (only the first account has fixed offsets). */
-function inputField(off: number, size: number): string | undefined {
+function inputField(off: number, size: number, unaligned: boolean): string | undefined {
   if (off === 0 && size === 8) return 'num_accounts';
   const o = off - 8;
   if (o < 0) return undefined;
+  if (unaligned) {
+    // the deprecated loader's record (views.ts UnalignedAccount): the owner and later fields follow the data
+    const U: [number, number, string][] = [[0, 1, 'dup_marker(0xff=not dup)'], [1, 1, 'is_signer'], [2, 1, 'is_writable'], [3, 32, 'key'], [0x23, 8, 'lamports'], [0x2b, 8, 'data_len']]
+    for (const [at, len, name] of U) if (o >= at && o + size <= at + len) return `acc0.${name}${len > 8 ? (o === at ? '' : `[${o - at}]`) : ''}`
+    return undefined
+  }
   const F: [number, number, string][] = [[0, 1, 'dup_marker(0xff=not dup)'], [1, 1, 'is_signer'], [2, 1, 'is_writable'], [3, 1, 'executable'], [4, 4, 'original_data_len'],
     [8, 32, 'key'], [40, 32, 'owner'], [72, 8, 'lamports'], [80, 8, 'data_len']];
   if (o === 0 && size === 2) return 'dup_marker|is_signer';
