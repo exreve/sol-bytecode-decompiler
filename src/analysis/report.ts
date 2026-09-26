@@ -371,8 +371,10 @@ function analyze0(r: Result): Analysis {
 		}
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
-			const R = resolverFor(ff.pc)
-			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
+			// (built on first use: a function with no check and no named account needs none)
+			let R_: AcctResolver | undefined | null = null
+			const R = () => R_ === null ? (R_ = resolverFor(ff.pc)) : R_
+			const cn = (a: string | undefined) => { const x = a ? R()?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
 			const AC = r.anchor ? anchorCompares(ff) : undefined
 			// (Anchor: a sysvar's id check (AccountSysvarMismatch) is on the account the check right before it names (its missing-account check))
 			const sysvarOf = (c: FnFacts['checks'][number]) => !/AccountSysvarMismatch/.test(c.error) ? undefined : ff.checks.filter(k => k.line < c.line && k.named && !/AccountSysvarMismatch/.test(k.error)).sort((x, y) => y.line - x.line)[0]?.named
@@ -380,17 +382,17 @@ function analyze0(r: Result): Analysis {
 				const sv = r.anchor ? sysvarOf(c0) : undefined
 				const c = sv ? { ...c0, named: sv } : c0
 				// (by the block deciding the condition: the failing side may be an error exit the tags share)
-				const cb = (grp || R) && c.c && byPc.get(ff.pc) ? decisionBlock(cfgOf(byPc.get(ff.pc)!), c.c, c.pc, c.passPc) : undefined
+				const cb = (grp || R()) && c.c && byPc.get(ff.pc) ? decisionBlock(cfgOf(byPc.get(ff.pc)!), c.c, c.pc, c.passPc) : undefined
 				if (grp && (cb !== undefined ? !grp.allowed(ff.pc, cb) : !keep(ff.pc, c.pc))) continue
 				const status: 'found' | 'partial' = fm && c.main ? 'found' : 'partial'
-				const irRefs = R && c.c ? R.refs(c.c, cb) : []
+				const irRefs = R() && c.c ? R()!.refs(c.c, cb) : []
 				// (an account the code holds in a temporary: its name, marked with ?)
 				const acct = cn(c.named) ?? cn(c.refs.find(x => cn(x.acct))?.acct) ?? (irRefs[0] ? idxName(irRefs[0].index) : undefined) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
 				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
 				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
 				// (native: an account key compared with a constant (address), with a derived address in the frame (pda),
 				// or two account fields compared (a relation))
-				const sd = R && c.c ? R.sides(c.c, cb) : undefined
+				const sd = R() && c.c ? R()!.sides(c.c, cb) : undefined
 				// (a 32-byte comparison this instruction's context does not resolve either; but a PDA compared with a value
 				// it does not resolve, e.g. the key of an AccountInfo a helper takes from an accounts iterator: the
 				// comparison, on no named account)
@@ -426,7 +428,7 @@ function analyze0(r: Result): Analysis {
 				else if (ls) { sides = ls; if (!account || account.endsWith('?')) account = ls.find(z => !z.endsWith('.key'))?.split('.')[0] ?? ls[0].split('.')[0] }
 				const at = loc(ff, c.line, c.pc)
 				const keyCmp = !!ac?.length && ac.every(x => !x.direct) && !kinds.some(k => k === 'address' || k === 'pda') || undefined
-				const pdaBufs = R && c.c && kinds.includes('pda') ? R.pdaBufs(c.c, cb) : undefined
+				const pdaBufs = R() && c.c && kinds.includes('pda') ? R()!.pdaBufs(c.c, cb) : undefined
 				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main, keyCmp, ...(pdaBufs?.length ? { pdaBufs } : {}) })
 				const ci = checks.length - 1
 				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])

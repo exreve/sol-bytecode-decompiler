@@ -2111,6 +2111,8 @@ export function ctxResolver(fns: { byPc: Map<number, FuncOut> }, callee: Callee,
 	return m.get(fn)
 }
 
+const extMemo = new WeakMap<AcctResolver, Map<string, AV>>()
+const classifyMemo = new WeakMap<VarFunc, Map<string, [number, AV][]>>()
 /** a callee's parameters bound to the caller's values at a call (see ctxResolver) */
 export function seedFrom(PR: AcctResolver | undefined, pf: FuncOut | undefined, c: ReturnType<typeof callOf>, pos: number, fo: FuncOut, fn: number): Map<number, AcctVal> {
 	const seed = new Map<number, AcctVal>()
@@ -2122,7 +2124,15 @@ export function seedFrom(PR: AcctResolver | undefined, pf: FuncOut | undefined, 
 		if (v.k === 'slice' || v.k === 'recs' || v.k === 'rec' || v.k === 'ptr' || v.k === 'rc') seed.set(pv, v)
 		// (a pointer into the caller's frame: its words as the caller's evaluator sees them at the call)
 		else if (v.k === 'ext') seed.set(pv, v) // (a pointer into a frame further up: the same loader, offsets in that frame)
-		else if (v.k === 'fr') seed.set(pv, extOf(e => PR.av(e, pos), pfp, v.off))
+		else if (v.k === 'fr') {
+			// (the same caller resolver, position and offset: the same loader, one id (the callee's resolver memo hits))
+			let m = extMemo.get(PR)
+			if (!m) extMemo.set(PR, (m = new Map()))
+			const k = `${pos}|${pfp}|${v.off}`
+			let x = m.get(k)
+			if (!x) m.set(k, (x = extOf(e => PR.av(e, pos), pfp, v.off)))
+			seed.set(pv, x)
+		}
 	})
 	return seed
 }
@@ -2146,7 +2156,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	let infos: number | undefined
 	if (input !== undefined && arr === undefined) ({ ptrs: arr, infos } = cursorArrays(f, input, fpOff))
 	// first pass: the variables used as a slice / an array of record pointers (classify: the roots it adds)
-	const classify = (roots: Map<number, AV>) => {
+	const classify0 = (roots: Map<number, AV>) => {
 		const { ev } = avEvaluator(f, D, roots, arr, callee, 2, true, infos)
 		const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
 		// (evidence a base is an &[AccountInfo], not any struct read at a few offsets: a flag byte read, a key / owner
@@ -2197,6 +2207,22 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		})
 		for (const [v, ks] of hits) if (ks.size >= 2 && infoEv.has(v) && !misfit.has(v)) roots.set(v, { k: 'slice', off: 0 })
 		for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
+	}
+	// (roots without a caller's frame pointer (ext, a loader): the roots classify sets depend on the function, the kind
+	// of callee and the roots given only (a fresh evaluator); by those, what it sets)
+	const classify = (roots: Map<number, AV>) => {
+		if ([...roots.values()].some(x => x.k === 'ext')) { classify0(roots); return }
+		let m = classifyMemo.get(f)
+		if (!m) classifyMemo.set(f, (m = new Map()))
+		const k = `${ck}${JSON.stringify([...roots])}`
+		let y = m.get(k)
+		if (!y) {
+			const r0 = new Map(roots)
+			classify0(roots)
+			m.set(k, (y = [...roots].filter(([v, x]) => r0.get(v) !== x)))
+			return
+		}
+		for (const [v, x] of y) roots.set(v, { ...x })
 	}
 	// (a pointer into a caller's frame (an 'ext' seed): an array of input record pointers by the function's own evidence
 	// (pinocchio's accounts), else by the caller's words (e.g. an accounts struct of AccountInfo copies))
