@@ -126,6 +126,20 @@ export function bypass(g: Cfg, avoid: number, to: number, allowed?: (b: number) 
 	return undefined
 }
 
+/** Is block `to` reachable from block `from` (allowed blocks only)? */
+export function reaches(g: Cfg, from: number, to: number, allowed?: (b: number) => boolean): boolean {
+	const blocks = g.fo.f.blocks
+	const seen = new Uint8Array(blocks.length)
+	const q = [from]
+	seen[from] = 1
+	while (q.length) {
+		const b = q.pop()!
+		if (b === to) return true
+		for (const s of blocks[b].succs) if (!seen[s] && (!allowed || allowed(s))) { seen[s] = 1; q.push(s) }
+	}
+	return false
+}
+
 /** The first statement pc of a block (its start when it has none). */
 export const blockPc = (g: Cfg, b: number) => g.fo.f.blocks[b].stmts[0]?.pc ?? g.fo.f.blocks[b].start
 
@@ -403,11 +417,13 @@ function paramVar(f: VarFunc, n: number): number | undefined {
 /** an evaluator's memo of an expression: its value at the first position evaluated, at the others (only values
  * whose evaluation reached no depth limit (evCuts unchanged): those do not depend on the depth nor on what was asked before) */
 let evCuts = 0
+/** an AccountInfo's pointer words (repr(C) offsets): key, lamports / data Rc, owner */
+const INFO_WORD: Record<number, 'keyp' | 'rc' | 'drc' | 'ownp'> = { 0: 'keyp', 8: 'rc', 0x10: 'drc', 0x18: 'ownp' }
 interface EvMemo<T> { p: number; x: T | undefined; more?: Map<number, T | undefined> }
 /** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
 const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
-	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' }
+	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo }
 	const D = defsOf(H.f, cl)
 	const ti = tryInfo(r, H)
 	const layout = ti?.layout ?? []
@@ -533,10 +549,10 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 					// (a word of the i-th AccountInfo (0x30 bytes) of the remaining accounts)
 					if (a.k === 'rem') {
 						const i = Math.floor(a.off / 0x30), w = a.off - 0x30 * i
-						const k = w === 0 ? 'keyp' : w === 8 ? 'rc' : w === 0x10 ? 'drc' : w === 0x18 ? 'ownp' : undefined
+						const k = INFO_WORD[(cl.legacy ? w - 8 : w)]
 						return k ? { k, acct: `remaining_accounts[${i}]`, off: 0 } : undefined
 					}
-					const next = a.k === 'info' ? (a.off === 0 ? 'keyp' : a.off === 8 ? 'rc' : a.off === 0x10 ? 'drc' : a.off === 0x18 ? 'ownp' : undefined) : a.off === 0x18 ? (a.k === 'rc' ? 'lam' : a.k === 'drc' ? 'data' : undefined) : undefined
+					const next = a.k === 'info' ? INFO_WORD[cl.legacy ? a.off - 8 : a.off] : a.off === 0x18 ? (a.k === 'rc' ? 'lam' : a.k === 'drc' ? 'data' : undefined) : undefined
 					return next ? { k: next, acct: a.acct, ty: a.ty, off: 0, guess: a.guess } : undefined
 				}
 			}
@@ -1134,6 +1150,8 @@ const evalCmpN = (op: string, a: bigint, b: bigint): boolean => {
 
 /** AccountInfo (solana-program, 0x30 bytes): field by offset */
 const INFO_FIELD: Record<number, string> = { 0: 'key', 8: 'lamports', 0x10: 'data', 0x18: 'owner', 0x20: 'rent_epoch', 0x28: 'is_signer', 0x29: 'is_writable', 0x2a: 'executable' }
+/** the same before AccountInfo became #[repr(C)] (accounts.ts legacyAccountInfo) */
+const LEGACY_INFO_FIELD: Record<number, string> = { 0: 'rent_epoch', 8: 'key', 0x10: 'lamports', 0x18: 'data', 0x20: 'owner', 0x28: 'is_signer', 0x29: 'is_writable', 0x2a: 'executable' }
 /** a serialized input record (the entrypoint's input; pinocchio's AccountInfo points to one): field by offset, size */
 const REC_FIELD: Record<number, [string, number]> = { 1: ['is_signer', 1], 2: ['is_writable', 1], 3: ['executable', 1], 8: ['key', 32], 0x28: ['owner', 32], 0x48: ['lamports', 8], 0x50: ['data_len', 8] }
 /** C SDK SolAccountInfo (0x38 bytes, the entrypoint's copy made by sol_deserialize): field by offset, size */
@@ -1172,7 +1190,7 @@ export type AcctVal = AV
 const resMemo = new WeakMap<object, AcctResolver>(), seedMemo = new WeakMap<object, Map<string, AcctResolver>>()
 
 /** a function's IR (when decompiled) and name (library code) */
-export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number> }
+export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number>; legacy?: boolean } // legacy: the pre-repr(C) AccountInfo
 /** writes through a pointer argument, by the callee's name (library code not decompiled) */
 const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_program_address/, 33], [/^(sol_)?(memcpy|memmove|memset)/, -1]]
 /**
@@ -1571,10 +1589,10 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			case 'base': return pass1 && size === 8 && a.off >= 0 && a.off % 8 === 0 ? { k: 'elem', v: a.v, e: a.off / 8, off: 0 } : undefined
 			case 'slice': {
 				if (a.off < 0) return undefined
-				const i = Math.floor(a.off / 0x30), o = a.off % 0x30, fl = INFO_FIELD[o]
-				if (size === 8 && (o === 0 || o === 0x18)) return { k: 'ptr', i, f: fl, off: 0 }
-				if (size === 8 && (o === 8 || o === 0x10)) return { k: 'rc', i, f: o === 8 ? 'lamports' : 'data', off: 0 }
-				return fl && o >= 0x20 ? { k: 'val', i, f: fl } : undefined
+				const i = Math.floor(a.off / 0x30), o = a.off % 0x30, fl = (callee?.legacy ? LEGACY_INFO_FIELD : INFO_FIELD)[o]
+				if (size === 8 && (fl === 'key' || fl === 'owner')) return { k: 'ptr', i, f: fl, off: 0 }
+				if (size === 8 && (fl === 'lamports' || fl === 'data')) return { k: 'rc', i, f: fl, off: 0 }
+				return fl && (fl === 'rent_epoch' ? size === 8 : o >= 0x28 && size === 1) ? { k: 'val', i, f: fl } : undefined
 			}
 			case 'recs': return size === 8 && a.off >= 0 && a.off < 8 * 64 && a.off % 8 === 0 ? { k: 'rec', i: a.off / 8, off: 0 } : undefined
 			case 'rec': {
@@ -1587,7 +1605,10 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			case 'rc':
 				if (a.off === 0x18 && size === 8) return { k: 'ptr', i: a.i, f: a.f, off: 0 }
 				return a.f === 'data' && a.off === 0x20 && size === 8 ? { k: 'val', i: a.i, f: 'data_len' } : undefined
-			case 'ptr': return { k: 'val', i: a.i, f: a.f === 'data' ? `data[${a.off}..${a.off + size}]` : a.f }
+			case 'ptr':
+				// (a key / owner: only its 32 bytes; lamports: the 8)
+				if (a.f !== 'data' && (a.off < 0 || a.off + size > (a.f === 'lamports' ? 8 : 0x20))) return undefined
+				return { k: 'val', i: a.i, f: a.f === 'data' ? `data[${a.off}..${a.off + size}]` : a.f }
 		}
 		return undefined
 	}
@@ -1657,6 +1678,14 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	let { ev } = avEvaluator(f, D, roots, arr, callee, 2, true, infos)
 	// first pass: the variables used as a slice / an array of record pointers
 	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
+	// (evidence a base is an &[AccountInfo], not any struct read at a few offsets: a flag byte read, a key / owner
+	// pointer loaded from it and compared as 32 bytes or read word-wise, a data Rc's pointer / length read)
+	const IF = callee?.legacy ? LEGACY_INFO_FIELD : INFO_FIELD
+	const infoEv = new Set<number>(), misfit = new Set<number>(), keyWords = new Map<string, Set<number>>()
+	const elemField = (a: AV | undefined) => a?.k === 'elem' ? IF[(a.e * 8) % 0x30] : undefined
+	const cmpNote = (y: Expr, p: number) => {
+		if (y.k === 'fn' && (y.name === 'memeq' || y.name === 'keyeq')) for (const a of y.name === 'memeq' ? y.args.slice(0, 2) : y.args.slice(0, 1)) { const x = ev(a, p); if (x?.k === 'elem' && x.off < 0x20 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
+	}
 	const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
 	const recUse = (a: AV | undefined, ok: boolean) => { if (a?.k === 'elem' && ok) recUses.set(a.v, (recUses.get(a.v) ?? 0) + 1) }
 	f.blocks.forEach((b, bi) => {
@@ -1666,8 +1695,20 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 			const a = ev(x.addr, p)
 			if (a?.k === 'base' && a.v !== input && a.off >= 0 && a.off < 0x30 * 64) { // (the entrypoint's input is the serialized input, not a slice)
 				const c = a.off
-				if (INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
+				const fl = IF[c % 0x30]
+				// (a load no AccountInfo field explains: some other struct)
+				if (!(x.size === 8 ? c % 8 === 0 : x.size === 1 && c % 0x30 >= 0x28 && c % 0x30 <= 0x2a)) misfit.add(a.v)
+				if (fl !== undefined && (x.size === 8 ? c % 0x30 < 0x28 : x.size === 1 && c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
+				if (x.size === 1 && c % 0x30 >= 0x28 && fl) infoEv.add(a.v)
 				if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
+			}
+			const ef = elemField(a)
+			// (a word loaded from it dereferenced past what that field points to: key / owner 32 bytes, an Rc box
+			// 0x28; a value (rent_epoch) dereferenced at all)
+			if (a?.k === 'elem' && (ef === undefined || ef === 'rent_epoch' || a.off < 0 || a.off + x.size > (ef === 'key' || ef === 'owner' ? 0x20 : 0x28))) misfit.add(a.v)
+			if (a?.k === 'elem' && x.size === 8) {
+				if (ef === 'data' && (a.off === 0x18 || a.off === 0x20)) infoEv.add(a.v)
+				if ((ef === 'key' || ef === 'owner') && a.off < 0x20 && a.off % 8 === 0) { const k = `${a.v}:${a.e}`; let w = keyWords.get(k); if (!w) keyWords.set(k, (w = new Set())); w.add(a.off); if (w.size >= 2) infoEv.add(a.v) }
 			}
 			recUse(a, a?.k === 'elem' && REC_FIELD[a.off]?.[1] === x.size)
 		}
@@ -1676,13 +1717,14 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 			for (const e of stmtExprs(s)) walkExpr(e, note)
 			// (a key / owner compared: memcmp(rec + 8 | rec + 0x28, ..); lamports stored)
 			const c = callOf(s)
-			if (c) for (const a of c.args) { const x = ev(a, p); recUse(x, x?.k === 'elem' && (x.off === 8 || x.off === 0x28)) }
+			if (c) for (const a of c.args) { const x = ev(a, p); recUse(x, x?.k === 'elem' && (x.off === 8 || x.off === 0x28)); if (x?.k === 'elem' && x.off === 0 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
+			for (const e of stmtExprs(s)) walkExpr(e, y => cmpNote(y, p))
 			if (s.k === 'store') { const x = ev(s.addr, p); recUse(x, x?.k === 'elem' && x.off === 0x48) }
 		})
 		p = bi << 16 | b.stmts.length
-		if (b.term.k === 'br') walkExpr(b.term.c, note)
+		if (b.term.k === 'br') { walkExpr(b.term.c, note); walkExpr(b.term.c, y => cmpNote(y, p)) }
 	})
-	for (const [v, ks] of hits) if (ks.size >= 2) roots.set(v, { k: 'slice', off: 0 })
+	for (const [v, ks] of hits) if (ks.size >= 2 && infoEv.has(v) && !misfit.has(v)) roots.set(v, { k: 'slice', off: 0 })
 	for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
 	ev = avEvaluator(f, D, roots, arr, callee, 2, false, infos).ev
 	const asRef = (a: AV | undefined): AcctRef | undefined => {
@@ -1754,7 +1796,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		const n = s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n
 		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
 		// (the owner pubkey rewritten: AccountInfo::assign)
-		if (a?.k === 'ptr' && a.f === 'owner' || a?.k === 'rec' && a.off >= 0x28 && a.off < 0x48) return { index: a.i, field: 'owner' }
+		// (only the 32 owner bytes: not a neighbouring Rc / RefCell word)
+		if (a?.k === 'ptr' && a.f === 'owner' && a.off >= 0 && a.off + n <= 0x20 || a?.k === 'rec' && a.off >= 0x28 && a.off + n <= 0x48) return { index: a.i, field: 'owner' }
 		if (a?.k === 'rec' && a.off === 0x48 && s.k === 'store' && s.size === 8) return { index: a.i, field: 'lamports' }
 		if (a?.k === 'rec' && a.off >= 0x58) return { index: a.i, field: `data[${a.off - 0x58}..${a.off - 0x58 + n}]` }
 		return undefined

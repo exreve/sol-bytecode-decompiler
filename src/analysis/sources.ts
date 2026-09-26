@@ -41,7 +41,7 @@ export function sourceCtx(r: Result, ix: IxOut): SourceCtx {
 }
 function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 	const I = irOf(r), ctx = ix.ctx
-	const cl = { f: (pc: number) => I.byPc.get(pc)?.f, name: (pc: number) => r.program.funcs.get(pc)?.name ?? '' }
+	const cl = { f: (pc: number) => I.byPc.get(pc)?.f, name: (pc: number) => r.program.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo }
 	const nameAt = (i: number) => ix.accounts.find(x => x.index === i)?.name ?? `account[${i}]`
 	const known = ix.accounts.filter(x => x.index !== undefined).length
 	const args = (r.instructions.find(i => i.name === ix.name)?.args ?? []).map(s => s.split(':')[0].trim())

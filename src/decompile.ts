@@ -12,7 +12,7 @@ import { promoteStack } from './stack.ts';
 import { compactStores, sinkFrameLoads } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
-import { findAccounts, accountField, accountAddr, unalignedInput } from './accounts.ts';
+import { findAccounts, accountField, accountAddr, unalignedInput, legacyAccountInfo } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { sigShape, shapeSignature, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
@@ -21,7 +21,7 @@ import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
-import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, type View } from './views.ts';
+import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, LEGACY_INFO_VIEW, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
@@ -52,6 +52,7 @@ export interface Result {
   libCount: number;
   text: string;                    // single-file rendering
   facts: Map<number, FnFacts>;     // per-function facts for the analysis (src/analysis), by function pc
+  legacyInfo?: boolean;            // AccountInfo in the pre-repr(C) field order (accounts.ts legacyAccountInfo)
   tryOf: Map<number, number>;      // Anchor: handler pc -> its Accounts::try_accounts function
   acctLayouts?: Map<number, import('./views.ts').Field[]>; // Anchor: handler pc -> the Accounts struct's fields, offsets in try_accounts' out object (the analysis)
   programId?: string;              // the program's address (IDL, or the id the entry code checks program_id against)
@@ -457,7 +458,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // (analysis only, src/analysis: CPIs made through small user functions wrapping invoke, decoded at their
   // call sites by a run of the caller; own budget, nothing printed)
   const wrapBudget = { steps: 150_000 };
-  const callee: Callee = { f: pc => built.get(pc)?.f, name: fnName }; // (native account resolution: what calls write through frame pointers)
+  // AccountInfo field order: the pre-repr(C) one (key at +8) when the entrypoint's deserializer builds it so
+  const legacyInfo = legacyAccountInfo(built, p.elf.entryPc);
+  const callee: Callee = { f: pc => built.get(pc)?.f, name: fnName, legacy: legacyInfo }; // (native account resolution: what calls write through frame pointers)
   const userInvoke = new Set<number>();
   if (opts.sugar !== false) for (const [pc, bt] of built) {
     let n = 0, hit = false;
@@ -472,9 +475,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   }
   // input serialization: the deprecated loader's unaligned layout (by the owner when known, else by the entrypoint's deserializer)
   const unaligned = opts.loader !== undefined ? opts.loader.startsWith('BPFLoader1111') : unalignedInput(p)
-  const accountInfos = opts.sugar !== false ? findAccounts(built, unaligned) : undefined;
+  const accountInfos = opts.sugar !== false ? findAccounts(built, unaligned, legacyInfo) : undefined;
   const views = new Views();
   if (unaligned) for (const v of UNALIGNED_VIEWS) views.add(v)
+  if (legacyInfo) views.add(LEGACY_INFO_VIEW)
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
   const dataVars = opts.sugar !== false && opts.idl ? accountDataVars(built, accountViews(opts.idl, views), t => views.recordOf(t)) : new Map<number, Map<number, string>>();
   // Anchor: account names from the program's own account-error strings (see anchor.ts)
@@ -1042,7 +1046,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // loads through pointers known to be AccountInfo: field names (is_signer, owner, ...)
     const accTyped = accountInfos?.get(pc);
     if (opts.sugar !== false) ctx.storeField = (size, addr) => {
-      const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr });
+      const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr }, legacyInfo);
       if (fld || inputVar === undefined) return fld;
       const off = addr.k === 'var' && addr.id === inputVar ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === inputVar && addr.b.k === 'const' ? Number(addr.b.v) : -1;
       return off >= 0 ? inputField(off, size, unaligned) : undefined;
@@ -1051,7 +1055,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (accTyped?.size) {
       const prev = ctx.exprHook;
       ctx.exprHook = (e, pr) => {
-        const fld = accountField(accTyped, e);
+        const fld = accountField(accTyped, e, legacyInfo);
         if (fld && e.k === 'load') { inAddr = true; const a = pr(e.addr, 0); inAddr = false; return `ld${e.size * 8}(${a} /* ${fld} */)`; }
         const adr = e.k === 'bin' && !inAddr ? accountAddr(accTyped, e) : undefined;
         if (adr && e.k === 'bin') return `(${pr(e.a, 13)} + ${pr(e.b, 14)} /* ${adr} */)`;
@@ -1421,7 +1425,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const { decls, hoisted } = declarations(hf, h.body);
     outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });
   }
-  const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, get sigs() { return (sigs ??= new Map(sigShapes.map(x => [x.pc, shapeSignature(p, x)]))); }, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
+  const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, legacyInfo, tryOf, acctLayouts, programId: stateIdl?.address, get sigs() { return (sigs ??= new Map(sigShapes.map(x => [x.pc, shapeSignature(p, x)]))); }, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }

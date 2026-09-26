@@ -36,6 +36,12 @@ const LAYOUTS: Record<Kind, Layout> = {
 		flags: [1, 2], keyPtrs: [], keyAddrs: [3n],
 	},
 }
+/** the pre-repr(C) AccountInfo (see legacyAccountInfo): each pointer a word further, rent_epoch first */
+const LEGACY_INFO: Layout = {
+	loads: { 0: [8, 'rent_epoch'], 8: [8, 'key'], 0x10: [8, 'lamports'], 0x18: [8, 'data'], 0x20: [8, 'owner'], 0x28: [1, 'is_signer'], 0x29: [1, 'is_writable'], 0x2a: [1, 'executable'] },
+	flags: [0x28, 0x29, 0x2a], keyPtrs: [8n, 0x20n], keyAddrs: [],
+}
+const layoutsOf = (legacy: boolean): Record<Kind, Layout> => (legacy ? { ...LAYOUTS, info: LEGACY_INFO } : LAYOUTS)
 const STRIDE = 0x30n
 
 /** canonical text of an expression (identity for the typing maps) */
@@ -74,8 +80,9 @@ interface Static {
 interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>>; st?: Static } // params: var id -> register
 
 /** Per function: expressions (variables, loads) that point to an account. */
-export function findAccounts(funcs: Map<number, { f: VarFunc }>, unaligned = false): Map<number, Typed> {
+export function findAccounts(funcs: Map<number, { f: VarFunc }>, unaligned = false, legacy = false): Map<number, Typed> {
 	const kinds: Kind[] = ['info', unaligned ? 'raw1' : 'raw']
+	const layouts = layoutsOf(legacy)
 	const info = new Map<number, FnInfo>()
 	for (const [pc, { f }] of funcs) {
 		const params = new Map<number, number>()
@@ -86,7 +93,7 @@ export function findAccounts(funcs: Map<number, { f: VarFunc }>, unaligned = fal
 	const blocked = new Map<number, Set<number>>()           // callee pc -> registers some caller passes a constant in
 	for (let round = 0; round < 6; round++) {
 		let changed = false
-		for (const [pc, fi] of info) if (local(fi, paramTyped.get(pc), kinds)) changed = true
+		for (const [pc, fi] of info) if (local(fi, paramTyped.get(pc), kinds, layouts)) changed = true
 		// call sites vote for callee parameters
 		for (const [, fi] of info) for (const { t, args } of fi.st!.calls) {
 			args.forEach((a, i) => {
@@ -118,7 +125,7 @@ function kindOf(typed: Typed, { bk, o }: Split): Kind | undefined {
  * so every key it would add was added (or already present) in the first call, and `typed` only
  * grows. What can still change is parameter typing (new call-site votes) and the propagation.
  */
-function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined, kinds: Kind[]): boolean {
+function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined, kinds: Kind[], layouts: Record<Kind, Layout>): boolean {
 	const { f, typed } = fi
 	const n0 = typed.size
 	if (fi.st) {
@@ -174,7 +181,7 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined, kinds: Ki
 		else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, inRet)
 	}
 	for (const [bk, m] of loads) for (const kind of kinds) {
-		const L = LAYOUTS[kind]
+		const L = layouts[kind]
 		const fit = [...m].filter(([o, sz]) => L.loads[o]?.[0] === sz)
 		if (!fit.some(([o]) => L.flags.includes(o))) continue
 		const keyed = L.keyPtrs.some(o => wide.has(`L8(${offKey(bk, o)})`)) || L.keyAddrs.some(o => wide.has(offKey(bk, o)))
@@ -231,12 +238,13 @@ function fieldAddrs(f: VarFunc): Map<string, Set<number>> {
 }
 
 /** Field name for a load through a known account pointer, e.g. `is_signer`. */
-export function accountField(typed: Typed | undefined, e: Expr): string | undefined {
+export function accountField(typed: Typed | undefined, e: Expr, legacy = false): string | undefined {
 	if (!typed || e.k !== 'load') return undefined
 	const [b, o] = split(e.addr)
 	// (offset and size first: only a field of one of the layouts can be named, and the key of a
 	// large base expression is costly to build; the printer asks for every load)
 	if (o < 0n) return undefined
+	const LAYOUTS = layoutsOf(legacy)
 	const inf = LAYOUTS.info.loads[Number(o % STRIDE)], raw = LAYOUTS.raw.loads[Number(o)], raw1 = LAYOUTS.raw1.loads[Number(o)]
 	if (!(inf && inf[0] === e.size) && !(raw && raw[0] === e.size) && !(raw1 && raw1[0] === e.size) && !(o >= 3n && o < 0x48n && e.size === 8)) return undefined
 	const kind = typed.get(key(b))
@@ -270,6 +278,48 @@ export function accountAddr(typed: Typed | undefined, e: Expr): string | undefin
 	if (!nm && !nm1) return undefined
 	const k = typed.get(key(b))
 	return k === 'raw' ? nm : k === 'raw1' ? nm1 : undefined
+}
+
+/**
+ * solana_program before AccountInfo became #[repr(C)] (≈ 1.9): rustc ordered its fields
+ * { rent_epoch, key, lamports, data, owner, is_signer, is_writable, executable }, i.e. every pointer one word
+ * further than in the repr(C) layout. Told by the entrypoint's deserializer (the entry function or one it calls,
+ * two levels): an AccountInfo it builds (1-byte stores at +0x28 / +0x29 / +0x2a of one base) gets the record's
+ * key address (record + 8) at +8 rather than at +0.
+ */
+export function legacyAccountInfo(funcs: Map<number, { f: VarFunc }>, entryPc: number): boolean {
+	const seen = new Set<number>()
+	let legacy = 0, current = 0
+	const visit = (pc: number, depth: number) => {
+		const f = funcs.get(pc)?.f
+		if (!f || seen.has(pc)) return
+		seen.add(pc)
+		const defs = new Map<number, Expr[]>()
+		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set') { let a = defs.get(s.dst); if (!a) defs.set(s.dst, (a = [])); a.push(s.e) }
+		const one = (e: Expr): Expr => { for (let k = 0; k < 4 && e.k === 'var'; k++) { const d = defs.get(e.id); if (d?.length !== 1) break; e = d[0] } return e }
+		const keyAddr = (e: Expr) => { const x = one(e); return x.k === 'bin' && x.op === 'add' && x.b.k === 'const' && x.b.v === 8n }
+		// per base: offsets of 1-byte stores, values of the 8-byte stores at +0 / +8
+		const flags = new Map<string, Set<number>>(), words = new Map<string, Map<number, Expr>>()
+		for (const b of f.blocks) for (const s of b.stmts) {
+			if (s.k === 'call' && s.t.k === 'fn' && depth > 0) visit(s.t.pc, depth - 1)
+			if (s.k !== 'store' && s.k !== 'stores') continue
+			const [bs, o] = split(s.addr), bk = key(bs)
+			const vals = s.k === 'store' ? [s.v] : s.vals
+			vals.forEach((v, i) => {
+				const off = Number(o) + i * s.size
+				if (s.size === 1) { let m = flags.get(bk); if (!m) flags.set(bk, (m = new Set())); m.add(off) }
+				if (s.size === 8 && (off === 0 || off === 8)) { let m = words.get(bk); if (!m) words.set(bk, (m = new Map())); m.set(off, v) }
+			})
+		}
+		for (const [bk, m] of flags) {
+			if (!m.has(0x28) || !m.has(0x29) || !m.has(0x2a)) continue
+			const w = words.get(bk), w0 = w?.get(0), w8 = w?.get(8)
+			if (w8 && keyAddr(w8) && !(w0 && keyAddr(w0))) legacy++
+			else if (w0 && keyAddr(w0) && !(w8 && keyAddr(w8))) current++
+		}
+	}
+	visit(entryPc, 2)
+	return legacy > 0 && current === 0
 }
 
 /**

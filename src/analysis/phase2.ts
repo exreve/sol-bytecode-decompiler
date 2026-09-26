@@ -13,7 +13,7 @@
 import type { Result } from '../decompile.ts'
 import type { OpKind } from './facts.ts'
 import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
-import { cfgOf, decisionBlock, dominates, bypass, blockPc, callOf, type Cfg } from './flow.ts'
+import { cfgOf, decisionBlock, dominates, bypass, reaches, blockPc, callOf, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { auditIx } from './audit.ts'
@@ -27,6 +27,8 @@ import { b58, KNOWN_KEYS } from '../semantics.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
+/** an account whose data is used: which of its stored keys are compared with which provided accounts (see storedKeys) */
+export interface StoredKeys { account: string; type?: string; compared: string[]; referencedBy: string[]; never: string[]; gaps: string[] }
 export interface Enabler { kind: 'signer' | 'stored' | 'pda' | 'none'; what: string; status?: string; writtenBy?: string[] }
 export interface AuthorityRow { op: number; kind: string; enabledBy: Enabler[] }
 export interface Finding { rule: string; title: string; ix: string; accounts: string[]; path: string[]; evidence: string[]; confidence: 'high' | 'medium' | 'low'; weight: number }
@@ -122,7 +124,10 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 				const p = pointsOf[oi].find(x => x.fn === s.fn)
 				if (!p) continue
 				const g = cfg(s.fn)!
-				const path = bypass(g, s.b, p.b, ctx.allowed ? b => ctx.allowed!(s.fn, b) : undefined)
+				const al = ctx.allowed ? (b: number) => ctx.allowed!(s.fn, b) : undefined
+				// (a check on some paths to the operation, not one guarding other code (e.g. another instruction's branch))
+				if (s.b === p.b || !reaches(g, s.b, p.b, al)) continue
+				const path = bypass(g, s.b, p.b, al)
 				if (!path) continue
 				const ff = r.facts.get(s.fn)
 				const locs: Loc[] = []
@@ -269,6 +274,9 @@ export function phase2(a: Analysis, r: Result) {
 			const sides = c.sides ?? eqSides(c.cond)
 			if (!sides) continue
 			const norm = (t: string) => {
+				// (a nested field path, e.g. `arrow.vendor_miner.mint`)
+				const d = /^([A-Za-z_]\w*)\.([a-z_]\w*(?:\.[a-z_]\w*)+)$/.exec(t.trim())
+				if (d && acctOf(d[1])) return `${acctOf(d[1])}.${d[2]}`
 				for (const m of t.matchAll(ACCT_REF)) { const acct = acctOf(m[1]); if (acct) return `${acct}.${m[2]}` }
 				const b = acctOf(t.trim())
 				return b ? `${b}.key` : undefined
@@ -278,7 +286,9 @@ export function phase2(a: Analysis, r: Result) {
 			const kind: Relation['kind'] = c.kinds.some(k => k === 'token_mint' || k === 'token_owner') ? 'token' : x?.endsWith('.key') && y?.endsWith('.key') ? 'key_eq' : x && y ? 'field_eq' : 'compare'
 			rel.push({ a: x ?? sides[0].slice(0, 60), b: y ?? sides[1].slice(0, 60), kind, status: c.status, at: c.at })
 		}
-		ix.relations = rel
+		// (dedup: the same equality checked twice, e.g. a split comparison)
+		ix.relations = rel.filter((x, i) => rel.findIndex(y => y.a === x.a && y.b === x.b && y.kind === x.kind) === i)
+		ix.storedKeys = storedKeys(r, ix)
 		// (account data rows only for accounts whose data is checked or read by an operation)
 		const dataUsed = new Set(ix.ops.flatMap(o => (o.sources ?? []).filter(x => !x.source.endsWith('.key')).map(x => x.source.split('.')[0])))
 		ix.trust = trust.filter(t => !t.value.endsWith('.data') || t.evidence.length || dataUsed.has(t.value.slice(0, -5)))
@@ -349,6 +359,41 @@ const signerKey = (ix: IxOut, src: string) => { const m = /^(.+)\.key$/.exec(src
 const snakeName = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
 
 /** the fields of an account's IDL type (its type in the Accounts struct's layout, else any account type's; undefined without an IDL) */
+/**
+ * Stored keys of the accounts whose data the instruction uses (a discriminator / type checked, or a stored field
+ * compared): the key equalities with provided accounts, and the stored Pubkey fields (by the account's IDL type)
+ * never compared with anything; a gap when an account of the instruction is named like such a field
+ * (bank.crate_mint vs crate_mint). Without a type: the account's only bindings (its key compared with other
+ * accounts' fields).
+ */
+function storedKeys(r: Result, ix: IxOut): StoredKeys[] {
+	const rel = ix.relations ?? []
+	const out: StoredKeys[] = []
+	const types = r.idl?.types
+	const h = r.funcs.find(x => x.name === ix.handler)
+	const lay = h && r.acctLayouts?.get(h.pc)
+	const isKey = (t: any) => t === 'publicKey' || t === 'pubkey'
+	const fieldOf = (side: string, a: string) => side.startsWith(`${a}.`) && !/^(key|owner|lamports|data|data_len|is_signer|is_writable|executable)$/.test(side.slice(a.length + 1)) ? side.slice(a.length + 1) : undefined
+	for (const x of ix.accounts) {
+		const a = x.name
+		const typed = x.constraints.discriminator && x.constraints.discriminator.status !== 'not_found'
+		const mine = rel.filter(y => fieldOf(y.a, a) || fieldOf(y.b, a))
+		if (!typed && !mine.length) continue
+		// (the account's type: the Accounts struct's, else the IDL account type named like the account)
+		const t = lay?.find(y => y.name === a || snakeName(y.name) === snakeName(a))?.t
+		const lt = t?.k === 'embed' ? t.type : t?.k === 'ref' && t.to !== 'AccountInfo' ? t.to : undefined
+		const ty = lt && types?.has(lt) ? lt : r.idl?.accounts.find(y => snakeName(y.name) === snakeName(a))?.name
+		const fields = ty && types ? structFields(ty, types)?.filter(f => isKey(f.type)).map(f => snakeName(f.name)) : undefined
+		const compared = mine.map(y => fieldOf(y.a, a) ? `${y.a} == ${y.b}` : `${y.b} == ${y.a}`)
+		const referencedBy = rel.filter(y => y.a === `${a}.key` && !fieldOf(y.b, a) && !y.b.startsWith('(') || y.b === `${a}.key` && !fieldOf(y.a, a)).map(y => y.a === `${a}.key` ? y.b : y.a)
+		const cmpF = new Set(mine.map(y => (fieldOf(y.a, a) ?? fieldOf(y.b, a))!.split('.')[0]))
+		const never = (fields ?? []).filter(f => !cmpF.has(f))
+		const gaps = never.flatMap(f => ix.accounts.filter(y => y.name !== a && snakeName(y.name) === f).map(y => `${a}.${f} is never compared with ${y.name}.key`))
+		out.push({ account: a, type: ty, compared, referencedBy, never, gaps })
+	}
+	return out
+}
+
 function idlFields(r: Result, handler: string, acct: string): Set<string> | undefined {
 	const idl = r.idl
 	if (!idl?.accounts?.length) return undefined
@@ -459,6 +504,13 @@ const RULES: Rule[] = [
 		run: (ix, a) => ix.ops.filter(o => !runtimeAuthorized(o) && !initMechanics(ix, o)).flatMap(o => (o.bypass ?? []).filter(b => !(a.program.anchor && ix.checks[b.check].error === 'return')).map(b => {
 			const c = ix.checks[b.check]
 			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`], confidence: 'medium' as const, weight: wOf(o) + 1 }
+		})),
+	},
+	{
+		id: 'stored-key-unbound', title: 'A stored key of an account the instruction uses is never compared with the provided account it names',
+		run: ix => (ix.storedKeys ?? []).flatMap(k => k.gaps.map(g => {
+			const [f, other] = /^(\S+) is never compared with (\w+)\.key$/.exec(g)!.slice(1)
+			return { accounts: [k.account, other], path: [], evidence: [`${f} (${k.type}) is stored, and ${other} is an account of this instruction, but no check compares them`, k.compared.length ? `compared: ${k.compared.slice(0, 4).join('; ')}` : `no stored field of ${k.account} is compared${k.referencedBy.length ? `; bound only through ${k.referencedBy.join(', ')}` : ''}`], confidence: 'low' as const, weight: 2 }
 		})),
 	},
 	{

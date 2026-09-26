@@ -192,6 +192,21 @@ export const BUILTIN_VIEWS: View[] = [
 	},
 ]
 
+/** AccountInfo of solana_program before it became #[repr(C)] (see accounts.ts legacyAccountInfo): rustc's field order */
+export const LEGACY_INFO_VIEW: View = {
+	name: 'AccountInfo', size: 0x30, doc: 'solana_program::account_info::AccountInfo (Rust struct, 0x30 bytes, pre-repr(C) field order; `&[AccountInfo]` has stride 0x30)',
+	fields: [
+		{ name: 'rent_epoch', off: 0x00, t: S(8) },
+		{ name: 'key', off: 0x08, t: REF('Pubkey'), doc: '&Pubkey' },
+		{ name: 'lamports', off: 0x10, t: REF('LamportsCell'), doc: 'Rc<RefCell<&mut u64>>' },
+		{ name: 'data', off: 0x18, t: REF('DataCell'), doc: 'Rc<RefCell<&mut [u8]>>' },
+		{ name: 'owner', off: 0x20, t: REF('Pubkey'), doc: '&Pubkey' },
+		{ name: 'is_signer', off: 0x28, t: S(1) },
+		{ name: 'is_writable', off: 0x29, t: S(1) },
+		{ name: 'executable', off: 0x2a, t: S(1) },
+	],
+}
+
 /**
  * The deprecated loader's (BPFLoader1111…) unaligned input (see accounts.ts unalignedInput): replaces
  * Input; only the fields before the data have fixed offsets (the owner, executable and rent_epoch follow it).

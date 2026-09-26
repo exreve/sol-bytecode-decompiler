@@ -40,6 +40,7 @@
 //                     sources?: [ { param, source (ix data / ix.<arg> / <account>.key / <account>.<field>), trust } ] } ],
 //     trust:     [ { value (<account>.key | <account>.data | ix.<arg>), trust ('caller-controlled' | 'validated' | 'partially-validated' | 'runtime'), evidence } ],
 //     relations: [ { a, b, kind ('key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token': a token account's mint / owner), status, at } ],
+//     stored_keys: [ { account, type?, compared: ['<acct>.<field> == <other>'], referencedBy, never: [stored Pubkey fields not compared], gaps } ],
 //     authority: [ { operation (index), kind, enabled_by: [ { kind ('signer' | 'stored' | 'pda' | 'none'), what, status?, writtenBy? } ] } ],
 //     path_conditions: [ { operation (index), conditions: [ { at, cond, holds (false: the path needs it not to hold), how ('branch' | 'exit-check' | 'loop'), check? (id) } ],
 //                          not_required: [ { check, path? } ] (relevant checks some path to it does not make), truncated? } ]            (phase3.ts)
@@ -62,7 +63,7 @@ import type { FuncOut, Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
-import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
+import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
@@ -107,6 +108,7 @@ export interface IxOut {
 	ctx?: IxCtx          // (internal: the dominance analysis)
 	trust?: TrustRow[]
 	relations?: Relation[]
+	storedKeys?: StoredKeys[]
 	authority?: AuthorityRow[]
 	paths?: PathInfo[]   // phase 3 (phase3.ts)
 	chains?: Chain[]
@@ -145,6 +147,8 @@ export function analyze(r: Result): Analysis {
 	if (!a) { a = analyze0(r); memo.set(r, a) }
 	return a
 }
+
+const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
 
 function parseIdlAccount(s: string, i: number): AccountRow {
 	const m = /^(\S+)(?: \[(.*)\])?$/.exec(s)!
@@ -245,11 +249,16 @@ function analyze0(r: Result): Analysis {
 			: grp?.accounts ? grp.accounts.map((n, i) => ({ index: i, name: n, source: 'known' as const, expected: {}, constraints: {} }))
 			: (info?.strAccounts ?? []).map((n, i) => ({ index: i, name: n, source: 'str' as const, expected: {}, constraints: {} }))
 		const known = new Set(accounts.map(x => x.name))
+		// (the code's snake_case name of an account the IDL names in camelCase, when only one matches)
+		const bySnake = new Map<string, string | null>()
+		for (const x of accounts) if (x.source === 'idl') { const k = snake(x.name); bySnake.set(k, bySnake.has(k) && bySnake.get(k) !== x.name ? null : x.name) }
 		const canon = (acct: string | undefined): string | undefined => {
 			if (!acct) return undefined
 			if (known.has(acct)) return acct
 			const a = acct.replace(/_\d+$/, '')
 			if (known.has(a)) return a
+			const sn = bySnake.get(a)
+			if (sn) return sn
 			const ix = /^acc(\d+)$/.exec(a) ?? /^account\[(\d+)\]$/.exec(a)
 			if (ix) return accounts.find(y => y.index === Number(ix[1]))?.name ?? `account[${ix[1]}]`
 			return TEMP.test(acct) ? undefined : a
@@ -298,7 +307,7 @@ function analyze0(r: Result): Analysis {
 			const fo = byPc.get(fn)
 			const s = fo?.f.blocks.flatMap(b => b.stmts).find(x => x.pc === pc && callOf(x))
 			if (!fo || !s) return undefined
-			const R = accountResolver(fo, { f: x => byPc.get(x)?.f, name: x => p.funcs.get(x)?.name ?? '' })
+			const R = accountResolver(fo, { f: x => byPc.get(x)?.f, name: x => p.funcs.get(x)?.name ?? '', legacy: r.legacyInfo })
 			return callOf(s)!.args.slice(1, 8).map(a => { const x = R.valueRef(a, s); return x?.field === 'key' ? idxName(x.index) : undefined })
 		}
 		const hintBefore = (ff: FnFacts, line: number, depth = 2): IxHint | undefined => {
@@ -316,7 +325,7 @@ function analyze0(r: Result): Analysis {
 		}
 		// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice; in a function the
 		// instruction calls, its pointer parameters bound to the values at the call site of this instruction's call path)
-		const clr = { f: (pc: number) => byPc.get(pc)?.f, name: (pc: number) => p.funcs.get(pc)?.name ?? '' }
+		const clr = { f: (pc: number) => byPc.get(pc)?.f, name: (pc: number) => p.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo }
 		const resMemo = new Map<number, AcctResolver | undefined>()
 		const resolverFor = (fn: number, d = 0): AcctResolver | undefined => {
 			if (resMemo.has(fn)) return resMemo.get(fn)
@@ -335,6 +344,22 @@ function analyze0(r: Result): Analysis {
 			})
 			if (seed.size) resMemo.set(fn, accountResolver(fo, clr, seed))
 			return resMemo.get(fn)
+		}
+		// (a key equality a failing side's log states, `self.a.b.c` in some nested Accounts struct: the account is the IDL
+		// path with the longest suffix the path starts with, the rest its field)
+		const idlPaths = (accounts[0]?.source === 'idl' ? info?.accounts ?? [] : []).map((s, i) => ({ segs: s.split(' ')[0].split('.').map(snake), name: accounts[i]?.name }))
+		const pathRefs = (p: string): string[] => {
+			const segs = p.split('.'), out: [number, string][] = []
+			for (const x of idlPaths) for (let k = Math.min(segs.length, x.segs.length); k >= 1; k--) {
+				if (x.name && segs.slice(0, k).join('.') === x.segs.slice(-k).join('.')) out.push([k, `${x.name}.${segs.slice(k).join('.') || 'key'}`])
+			}
+			return out.sort((a, b) => b[0] - a[0]).map(x => x[1]).filter((x, i, a) => a.indexOf(x) === i)
+		}
+		/** the two sides of a logged key equality (the longest matches first; two different accounts) */
+		const logSides = ([a, b]: [string, string]): [string, string] | undefined => {
+			const bs = /^[A-Z][A-Z0-9_]*$/.test(b) ? [`(constant ${b})`] : pathRefs(b)
+			for (const x of pathRefs(a)) for (const y of bs) if (x.split('.')[0] !== y.split('.')[0]) return [x, y]
+			return undefined
 		}
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
@@ -381,11 +406,17 @@ function analyze0(r: Result): Analysis {
 						if (t && o && t !== o) { sides = [`${t}.mint`, `${o}.data`]; if (!account || account.endsWith('?')) account = t }
 					}
 				}
+				const ls = c.logRel && !sides ? logSides(c.logRel) : undefined
+				// (a key compared with a named constant: an address check)
+				const lAddr = ls?.[1].startsWith('(constant') && ls[0].endsWith('.key') ? ls[0].slice(0, -4) : undefined
+				if (lAddr) { account = lAddr; if (!kinds.includes('address')) kinds.push('address') }
+				else if (ls) { sides = ls; if (!account || account.endsWith('?')) account = ls.find(z => !z.endsWith('.key'))?.split('.')[0] ?? ls[0].split('.')[0] }
 				const at = loc(ff, c.line, c.pc)
 				const keyCmp = !!ac?.length && ac.every(x => !x.direct) && !kinds.some(k => k === 'address' || k === 'pda') || undefined
 				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main, keyCmp })
 				const ci = checks.length - 1
 				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])
+				if (lAddr) pend.push([lAddr, 'address', ci, undefined])
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind
 				// (applied once the statuses are final: see the dominance analysis below)
 				if (c.named && cn(c.named)) for (const k of kinds) pend.push([cn(c.named)!, k, ci, c.via && !c.kinds.includes(k) ? c.via.fn : undefined])
@@ -564,7 +595,7 @@ export function renderJson(a: Analysis, where: Where): string {
 				pda: o.pda,
 				guarded_by: o.guards, bypass: o.bypass?.map(b => ({ check: b.check, path: b.path.map(x => L(ix.name, x)) })), sources: o.sources,
 			})),
-			trust: ix.trust, relations: ix.relations?.map(x => ({ ...x, at: L(ix.name, x.at) })), authority: ix.authority?.map(x => ({ operation: x.op, kind: x.kind, enabled_by: x.enabledBy })),
+			trust: ix.trust, relations: ix.relations?.map(x => ({ ...x, at: L(ix.name, x.at) })), stored_keys: ix.storedKeys?.length ? ix.storedKeys : undefined, authority: ix.authority?.map(x => ({ operation: x.op, kind: x.kind, enabled_by: x.enabledBy })),
 			path_conditions: ix.paths?.map(p => ({ operation: p.op, conditions: p.conds.map(c => ({ at: L(ix.name, c.at), cond: c.cond, holds: c.holds, how: c.how, check: c.check })), not_required: p.notRequired.map(x => ({ check: x.check, path: x.path?.map(y => L(ix.name, y)) })), truncated: p.truncated })),
 			auth_chains: ix.chains?.map(c => ({ operation: c.op, chains: c.steps })),
 			arithmetic: ix.arith?.map(x => ({ at: L(ix.name, x.at), operation: x.op, target: x.target, expr: x.expr, kind: x.kind, status: x.status, guard: x.guard && { at: L(ix.name, x.guard.at), cond: x.guard.cond }, caller_controlled: x.caller, unnamed_field: x.unnamed })),
@@ -764,6 +795,16 @@ export function renderIx(ix: IxOut, where: Where, a?: Analysis): string {
 	if (ix.relations?.length) {
 		out.push('', '## Relations (equalities the checks establish)', '')
 		for (const x of ix.relations.slice(0, 20)) out.push(`- ${x.a} ${x.kind === 'compare' ? '~' : '=='} ${x.b} (${x.kind}, ${ST[x.status]}, ${W(x.at)})`)
+	}
+	if (ix.storedKeys?.length) {
+		out.push('', '## Stored keys (accounts whose data is used: which stored keys are compared with provided accounts)', '')
+		for (const k of ix.storedKeys) {
+			const parts = [...k.compared, ...k.referencedBy.map(b => `key referenced by ${b}`)]
+			out.push(`- ${k.account}${k.type ? ` (${k.type})` : ''}: ${parts.join('; ') || 'no key relation found'}`)
+			if (!k.compared.length) out.push(`  - none of its stored fields is compared with a provided account${k.referencedBy.length ? ` (bound only through ${k.referencedBy.join(', ')})` : ''}`)
+			if (k.never.length) out.push(`  - stored keys never compared: ${k.never.join(', ')}`)
+			for (const g of k.gaps) out.push(`  - GAP: ${g}`)
+		}
 	}
 	const tr = ix.trust?.filter(t => t.trust !== 'validated' || t.evidence.length) ?? []
 	if (tr.length) {

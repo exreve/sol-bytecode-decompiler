@@ -57,6 +57,7 @@ export interface Check {
 	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
 	passPc?: number        // the first statement on the passing side (the deciding block, when the condition's code is duplicated)
 	cmp32?: boolean        // native: a 32-byte comparison whose accounts the function alone does not know (no kinds yet)
+	logRel?: [string, string] // the key equality the failing side's log states (vipers assert_keys_eq!: "self.a != self.b.c"): the two paths
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -95,6 +96,8 @@ export interface FnFacts {
 }
 
 const ACC_FIELDS = new Set(['key', 'owner', 'is_signer', 'is_writable', 'executable', 'lamports', 'data', 'data_len', 'rent_epoch', 'original_data_len', 'dup_marker'])
+/** the log of a violated key equality (vipers assert_keys_eq!(a, b): "self.a != self.b.c") */
+const VIPERS_LOG = /"self\.([a-z_][\w.]*) != (?:self\.([a-z_][\w.]*)|([A-Z][A-Z0-9_]*))"/
 const FIELD_KIND: Record<string, string> = { is_signer: 'signer', is_writable: 'writable', executable: 'executable', owner: 'owner', key: 'key', data_len: 'data_len', lamports: 'lamports' }
 /** Anchor error -> the constraint it reports */
 export const ANCHOR_KIND: Record<string, string> = {
@@ -450,6 +453,11 @@ export function functionFacts(inp: FnInput): FnFacts {
 		}
 		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
 		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
+		// (vipers assert_keys_eq!(a, b) logs "self.a != self.b" on its failing side; the comparison itself is split into
+		// word / 16-byte pieces the condition alone does not show as a key comparison)
+		const lr = VIPERS_LOG.exec(leadText(failNodes))
+		const logRel: [string, string] | undefined = lr ? [lr[1], lr[2] ?? lr[3]] : undefined
+		if (logRel) add('key')
 		// the error raised: an IDL error, else an Anchor error that reports a constraint, else any Anchor / program error
 		let error = ''
 		const cm2 = /\berror::(\w+)/.exec(ft)
@@ -474,7 +482,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		while (ac.k === 'lnot') ac = ac.a
 		if (ac.k === 'cmp' && (ac.op === 'eq' || ac.op === 'ne') && ac.b.k === 'const' && ac.b.v === 0n && ac.a.k === 'bin' && ac.a.op === 'and' && ac.a.b.k === 'const' && [1n, 3n, 7n, 15n].includes(ac.a.b.v) && !error.includes('::')) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}) })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}), ...(logRel ? { logRel } : {}) })
 	}
 
 	const condLines = (c: Expr, l: number) => {
@@ -531,6 +539,9 @@ export function functionFacts(inp: FnInput): FnFacts {
 					else if (eEx && !tEx) fail = 'else'
 					// (both exit, or both fall into a continuation that exits: the one that looks like the error path)
 					else if ((tEx && eEx) || (!tEx && !eEx && after)) { const pf = pickFail(n.then, n.else); fail = pf === 'then' ? 'then' : pf === 'rest' ? 'else' : undefined }
+					// (the side logging a violated key equality (vipers) fails, whatever the shapes say)
+					const vt = vlog(n.then)
+					if (n.else.length) { const ve = vlog(n.else); if (vt !== ve) fail = vt ? 'then' : 'else' } else if (vt !== vlog(rest)) fail = vt ? 'then' : 'rest'
 					if (fail) {
 						const failNodes = fail === 'then' ? n.then : fail === 'else' ? n.else : rest
 						check(n, failNodes, fail === 'then', main, before, fail === 'then' ? (n.else.length ? n.else : rest) : n.then)
@@ -550,6 +561,18 @@ export function functionFacts(inp: FnInput): FnFacts {
 	/** both sides exit: the one that looks like the error path (error markers; else much shorter) */
 	const out0 = sig && /^(?:export )?function \w+\((\w+)/.exec(sig)?.[1]
 	const okOut = out0 ? new RegExp(`^\\s*(?:st64\\(${out0}, 0\\)|${out0}\\.tag = 0)$`, 'm') : undefined
+	/** a side logging a violated key equality first thing (vipers assert_keys_eq!) */
+	const vlog = (x: Node[]) => VIPERS_LOG.test(leadText(x))
+	/** the lines of a list's statements before its first branch / block / loop (at most 40) */
+	const leadText = (ns: Node[]): string => {
+		const out: string[] = []
+		for (const n of ns) {
+			if (n.k === 'if' || n.k === 'block' || n.k === 'loop' || n.k === 'switch') break
+			const sp = spans.get(n)
+			if (sp) for (let i = sp[0]; i < sp[1] && out.length < 40; i++) out.push(lines[at + i])
+		}
+		return out.join('\n')
+	}
 	const pickFail = (a: Node[], b: Node[], strict = false): 'then' | 'rest' | undefined => {
 		const la = span(a), lb = span(b)
 		// (a short side storing the Ok tag into the out object (the first parameter) and showing no error, before a rest
