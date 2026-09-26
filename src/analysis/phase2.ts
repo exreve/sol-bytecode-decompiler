@@ -308,6 +308,17 @@ export function phase2(a: Analysis, r: Result) {
 			const kind: Relation['kind'] = c.kinds.some(k => k === 'token_mint' || k === 'token_owner') ? 'token' : x?.endsWith('.key') && y?.endsWith('.key') ? 'key_eq' : x && y ? 'field_eq' : 'compare'
 			rel.push({ a: x ?? sides[0].slice(0, 60), b: y ?? sides[1].slice(0, 60), kind, status: c.status, at: c.at })
 		}
+		// (the relations a token account's / mint's initialization establishes: its mint, owner, mint authority)
+		for (const o of ix.ops) {
+			const acc = (role: string) => { const t = o.cpi?.accounts.find(x => x.role === role)?.text; return t && t !== '?' ? t : undefined }
+			const st = o.main ? 'found' as const : 'partial' as const
+			if (o.cpi?.ix === 'InitializeAccount3' && acc('account')) {
+				if (acc('mint')) rel.push({ a: `${acc('account')}.mint`, b: `${acc('mint')}.key`, kind: 'token', status: st, at: o.at })
+				if (acc('authority')) rel.push({ a: `${acc('account')}.owner`, b: `${acc('authority')}.key`, kind: 'token', status: st, at: o.at })
+			}
+			const ma = o.cpi?.ix === 'InitializeMint2' ? o.cpi.fields.find(x => x[0] === 'mint_authority')?.[1] : undefined
+			if (ma && acc('mint')) rel.push({ a: `${acc('mint')}.mint_authority`, b: ma, kind: 'token', status: st, at: o.at })
+		}
 		// (dedup: the same equality checked twice, e.g. a split comparison)
 		ix.relations = rel.filter((x, i) => rel.findIndex(y => y.a === x.a && y.b === x.b && y.kind === x.kind) === i)
 		ix.storedKeys = storedKeys(r, ix)
@@ -643,6 +654,7 @@ const RULES: Rule[] = [
 	{
 		id: 'reinit-unchecked', title: 'Account initialized (its type discriminator written) with no check that it is uninitialized (reinitialization)',
 		run: ix => (ix.audit?.initWrites ?? []).slice(0, 1).map(x => {
+			if (x.field) return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the authority field ${x.field}${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (an is_initialized flag, its state unpacked): calling it again on an initialized ${x.acct} overwrites the authority`], confidence: 'info' as const, weight: 3 }
 			return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the ${x.type} discriminator into ${x.acct}'s data${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (discriminator == 0 / Anchor \`zero\` / an is_initialized flag): calling it again on a live ${x.type} overwrites it (e.g. its authority)`], confidence: 'medium' as const, weight: 5 }
 		}),
 	},

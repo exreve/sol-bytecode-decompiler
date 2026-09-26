@@ -5,7 +5,7 @@
 import type { Result } from '../decompile.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
-import type { IxOut, Loc } from './report.ts'
+import type { IxCtx, IxOut, Loc } from './report.ts'
 import { irOf, stmtAt, defsIn, pathTo, blockAt } from './paths.ts'
 import { dataReads, callOf, cfgOf, anchorEval, tryInfo, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
@@ -21,7 +21,7 @@ export interface AuditFacts {
 	sameType?: { fn: string; n: number; type?: string; accts: string[] } // Anchor: an account type try_accounts deserializes more than once (its try call, the accounts it names)
 	initWrites?: InitWrite[]                                      // an account type's discriminator written into an account's data with no state check before
 }
-export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean } // owner: a check compares the account's owner
+export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean; field?: string } // field: native, an authority field written (no discriminator) // owner: a check compares the account's owner
 
 const VALUE_OPS = new Set(['LAMPORT_WRITE', 'LAMPORT_TRANSFER', 'TOKEN_TRANSFER', 'MINT', 'BURN'])
 
@@ -120,6 +120,20 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 		})
 	}
 	if (ctx) out.initWrites = initWrites(r, ix, out.ownerCmp ?? [])
+	// (native: an authority field written into an account the instruction does not create, no condition on the way
+	// reading the account's data (an is_initialized flag, a state unpacked))
+	if (ctx && !r.anchor && !out.initWrites?.length && !ix.ops.some(o => o.kinds.includes('ACCOUNT_CREATE') || (o.cpi && (o.cpi.family === 'system' || (!o.cpi.known && !o.cpi.family))))) {
+		for (const o of ix.ops) {
+			if (!o.kinds.includes('AUTHORITY_WRITE') || !o.target || o.fnPc === undefined || o.at.pc === undefined) continue
+			const acct = o.target.split('.')[0]
+			if (/\?$|^account\[/.test(acct) && !ix.accounts.some(a => a.name === acct)) continue
+			const conds = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc))
+			if (conds.some(k => k.how !== 'before' && src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data'))) continue
+			if (ix.checks.some(k => k.account === acct && k.kinds.some(x => x === 'state' || x === 'discriminator' || x === 'initialized'))) continue
+			out.initWrites!.push({ acct, type: '', field: o.target, at: o.at, owner: ix.checks.some(k => k.account === acct && k.kinds.includes('owner')) })
+			break
+		}
+	}
 	return out
 }
 
@@ -327,8 +341,12 @@ function paramWidth(I: ReturnType<typeof irOf>, ctx: IxOut['ctx'], fn: number, d
 }
 
 /** Anchor: the evaluation context of a function of the instruction (its parameters bound up the call path) */
-function evaluators(r: Result, ix: IxOut): (fn: number) => EvCtx | undefined {
-	const I = irOf(r), ctx = ix.ctx!
+function evaluators(r: Result, ix: IxOut): (fn: number) => EvCtx | undefined { return evaluatorsFor(r, ix.ctx!) }
+const evMemo = new WeakMap<IxCtx, (fn: number) => EvCtx | undefined>()
+export function evaluatorsFor(r: Result, ctx: IxCtx): (fn: number) => EvCtx | undefined {
+	const m = evMemo.get(ctx)
+	if (m) return m
+	const I = irOf(r)
 	const H = I.byPc.get(ctx.handler)
 	const A = H && anchorEval(r, H), T = H && tryInfo(r, H)
 	const memo = new Map<number, EvCtx | undefined>()
@@ -348,14 +366,16 @@ function evaluators(r: Result, ix: IxOut): (fn: number) => EvCtx | undefined {
 				const roots = new Map<number, HVal>()
 				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = fo.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) roots.set(pv, v) })
 				// (try_accounts before &AccountInfo fields: the variables holding an account's &AccountInfo (byValueTry))
-				if (fn === T?.tryPc) for (const [id, acct] of T.ptrs ?? []) roots.set(id, { k: 'info', acct, off: 0 })
+				if (fn === T?.tryPc) for (const [id, acct] of T.ptrs ?? []) roots.set(id, { k: 'info', acct, off: 0, seq: T.seqs?.get(id) })
 				x = A.ctxOf(fo, roots, 2)
 			}
 		}
 		memo.set(fn, x)
 		return x
 	}
-	return fn => evIn(fn)
+	const f = (fn: number) => evIn(fn)
+	evMemo.set(ctx, f)
+	return f
 }
 
 /** Anchor: whether a value reads the account's bytes (its data, or its object in the handler's frame), through variables */
