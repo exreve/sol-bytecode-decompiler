@@ -2,15 +2,19 @@
 //
 // Pointers without a known layout get a view whose fields are the fixed-offset accesses the program makes
 // through them: `ld64(b + 0x18)` prints as `b.f0x18_u64`, `st8(ret + 0x20, x)` as `ret.f0x20_u8 = x`.
-// A pointer is a function parameter never reassigned, or a variable defined once as a pointer loaded
-// from such an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to). Objects are unified
-// (one view) along the program's own data flow, Steensgaard style: a parameter with the arguments the
-// calls pass it (the same object), a loaded pointer with every other pointer loaded from or stored at
-// the same field of the same object. A merge is only made when the two layouts agree (no access of one
-// overlaps an access of another size of the other), recursively for the objects their fields point to.
-// Each field is named after its offset and size (a u64 at 0x18: `f0x18_u64`; an 8-byte field whose value
-// is used as such a pointer: `f0x10_ref`, of type ref<its view>). Pointers used in arithmetic with a
-// non-constant (buffers, arrays) and those of library functions get no view.
+// A pointer is a function parameter never reassigned; a variable defined once as a pointer loaded from such
+// an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to), from a call's out object in the frame
+// (that field of the callee's object) or from a frame word every store of which holds the same value (a spill);
+// an account's data pointer (acc.data.ptr); an inline heap allocation; a frame object passed to a call (the
+// stores building it right before); or a variable each definition of which is one of these. Objects are
+// unified (one view) along the program's own data flow, Steensgaard style: a parameter with the arguments the
+// calls pass it (the same object), a loaded pointer with every other pointer loaded from or stored at the
+// same field of the same object. A merge is only made when the two layouts agree (no access of one overlaps
+// an access of another size of the other), recursively for the objects their fields point to. Each field is
+// named after its offset and size (a u64 at 0x18: `f0x18_u64`; an 8-byte field whose value is used as such a
+// pointer: `f0x10_ref`, of type ref<its view>). Pointers used in arithmetic with a non-constant or at a
+// negative offset (buffers, arrays, stack arguments) and those of library and noreturn functions get no view.
+// An object whose accesses fit solana_program's AccountInfo (or its data RefCell box) gets that view instead.
 import type { VarFunc } from './dataflow.ts'
 import type { Expr, Stmt } from './ir.ts'
 import type { Views, Field } from './views.ts'
