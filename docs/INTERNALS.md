@@ -38,8 +38,11 @@ named after its role, and typed when its layout is fixed by that role, when the 
   `seeds: Slice`, a PDA's seed list, result `pda` and `bump`, a `fmt: FmtArguments` and its `fmt_args: FmtArg`;
   not when the object's address is passed to other calls too, nor (typed) when an access to it does not hit a
   field of the view exactly (a slot reused for other data);
-* objects whose address is only ever the first argument (the out parameter) of u128 builtins (`prod`, `quot`,
-  `rem: U128`: `prod.lo`, `prod.hi`) or of Anchor error constructors (`err`).
+* objects whose address is only ever the first argument (the out parameter, or `&mut self`) of calls whose
+  role is known, and that the function never writes itself: u128 builtins (`prod`, `quot`, `rem: U128`:
+  `prod.lo`, `prod.hi`), Anchor error constructors (`err`), `AccountInfo::clone` (`info: AccountInfo`),
+  `try_borrow_data` (`data_ref`), sysvar getters (`rent`, `clock`), `try_accounts` (`accts`), RawVec growth
+  (`vec`), and user functions whose out parameter holds an enum with a clear tag (`res: Tagged64`, below).
 
 ```ts
 	const prod: U128 = fp - 0x40
@@ -52,6 +55,9 @@ named after its role, and typed when its layout is fixed by that role, when the 
 **Out parameters.** A user function whose first parameter is only written through (stores and copies at
 constant offsets, or passed on as another call's first argument; never loaded, never reassigned) names it
 `ret`: the caller's object the result is written to (Rust's return slot for values larger than 8 bytes).
+When every store at `ret + 0` is a constant of one size (no copy writes it; passing `ret` on goes to a function
+with the same tag), that word is an enum's variant tag: `ret: Tagged64` (`ret.tag = 2`), and the caller's
+object `res: Tagged64` (`if (res.tag == 0) { … }`; the payload stays `ld64(res + 8)`).
 
 **Outlined tails** (`src/outline.ts`). Statement runs that end a function (a `return` on every path) and recur
 in several places, identical up to the variables and stack objects they use, are printed once as a helper and

@@ -170,6 +170,10 @@ export const BUILTIN_VIEWS: View[] = [
 			{ name: 'formatter', off: 0x08, t: S(8) },
 		],
 	},
+	...([1, 2, 4, 8] as const).map((n): View => ({
+		name: `Tagged${n * 8}`, doc: `enum value returned through an out parameter: its variant tag, a u${n * 8} at offset 0 (the payload after it is not named)`,
+		fields: [{ name: 'tag', off: 0, t: S(n) }],
+	})),
 	{
 		name: 'Input', doc: 'program input (entrypoint parameter): account count, then the first serialized account',
 		fields: [
