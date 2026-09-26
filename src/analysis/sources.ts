@@ -106,6 +106,7 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 		const kind: SrcKind | undefined = h.k === 'keyp' ? 'key' : h.k === 'ownp' ? 'owner' : h.k === 'lam' ? 'lamports' : h.k === 'data' ? 'data' : undefined
 		if (!kind) return undefined
 		const field = kind === 'data' ? A!.zcField(h.ty, h.off, n) ?? 'data' : kind
+		if (/^remaining_accounts\[/.test(h.acct)) return { source: `${h.acct}.${field}`, kind: 'remaining', acct: h.acct }
 		return { source: `${h.acct}.${field}`, kind, acct: h.acct }
 	}
 

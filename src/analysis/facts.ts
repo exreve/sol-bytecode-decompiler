@@ -109,6 +109,13 @@ export const ANCHOR_KIND: Record<string, string> = {
 }
 const ERROR_RAISE = /anchor::(Constraint|Account|Require)\w*|error::\w|ProgramError::\w/
 const ERROR_MARK = /anchor::\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
+/** a two-letter account name built on the heap (inlineString wants three): one 16-bit store, the String's length 2 */
+export const shortName = (t: string): string | undefined => {
+	const m = /\bst16\((\w+), (0x[0-9a-f]{4})\)/.exec(t)
+	if (!m || !new RegExp(`st64\\(\\w+ \\+ 8, 2\\)|st64\\(\\w+ \\+ 0x10, ${m[1]}, 2\\)`).test(t)) return undefined
+	const v = parseInt(m[2], 16), s = String.fromCharCode(v & 0xff, v >> 8)
+	return /^[a-z]{2}$/.test(s) ? s : undefined
+}
 const TEMP = /^([a-z]{1,2}|v\d+|s[0-9a-f]+|p\d+|r\d|fp|u\d+)$/
 const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate/i
 
@@ -457,7 +464,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		let named: string | undefined
 		const nm = /Error_with_account_name\([^\n]*?"(\w+)"/.exec(ft)
 		if (nm) named = nm[1]
-		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
+		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes) ?? shortName(ft)
 		// (native: a 32-byte comparison of values the function does not know as accounts (e.g. an AccountInfo parameter):
 		// kept without kinds, for the instruction's context to resolve (report.ts))
 		const cmp32 = !kinds.length && !named && !!inp.irCmp?.(n.c, firstPc(failNodes), firstPc(passNodes))

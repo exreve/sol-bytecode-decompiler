@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["a_vault", "a_staking", "a_escrow", "a_counter", "a_oracle", "a_mint", "n_vault", "n_token", "n_pool", "p_counter"]
+members = ["a_vault", "a_staking", "a_escrow", "a_counter", "a_oracle", "a_mint", "a_audit", "n_vault", "n_token", "n_pool", "p_counter"]
 
 [workspace.dependencies]
 anchor-lang = "=0.31.1"

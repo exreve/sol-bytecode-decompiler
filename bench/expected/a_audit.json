@@ -1,0 +1,365 @@
+{
+	"kind": "anchor",
+	"idl": "a_audit.json",
+	"instructions": {
+		"init_config": {
+			"accounts": {
+				"payer": [
+					"signer",
+					"writable"
+				],
+				"config": [
+					"writable",
+					"pda",
+					"owner",
+					"discriminator?"
+				],
+				"system_program": [
+					"address"
+				]
+			},
+			"cpis": [
+				"SYSTEM_PROGRAM.CreateAccount",
+				"SYSTEM_PROGRAM.Transfer?",
+				"SYSTEM_PROGRAM.Allocate?",
+				"SYSTEM_PROGRAM.Assign?"
+			],
+			"writes": [
+				"config.admin",
+				"config.beneficiary",
+				"config.initialized",
+				"config.bump"
+			],
+			"pdas": [
+				"config"
+			],
+			"note": "init_if_needed: the state is set only while config.initialized is false"
+		},
+		"touch": {
+			"accounts": {
+				"market": [
+					"owner",
+					"discriminator",
+					"writable",
+					"has_one"
+				],
+				"admin": [
+					"signer"
+				],
+				"clock": [
+					"address"
+				]
+			},
+			"relations": [
+				[
+					"market",
+					"admin"
+				]
+			],
+			"writes": [
+				"market.last_ts"
+			]
+		},
+		"claim": {
+			"accounts": {
+				"owner": [
+					"signer",
+					"writable"
+				],
+				"position": [
+					"owner",
+					"discriminator",
+					"writable",
+					"has_one",
+					"pda"
+				],
+				"treasury": [
+					"owner",
+					"discriminator",
+					"writable",
+					"pda"
+				]
+			},
+			"relations": [
+				[
+					"position",
+					"owner"
+				]
+			],
+			"writes": [
+				"position.claimed",
+				"treasury.lamports",
+				"owner.lamports"
+			],
+			"pdas": [
+				"pos/*",
+				"treasury"
+			]
+		},
+		"move_points": {
+			"accounts": {
+				"from": [
+					"owner",
+					"discriminator",
+					"writable",
+					"has_one"
+				],
+				"to": [
+					"owner",
+					"discriminator",
+					"writable"
+				],
+				"owner": [
+					"signer"
+				]
+			},
+			"relations": [
+				[
+					"from",
+					"owner"
+				],
+				[
+					"from",
+					"to?"
+				]
+			],
+			"writes": [
+				"from.points",
+				"to.points"
+			]
+		},
+		"admin_withdraw": {
+			"accounts": {
+				"config": [
+					"owner",
+					"discriminator",
+					"has_one"
+				],
+				"admin": [
+					"signer",
+					"writable"
+				],
+				"treasury": [
+					"owner",
+					"discriminator",
+					"writable",
+					"pda"
+				]
+			},
+			"relations": [
+				[
+					"config",
+					"admin"
+				]
+			],
+			"writes": [
+				"treasury.lamports",
+				"admin.lamports"
+			],
+			"pdas": [
+				"treasury"
+			]
+		},
+		"forward": {
+			"accounts": {
+				"config": [
+					"owner",
+					"discriminator",
+					"has_one"
+				],
+				"admin": [
+					"signer"
+				],
+				"vault": [
+					"owner",
+					"writable",
+					"pda"
+				],
+				"dest": [
+					"owner",
+					"writable",
+					"address"
+				],
+				"target_program": [
+					"address"
+				]
+			},
+			"relations": [
+				[
+					"config",
+					"admin"
+				],
+				[
+					"config",
+					"dest?"
+				]
+			],
+			"cpis": [
+				"SYSTEM_PROGRAM.Transfer"
+			],
+			"pdas": [
+				"vault"
+			]
+		},
+		"deposit": {
+			"accounts": {
+				"user": [
+					"signer",
+					"writable"
+				],
+				"vault": [
+					"owner",
+					"writable",
+					"pda"
+				],
+				"stats": [
+					"owner",
+					"discriminator",
+					"writable",
+					"pda"
+				],
+				"system_program": [
+					"address"
+				]
+			},
+			"cpis": [
+				"SYSTEM_PROGRAM.Transfer"
+			],
+			"writes": [
+				"stats.deposited"
+			],
+			"pdas": [
+				"vault",
+				"stats/*"
+			]
+		},
+		"payout": {
+			"accounts": {
+				"config": [
+					"owner",
+					"discriminator",
+					"has_one"
+				],
+				"admin": [
+					"signer"
+				],
+				"treasury": [
+					"owner",
+					"discriminator",
+					"writable",
+					"pda"
+				],
+				"beneficiary": [
+					"owner",
+					"writable"
+				]
+			},
+			"relations": [
+				[
+					"config",
+					"admin"
+				],
+				[
+					"config",
+					"beneficiary"
+				]
+			],
+			"writes": [
+				"treasury.lamports",
+				"beneficiary.lamports"
+			],
+			"pdas": [
+				"treasury"
+			]
+		},
+		"distribute": {
+			"accounts": {
+				"config": [
+					"owner",
+					"discriminator",
+					"has_one"
+				],
+				"admin": [
+					"signer"
+				],
+				"treasury": [
+					"owner",
+					"discriminator",
+					"writable",
+					"pda"
+				]
+			},
+			"relations": [
+				[
+					"config",
+					"admin"
+				]
+			],
+			"writes": [
+				"treasury.lamports"
+			],
+			"pdas": [
+				"treasury"
+			],
+			"note": "the destination comes from ctx.remaining_accounts[0], its key compared with config.beneficiary"
+		}
+	},
+	"variants": {
+		"reinit": {
+			"ix": "init_config",
+			"rules": [
+				"init-if-needed-reinit"
+			]
+		},
+		"sysvar_unchecked": {
+			"ix": "touch",
+			"rules": [
+				"sysvar-account-unchecked"
+			]
+		},
+		"bump_from_ix": {
+			"ix": "claim",
+			"rules": [
+				"pda-bump-from-ix"
+			]
+		},
+		"dup_mut": {
+			"ix": "move_points",
+			"rules": [
+				"duplicate-mutable-accounts"
+			]
+		},
+		"type_confusion": {
+			"ix": "admin_withdraw",
+			"rules": [
+				"account-type-unchecked",
+				"signer-not-related-to-authority"
+			]
+		},
+		"cpi_pda_unchecked": {
+			"ix": "forward",
+			"rules": [
+				"cpi-unchecked-program",
+				"caller-controlled-sensitive-param"
+			]
+		},
+		"ignored_result": {
+			"ix": "deposit",
+			"rules": [
+				"cpi-result-ignored"
+			]
+		},
+		"truncating_cast": {
+			"ix": "payout",
+			"rules": [
+				"truncating-cast"
+			]
+		},
+		"remaining_unchecked": {
+			"ix": "distribute",
+			"rules": [
+				"remaining-account-unchecked"
+			]
+		}
+	}
+}

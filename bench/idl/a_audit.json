@@ -1,0 +1,534 @@
+{
+	"address": "BAudit1111111111111111111111111111111111111",
+	"metadata": {
+		"name": "a_audit",
+		"version": "0.1.0",
+		"spec": "0.1.0"
+	},
+	"instructions": [
+		{
+			"name": "init_config",
+			"discriminator": [
+				23,
+				235,
+				115,
+				232,
+				168,
+				96,
+				1,
+				231
+			],
+			"accounts": [
+				{
+					"name": "payer",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "config",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "beneficiary",
+					"type": "pubkey"
+				}
+			]
+		},
+		{
+			"name": "touch",
+			"discriminator": [
+				80,
+				157,
+				106,
+				220,
+				181,
+				72,
+				101,
+				81
+			],
+			"accounts": [
+				{
+					"name": "market",
+					"writable": true
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "clock"
+				}
+			],
+			"args": []
+		},
+		{
+			"name": "claim",
+			"discriminator": [
+				62,
+				198,
+				214,
+				193,
+				213,
+				159,
+				108,
+				210
+			],
+			"accounts": [
+				{
+					"name": "owner",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "position",
+					"writable": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "bump",
+					"type": "u8"
+				}
+			]
+		},
+		{
+			"name": "move_points",
+			"discriminator": [
+				244,
+				138,
+				6,
+				67,
+				62,
+				196,
+				58,
+				59
+			],
+			"accounts": [
+				{
+					"name": "from",
+					"writable": true
+				},
+				{
+					"name": "to",
+					"writable": true
+				},
+				{
+					"name": "owner",
+					"signer": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "admin_withdraw",
+			"discriminator": [
+				160,
+				166,
+				147,
+				222,
+				46,
+				220,
+				75,
+				224
+			],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "forward",
+			"discriminator": [
+				45,
+				165,
+				201,
+				116,
+				206,
+				225,
+				241,
+				18
+			],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "dest",
+					"writable": true
+				},
+				{
+					"name": "target_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "deposit",
+			"discriminator": [
+				242,
+				35,
+				198,
+				137,
+				82,
+				225,
+				242,
+				182
+			],
+			"accounts": [
+				{
+					"name": "user",
+					"writable": true,
+					"signer": true
+				},
+				{
+					"name": "vault",
+					"writable": true
+				},
+				{
+					"name": "stats",
+					"writable": true
+				},
+				{
+					"name": "system_program"
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "payout",
+			"discriminator": [
+				149,
+				140,
+				194,
+				236,
+				174,
+				189,
+				6,
+				239
+			],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				},
+				{
+					"name": "beneficiary",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		},
+		{
+			"name": "distribute",
+			"discriminator": [
+				191,
+				44,
+				223,
+				207,
+				164,
+				236,
+				126,
+				61
+			],
+			"accounts": [
+				{
+					"name": "config"
+				},
+				{
+					"name": "admin",
+					"signer": true
+				},
+				{
+					"name": "treasury",
+					"writable": true
+				}
+			],
+			"args": [
+				{
+					"name": "amount",
+					"type": "u64"
+				}
+			]
+		}
+	],
+	"accounts": [
+		{
+			"name": "Config",
+			"discriminator": [
+				155,
+				12,
+				170,
+				224,
+				30,
+				250,
+				204,
+				130
+			]
+		},
+		{
+			"name": "Market",
+			"discriminator": [
+				219,
+				190,
+				213,
+				55,
+				0,
+				227,
+				198,
+				154
+			]
+		},
+		{
+			"name": "Position",
+			"discriminator": [
+				170,
+				188,
+				143,
+				228,
+				122,
+				64,
+				247,
+				208
+			]
+		},
+		{
+			"name": "Wallet",
+			"discriminator": [
+				24,
+				89,
+				59,
+				139,
+				81,
+				154,
+				232,
+				95
+			]
+		},
+		{
+			"name": "Treasury",
+			"discriminator": [
+				238,
+				239,
+				123,
+				238,
+				89,
+				1,
+				168,
+				253
+			]
+		},
+		{
+			"name": "Stats",
+			"discriminator": [
+				190,
+				125,
+				51,
+				63,
+				169,
+				197,
+				36,
+				238
+			]
+		}
+	],
+	"errors": [
+		{
+			"code": 6000,
+			"name": "overflow"
+		},
+		{
+			"code": 6001,
+			"name": "not_open"
+		},
+		{
+			"code": 6002,
+			"name": "claimed"
+		},
+		{
+			"code": 6003,
+			"name": "same_wallet"
+		},
+		{
+			"code": 6004,
+			"name": "bad_config"
+		},
+		{
+			"code": 6005,
+			"name": "no_dest"
+		},
+		{
+			"code": 6006,
+			"name": "bad_dest"
+		}
+	],
+	"types": [
+		{
+			"name": "Config",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "beneficiary",
+						"type": "pubkey"
+					},
+					{
+						"name": "initialized",
+						"type": "bool"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Market",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "admin",
+						"type": "pubkey"
+					},
+					{
+						"name": "opens_at",
+						"type": "i64"
+					},
+					{
+						"name": "last_ts",
+						"type": "i64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Position",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "reward",
+						"type": "u64"
+					},
+					{
+						"name": "claimed",
+						"type": "bool"
+					},
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Wallet",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "owner",
+						"type": "pubkey"
+					},
+					{
+						"name": "points",
+						"type": "u64"
+					}
+				]
+			}
+		},
+		{
+			"name": "Treasury",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "bump",
+						"type": "u8"
+					}
+				]
+			}
+		},
+		{
+			"name": "Stats",
+			"type": {
+				"kind": "struct",
+				"fields": [
+					{
+						"name": "deposited",
+						"type": "u64"
+					}
+				]
+			}
+		}
+	]
+}

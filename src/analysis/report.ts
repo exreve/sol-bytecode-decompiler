@@ -66,6 +66,7 @@ import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, typ
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
+import type { AuditFacts } from './audit.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -81,6 +82,7 @@ export interface CheckOut {
 	at: Loc; status: 'found' | 'partial'; account?: string; kinds: string[]; cond: string; failsIf: boolean; error: string; via?: string
 	sides?: [string, string]              // native: the two account fields an equality compares (by the IR)
 	fnPc: number; c?: Expr; passPc?: number; main: boolean // (internal: the dominance analysis, phase2.ts)
+	keyCmp?: boolean                      // (internal, Anchor: a 32-byte comparison of account keys only, no data, no constant)
 }
 export interface OpOut {
 	at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda']
@@ -111,6 +113,7 @@ export interface IxOut {
 	arith?: ArithSite[]
 	divs?: DivSite[]
 	proof?: Proof[]
+	audit?: AuditFacts   // (internal: the audit pattern rules, audit.ts)
 }
 export interface IxCtx { handler: number; parents: Map<number, { fn: number; pc?: number; ret?: Expr }>; allowed?: (fn: number, b: number) => boolean; restricted?: Set<number>; tag?: { fn: number; v: number } }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
@@ -338,7 +341,11 @@ function analyze0(r: Result): Analysis {
 			const R = resolverFor(ff.pc)
 			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
 			const AC = r.anchor ? anchorCompares(ff) : undefined
-			for (const c of ff.checks) {
+			// (Anchor: a sysvar's id check (AccountSysvarMismatch) is on the account the check right before it names (its missing-account check))
+			const sysvarOf = (c: FnFacts['checks'][number]) => !/AccountSysvarMismatch/.test(c.error) ? undefined : ff.checks.filter(k => k.line < c.line && k.named && !/AccountSysvarMismatch/.test(k.error)).sort((x, y) => y.line - x.line)[0]?.named
+			for (const c0 of ff.checks) {
+				const sv = r.anchor ? sysvarOf(c0) : undefined
+				const c = sv ? { ...c0, named: sv } : c0
 				// (by the block deciding the condition: the failing side may be an error exit the tags share)
 				const cb = (grp || R) && c.c && byPc.get(ff.pc) ? decisionBlock(cfgOf(byPc.get(ff.pc)!), c.c, c.pc, c.passPc) : undefined
 				if (grp && (cb !== undefined ? !grp.allowed(ff.pc, cb) : !keep(ff.pc, c.pc))) continue
@@ -360,7 +367,7 @@ function analyze0(r: Result): Analysis {
 				let sides = sd && typeof sd[0] === 'object' && typeof sd[1] === 'object' && sd[0].index !== sd[1].index ? sd.map(x => `${idxName((x as AcctRef).index)}.${(x as AcctRef).field}`) as [string, string] : undefined
 				// (Anchor: the accounts a key comparison reads, by where its bytes come from: an account's data (the
 				// checked account) and another account's key; has_one: the field is named after the target account)
-				const ac = AC && c.c && kinds.some(k => ['has_one', 'token_mint', 'token_owner', 'key', 'raw', 'custom'].includes(k)) ? AC(c) : undefined
+				const ac = AC && c.c && (kinds.some(k => ['has_one', 'token_mint', 'token_owner', 'key', 'raw', 'custom'].includes(k)) || !kinds.length) ? AC(c) : undefined
 				let account = sk ? idxName(keyed!.index) : acct
 				if (ac) {
 					const dat = ac.find(x => x.direct), key = ac.find(x => !x.direct)
@@ -375,7 +382,8 @@ function analyze0(r: Result): Analysis {
 					}
 				}
 				const at = loc(ff, c.line, c.pc)
-				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main })
+				const keyCmp = !!ac?.length && ac.every(x => !x.direct) && !kinds.some(k => k === 'address' || k === 'pda') || undefined
+				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main, keyCmp })
 				const ci = checks.length - 1
 				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind

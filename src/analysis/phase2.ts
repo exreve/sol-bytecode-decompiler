@@ -16,6 +16,7 @@ import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
 import { cfgOf, decisionBlock, dominates, bypass, blockPc, callOf, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
+import { auditIx } from './audit.ts'
 import { structFields } from '../idl.ts'
 import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
@@ -304,7 +305,7 @@ export function phase2(a: Analysis, r: Result) {
 		ix.authority = auth
 	}
 	// phase 3 views (after every instruction's authority rows: the chains follow the writers), then the rules
-	for (const ix of a.ixs) phase3Ix(r, ix, a)
+	for (const ix of a.ixs) { phase3Ix(r, ix, a); ix.audit = auditIx(r, ix) }
 	a.states = stateMachine(a)
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 	for (const ix of a.ixs) {
@@ -319,6 +320,10 @@ export function phase2(a: Analysis, r: Result) {
  * A CPI to a well-known program (system, token) the program does not sign for: the callee requires the
  * signature of the account it debits / reassigns itself (the runtime enforces it).
  */
+const SYSVAR_NAME = /^(clock|rent|instructions?|ix_sysvar|instructions?_sysvar|sysvar_\w+|\w+_sysvar|slot_?hashes|recent_(block|slot)hashes|stake_history|epoch_schedule|epoch_rewards|fees|last_restart_slot)$/
+/** an account's key compared with a constant (an address check) */
+const addressChecked = (ix: IxOut, a: string) => found(ix, a, 'address') || ix.checks.some(c => c.account === a && c.kinds.includes('address'))
+const found = (ix: IxOut, a: string, k: string) => { const c = ix.accounts.find(x => x.name === a)?.constraints[k]; return !!c && (c.status === 'found' || c.status === 'partial') }
 const runtimeAuthorized = (o: OpOut) => !!o.cpi && !!(o.cpi.known || o.cpi.family) && !o.cpi.seeds && !o.kinds.includes('PDA_SIGNATURE')
 
 /** the system CPIs creating an account (create_account, or transfer + allocate + assign of a funded one) in an instruction that creates one */
@@ -406,10 +411,12 @@ const RULES: Rule[] = [
 		run: ix => ix.ops.filter(o => o.cpi && !o.cpi.known && o.cpi.program !== '?' && !/\(id compared with/.test(o.cpi.checked ?? '')).flatMap(o => {
 			// (the program account not identified, e.g. an instruction built by a library builder: a key compared with a constant)
 			const unid = !o.cpi!.accounts.length && /^[A-Z_0-9|]+$/.test(o.cpi!.program)
-			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && (!c.account || /program/.test(c.account) || o.cpi!.program.includes(c.account.replace(/\?$/, '')) || (unid && c.kinds.includes('address'))))
+			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && ((!c.account && !c.kinds.includes('initialized')) || /program/.test(c.account ?? '') || (!!c.account && o.cpi!.program.includes(c.account.replace(/\?$/, ''))) || (unid && c.kinds.includes('address'))))
 			if (g.length) return []
 			const progAcct = ix.accounts.find(x => /program/.test(x.name) && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
-			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, progAcct ? `a program account (${progAcct.name}) is checked, but no check dominating this CPI compares its id` : 'no address / executable check on a program account found'], confidence: progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + 2 }]
+			// (the program signs it (PDA): whatever program the caller passes gets the PDA's authority)
+			const pda = !!o.cpi!.seeds || o.kinds.includes('PDA_SIGNATURE')
+			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, progAcct ? `a program account (${progAcct.name}) is checked, but no check dominating this CPI compares its id` : 'no address / executable check on a program account found', ...(pda ? ['PDA-signed: the program lends its PDA signature to the account-supplied program'] : [])], confidence: pda ? 'high' as const : progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + (pda ? 4 : 2) }]
 		}),
 	},
 	{
@@ -492,6 +499,69 @@ const RULES: Rule[] = [
 			}
 			return []
 		},
+	},
+	// ---- audit pattern rules (audit.ts facts) ----
+	{
+		id: 'sysvar-account-unchecked', title: 'Sysvar data (Clock / Rent / Instructions / …) read from an account whose key is not checked against the sysvar id',
+		run: ix => (ix.audit?.dataReads ?? []).filter(a => SYSVAR_NAME.test(a) && !addressChecked(ix, a)).map(a => ({
+			accounts: [a], path: [], evidence: [`the logic borrows ${a}'s data and reads it as a sysvar`, `no check of ${a}'s key against the sysvar id found: any account with chosen data passes (Sysvar<T> / from_account_info / get() check or avoid it)`], confidence: 'medium' as const, weight: 4,
+		})),
+	},
+	{
+		id: 'pda-bump-from-ix', title: 'PDA address from create_program_address with a bump taken from instruction data (not the canonical bump)',
+		run: ix => (ix.audit?.bumps ?? []).map(b => { const o = ix.ops[b.op]; return { accounts: [], path: [L(o.at)], evidence: [o.text.slice(0, 140), `bump seed ← ${b.source}: the caller picks among several valid addresses (use find_program_address or a stored canonical bump)`], confidence: 'medium' as const, weight: 3 } }),
+	},
+	{
+		id: 'duplicate-mutable-accounts', title: 'Two writable accounts of one type with no key comparison between them (the same account passed twice)',
+		// (Anchor: try_accounts deserializes one account type several times; the instruction writes account data; no check compares two account keys)
+		run: ix => {
+			const t = ix.audit?.sameType
+			if (!t || ix.checks.some(c => c.keyCmp)) return []
+			const w = ix.accounts.filter(x => x.expected.writable).map(x => x.name)
+			// (data of that type written: an account it names, or an object named after the type)
+			// (type not known: an object the instruction's accounts do not name, named after its type)
+			const mine = (o: OpOut) => { const a = o.target?.split('.')[0]; return o.kinds.includes('ACCOUNT_DATA_WRITE') && !!a && (t.accts.includes(a) || (t.type ? a === t.type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() : !ix.accounts.some(x => x.name === a))) }
+			const o = ix.ops.find(o => mine(o) && o.how !== '=')
+			const any = o ?? ix.ops.find(mine)
+			if (w.length < 2 || !any || !t.accts.every(a => w.includes(a))) return []
+			return [{ accounts: w, path: [L(any.at)], evidence: [`${t.n} accounts deserialized by ${t.fn} (one type), ${w.length} writable (${w.join(', ')})`, 'no comparison of two account keys found: passing one account twice makes both views of it, the last one written back wins (e.g. a debit undone by the credit)'], confidence: o ? 'medium' as const : 'low' as const, weight: 4 }]
+		},
+	},
+	{
+		id: 'account-type-unchecked', title: 'Account data trusted in an authorization / value decision without a discriminator (type) check',
+		// (Anchor: data the logic reads itself from an account try_accounts did not deserialize as Account<T> (no discriminator check))
+		run: ix => {
+			if (!ix.ops.some(o => isValueOrAuth(o) && !runtimeAuthorized(o))) return []
+			return (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator')).slice(0, 2).map(a => {
+				const own = found(ix, a, 'owner')
+				return { accounts: [a], path: [], evidence: [`the logic reads ${a}'s data itself; no discriminator check on ${a} found${own ? '' : ', nor an owner check'}`, 'an account of another type (or program) with the same layout passes the checks made on this data'], confidence: own ? 'low' as const : 'medium' as const, weight: 3 }
+			})
+		},
+	},
+	{
+		id: 'cpi-result-ignored', title: 'CPI whose result (the Result invoke / the CPI helper returns) is never tested',
+		run: ix => (ix.audit?.ignored ?? []).map(i => { const o = ix.ops[i]; return { accounts: o.cpi ? [o.cpi.program] : [], path: [L(o.at)], evidence: [o.text.slice(0, 140), 'no statement after the call reads its Result: an error returned before the CPI runs (e.g. a borrow failure) passes silently'], confidence: 'medium' as const, weight: wOf(o) + 1 } }),
+	},
+	{
+		id: 'truncating-cast', title: 'Amount / balance narrowed (truncating cast) on a value path',
+		run: ix => (ix.audit?.casts ?? []).map(c => { const o = ix.ops[c.op]; return { accounts: [], path: [L(o.at)], evidence: [c.expr, `a value from ${c.source} is cast to ${c.bits} bits before this operation: larger values wrap`], confidence: /^ix\.|instruction data/.test(c.source) ? 'medium' as const : 'low' as const, weight: 3 } }),
+	},
+	{
+		id: 'remaining-account-unchecked', title: 'Remaining account used as a destination / authority with no key or owner check',
+		run: ix => {
+			const ok = new Set(ix.audit?.remChecked ?? [])
+			const out: Omit<Finding, 'rule' | 'title' | 'ix'>[] = []
+			for (const o of ix.ops) {
+				const rs = [...new Set([...(o.target && /^remaining_accounts\[\d+\]\./.test(o.target) && (o.how === '+=' || o.kinds.some(k => k !== 'LAMPORT_WRITE')) ? [o.target.split('.')[0]] : []),
+					...(o.cpi?.accounts ?? []).filter(x => x.role && /^(destination|to|authority|owner|account)$/.test(x.role) && /remaining_accounts\[\d+\]/.test(x.text)).map(x => /remaining_accounts\[\d+\]/.exec(x.text)![0])])].filter(a => !ok.has(a))
+				for (const a of rs) out.push({ accounts: [a], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${a} (ctx.remaining_accounts) receives value / authority; no check of its key or owner found`], confidence: 'medium' as const, weight: wOf(o) })
+			}
+			return out.slice(0, 2)
+		},
+	},
+	{
+		id: 'init-if-needed-reinit', title: 'Authority / state field of an init_if_needed account overwritten with no initialized check (reinitialization)',
+		run: ix => (ix.audit?.reinit ?? []).slice(0, 1).map(x => { const o = ix.ops[x.op]; return { accounts: [x.acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${x.acct} may exist already (init_if_needed: its owner check on the existing account's path); no condition on the way reads its state: a second call overwrites ${o.target}`], confidence: 'medium' as const, weight: 5 } }),
 	},
 	// ---- phase 3 pattern rules (phase3.ts facts) ----
 	{

@@ -17,6 +17,7 @@ import { borshSize, structFields } from '../idl.ts'
 import type { Field, FieldType } from '../views.ts'
 import { knownFamilies } from '../cpi.ts'
 import type { Op, OpKind } from './facts.ts'
+import { shortName } from './facts.ts'
 
 // ---- control-flow graphs ----
 
@@ -172,7 +173,7 @@ function storeValue(line: string): string {
 
 // ---- Anchor: fields written back on exit ----
 
-export interface ExitFn { type?: string; param: number; fields: { off: number; size: number; name: string }[] }
+export interface ExitFn { type?: string; param: number; fields: { off: number; size: number; name: string }[]; subs?: { type?: string; fields: ExitFn['fields']; name?: string }[] } // subs: a wrapper's several objects (an Accounts struct's exit), each named by the check after its exit call
 
 const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgrade|delegate/i
 
@@ -198,6 +199,7 @@ export function exitFns(r: Result): Map<number, ExitFn> {
 		if (!params.size) continue
 		const fp = fpOf(fo)
 		const slot = new Map<number, Expr>() // frame offset -> value last stored
+		let sdefs: Map<number, Expr> | undefined
 		const byW = new Map<number, { disc?: bigint; writes: { param: number; off: number; size: number }[] }>()
 		for (const s of stmtsOf(fo)) {
 			if (s.k === 'store') { const o = offOf(s.addr, fp); if (o !== undefined) slot.set(o, s.v) }
@@ -213,7 +215,8 @@ export function exitFns(r: Result): Map<number, ExitFn> {
 			if (!rec) continue
 			let src: Expr = a
 			const fo2 = offOf(a, fp)
-			if (fo2 !== undefined) { const v = slot.get(fo2); if (v?.k === 'load' && v.size === len) src = v.addr }
+			// (through a variable defined once)
+			if (fo2 !== undefined) { let v = slot.get(fo2); if (v?.k === 'var') v = (sdefs ??= singleDefs(fo)).get(v.id); if (v?.k === 'load' && v.size === len) src = v.addr }
 			const base = src.k === 'var' ? src.id : src.k === 'bin' && src.op === 'add' && src.a.k === 'var' && src.b.k === 'const' ? src.a.id : -1
 			const pi = params.get(base)
 			if (pi === undefined) continue
@@ -221,7 +224,8 @@ export function exitFns(r: Result): Map<number, ExitFn> {
 		}
 		for (const rec of byW.values()) {
 			const ws = rec.writes
-			if (ws.length < 2 || rec.disc === undefined || !ws.every(w => w.param === ws[0].param)) continue
+			// (one field write: only for a type the IDL names by its discriminator)
+			if (!ws.length || (ws.length < 2 && !(idl && rec.disc !== undefined && discType.has(rec.disc))) || rec.disc === undefined || !ws.every(w => w.param === ws[0].param)) continue
 			const type = discType.get(rec.disc)
 			if (idl && !type) continue
 			// field names: the IDL struct's fields in order, while the Borsh sizes agree
@@ -244,17 +248,32 @@ export function exitFns(r: Result): Map<number, ExitFn> {
 		if (out.has(fo.pc) || fo.f.blocks.length > 400) continue
 		const params = new Map<number, number>()
 		for (const v of fo.f.vars) if (v.param >= 1 && v.param <= 5) params.set(v.id, v.param)
+		const subs: { pi: number; ex: ExitFn; d: number; pc: number }[] = []
 		for (const s of stmtsOf(fo)) {
 			const c = callOf(s)
 			const ex = c?.t.k === 'fn' ? out.get(c.t.pc) : undefined
 			const a = ex && c!.args[ex.param - 1]
 			const base = a?.k === 'var' ? a.id : a?.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? a.a.id : -1
 			const pi = params.get(base)
-			if (!ex || pi === undefined) continue
-			const d = offOf(a!, base)!
-			out.set(fo.pc, { type: ex.type, param: pi, fields: ex.fields.map(x => ({ ...x, off: x.off + d })) })
-			break
+			if (!ex || pi === undefined || (subs.length && pi !== subs[0].pi)) continue
+			subs.push({ pi, ex, d: offOf(a!, base)!, pc: s.pc })
 		}
+		if (!subs.length) continue
+		const [{ pi, ex, d }] = subs
+		const shift = (e: ExitFn, d: number) => e.fields.map(x => ({ ...x, off: x.off + d }))
+		// (each object named by the check right after its exit call, e.g. the error with the account's name)
+		const ff = r.facts.get(fo.pc)
+		// (else the account name its error path builds (heap string) before the next exit call)
+		const lines = subs.map(x => ff?.pcLine.get(x.pc))
+		const nameAt = (pc: number) => {
+			const i = subs.findIndex(x => x.pc === pc), l = lines[i]
+			if (l === undefined) return undefined
+			const k = ff!.checks.filter(k => k.named && k.line > l && (lines[i + 1] === undefined || k.line < lines[i + 1]!)).sort((x, y) => x.line - y.line)[0]?.named
+			if (k) return k
+			const t = ff!.lines.slice(l, lines[i + 1] ?? ff!.lines.length).join('\n')
+			return /\/\/ "([a-z][a-z0-9_]*)"/.exec(t)?.[1] ?? shortName(t)
+		}
+		out.set(fo.pc, { type: ex.type, param: pi, fields: shift(ex, d), subs: subs.length > 1 ? subs.map(x => ({ type: x.ex.type, fields: shift(x.ex, x.d), name: nameAt(x.pc) })) : undefined })
 	}
 	return out
 }
@@ -276,14 +295,13 @@ export function addExitWrites(r: Result) {
 		const g = cfgOf(fo)
 		const defs = singleDefs(fo), D = defsOf(fo.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
 		const objs: FrameObj[] = []
-		for (const s0 of sites) {
+		for (const s0 of sites) for (const ex of exitObjs(exits.get((callOf(s0)!.t as { pc: number }).pc)!)) {
 			const c = callOf(s0)!
-			const ex = exits.get((c.t as { pc: number }).pc)!
 			const X = offOf(c.args[ex.param - 1] ?? { k: 'undef' }, fp)
 			if (X === undefined) continue
 			// the account: named by the check of the exit call's result, else by its type
 			const callee = (c.t as { pc: number }).pc
-			const acct = ff.checks.find(k => k.before === callee && k.named)?.named ?? (ex.type ? ex.type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() : 'account?')
+			const acct = ex.name ?? ff.checks.find(k => k.before === callee && k.named)?.named ?? (ex.type ? ex.type.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() : 'account?')
 			const exitBlock = g.pcBlock.get(s0.pc)
 			const seen = new Set<string>()
 			const size = Math.max(...ex.fields.map(x => x.off + x.size))
@@ -347,6 +365,8 @@ export function addExitWrites(r: Result) {
 }
 
 interface FrameObj { X: number; size: number; acct: string; ex: ExitFn; exit: string }
+/** the objects an exit function serializes: its own, or a wrapper's several (each as an exit function of its own, with its name) */
+const exitObjs = (e: ExitFn): (ExitFn & { name?: string })[] => e.subs ? e.subs.map(x => ({ type: x.type, param: e.param, fields: x.fields, name: x.name })) : [e]
 const objsMemo = new WeakMap<FuncOut, FrameObj[]>() // the account objects a function serializes back (addExitWrites)
 const objLo = (o: FrameObj) => Math.min(...o.ex.fields.map(x => x.off))
 /**
@@ -354,7 +374,7 @@ const objLo = (o: FrameObj) => Math.min(...o.ex.fields.map(x => x.off))
  * position `at`); an account's &AccountInfo (info), the RcBox of its lamports (rc) / data (drc), a pointer
  * to its lamports (lam) / data (data, at `off`); ty: the account's type.
  */
-export type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data' | 'keyp' | 'ownp'; acct: string; ty?: string; off: number; guess?: boolean } // keyp / ownp: a pointer to its key / owner; guess: the account by the words around an account object
+export type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data' | 'keyp' | 'ownp' | 'rem'; acct: string; ty?: string; off: number; guess?: boolean } // keyp / ownp: a pointer to its key / owner; rem: into the remaining accounts' AccountInfo array; guess: the account by the words around an account object
 export interface EvCtx { fo: FuncOut; D: Defs; ev: (e: Expr, p: number, d?: number) => HVal | undefined }
 export interface AnchorEval {
 	ctxOf: (fo: FuncOut, roots: Map<number, HVal>, depth: number) => EvCtx
@@ -394,6 +414,13 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 	const tryPc = ti?.tryPc
 	const isInfo = (t: FieldType) => t.k === 'ref' && t.to === 'AccountInfo'
 	const discType = new Map((r.idl?.accounts ?? []).map(a => [a.disc, a.name] as [bigint, string]))
+	const accountsParam = paramVar(H.f, 3)
+	/** the handler's frame word z is the pointer of the accounts slice (the handler's accounts parameter) the try call gets */
+	const restSlice = (z: number, c: Extract<Expr, { k: 'call' }>, p: number): boolean => {
+		if (!c.args.some(x => D.fpOff(x) === z)) return false
+		const y = D.reaching(D.SLOT(z), p)
+		return !!y && y[0].k === 'var' && y[0].id === accountsParam
+	}
 	/** the account whose &AccountInfo the handler's frame word z holds (at position at): copies followed back to try_accounts' out object */
 	const infoAcct = (z0: number, at0: number): { acct: string; ty?: string; guess?: boolean } | undefined => {
 		// (the Accounts struct's layout; else the account object's own words: among its fields, or its &AccountInfo right
@@ -495,12 +522,20 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 					if (a?.k === 'fr') {
 						// (a word of a frame: what was stored there (by a call: its store), else (the handler's) an &AccountInfo)
 						const y = a.ctx.D.reaching(a.ctx.D.SLOT(a.z), a.at, true)
+						// (the pointer of the accounts slice try_accounts took its accounts from: the remaining accounts)
+						if (y && a.ctx.fo === H && y[0].k === 'call' && y[0].t.k === 'fn' && y[0].t.pc === tryPc && restSlice(a.z, y[0], y[1])) return { k: 'rem', acct: 'remaining_accounts', off: 0 }
 						const v = !y ? undefined : y[0].k === 'call' ? (a.ctx === self ? outOf(y[0], a.z, y[1], d) : undefined) : a.ctx.ev(y[0], y[1], d + 1)
 						if (v) return v
 						const ia = a.ctx.fo === H ? infoAcct(a.z, a.at) : undefined
 						return ia ? { k: 'info', ...ia, off: 0 } : undefined
 					}
 					if (!a || a.k === 'lam' || a.k === 'data' || a.k === 'keyp' || a.k === 'ownp') return undefined
+					// (a word of the i-th AccountInfo (0x30 bytes) of the remaining accounts)
+					if (a.k === 'rem') {
+						const i = Math.floor(a.off / 0x30), w = a.off - 0x30 * i
+						const k = w === 0 ? 'keyp' : w === 8 ? 'rc' : w === 0x10 ? 'drc' : w === 0x18 ? 'ownp' : undefined
+						return k ? { k, acct: `remaining_accounts[${i}]`, off: 0 } : undefined
+					}
 					const next = a.k === 'info' ? (a.off === 0 ? 'keyp' : a.off === 8 ? 'rc' : a.off === 0x10 ? 'drc' : a.off === 0x18 ? 'ownp' : undefined) : a.off === 0x18 ? (a.k === 'rc' ? 'lam' : a.k === 'drc' ? 'data' : undefined) : undefined
 					return next ? { k: next, acct: a.acct, ty: a.ty, off: 0, guess: a.guess } : undefined
 				}
@@ -555,6 +590,10 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 			let layout: Field[] = []
 			const named = tf.checks.filter(k => k.named && k.before !== undefined && k.pc !== undefined)
 			const names = new Set(tf.checks.map(k => k.named).filter(x => x !== undefined))
+			// (the accounts slice try_accounts takes its accounts from: &mut &[AccountInfo], its third parameter)
+			const slicePv = T.f.vars.find(v => v.param === 3)?.id
+			// (a variable holding a copy of it (its other definitions: registers a call clobbered))
+			const copies = (id: number) => { let any = false, other = false; for (const b of T.f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst === id) { if (s.k === 'set' && s.e.k === 'var' && s.e.id === slicePv) any = true; else if (!(s.k === 'set' && s.e.k === 'undef')) other = true } return any && !other }
 			const g = cfgOf(T), dbm = new Map<object, number | undefined>()
 			const dbOf = (k: typeof named[number]) => { if (!dbm.has(k)) dbm.set(k, decisionBlock(g, k.c, k.pc, k.passPc)); return dbm.get(k) }
 			// (an expression through variables and the frame words it was saved to: its origin (a call, a parameter, …))
@@ -578,7 +617,7 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 				if (s.k !== 'store' || s.size !== 8 || out === undefined) return
 				// (the address: the out object (possibly saved to the frame and reloaded) plus a constant)
 				const [base, off] = s.addr.k === 'var' ? [s.addr, 0] : s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.a.k === 'var' && s.addr.b.k === 'const' ? [s.addr.a, Number(s.addr.b.v)] : [undefined, -1]
-				if (off <= 0 || off > 0x1000 || bl.some(x => x.off === off)) return
+				if (off < 0 || off > 0x1000 || bl.some(x => x.off === off)) return
 				const ob = base && (base.id === out ? [base] : follow(base, bi << 16 | i))
 				if (!ob || ob[0].k !== 'var' || ob[0].id !== out) return
 				nst++
@@ -587,10 +626,22 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 				if (!y || y[0].k !== 'call' || y[0].t.k !== 'fn') {
 					// (else an &AccountInfo taken straight from the accounts slice (no try call, e.g. an UncheckedAccount): the
 					// variable the code names after the account a check names)
-					const vn = s.v.k === 'var' ? T.names[s.v.id] : undefined
-					if (vn && names.has(vn)) { wordOf.set(off, 0); bl.push({ name: vn, off, t: { k: 'ref', to: 'AccountInfo' }, doc: 'the analysis: stored by try_accounts, taken from the accounts slice' }) }
+					let vn = s.v.k === 'var' ? T.names[s.v.id] : undefined
+					// (else the account whose missing-account check (AccountNotEnoughKeys) is the nearest one on the way to the load of
+					// the slice's pointer; a variable assigned on several paths (the error path's value too): its definition loading it)
+					const fromSlice = (e: Expr, q: number) => { if (e.k !== 'load' || e.size !== 8) return false; const isS = (x: Expr) => x.k === 'var' && (x.id === slicePv || copies(x.id)); const z = follow(e.addr, q); return isS(e.addr) || (!!z && isS(z[0])) }
+					let lp: number | undefined
+					if (y && fromSlice(y[0], y[1])) lp = y[1]
+					else if (y && y[0].k === 'var') { const id = y[0].id; T.f.blocks.forEach((b2, bi2) => b2.stmts.forEach((s2, i2) => { if (lp === undefined && s2.k === 'set' && s2.dst === id && fromSlice(s2.e, bi2 << 16 | i2)) lp = bi2 << 16 | i2 })) }
+					if (!(vn && names.has(vn)) && lp !== undefined) {
+						const cs = tf.checks.filter(k => k.named && k.kinds.includes('count') && k.pc !== undefined && dbOf(k) !== undefined && dominates(g, dbOf(k)!, lp! >> 16))
+						vn = cs.sort((x, w) => g.rpo[dbOf(w)!] - g.rpo[dbOf(x)!])[0]?.named
+					}
+					if (vn && names.has(vn) && !bl.some(x => x.name === vn)) { wordOf.set(off, 0); bl.push({ name: vn, off, t: { k: 'ref', to: 'AccountInfo' }, doc: 'the analysis: stored by try_accounts, taken from the accounts slice' }) }
 					return
 				}
+				// (offset 0: the Result's tag, unless an account's (the niche of its non-null pointer, see above))
+				if (off === 0) return
 				const [e, p] = y
 				if (e.k !== 'call' || e.t.k !== 'fn') return
 				// (a word of the call's out object other than its first (the &AccountInfo; the rest: the deserialized data))
@@ -677,6 +728,13 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
+			// (the handler's logic borrowing an account's data itself (not a deserialization of try_accounts): a data read)
+			if (c?.t.k === 'fn' && /try_borrow_(mut_)?data/.test(r.program.funcs.get(c.t.pc)?.name ?? '')) for (const x of c.args) {
+				// (an &AccountInfo, or a clone of one in a frame (to_account_info): its data RcBox at +0x10)
+				let v = X.ev(x, p)
+				if (v?.k === 'fr') { const w = X.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: x, b: { k: 'const', v: 0x10n } } }, p); v = w?.k === 'drc' ? { ...w, k: 'info' } : undefined }
+				if (v?.k === 'info' && v.off === 0 && !v.guess) { let m = dataReadsMemo.get(r); if (!m) dataReadsMemo.set(r, (m = new Map())); let st = m.get(H.pc); if (!st) m.set(H.pc, (st = new Set())); st.add(v.acct) }
+			}
 			if (c?.t.k === 'fn' && depth > 0 && !exits.has(c.t.pc)) {
 				const g = byPcOf(r).get(c.t.pc)
 				const rs = new Map<number, HVal>()
@@ -710,6 +768,10 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 	}
 	visit(H, new Map(), 3)
 }
+
+const dataReadsMemo = new WeakMap<Result, Map<number, Set<string>>>()
+/** Anchor: the accounts whose data an instruction's logic borrows itself (AccountInfo::try_borrow_data), by handler */
+export const dataReads = (r: Result, handler: number): Set<string> | undefined => dataReadsMemo.get(r)?.get(handler)
 
 const byPcMemo = new WeakMap<Result, Map<number, FuncOut>>()
 const byPcOf = (r: Result) => { let m = byPcMemo.get(r); if (!m) byPcMemo.set(r, (m = new Map(r.funcs.map(x => [x.pc, x])))); return m }

@@ -1,0 +1,31 @@
+[package]
+name = "a_audit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+v_reinit = []
+v_sysvar_unchecked = []
+v_bump_from_ix = []
+v_dup_mut = []
+v_type_confusion = []
+v_cpi_pda_unchecked = []
+v_ignored_result = []
+v_truncating_cast = []
+v_remaining_unchecked = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = []
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
