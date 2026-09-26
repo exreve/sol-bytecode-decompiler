@@ -1896,7 +1896,7 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
  * what the callee stores there (its stores through that parameter, evaluated with its parameters bound;
  * `depth` levels), or for AccountInfo::try_borrow_(mut_)data / lamports, the RefCell's value.
  */
-function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, depth: number, pass1: boolean, infos?: number, bud = { n: 64 }): { ev: (e: Expr, p: number, d?: number) => AV | undefined } {
+function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, depth: number, pass1: boolean, infos?: number, bud?: { n: number }): { ev: (e: Expr, p: number, d?: number) => AV | undefined } {
 	const { fp, fpOff, defs, defPos, multi, SLOT, reaching } = D
 	const outOf = (c: Extract<Expr, { k: 'call' }>, o: number, p: number, d: number): AV | undefined => {
 		const g = c.t.k === 'fn' && depth > 0 ? callee?.f(c.t.pc) : undefined
@@ -1925,8 +1925,10 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			else rs.set(q, x)
 		})
 		if (!rs.size) return undefined
-		// (the stores whose value is known agree: other paths store error values)
-		const G = avEvaluator(g, GD, rs, undefined, callee, depth - 1, false, undefined, bud)
+		// (the stores whose value is known agree: other paths store error values; a call evaluated from the top
+		// evaluator gets its own budget, shared with the evaluators of its callees: its value depends on the call only,
+		// not on the queries asked before)
+		const G = avEvaluator(g, GD, rs, undefined, callee, depth - 1, false, undefined, bud ?? { n: 64 })
 		const xs = vs.map(([e, q]) => G.ev(e, q, d + 1)).filter((x): x is AV => !!x)
 		return xs.length && xs.every(x => JSON.stringify(x) === JSON.stringify(xs[0])) ? xs[0] : undefined
 	}
@@ -1934,7 +1936,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 	// (a callee's variable whose definitions differ by path (a call's out object evaluated, outOf): the one account value
 	// they give, the others none (e.g. an optional peeked AccountInfo the caller leaves empty); by variable, whatever the
 	// position (each definition at its own))
-	let mdefs: Map<number, [Expr, number][]> | undefined
+	let mdefs: Map<number, [Expr, number][]> | undefined, own: { n: number } | undefined
 	const mres = new Map<number, AV | undefined | null>()
 	const multiVal = (id: number, d: number): AV | undefined => {
 		const m = mres.get(id)
@@ -1945,7 +1947,8 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		}
 		const ds = mdefs.get(id) ?? []
 		// (a budget shared with the callees' evaluators: each definition may reach further calls)
-		if (!ds.length || ds.length > 4 || d > 6 || (bud.n -= ds.length) < 0) return undefined
+		const B = bud ?? (own ??= { n: 64 })
+		if (!ds.length || ds.length > 4 || d > 6 || (B.n -= ds.length) < 0) return undefined
 		mres.set(id, null)
 		const vs = ds.map(([x, q]) => x.k === 'call' ? undefined : ev(x, q, d + 1)).filter((x): x is AV => !!x && x.k !== 'fr' && x.k !== 'base')
 		const r = vs.length && vs.every(x => JSON.stringify(x) === JSON.stringify(vs[0])) ? vs[0] : undefined
