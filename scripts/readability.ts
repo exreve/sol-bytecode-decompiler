@@ -19,7 +19,7 @@ export function measure(file: string, text: string): M {
 	let frameNames = new Set<string>()
 	let inFn = false
 	for (const raw of lines) {
-		if (/^(export )?function /.test(raw)) { inFn = true; frameNames = new Set(); if (/^function outl_|^function err_/.test(raw)) m.helpers++; continue }
+		if (/^(export )?function /.test(raw)) { inFn = true; frameNames = new Set(); if (/^function (ret_tail|tail)_\d+\(/.test(raw)) m.helpers++; continue }
 		if (raw === '}') { inFn = false; continue }
 		if (!inFn) continue
 		const code = strip(raw).trim()

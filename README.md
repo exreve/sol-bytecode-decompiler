@@ -114,6 +114,7 @@ Also emitted as `lib.d.ts` / the single-file prelude.
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
 | `x: AccountInfo`, `x.is_signer` | typed view: `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
 | `x[k]`, `x.f[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`) |
+| `ret_tail_3(ret, err, r)`, `tail_7(…)` | outlined tail: a function defined in the output (`// outlined tails` section, `outlined.ts`) whose body is exactly the statements (ending in a return) each call replaces; its arguments are the values and stack-object addresses they use |
 
 Style: tabs, no semicolons, short variable names.
 

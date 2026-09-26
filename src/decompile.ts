@@ -16,6 +16,7 @@ import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { signatures, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
+import { findOutlines, type Outlines } from './outline.ts';
 import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
@@ -41,6 +42,7 @@ export interface Result {
   program: Program;
   funcs: FuncOut[];
   stubs: string[];                 // `declare function` lines for referenced library functions
+  outlined: { name: string; text: string }[]; // helpers printed once for repeated tails (src/outline.ts)
   instructions: { name: string; pc: number; disc: bigint; args?: string[]; accounts?: string[]; strAccounts?: string[] }[];
   views: Views;                    // typed views available to the output (declared with it)
   processors: { fn: string; names: string[] }[];  // functions handling several instructions inline (native programs)
@@ -766,10 +768,21 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     return `[${out.join(', ')}]`;
   };
+  // readable mode: `x = undef` (leftover register value) is shown by leaving x unassigned
+  const finalBody = new Map<number, Node[]>();
+  for (const [pc, bt] of built) finalBody.set(pc, opts.sugar !== false ? stripUndef(bt.body, undefOnly(bt.body, v => bt.f.vars[v]?.param >= 0)) : bt.body);
+  // repeated tails printed once as helpers (src/outline.ts)
+  const outl: Outlines = opts.sugar === false ? { at: new Map(), helpers: [] } : findOutlines([...built].map(([pc, { f }]) => {
+    const fp = f.vars.find(v => v.param === 10)?.id;
+    return {
+      f, body: finalBody.get(pc)!, fp, ret: outParams.has(pc) ? f.vars.find(v => v.param === 1)?.id : undefined,
+      bases: fp === undefined ? [] : [...frameOffsets(f, fp).bases].sort((a, b) => a - b), noConstStores: sem.resultOkTag !== undefined,
+    };
+  }), nm => globalIdents(p).has(nm) || views.map.has(nm) || views.opaque.has(nm) || RESERVED_TS.has(nm));
+  const helperNames = new Set(outl.helpers.map(h => h.name));
   for (const [pc, bt] of built) {
     const { f, irreducible } = bt;
-    // readable mode: `x = undef` (leftover register value) is shown by leaving x unassigned
-    const body = opts.sugar !== false ? stripUndef(bt.body, undefOnly(bt.body, v => f.vars[v]?.param >= 0)) : bt.body;
+    const body = finalBody.get(pc)!;
     const names: string[] = [];
     const used = new Set<number>();
     const note = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') used.add(x.id); });
@@ -801,7 +814,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const an = anchorInfo.get(pc);
     const recovered: string[] = [];
     let taken: Set<string> | undefined; // names of this function (built on first use)
-    const isTaken = (nm: string) => { taken ??= new Set(names.filter(Boolean)); return taken.has(nm) || globalIdents(p).has(nm) || views.map.has(nm) || views.opaque.has(nm) || RESERVED_TS.has(nm); };
+    const isTaken = (nm: string) => { taken ??= new Set(names.filter(Boolean)); return taken.has(nm) || globalIdents(p).has(nm) || views.map.has(nm) || views.opaque.has(nm) || RESERVED_TS.has(nm) || helperNames.has(nm); };
     const unique = (nm0: string) => { let nm = nm0, k = 2; while (isTaken(nm)) nm = `${nm0}_${k++}`; taken!.add(nm); return nm; };
     // IDL: the instruction data of a handler, as a view of its arguments (Borsh layout)
     const argTypes = new Map<number, string>();
@@ -851,6 +864,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
+      outline: outl.helpers.length ? (ns, i) => { const u = outl.at.get(ns)?.get(i); return u && { name: u.helper.name, args: u.args, value: u.helper.value }; } : undefined,
     };
     // node -> printed lines, CPI / PDA sites (for the analysis: src/analysis/facts.ts)
     const spans = new Map<Node, [number, number]>();
@@ -1163,7 +1177,18 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     return { name, pc, disc: d?.disc ?? sem.discOf(name), args: d?.args, accounts: d?.accounts, strAccounts: strAccounts.get(pc) };
   });
   const processors = [...sem.processors].filter(([pc]) => built.has(pc)).map(([pc, names]) => ({ fn: p.funcs.get(pc)!.name, names }));
-  const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
+  // the outlined helpers' definitions
+  const outlined: { name: string; text: string }[] = [];
+  for (const h of outl.helpers) {
+    const hf = { vars: h.vars } as unknown as VarFunc;
+    const hpr = new Printer({
+      fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n), constComment: (v, role) => sem.constComment(v, role), varName: id => h.names[id],
+      strAt: (ptr, len) => sem.strLit(ptr, len), strNote: (ptr, len) => sem.strAt(ptr, len), keyAt: ptr => sem.keyAt(ptr), dropUndefArgs: true, exprHook: (e, pr) => sem.sugar(e, pr),
+    });
+    const { decls, hoisted } = declarations(hf, h.body);
+    outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });
+  }
+  const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }

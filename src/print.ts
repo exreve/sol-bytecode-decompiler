@@ -36,6 +36,7 @@ export interface PrintCtx {
   stmtTail?: (s: Stmt, prev?: Stmt) => string | undefined; // comment at the end of a statement's line (prev: statement printed just before, same list)
   views?: Views;                                  // typed views (src/views.ts): x.field for loads/stores/addresses through typed variables
   varType?: (id: number) => string | undefined;   // view type of a variable
+  outline?: (list: Node[], i: number) => { name: string; args: Expr[]; value: boolean } | undefined; // nodes list[i..] printed as a call of an outlined helper (src/outline.ts)
 }
 
 const P = { assign: 2, cond: 3, lor: 4, land: 5, bor: 6, bxor: 7, band: 8, eq: 9, rel: 10, shift: 11, add: 12, mul: 13, unary: 15, as: 3, call: 20, prim: 21 };
@@ -344,8 +345,23 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
     }
   };
   let prevStmt: Stmt | undefined;
+  const spanAll = (ns: Node[], a: number, b: number) => { for (const n of ns) { pr.ctx.nodeLines?.(n, a, b); if (n.k === 'if') { spanAll(n.then, a, b); spanAll(n.else, a, b); } } };
   const rec = (ns: Node[], d: number) => {
-    for (const n of ns) {
+    for (let i = 0; i < ns.length; i++) {
+      const n = ns[i];
+      const o = pr.ctx.outline?.(ns, i);
+      if (o) {
+        // the rest of the list (it ends in a return on every path) as one call of the helper
+        const start = out.length;
+        const note = pr.ctx.nodeNote?.(n); // (a leading call's comment)
+        if (note) out.push(`${I(d)}// ${note}`);
+        const call = `${o.name}(${joinArgs(o.args.map(x => pr.u(x, P.assign)))})`;
+        if (o.value) out.push(`${I(d)}return ${call}`);
+        else out.push(`${I(d)}${call}`, `${I(d)}return`);
+        spanAll(ns.slice(i), start, out.length);
+        prevStmt = undefined;
+        return;
+      }
       const prev = prevStmt;
       prevStmt = undefined;
       const start = out.length;

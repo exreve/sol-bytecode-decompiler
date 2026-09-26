@@ -172,6 +172,8 @@ function usedSyscalls(r: Result): string[] {
 	return out
 }
 
+const OUTLINED = '// outlined tails: repeated statements ending in a return, defined once; each call runs exactly these statements (arguments: the values and stack objects they use)'
+
 /** How recovered names are marked (per-function "// names" / "// accounts" lines carry the tags). */
 export const PROVENANCE = `// recovered names carry their source: [idl] Anchor IDL · [str] the program's own strings (instruction logs, Anchor account-error
 //   names) · [known] well-known program ids and layouts · [heur] structural inference (verify); per-function "// names" lines list them.
@@ -203,6 +205,7 @@ export function renderSingle(r: Result): string {
 	const sys = usedSyscalls(r)
 	if (sys.length) out.push(...sys, '')
 	if (r.stubs.length) out.push(`// library functions (recognized, not decompiled):`, ...r.stubs, '')
+	if (r.outlined.length) out.push(OUTLINED, ...r.outlined.map(h => h.text + '\n'))
 	const section = (grp: { title: string; funcs: FuncOut[] }) => { if (!grp.funcs.length) return; out.push(`// ===== ${grp.title} =====`); for (const f of grp.funcs) out.push(f.text, '') }
 	section(g.entry)
 	for (const x of g.ix) section(x)
@@ -225,6 +228,7 @@ export function renderProject(r: Result): Map<string, string> {
 	const files = new Map<string, string>()
 	const home = new Map<string, string>() // function name -> module path
 	for (const grp of [g.entry, g.shared, ...g.ix]) for (const f of grp.funcs) home.set(f.name, grp.key)
+	for (const h of r.outlined) home.set(h.name, 'outlined')
 	const libNames = new Set(r.stubs.map(s => /declare function (\w+)/.exec(s)![1]))
 	const modLoc = new Map<string, { file: string; line: number }>() // function -> its module file and first line
 	const bundleLoc = new Map<string, Map<string, number>>()           // instruction -> function -> first line in bundle/<ix>.ts
@@ -247,6 +251,7 @@ export function renderProject(r: Result): Map<string, string> {
 		for (const f of grp.funcs) { modLoc.set(f.name, { file: grp.key + '.ts', line: at }); at += lineCount(f) + 1 }
 	}
 	mod(g.entry); mod(g.shared); g.ix.forEach(mod)
+	if (r.outlined.length) files.set('outlined.ts', [`/// <reference path="./lib.d.ts" />`, OUTLINED, '', r.outlined.map(h => h.text.replace(/^function /m, 'export function ')).join('\n\n'), ''].join('\n'))
 	void libNames
 	const lib = [PRELUDE, TYPES, '', ...usedViews(r), '', '// syscalls', ...usedSyscalls(r), '', '// library functions (recognized in many programs; not decompiled)', ...r.stubs].join('\n') + '\n'
 	files.set('lib.d.ts', lib)
@@ -273,7 +278,8 @@ export function renderProject(r: Result): Map<string, string> {
 		const used = new Set([...order.flatMap(f => scan(f).called), ...[...declText.matchAll(CALLED)].map(m => m[1])])
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls({ ...r, funcs: order })
-		const pre = [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ''].join('\n')
+		const outl = r.outlined.filter(x => used.has(x.name))
+		const pre = [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ...(outl.length ? ['', OUTLINED, ...outl.map(x => x.text)] : []), ''].join('\n')
 		files.set(`bundle/${h.name.slice(3)}.ts`, pre + '\n' + text + '\n')
 		const m = new Map<string, number>()
 		let at = pre.split('\n').length + 1

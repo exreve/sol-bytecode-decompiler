@@ -53,6 +53,27 @@ named after its role, and typed when its layout is fixed by that role, when the 
 constant offsets, or passed on as another call's first argument; never loaded, never reassigned) names it
 `ret`: the caller's object the result is written to (Rust's return slot for values larger than 8 bytes).
 
+**Outlined tails** (`src/outline.ts`). Statement runs that end a function (a `return` on every path) and recur
+in several places, identical up to the variables and stack objects they use, are printed once as a helper and
+replaced by a call: variables the run reads that also occur elsewhere in the function are parameters (passed their
+value), variables occurring only in the run are the helper's locals, stack objects are parameters holding their
+address (accesses relative to it); constants stay in the body. Only runs without calls or loops that store into
+the out parameter or the frame are outlined (everything the analysis reads from the text stays in place), and only
+when it shortens the output (2+ places, 3+ lines):
+
+```ts
+		r = Error_with_account_name(err_8, k, g, "whirlpools_config", 0x11)
+		return ret_tail_1(ret, err_8, r)
+// outlined: 430 places
+function ret_tail_1(ret: u64, a: u64, b: u64): u64 {
+	copyr(ret + 8, a, 0x10)
+	st64(ret, 0)
+	return b
+}
+```
+
+`test/evaluate.ts` runs a call of a function defined in the output that is not a program function in place.
+
 ## Recovered names and their provenance
 
 Every recovered name says where it comes from, so a reader knows what to double-check:

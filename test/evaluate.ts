@@ -208,7 +208,12 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 		return () => {
 			const e = env()
 			const t = e.fnTarget.get(name) ?? e.sysTarget.get(name)
-			if (!t) throw new EvalError(`unknown function ${name}`)
+			if (!t) {
+				// a function defined in the output that is not a program function: an outlined helper, run in place
+				const d = localFunctions(fn.getSourceFile()).get(name)
+				if (!d) throw new EvalError(`unknown function ${name}`)
+				return runLocal(d, args.map(f => W(f())), e)
+			}
 			const vs = args.map(f => W(f()))
 			const n = e.arity?.get(t)
 			if (n !== undefined) while (vs.length < n) vs.push(UNDEF)
@@ -382,6 +387,31 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 	}
 	const body = list(fn.body!.statements)
 	return { slots, nparams: fn.parameters.length, body, ctl, vals, env: envRef, fpSlot } as Compiled & { fpSlot: number }
+}
+
+/** Function declarations with a body in a source file, by name. */
+const localCache = new WeakMap<ts.SourceFile, Map<string, ts.FunctionDeclaration>>()
+function localFunctions(sf: ts.SourceFile): Map<string, ts.FunctionDeclaration> {
+	let m = localCache.get(sf)
+	if (!m) { m = new Map(); for (const s of sf.statements) if (ts.isFunctionDeclaration(s) && s.name && s.body) m.set(s.name.text, s); localCache.set(sf, m) }
+	return m
+}
+
+/** Run a helper defined in the output in the caller's environment (aborts and step limits propagate). */
+function runLocal(fn: ts.FunctionDeclaration, args: bigint[], env: EvalEnv): bigint {
+	let c = cache.get(fn)
+	if (!c) { c = compile(fn); cache.set(fn, c) }
+	const cc = c as Compiled & { fpSlot: number }
+	if (cc.env.cur) throw new EvalError(`helper ${fn.name?.text} entered twice`)
+	cc.vals.fill(undefined)
+	for (let i = 0; i < cc.nparams; i++) cc.vals[i] = W(args[i] ?? 0n)
+	cc.vals[cc.fpSlot] = env.fp
+	cc.env.cur = env
+	cc.ctl.steps = 0; cc.ctl.max = env.maxSteps; cc.ctl.label = null; cc.ctl.ret = undefined
+	try {
+		const r = cc.body()
+		return r === 3 && cc.ctl.ret !== undefined ? cc.ctl.ret : 0n
+	} finally { cc.env.cur = null }
 }
 
 export function runFunction(fn: ts.FunctionDeclaration, args: bigint[], env: EvalEnv): { ret?: bigint; abort?: string; limit?: boolean } {
