@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "tag_3/tag_4/tag_5/tag_6 governance", "accounts": ["account[2] posted VAA"], "issue": "VAA account only owner-checked; 'vaa' magic and PDA not re-derived; program-owned message accounts could pass as governance VAAs (depends on governance emitter control)", "confidence": 0.35},
+{"instruction": "tag_4 TransferFees", "accounts": ["bridge", "fee_collector", "recipient"], "issue": "last_lamports not updated after fee transfer; PostMessage then fails (DoS)", "confidence": 0.35},
+{"instruction": "tag_0 Initialize", "accounts": ["bridge", "guardian set", "payer"], "issue": "initialize has no privileged key; first caller sets guardian set (front-run)", "confidence": 0.4}
+], "tokens_read": 178831}

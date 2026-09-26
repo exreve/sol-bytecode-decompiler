@@ -1,0 +1,341 @@
+{
+	"decompiler": "2186dd1",
+	"packets": {
+		"prog_01": {
+			"code": {
+				"files": 6,
+				"lines": 3537,
+				"kb": 116
+			},
+			"full": {
+				"files": 12,
+				"lines": 6145,
+				"kb": 189
+			}
+		},
+		"prog_02": {
+			"code": {
+				"files": 5,
+				"lines": 3675,
+				"kb": 111
+			},
+			"full": {
+				"files": 10,
+				"lines": 8770,
+				"kb": 253
+			}
+		},
+		"prog_03": {
+			"code": {
+				"files": 7,
+				"lines": 1936,
+				"kb": 60
+			},
+			"full": {
+				"files": 14,
+				"lines": 4539,
+				"kb": 126
+			}
+		},
+		"prog_04": {
+			"code": {
+				"files": 11,
+				"lines": 9927,
+				"kb": 340
+			},
+			"full": {
+				"files": 26,
+				"lines": 26927,
+				"kb": 836
+			}
+		},
+		"prog_05": {
+			"code": {
+				"files": 11,
+				"lines": 26879,
+				"kb": 840
+			},
+			"full": {
+				"files": 26,
+				"lines": 38096,
+				"kb": 1185
+			}
+		},
+		"prog_06": {
+			"code": {
+				"files": 17,
+				"lines": 12620,
+				"kb": 452
+			},
+			"full": {
+				"files": 44,
+				"lines": 29343,
+				"kb": 977
+			}
+		},
+		"prog_07": {
+			"code": {
+				"files": 11,
+				"lines": 30808,
+				"kb": 886
+			},
+			"full": {
+				"files": 28,
+				"lines": 42379,
+				"kb": 1260
+			}
+		},
+		"prog_08": {
+			"code": {
+				"files": 17,
+				"lines": 12581,
+				"kb": 451
+			},
+			"full": {
+				"files": 44,
+				"lines": 29258,
+				"kb": 974
+			}
+		},
+		"prog_09": {
+			"code": {
+				"files": 22,
+				"lines": 65456,
+				"kb": 2067
+			},
+			"full": {
+				"files": 54,
+				"lines": 149392,
+				"kb": 4161
+			}
+		},
+		"prog_10": {
+			"code": {
+				"files": 20,
+				"lines": 39944,
+				"kb": 1284
+			},
+			"full": {
+				"files": 53,
+				"lines": 75695,
+				"kb": 2355
+			}
+		},
+		"prog_11": {
+			"code": {
+				"files": 32,
+				"lines": 192715,
+				"kb": 6123
+			},
+			"full": {
+				"files": 89,
+				"lines": 265907,
+				"kb": 8435
+			}
+		},
+		"prog_12": {
+			"code": {
+				"files": 13,
+				"lines": 7969,
+				"kb": 284
+			},
+			"full": {
+				"files": 32,
+				"lines": 16851,
+				"kb": 581
+			}
+		},
+		"prog_13": {
+			"code": {
+				"files": 12,
+				"lines": 41363,
+				"kb": 1169
+			},
+			"full": {
+				"files": 23,
+				"lines": 54631,
+				"kb": 1519
+			}
+		},
+		"prog_14": {
+			"code": {
+				"files": 19,
+				"lines": 44877,
+				"kb": 1428
+			},
+			"full": {
+				"files": 45,
+				"lines": 113509,
+				"kb": 3220
+			}
+		},
+		"prog_15": {
+			"code": {
+				"files": 22,
+				"lines": 65293,
+				"kb": 2060
+			},
+			"full": {
+				"files": 54,
+				"lines": 149162,
+				"kb": 4150
+			}
+		},
+		"prog_16": {
+			"code": {
+				"files": 12,
+				"lines": 7188,
+				"kb": 254
+			},
+			"full": {
+				"files": 29,
+				"lines": 15274,
+				"kb": 520
+			}
+		},
+		"prog_17": {
+			"code": {
+				"files": 17,
+				"lines": 12641,
+				"kb": 454
+			},
+			"full": {
+				"files": 44,
+				"lines": 29434,
+				"kb": 981
+			}
+		},
+		"prog_18": {
+			"code": {
+				"files": 11,
+				"lines": 23495,
+				"kb": 710
+			},
+			"full": {
+				"files": 28,
+				"lines": 31335,
+				"kb": 986
+			}
+		},
+		"prog_19": {
+			"code": {
+				"files": 7,
+				"lines": 6053,
+				"kb": 185
+			},
+			"full": {
+				"files": 14,
+				"lines": 12806,
+				"kb": 366
+			}
+		},
+		"prog_20": {
+			"code": {
+				"files": 20,
+				"lines": 40106,
+				"kb": 1291
+			},
+			"full": {
+				"files": 53,
+				"lines": 76055,
+				"kb": 2368
+			}
+		},
+		"prog_21": {
+			"code": {
+				"files": 17,
+				"lines": 13021,
+				"kb": 464
+			},
+			"full": {
+				"files": 44,
+				"lines": 29879,
+				"kb": 993
+			}
+		},
+		"prog_22": {
+			"code": {
+				"files": 11,
+				"lines": 41378,
+				"kb": 1170
+			},
+			"full": {
+				"files": 22,
+				"lines": 54633,
+				"kb": 1519
+			}
+		},
+		"prog_23": {
+			"code": {
+				"files": 32,
+				"lines": 192157,
+				"kb": 6091
+			},
+			"full": {
+				"files": 89,
+				"lines": 265312,
+				"kb": 8402
+			}
+		},
+		"prog_24": {
+			"code": {
+				"files": 19,
+				"lines": 44559,
+				"kb": 1419
+			},
+			"full": {
+				"files": 45,
+				"lines": 113070,
+				"kb": 3207
+			}
+		},
+		"prog_25": {
+			"code": {
+				"files": 19,
+				"lines": 45189,
+				"kb": 1442
+			},
+			"full": {
+				"files": 45,
+				"lines": 113810,
+				"kb": 3234
+			}
+		},
+		"prog_26": {
+			"code": {
+				"files": 11,
+				"lines": 27332,
+				"kb": 854
+			},
+			"full": {
+				"files": 26,
+				"lines": 38593,
+				"kb": 1202
+			}
+		},
+		"prog_27": {
+			"code": {
+				"files": 11,
+				"lines": 8646,
+				"kb": 294
+			},
+			"full": {
+				"files": 26,
+				"lines": 19854,
+				"kb": 649
+			}
+		},
+		"prog_28": {
+			"code": {
+				"files": 19,
+				"lines": 45185,
+				"kb": 1442
+			},
+			"full": {
+				"files": 45,
+				"lines": 113801,
+				"kb": 3233
+			}
+		}
+	}
+}

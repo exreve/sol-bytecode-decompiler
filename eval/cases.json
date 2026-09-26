@@ -1,0 +1,438 @@
+{
+	"about": "Ground truth for the reviewer eval (see eval/README.md). Never hand this file, eval/bin/ or eval/build.sh to a reviewer: a reviewer gets one eval/packets/<prog_NN>/<code|full>/ directory only. 'packets' maps each neutral packet id to its binary; a finding on a 'fixed' packet at the ground-truth location is a false positive.",
+	"categories": {
+		"missing-signer": "a privileged action does not require the authority to sign",
+		"missing-owner-check": "account data is trusted without checking the account's owner program",
+		"account-confusion": "an account is not bound to the other accounts / state it must belong to (has_one, stored key, PDA)",
+		"sysvar-unchecked": "a sysvar is read from an account whose address is not checked",
+		"unchecked-cpi-program": "a CPI goes to a program id taken from an account that is not checked",
+		"remaining-account-unchecked": "an account passed in remaining_accounts is used without checking its address",
+		"reinitialization": "an already-initialized account can be initialized again",
+		"type-confusion": "an account of another type (or unchecked data) is deserialized as the expected type",
+		"pda-bump": "a PDA is derived with a caller-supplied bump",
+		"input-validation": "an instruction argument / derived amount is not range-checked (zero, bounds)",
+		"arithmetic": "rounding / overflow / underflow in value computations"
+	},
+	"cases": [
+		{
+			"id": "wormhole_bridge",
+			"source": "real",
+			"program": "Wormhole core bridge, Solana (solitaire framework, native)",
+			"repo": "https://github.com/wormhole-foundation/wormhole",
+			"path": "solana/bridge/program",
+			"commits": { "vuln": "79ab522f802ccc5ba34278d3c648fa62e06f4f1c", "fixed": "e8b91810a9bb35c3c139f86b4d0795432d647305" },
+			"links": [
+				"https://github.com/wormhole-foundation/wormhole/commit/e8b91810a9bb35c3c139f86b4d0795432d647305",
+				"https://research.kudelskisecurity.com/2022/02/03/quick-analysis-of-the-wormhole-attack/",
+				"https://halborn.com/explained-the-wormhole-hack-february-2022/"
+			],
+			"date": "2022-02-02",
+			"framework": "native",
+			"idl": false,
+			"category": "sysvar-unchecked",
+			"ground_truth": {
+				"instruction": "verify_signatures",
+				"aliases": ["verify_signatures", "VerifySignatures", "verify_signature", "tag_7", "tag 7", "instruction 7", "ix 7"],
+				"accounts": ["instruction_acc", "instructions sysvar", "instruction sysvar", "sysvar", "accounts[3]", "account 3", "account #3", "4th account"],
+				"keywords": ["sysvar", "instructions sysvar", "load_instruction_at", "secp256k1", "address", "spoof", "fake", "not checked", "unchecked", "Sysvar1nstructions"],
+				"description": "verify_signatures reads the secp256k1 signature-verification instruction through the instructions sysvar (solana_program::sysvar::instructions::load_instruction_at) from account 3 (instruction_acc) without checking that its key is the Instructions sysvar id. An attacker passes a fake account holding a forged instruction list, so guardian signatures are marked verified without any secp256k1 verification; the forged signature set then posts a VAA that mints 120k wETH."
+			},
+			"packets": { "vuln": "prog_22", "fixed": "prog_13" }
+		},
+		{
+			"id": "solend_lending",
+			"source": "real",
+			"program": "Solend token-lending (fork of SPL token-lending, native)",
+			"repo": "https://github.com/solendprotocol/solana-program-library",
+			"path": "token-lending/program",
+			"commits": { "vuln": "871935cafc590bf1985bebfbc7e6399b153a5b40", "fixed": "132d74cf17" },
+			"links": [
+				"https://github.com/solendprotocol/solana-program-library/commit/132d74cf17",
+				"https://docs.google.com/document/d/1-WoQwT1QrPEX-r4N-fDamRQ50LM8DsdsOyq1iTabS3Q/edit",
+				"https://www.helius.dev/blog/solana-hacks"
+			],
+			"date": "2021-08-19",
+			"framework": "native",
+			"idl": false,
+			"category": "account-confusion",
+			"ground_truth": {
+				"instruction": "update_reserve_config",
+				"aliases": ["update_reserve_config", "UpdateReserveConfig", "process_update_reserve_config", "tag_16", "tag 16", "instruction 16", "ix 16"],
+				"accounts": ["reserve", "lending_market", "lending market", "accounts[0]", "accounts[1]", "account 0", "account 1"],
+				"keywords": ["reserve.lending_market", "lending market", "lending_market", "belongs", "bound", "not tied", "match", "owner of", "attacker-created", "fake", "any lending market", "has_one"],
+				"description": "UpdateReserveConfig checks that the signer is the owner of the lending market passed in (account 1), but never checks that the reserve (account 0) belongs to that lending market (reserve.lending_market == lending_market key). An attacker creates their own lending market, signs as its owner and rewrites the config (liquidation threshold / bonus) of any real reserve."
+			},
+			"packets": { "vuln": "prog_09", "fixed": "prog_15" }
+		},
+		{
+			"id": "spl_lending_flashloan",
+			"source": "real",
+			"program": "SPL token-lending (native)",
+			"repo": "https://github.com/solana-labs/solana-program-library",
+			"path": "token-lending/program",
+			"commits": { "vuln": "e8861b275d4d00561e11a9268407329e64bf3af3", "fixed": "23c487dd9c" },
+			"links": ["https://github.com/solana-labs/solana-program-library/commit/23c487dd9c"],
+			"date": "2021-09-01",
+			"framework": "native",
+			"idl": false,
+			"category": "missing-owner-check",
+			"ground_truth": {
+				"instruction": "flash_loan",
+				"aliases": ["flash_loan", "FlashLoan", "process_flash_loan", "tag_13", "tag 13", "instruction 13", "ix 13"],
+				"accounts": ["reserve", "accounts[2]", "account 2", "3rd account"],
+				"keywords": ["owner", "owned by", "program_id", "fake reserve", "forged", "spoof", "reserve data"],
+				"description": "FlashLoan unpacks the reserve (account 2) and trusts its fields (lending_market, liquidity supply, fee receiver, fees) without checking that the reserve account is owned by the lending program. A forged reserve naming the real lending market and a real liquidity supply lets the caller borrow from the supply with the market authority's signature under attacker-chosen parameters."
+			},
+			"packets": { "vuln": "prog_28", "fixed": "prog_25" }
+		},
+		{
+			"id": "spl_lending_rounding",
+			"source": "real",
+			"program": "SPL token-lending (native)",
+			"repo": "https://github.com/solana-labs/solana-program-library",
+			"path": "token-lending/program",
+			"commits": { "vuln": "c24bc966f133fbac5c789f7fb2841e47764ee0f2", "fixed": "c2b287788b" },
+			"links": [
+				"https://neodyme.io/blog/lending_disclosure",
+				"https://github.com/solana-labs/solana-program-library/pull/1883",
+				"https://github.com/solana-labs/solana-program-library/commit/c2b287788b"
+			],
+			"date": "2021-12-03",
+			"framework": "native",
+			"idl": false,
+			"category": "arithmetic",
+			"ground_truth": {
+				"instruction": "deposit_reserve_liquidity",
+				"aliases": ["deposit_reserve_liquidity", "DepositReserveLiquidity", "tag_4", "tag 4", "instruction 4", "ix 4", "redeem_reserve_collateral", "RedeemReserveCollateral", "tag_5", "tag 5", "instruction 5", "ix 5"],
+				"accounts": ["reserve", "collateral", "liquidity", "ctoken", "exchange rate"],
+				"keywords": ["round", "rounding", "precision", "exchange rate", "floor", "ceil", "truncat", "dust"],
+				"description": "The collateral exchange rate conversions (liquidity -> collateral on DepositReserveLiquidity, collateral -> liquidity on RedeemReserveCollateral) round to nearest instead of in the protocol's favour, so a deposit and a redeem of tiny amounts can each round up; repeated, this drains reserve liquidity (Neodyme: ~$2.6B TVL at risk across forks)."
+			},
+			"packets": { "vuln": "prog_14", "fixed": "prog_24" }
+		},
+		{
+			"id": "candy_machine_v2",
+			"source": "real",
+			"program": "Metaplex Candy Machine v2 (Anchor 0.17)",
+			"repo": "https://github.com/metaplex-foundation/metaplex",
+			"path": "rust/nft-candy-machine-v2",
+			"commits": { "vuln": "4f835f73e632ccaf4eb913d8fb64518ff52eb237", "fixed": "e9ef376443c3c8fd2f5b151dd0b09f757b1bf35c" },
+			"links": [
+				"https://github.com/metaplex-foundation/metaplex/pull/1366",
+				"https://medium.com/@solens_io/smashing-the-candy-machine-for-fun-and-profit-a3bcc58d6c30"
+			],
+			"date": "2021-12-31",
+			"framework": "anchor",
+			"idl": true,
+			"category": "reinitialization",
+			"ground_truth": {
+				"instruction": "initialize_candy_machine",
+				"aliases": ["initialize_candy_machine", "initializeCandyMachine", "InitializeCandyMachine"],
+				"accounts": ["candy_machine", "candyMachine", "candy machine"],
+				"keywords": ["reinit", "re-init", "already initialized", "initialized", "discriminator", "zero", "overwrite", "hijack", "wallet", "authority"],
+				"description": "initialize_candy_machine takes candy_machine as a mutable UncheckedAccount only constrained to be owned by the program and large enough; it does not require the account to be uninitialized (#[account(zero)]). Anyone can re-initialize a live candy machine with their own authority and wallet and redirect the mint proceeds."
+			},
+			"packets": { "vuln": "prog_05", "fixed": "prog_26" }
+		},
+		{
+			"id": "cashio_brrr",
+			"source": "real",
+			"program": "Cashio brrr (Anchor 0.22)",
+			"repo": "https://github.com/cashioapp/cashio",
+			"path": "programs/brrr",
+			"commits": { "vuln": "a51c3c59d544a5763b64abb4a8d82c49b0abd6d0", "fixed": "7df658184c" },
+			"links": [
+				"https://github.com/cashioapp/cashio/commit/7df658184c",
+				"https://www.sec3.dev/blog/cashioapp-attack-whats-the-vulnerability-and-how-soteria-detects-it",
+				"https://twitter.com/samczsun/status/1506578902331768832"
+			],
+			"date": "2022-03-23",
+			"framework": "anchor",
+			"idl": true,
+			"category": "account-confusion",
+			"note": "the fix commit also disables print_cash / burn_cash entirely (invariant!(false)); on the fixed binary any finding at print_cash counts as a false positive",
+			"ground_truth": {
+				"instruction": "print_cash",
+				"aliases": ["print_cash", "printCash", "PrintCash", "burn_cash", "burnCash"],
+				"accounts": ["bank", "collateral", "crate_mint", "crateMint", "crate_collateral_tokens", "saber_swap", "arrow", "lp mint", "mint"],
+				"keywords": ["bank", "crate_mint", "fake", "forged", "collateral", "mint", "not bound", "not validated", "has_one", "chain", "infinite mint", "arrow"],
+				"description": "print_cash validates a chain of accounts (collateral -> bank, crate_collateral_tokens -> collateral mint, saber swap / arrow LP accounts) but never binds the bank to the real $CASH crate mint (bank.crate_mint == crate_mint), and the saber_swap.arrow mint is not tied to the real LP. An attacker supplies a fake bank / collateral / arrow chain backed by worthless tokens and mints unbacked $CASH."
+			},
+			"packets": { "vuln": "prog_07", "fixed": "prog_18" }
+		},
+		{
+			"id": "raydium_clmm",
+			"source": "real",
+			"program": "Raydium CLMM (amm_v3, Anchor 0.29)",
+			"repo": "https://github.com/raydium-io/raydium-clmm",
+			"path": "programs/amm",
+			"commits": { "vuln": "d0cb69cc953a17b0fa9977914f281cd1d077067f", "fixed": "e6dd1d5673" },
+			"links": [
+				"https://github.com/raydium-io/raydium-clmm/commit/e6dd1d5673",
+				"https://immunefi.com/blog/bug-fix-reviews/raydium-tick-manipulation-bugfix-review/"
+			],
+			"date": "2024-01-11",
+			"framework": "anchor",
+			"idl": true,
+			"category": "remaining-account-unchecked",
+			"ground_truth": {
+				"instruction": "increase_liquidity",
+				"aliases": ["increase_liquidity", "increaseLiquidity", "increase_liquidity_v2", "increaseLiquidityV2"],
+				"accounts": ["remaining_accounts[0]", "remaining account", "remaining_accounts", "tickarray_bitmap_extension", "tick_array_bitmap_extension", "TickArrayBitmapExtension", "bitmap extension", "bitmap"],
+				"keywords": ["bitmap", "remaining", "extension", "PDA", "address", "key", "not verified", "flip", "tick"],
+				"description": "increase_liquidity (and increase_liquidity_v2) uses remaining_accounts[0] as the pool's TickArrayBitmapExtension when the position's tick arrays are outside the default bitmap, without checking it is the pool's bitmap-extension PDA. An attacker passes another account, so the pool's bitmap is not flipped for the newly initialized tick array; the liquidity is then mis-accounted during swaps, draining the pool (Immunefi, $505k bounty)."
+			},
+			"packets": { "vuln": "prog_23", "fixed": "prog_11" }
+		},
+		{
+			"id": "raydium_cp_swap",
+			"source": "real",
+			"program": "Raydium CP-Swap (Anchor 0.29)",
+			"repo": "https://github.com/raydium-io/raydium-cp-swap",
+			"path": "programs/cp-swap",
+			"commits": { "vuln": "cfdb70a8ca", "fixed": "183ddbb115" },
+			"links": [
+				"https://github.com/raydium-io/raydium-cp-swap/commit/183ddbb115",
+				"https://immunefi.com/blog/all/raydium-liquidity-drain-bug-fix-review/"
+			],
+			"date": "2025-03-11",
+			"framework": "anchor",
+			"idl": true,
+			"category": "input-validation",
+			"ground_truth": {
+				"instruction": "deposit",
+				"aliases": ["deposit", "withdraw", "swap_base_output", "swapBaseOutput"],
+				"accounts": ["lp_token_amount", "lpTokenAmount", "token_0_amount", "token_1_amount", "token0Vault", "token1Vault", "lp_mint", "lpMint", "owner_lp_token", "ownerLpToken"],
+				"keywords": ["zero", "rounding", "round", "one token", "single", "ceiling", "amount", "not checked", "lp token"],
+				"description": "deposit computes the token_0 / token_1 amounts for the requested lp_token_amount (rounded up) but does not reject a result where one side is zero (nor lp_token_amount == 0); with a skewed pool a depositor gets LP tokens while paying only one token, and repeated deposit / withdraw drains the pool. The fix adds require_gt!(lp_token_amount, 0) and zero checks on the computed amounts (also in withdraw and swap_base_output)."
+			},
+			"packets": { "vuln": "prog_10", "fixed": "prog_20" }
+		},
+		{
+			"id": "bench_a_vault_no_has_one",
+			"source": "bench",
+			"program": "bench/programs/a_vault (Anchor 0.31.1), variant v_no_has_one",
+			"binary": "bench/bin/a_vault@no_has_one.so",
+			"idl_file": "bench/idl/a_vault.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "account-confusion",
+			"rules": ["signer-not-related-to-authority"],
+			"ground_truth": {
+				"instruction": "withdraw",
+				"aliases": ["withdraw"],
+				"accounts": ["vault", "owner"],
+				"keywords": ["has_one", "owner", "not bound", "any signer", "seeds", "pda", "authority"],
+				"description": "withdraw: vault is only #[account(mut)] (no has_one = owner, no seeds), so any signer can withdraw from any vault."
+			},
+			"packets": { "vuln": "prog_16" }
+		},
+		{
+			"id": "bench_a_counter_ungated",
+			"source": "bench",
+			"program": "bench/programs/a_counter (Anchor 0.31.1), variant v_ungated",
+			"binary": "bench/bin/a_counter@ungated.so",
+			"idl_file": "bench/idl/a_counter.json",
+			"idl_patch": { "set_admin": "counter:w" },
+			"framework": "anchor",
+			"idl": true,
+			"category": "missing-signer",
+			"rules": ["state-write-ungated", "value-move-no-signer", "caller-controlled-sensitive-param"],
+			"ground_truth": {
+				"instruction": "set_admin",
+				"aliases": ["set_admin", "setAdmin"],
+				"accounts": ["counter", "admin"],
+				"keywords": ["signer", "admin", "anyone", "ungated", "authority", "permissionless"],
+				"description": "set_admin has no admin account at all (no has_one = admin, no signer): anyone can overwrite counter.admin."
+			},
+			"packets": { "vuln": "prog_12" }
+		},
+		{
+			"id": "bench_a_escrow_recipient_unbound",
+			"source": "bench",
+			"program": "bench/programs/a_escrow (Anchor 0.31.1), variant v_recipient_unbound",
+			"binary": "bench/bin/a_escrow@recipient_unbound.so",
+			"idl_file": "bench/idl/a_escrow.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "account-confusion",
+			"rules": ["recipient-unbound", "token-mint-unrelated"],
+			"ground_truth": {
+				"instruction": "take",
+				"aliases": ["take"],
+				"accounts": ["maker_ata_b", "makerAtaB"],
+				"keywords": ["mint", "authority", "owner", "recipient", "maker", "not bound", "token account"],
+				"description": "take: maker_ata_b (where the taker pays the maker) has no token::mint = mint_b / token::authority = maker constraint, so the taker can pay into their own account or with another mint."
+			},
+			"packets": { "vuln": "prog_04" }
+		},
+		{
+			"id": "bench_a_mint_no_signer",
+			"source": "bench",
+			"program": "bench/programs/a_mint (Anchor 0.31.1), variant v_no_signer",
+			"binary": "bench/bin/a_mint@no_signer.so",
+			"idl_file": "bench/idl/a_mint.json",
+			"idl_patch": { "mint_tokens": "config:w mint:w dest:w admin token_program" },
+			"framework": "anchor",
+			"idl": true,
+			"category": "missing-signer",
+			"rules": ["value-move-no-signer"],
+			"ground_truth": {
+				"instruction": "mint_tokens",
+				"aliases": ["mint_tokens", "mintTokens"],
+				"accounts": ["admin"],
+				"keywords": ["signer", "sign", "admin", "anyone", "unauthorized mint"],
+				"description": "mint_tokens: admin is an UncheckedAccount (has_one = admin still holds but no signature is required), so anyone can mint by naming the admin key."
+			},
+			"packets": { "vuln": "prog_27" }
+		},
+		{
+			"id": "bench_a_audit_type_confusion",
+			"source": "bench",
+			"program": "bench/programs/a_audit (Anchor 0.31.1), variant v_type_confusion",
+			"binary": "bench/bin/a_audit@type_confusion.so",
+			"idl_file": "bench/idl/a_audit.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "type-confusion",
+			"rules": ["account-type-unchecked", "signer-not-related-to-authority"],
+			"ground_truth": {
+				"instruction": "admin_withdraw",
+				"aliases": ["admin_withdraw", "adminWithdraw"],
+				"accounts": ["config"],
+				"keywords": ["discriminator", "owner", "type", "unchecked", "deserializ", "fake", "has_one", "admin"],
+				"description": "admin_withdraw: config is an UncheckedAccount; its owner is checked but its data is deserialized as Config without the discriminator check (try_deserialize_unchecked), so another program-owned account type whose bytes at the admin offset hold the attacker key passes as Config."
+			},
+			"packets": { "vuln": "prog_21" }
+		},
+		{
+			"id": "bench_a_audit_cpi_pda_unchecked",
+			"source": "bench",
+			"program": "bench/programs/a_audit (Anchor 0.31.1), variant v_cpi_pda_unchecked",
+			"binary": "bench/bin/a_audit@cpi_pda_unchecked.so",
+			"idl_file": "bench/idl/a_audit.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "unchecked-cpi-program",
+			"rules": ["cpi-unchecked-program", "caller-controlled-sensitive-param"],
+			"ground_truth": {
+				"instruction": "forward",
+				"aliases": ["forward"],
+				"accounts": ["target_program", "targetProgram"],
+				"keywords": ["program id", "cpi", "invoke_signed", "arbitrary program", "address", "not checked", "pda signer"],
+				"description": "forward: target_program (address = system_program removed) is invoked with a PDA signature, so the caller chooses which program receives the PDA's signer privilege."
+			},
+			"packets": { "vuln": "prog_06" }
+		},
+		{
+			"id": "bench_a_audit_bump_from_ix",
+			"source": "bench",
+			"program": "bench/programs/a_audit (Anchor 0.31.1), variant v_bump_from_ix",
+			"binary": "bench/bin/a_audit@bump_from_ix.so",
+			"idl_file": "bench/idl/a_audit.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "pda-bump",
+			"rules": ["pda-bump-from-ix"],
+			"ground_truth": {
+				"instruction": "claim",
+				"aliases": ["claim"],
+				"accounts": ["position", "bump"],
+				"keywords": ["bump", "canonical", "seeds", "pda", "create_program_address", "instruction data"],
+				"description": "claim: the position PDA is verified with a bump taken from instruction data instead of the stored canonical bump."
+			},
+			"packets": { "vuln": "prog_17" }
+		},
+		{
+			"id": "bench_a_audit_sysvar_unchecked",
+			"source": "bench",
+			"program": "bench/programs/a_audit (Anchor 0.31.1), variant v_sysvar_unchecked",
+			"binary": "bench/bin/a_audit@sysvar_unchecked.so",
+			"idl_file": "bench/idl/a_audit.json",
+			"framework": "anchor",
+			"idl": true,
+			"category": "sysvar-unchecked",
+			"rules": ["sysvar-account-unchecked"],
+			"ground_truth": {
+				"instruction": "touch",
+				"aliases": ["touch"],
+				"accounts": ["clock"],
+				"keywords": ["sysvar", "clock", "address", "fake", "timestamp", "not checked"],
+				"description": "touch: clock is an UncheckedAccount whose data is read as the Clock sysvar without checking its address."
+			},
+			"packets": { "vuln": "prog_08" }
+		},
+		{
+			"id": "bench_n_vault_no_owner",
+			"source": "bench",
+			"program": "bench/programs/n_vault (solana-program 2.2.1), variant v_no_owner",
+			"binary": "bench/bin/n_vault@no_owner.so",
+			"framework": "native",
+			"idl": false,
+			"category": "missing-owner-check",
+			"rules": ["unverified-account-data"],
+			"ground_truth": {
+				"instruction": "withdraw",
+				"aliases": ["withdraw", "tag_2", "tag 2", "instruction 2", "ix 2"],
+				"accounts": ["state", "accounts[1]", "account 1"],
+				"keywords": ["owner", "owned by", "program_id", "fake", "forged", "data"],
+				"description": "withdraw (tag 2): the state account (account 1) is read and written without checking that it is owned by the program; a forged state names the attacker as owner."
+			},
+			"packets": { "vuln": "prog_19" }
+		},
+		{
+			"id": "bench_n_token_cpi_unchecked",
+			"source": "bench",
+			"program": "bench/programs/n_token (solana-program 2.2.1), variant v_cpi_unchecked",
+			"binary": "bench/bin/n_token@cpi_unchecked.so",
+			"framework": "native",
+			"idl": false,
+			"category": "unchecked-cpi-program",
+			"rules": ["cpi-unchecked-program"],
+			"ground_truth": {
+				"instruction": "payout",
+				"aliases": ["payout", "tag_0", "tag 0", "instruction 0", "ix 0"],
+				"accounts": ["token_program", "accounts[5]", "account 5"],
+				"keywords": ["token program", "program id", "cpi", "invoke_signed", "arbitrary program", "spl_token"],
+				"description": "payout (tag 0): the token transfer is invoked (PDA-signed) on the program id taken from account 5 without checking it is the SPL token program."
+			},
+			"packets": { "vuln": "prog_01" }
+		},
+		{
+			"id": "bench_n_pool_wrapping_sub",
+			"source": "bench",
+			"program": "bench/programs/n_pool (solana-program 2.2.1), variant v_wrapping_sub",
+			"binary": "bench/bin/n_pool@wrapping_sub.so",
+			"framework": "native",
+			"idl": false,
+			"category": "arithmetic",
+			"rules": ["unchecked-arithmetic"],
+			"ground_truth": {
+				"instruction": "redeem",
+				"aliases": ["redeem", "tag_1", "tag 1", "instruction 1", "ix 1"],
+				"accounts": ["pool", "reserve", "accounts[1]", "account 1"],
+				"keywords": ["underflow", "wrap", "wrapping", "overflow", "checked_sub", "subtract", "reserve"],
+				"description": "redeem (tag 1): pool reserve -= amount with a wrapping subtraction (no underflow check)."
+			},
+			"packets": { "vuln": "prog_02" }
+		},
+		{
+			"id": "bench_p_counter_no_signer",
+			"source": "bench",
+			"program": "bench/programs/p_counter (pinocchio 0.8.4), variant v_no_signer",
+			"binary": "bench/bin/p_counter@no_signer.so",
+			"framework": "native",
+			"idl": false,
+			"category": "missing-signer",
+			"rules": ["value-move-no-signer"],
+			"ground_truth": {
+				"instruction": "withdraw",
+				"aliases": ["withdraw", "tag_3", "tag 3", "instruction 3", "ix 3"],
+				"accounts": ["admin", "accounts[0]", "account 0"],
+				"keywords": ["signer", "is_signer", "sign", "admin", "anyone"],
+				"description": "withdraw (tag 3): the admin account (account 0) is compared to the stored admin but is_signer is not checked, so anyone can withdraw lamports by naming the admin key."
+			},
+			"packets": { "vuln": "prog_03" }
+		}
+	]
+}

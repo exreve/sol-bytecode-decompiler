@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "idl_create_account", "accounts": ["from", "to", "base", "program"], "issue": "only a signer check on from; no upgrade-authority check; first signer controls IDL metadata (stock Anchor behavior, low impact)", "confidence": 0.35}], "note": "print_cash/burn_cash disabled in this build (return error before CPI)", "tokens_read": 96691}

@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "idl_write", "accounts": ["idl_account", "authority"], "issue": "authority check compares stored authority with h.lamports (ld64(h+8)) instead of the key; reviewer suspects a decompiler field-labeling artifact", "confidence": 0.2}], "tokens_read": 157640}

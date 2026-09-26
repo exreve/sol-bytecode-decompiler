@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "set_admin", "accounts": ["counter"], "issue": "set_admin has no signer account and no has_one check against counter.admin; anyone can overwrite counter.admin with a key from instruction data and take over increment/close_counter/resize_notes", "confidence": 0.93}], "tokens_read": 80932}

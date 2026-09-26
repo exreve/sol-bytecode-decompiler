@@ -1,0 +1,4 @@
+{"findings": [
+{"instruction": "update_candy_machine", "accounts": ["candy_machine", "authority", "wallet", "remaining_accounts[0]"], "issue": "authority-gated update sets token_mint from remaining_accounts[0] and wallet without the mint/token-account validation initialize performs; misconfiguration / payment DoS", "confidence": 0.5},
+{"instruction": "mint_nft", "accounts": ["recent_blockhashes", "candy_machine"], "issue": "config line index from RecentBlockhashes % items_remaining is predictable; minters can time mints for rare items", "confidence": 0.3}
+], "tokens_read": 123725}

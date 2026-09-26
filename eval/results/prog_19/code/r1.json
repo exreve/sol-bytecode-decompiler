@@ -1,0 +1,6 @@
+{"findings": [
+{"instruction": "tag_2 withdraw", "accounts": ["account[0] authority", "account[1] state", "account[2] vault", "account[3] destination"], "issue": "withdraw does not check state account owner == program id (deposit/close do); authority, bump and balance read from possibly forged account", "confidence": 0.55},
+{"instruction": "tag_0 initialize", "accounts": ["account[1] state", "account[2] vault"], "issue": "CreateAccount on predictable PDAs fails if pre-funded; initialization DoS", "confidence": 0.5},
+{"instruction": "tag_3 close", "accounts": ["account[0]", "account[1]", "account[2]"], "issue": "vault PDA left open; rent stranded, re-initialize blocked", "confidence": 0.4},
+{"instruction": "tag_1 deposit", "accounts": ["account[0]", "account[1]", "account[2]"], "issue": "no authority check on deposit; griefing of close", "confidence": 0.3}
+], "tokens_read": 62092}

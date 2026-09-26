@@ -1,0 +1,99 @@
+#!/bin/sh
+# Build the real-issue eval binaries (eval/bin/<case>@vuln.so, @fixed.so) from upstream sources at pinned commits.
+# Not needed to use the dataset: the stripped binaries are committed.
+# Runs cargo inside the sbf-builder container with Solana platform-tools from ~/.cache/sbf-tools/<tools> (see bench/build.sh).
+# usage: eval/build.sh [case-filter] [vuln|fixed]
+set -e
+E=$(cd "$(dirname "$0")" && pwd)
+W=${SBF_EVAL_WORK:-$HOME/.cache/sbf-eval}
+mkdir -p "$W" "$E/bin"
+
+# Anchor IDL from source (eval/idlgen, anchor-syn 0.29 parser) when IDL_SRC names the program's lib.rs
+IDLGEN=$W/idlgen-target/release/idlgen
+[ -x "$IDLGEN" ] || (cd "$E/idlgen" && CARGO_TARGET_DIR="$W/idlgen-target" cargo build --release -q)
+
+# fetch <dir> <owner/repo> <sha> <topdir>: source snapshot of one commit (only <topdir> is extracted, '.' = all)
+fetch() {
+	[ -d "$1" ] && return
+	mkdir -p "$1.tmp"
+	if [ "$4" = . ]; then set -- "$1" "$2" "$3"; else set -- "$1" "$2" "$3" --wildcards "*/$4/*"; fi
+	fd=$1 fr=$2 fc=$3; shift 3
+	curl -sfL "https://codeload.github.com/$fr/tar.gz/$fc" | tar xz -C "$fd.tmp" --strip-components=1 "$@"
+	mv "$fd.tmp" "$fd"
+}
+
+# run <tools> <srcroot> <subdir> <cmd>: cargo in the container, in <srcroot>/<subdir> (cargo home shared per toolchain)
+run() {
+	T=$HOME/.cache/sbf-tools/$1
+	C=$HOME/.cache/sbf-cargo-$1
+	mkdir -p "$C"
+	docker run --rm -u "$(id -u):$(id -g)" -v "$T:/tools:ro" -v "$C:/cargo" -v "$2:/w" -w "/w/$3" \
+		-e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/w/target -e HOME=/tmp -e PATH=/tools/llvm/bin:/tools/rust/bin:/usr/bin:/bin \
+		-e CC=clang -e AR=llvm-ar -e RUSTC=/tools/rust/bin/rustc -e RUSTFLAGS="$RUSTFLAGS_SBF" \
+		-e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback $DOCKER_ENV sbf-builder sh -c "$4"
+}
+
+# build <case> <variant> <owner/repo> <sha> <workspace-subdir> <package> <lib-name> <tools> [host-side patch function, run in the source root]
+# RUSTFLAGS_SBF: extra rustc flags; old solana-program (< 1.10) gates syscalls on target_arch="bpf", hence --cfg target_arch="bpf"
+build() {
+	case "$1" in *${FILTER:-}*) ;; *) return ;; esac
+	case "$2" in *${VARIANT:-}*) ;; *) return ;; esac
+	out="$E/bin/$1@$2.so"
+	[ -f "$out" ] && { echo "exists $1@$2"; return; }
+	d="$W/$1@$2"
+	fetch "$d" "$3" "$4" "${5%%/*}"
+	[ -z "$9" ] || [ -f "$d/.patched" ] || { (cd "$d" && $9) && touch "$d/.patched"; }
+	so=$7.so
+	run "$8" "$d" "$5" "$LOCK $PRE cargo build --release --target sbf-solana-solana -p $6 2>&1 | grep -E '^error' -A8 | head -60" || true
+	f="$d/target/sbf-solana-solana/release/$so"
+	[ -f "$f" ] || { echo "FAILED $1@$2"; return; }
+	run "$8" "$d" . "llvm-objcopy --strip-all target/sbf-solana-solana/release/$so /tmp/o.so && cat /tmp/o.so" > "$out" # as deployed (cargo build-sbf)
+	rm -rf "$d/target"
+	[ -z "$IDL_SRC" ] || "$IDLGEN" "$d/$IDL_SRC" > "$E/bin/$1@$2.json"
+	echo "built $1@$2 ($(wc -c < "$out") bytes)"
+}
+
+FILTER=$1 VARIANT=$2
+# no committed Cargo.lock: resolve with the toolchain's rust version, keeping edition-2024 crates out (as scripts/refbuild.ts)
+LOCK='[ -f Cargo.lock ] || { cargo generate-lockfile && for p in blake3@1.5.5 cc@1.1.31 jobserver@0.1.32; do cargo update -p ${p%@*} --precise ${p#*@} 2>/dev/null; done; true; };'
+BPF='--cfg target_arch="bpf"'
+
+# solitaire (2021) used the removed const_generics feature; adt_const_params is its successor in rustc 1.75
+wormhole_patch() {
+	for f in solana/solitaire/program/src/lib.rs solana/bridge/program/src/lib.rs; do
+		sed -i 's/^#!\[feature(const_generics)\]//; 1s/^/#![feature(adt_const_params)]\n#![allow(incomplete_features)]\n/' "$f"
+	done
+	sed -i '/^pub enum AccountState/i #[derive(std::marker::ConstParamTy)]' solana/solitaire/program/src/types/accounts.rs
+}
+
+RUSTFLAGS_SBF=$BPF DOCKER_ENV="-e EMITTER_ADDRESS=11111111111111111111111111111115" # mainnet governance emitter (as in solana/Dockerfile)
+build wormhole_bridge vuln wormhole-foundation/wormhole 79ab522f802ccc5ba34278d3c648fa62e06f4f1c solana/bridge wormhole-bridge-solana bridge v1.41 wormhole_patch
+build wormhole_bridge fixed wormhole-foundation/wormhole e8b91810a9bb35c3c139f86b4d0795432d647305 solana/bridge wormhole-bridge-solana bridge v1.41 wormhole_patch
+
+RUSTFLAGS_SBF= DOCKER_ENV= IDL_SRC=programs/cp-swap/src/lib.rs
+build raydium_cp_swap vuln raydium-io/raydium-cp-swap cfdb70a8ca . raydium-cp-swap raydium_cp_swap v1.41
+build raydium_cp_swap fixed raydium-io/raydium-cp-swap 183ddbb115 . raydium-cp-swap raydium_cp_swap v1.41
+
+IDL_SRC=programs/amm/src/lib.rs
+build raydium_clmm vuln raydium-io/raydium-clmm d0cb69cc95 . raydium-amm-v3 raydium_amm_v3 v1.48
+build raydium_clmm fixed raydium-io/raydium-clmm e6dd1d5673 . raydium-amm-v3 raydium_amm_v3 v1.48
+
+RUSTFLAGS_SBF=$BPF IDL_SRC=
+build solend_lending vuln solendprotocol/solana-program-library 871935cafc . spl-token-lending spl_token_lending v1.41
+build solend_lending fixed solendprotocol/solana-program-library 132d74cf17 . spl-token-lending spl_token_lending v1.41
+
+RUSTFLAGS_SBF=$BPF IDL_SRC=rust/nft-candy-machine-v2/src/lib.rs
+build candy_machine_v2 vuln metaplex-foundation/metaplex 4f835f73e632ccaf4eb913d8fb64518ff52eb237 rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
+build candy_machine_v2 fixed metaplex-foundation/metaplex e9ef376443c3c8fd2f5b151dd0b09f757b1bf35c rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
+
+# proc-macro2 < 1.0.60 does not build on newer rustc (proc_macro::LineColumn)
+PM2='cargo update -p proc-macro2 --precise 1.0.66;'
+RUSTFLAGS_SBF=$BPF IDL_SRC=programs/brrr/src/lib.rs PRE=$PM2
+build cashio_brrr vuln cashioapp/cashio a51c3c59d544a5763b64abb4a8d82c49b0abd6d0 . brrr brrr v1.41
+build cashio_brrr fixed cashioapp/cashio 7df658184c . brrr brrr v1.41
+
+RUSTFLAGS_SBF=$BPF IDL_SRC= PRE=
+build spl_lending_flashloan vuln solana-labs/solana-program-library e8861b275d4d00561e11a9268407329e64bf3af3 . spl-token-lending spl_token_lending v1.41
+build spl_lending_flashloan fixed solana-labs/solana-program-library 23c487dd9c . spl-token-lending spl_token_lending v1.41
+build spl_lending_rounding vuln solana-labs/solana-program-library c24bc966f133fbac5c789f7fb2841e47764ee0f2 . spl-token-lending spl_token_lending v1.41
+build spl_lending_rounding fixed solana-labs/solana-program-library c2b287788b . spl-token-lending spl_token_lending v1.41

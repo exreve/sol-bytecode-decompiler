@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "withdraw", "accounts": ["vault", "owner"], "issue": "withdraw try_accounts never compares the signer key with vault.owner (no has_one = owner; close_vault has one) and does not re-derive the vault PDA; any signer can pass another user's vault and withdraw its recorded balance to their own wallet", "confidence": 0.9}], "tokens_read": 76780}

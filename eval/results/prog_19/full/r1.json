@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "tag_2 withdraw", "accounts": ["account[1] state", "account[0] authority", "account[2] vault"], "issue": "withdraw never checks account[1].owner == program id (tag_1/tag_3 do); trusts data[0..32] authority, bump and balance from a possibly attacker-owned lookalike account; reviewer judged impact limited", "confidence": 0.3},
+{"instruction": "tag_1 deposit", "accounts": ["account[0]", "account[1]"], "issue": "deposit does not check state authority equals signer; anyone can credit another user's vault", "confidence": 0.15},
+{"instruction": "tag_3 close", "accounts": ["account[1]", "account[2]"], "issue": "close does not handle the vault PDA; vault lamports stranded and re-initialize blocked", "confidence": 0.25}
+], "tokens_read": 60689}
