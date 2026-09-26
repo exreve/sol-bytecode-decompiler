@@ -205,7 +205,7 @@ export function phase2(a: Analysis, r: Result) {
 			// (Anchor has_one on account T: T.<f> == f.key, f an account of the instruction and a field of T's type (the
 			// error names T, not f): by the bytes compared (c.sides), else the IDL's field names, else (no IDL) each signer)
 			if (c.kinds.includes('has_one') && c.account && !c.sides) {
-				const fields = idlFields(r)
+				const fields = idlFields(r, ix.handler, c.account)
 				const cands = fields ? ix.accounts.filter(x => x.name !== c.account && fields.has(x.name)) : ix.accounts.filter(x => x.name !== c.account && x.constraints.signer && x.constraints.signer.status !== 'not_found')
 				for (const t of cands) rel.push({ a: fields ? `${c.account}.${t.name}` : hasOneField(c.account, t.name, c.cond, a), b: `${t.name}.key`, kind: 'has_one', status: c.status, at: c.at })
 			}
@@ -259,12 +259,16 @@ export function phase2(a: Analysis, r: Result) {
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 }
 
-/** the fields of the IDL's account types (undefined without an IDL) */
-function idlFields(r: Result): Set<string> | undefined {
+/** the fields of an account's IDL type (its type in the Accounts struct's layout, else any account type's; undefined without an IDL) */
+function idlFields(r: Result, handler: string, acct: string): Set<string> | undefined {
 	const idl = r.idl
 	if (!idl?.accounts?.length) return undefined
+	const h = r.funcs.find(x => x.name === handler)
+	const t = h && r.acctLayouts?.get(h.pc)?.find(x => x.name === acct)?.t
+	const ty = t?.k === 'embed' ? t.type : t?.k === 'ref' && t.to !== 'AccountInfo' ? t.to : undefined
+	const types = ty && idl.accounts.some(x => x.name === ty) ? [ty] : idl.accounts.map(x => x.name)
 	const out = new Set<string>()
-	for (const x of idl.accounts) for (const f of structFields(x.name, idl.types) ?? []) out.add(f.name)
+	for (const x of types) for (const f of structFields(x, idl.types) ?? []) out.add(f.name)
 	return out
 }
 
