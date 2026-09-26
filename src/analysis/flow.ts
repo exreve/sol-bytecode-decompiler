@@ -1483,7 +1483,7 @@ type AV =
 	| { k: 'recs'; off: number }                                  // array of pointers to input records
 	| { k: 'rec'; i: number; off: number }                        // input record i
 	| { k: 'rc'; i: number; f: 'lamports' | 'data'; off: number } // Rc<RefCell<&mut ..>> of AccountInfo i
-	| { k: 'ptr'; i: number; f: string; off: number }             // &lamports / &data[..] / &key / &owner of account i
+	| { k: 'ptr'; i: number; f: string; off: number; vo?: boolean } // &lamports / &data[..] / &key / &owner of account i (vo: data at a variable offset past off)
 	| { k: 'val'; i: number; f: string }                          // a field value read
 	| { k: 'base'; v: number; off: number }                       // (first pass) a pointer variable
 	| { k: 'elem'; v: number; e: number; off: number }            // (first pass) a pointer loaded from base v, entry e
@@ -2009,7 +2009,13 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			}
 			case 'ext': return ev(e.a, p, d + 1)
 			case 'bin': {
-				if (e.op !== 'add' || e.b.k !== 'const') return undefined
+				if (e.op !== 'add') return undefined
+				// (an account's data plus a variable offset: somewhere in its data, e.g. a subslice's pointer)
+				if (e.b.k !== 'const') {
+					if (pass1) return undefined
+					for (const [x, y] of [[e.a, e.b], [e.b, e.a]]) if (y.k !== 'const') { const a = ev(x, p, d + 1); if (a?.k === 'ptr' && a.f === 'data') return { ...a, vo: true } }
+					return undefined
+				}
 				const a = ev(e.a, p, d + 1)
 				return a && a.k !== 'val' ? { ...a, off: a.off + sNum(e.b.v) } : undefined
 			}
@@ -2068,7 +2074,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			case 'ptr':
 				// (a key / owner: only its 32 bytes; lamports: the 8)
 				if (a.f !== 'data' && (a.off < 0 || a.off + size > (a.f === 'lamports' ? 8 : 0x20))) return undefined
-				return { k: 'val', i: a.i, f: a.f === 'data' ? `data[${a.off}..${a.off + size}]` : a.f }
+				return { k: 'val', i: a.i, f: a.f === 'data' ? (a.vo ? 'data' : `data[${a.off}..${a.off + size}]`) : a.f }
 		}
 		return undefined
 	}
@@ -2270,7 +2276,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (!a) return undefined
 		if (a.k === 'val') return { index: a.i, field: a.f }
 		// (a pointer standing for the 32 bytes compared)
-		if (a.k === 'ptr') return { index: a.i, field: a.f === 'data' ? `data[${a.off}..${a.off + 32}]` : a.f }
+		if (a.k === 'ptr') return { index: a.i, field: a.f === 'data' ? (a.vo ? 'data' : `data[${a.off}..${a.off + 32}]`) : a.f }
 		if (a.k === 'rec') { const r = REC_FIELD[a.off]; return a.off >= 0x58 ? { index: a.i, field: `data[${a.off - 0x58}..${a.off - 0x58 + 32}]` } : r && r[1] === 32 ? { index: a.i, field: r[0] } : undefined }
 		return undefined
 	}
@@ -2330,14 +2336,15 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (c && /^(sol_)?(memset|memcpy|memmove)_?$/.test(nm) && c.args.length >= 3) {
 			const a = ev(c.args[0], p), n = c.args[2].k === 'const' ? Number(c.args[2].v) : undefined
 			const d = a?.k === 'ptr' && a.f === 'data' ? [a.i, a.off] : a?.k === 'rec' && a.off >= 0x58 ? [a.i, a.off - 0x58] : undefined
+			if (a?.k === 'ptr' && a.vo) return { index: a.i, field: 'data' }
 			return d && { index: d[0], field: n === undefined ? (d[1] ? `data[${d[1]}..]` : 'data') : `data[${d[1]}..${d[1] + n}]` }
 		}
 		if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return undefined
 		const a = ev(s.k === 'copy' ? s.dst : s.addr, p)
 		const n = s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n
 		// (the u64 before the data: its length, AccountInfo::realloc)
-		if (a?.k === 'ptr' && a.f === 'data' && a.off === -8 && n === 8 && s.k === 'store') return { index: a.i, field: 'data_len' }
-		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
+		if (a?.k === 'ptr' && a.f === 'data' && !a.vo && a.off === -8 && n === 8 && s.k === 'store') return { index: a.i, field: 'data_len' }
+		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : a.vo ? 'data' : `data[${a.off}..${a.off + n}]` }
 		// (the owner pubkey rewritten: AccountInfo::assign)
 		// (only the 32 owner bytes: not a neighbouring Rc / RefCell word)
 		if (a?.k === 'ptr' && a.f === 'owner' && a.off >= 0 && a.off + n <= 0x20 || a?.k === 'rec' && a.off >= 0x28 && a.off + n <= 0x48) return { index: a.i, field: 'owner' }
