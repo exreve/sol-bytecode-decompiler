@@ -23,6 +23,10 @@ jobs:
           for s in memo token ata; do
             node --stack-size=65500 test/equiv.ts samples/$s.so 2
           done
+      - name: Regression (sBPF v3, 2.7 MB Anchor program; crashed on v3 syscall calls)
+        run: |
+          node src/cli.ts samples/svault_v3.so -o out/svault/
+          node --stack-size=65500 test/equiv.ts samples/svault_v3.so 1
       - name: Analysis benchmark (minimum score 85)
         run: |
           node bench/run.ts | tee bench.log
