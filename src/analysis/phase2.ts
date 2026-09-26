@@ -18,6 +18,7 @@ import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { auditIx } from './audit.ts'
 import { consistency } from './consistency.ts'
+import { incidentFindings, fundMovers } from './incidents.ts'
 import { structFields } from '../idl.ts'
 import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
@@ -411,6 +412,8 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
+	findings.push(...incidentFindings(a, r, findings))
+	a.fundMovers = fundMovers(a, r)
 	const rank = { high: 3, medium: 2, low: 1, info: 0 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
