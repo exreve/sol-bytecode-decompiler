@@ -435,11 +435,18 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (!strict && lb * 4 <= la && lb <= 40) return 'rest'
 		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")
 		if (!strict && inp.anchor && la <= 60 && la * 2 <= lb && inlineString(a)) return 'then'
+		// (Anchor: a callee's error returned with the account's name built inline and no error of its own, while the
+		// other side goes on to raise errors of further checks)
+		const marks = (ns: Node[]) => { let c = 0; for (const l of textOf(ns).split('\n')) if (ERROR_MARK.test(l)) c++; return c }
+		if (!strict && inp.anchor) {
+			const ma0 = marks(a), mb0 = marks(b)
+			if (!ma0 && mb0 >= 2 && la <= 60 && inlineString(a)) return 'then'
+			if (!mb0 && ma0 >= 2 && lb <= 60 && inlineString(b)) return 'rest'
+		}
 		// (the failing side raises its error first thing; the passing side, if at all, after further checks)
 		const fa = firstMark(a), fb = firstMark(b)
 		if (fa !== fb && Math.min(fa, fb) + 8 < Math.max(fa, fb)) return fa < fb ? 'then' : 'rest'
 		// (the failing side reports one error; the passing side goes on to make further checks)
-		const marks = (ns: Node[]) => { let c = 0; for (const l of textOf(ns).split('\n')) if (ERROR_MARK.test(l)) c++; return c }
 		const ca = marks(a), cb = marks(b)
 		if (ca && cb && ca !== cb && Math.min(ca, cb) * 2 < Math.max(ca, cb)) return ca < cb ? 'then' : 'rest'
 		const ma = ERROR_MARK.test(topText(a)), mb = ERROR_MARK.test(topText(b))

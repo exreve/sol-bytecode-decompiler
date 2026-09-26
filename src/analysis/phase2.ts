@@ -324,6 +324,9 @@ const RULES: Rule[] = [
 			const o = ix.ops[row.op]
 			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 			if (!hasSigner || stored || o.cpi?.seeds) return []
+			// (initialization: a write to an account the instruction creates (no discriminator / type check on it))
+			const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
+			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
 			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
 			if (o.cpi?.known && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) return []
