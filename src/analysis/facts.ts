@@ -36,6 +36,7 @@ export interface FnInput {
 	irCmp?: (e: Expr, failPc?: number, passPc?: number) => boolean // native: a condition on a 32-byte comparison (its accounts known in a caller's context only)
 	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
+	strAt?: (ptr: bigint, len: bigint) => string | undefined // a string in program memory
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -250,6 +251,33 @@ export function functionFacts(inp: FnInput): FnFacts {
 	 * struct's in field order), each named by its key word (`x.key` of an AccountInfo the code names), and
 	 * whether signer seeds follow (new_with_signer).
 	 */
+	/**
+	 * The seeds of one PDA signer (new_with_signer's &[&[&[u8]]] with one entry) built in the frame before line l: the
+	 * signer's (ptr, len) stored at `v`, its seeds' (ptr, len) pairs; literal strings in program memory by their text, the
+	 * others `*name`, a 1-byte one (the bump) `(1 bytes)`.
+	 */
+	const signerSeeds = (v: string | undefined, l: number): string | undefined => {
+		// (the frame words stored before line l: offset -> value)
+		const fo = (x: string) => { const m = /^s([0-9a-f]+)(?: \+ (0x[0-9a-f]+|\d+))?$/.exec(x.trim()); return m ? -parseInt(m[1], 16) + Number(m[2] ?? 0) : undefined }
+		const words = new Map<number, string>()
+		for (let k = Math.max(at, l - 120); k < l; k++) {
+			const m = /^\s*st64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?), (.*)\)$/.exec(lines[k])
+			const o = m && fo(m[1])
+			if (o !== undefined && o !== null) m![2].split(', ').forEach((y, i) => words.set(o + 8 * i, y.trim()))
+		}
+		const S = v === undefined ? undefined : fo(v)
+		const P = S === undefined ? undefined : words.get(S), n = S === undefined ? NaN : Number(words.get(S + 8))
+		const A = P === undefined ? undefined : fo(P)
+		if (A === undefined || !(n > 0 && n <= 16)) return undefined
+		const out: string[] = []
+		for (let i = 0; i < n; i++) {
+			const a = words.get(A + 16 * i), len = words.get(A + 16 * i + 8)
+			if (a === undefined || len === undefined) return undefined
+			const lit = /^0x[0-9a-f]+$/.test(a) && /^(0x[0-9a-f]+|\d+)$/.test(len) ? inp.strAt?.(BigInt(a), BigInt(len)) : undefined
+			out.push(lit !== undefined && /^[\x20-\x7e]+$/.test(lit) ? JSON.stringify(lit) : /^(0x)?1$/.test(len) ? '(1 bytes)' : `*${a}`)
+		}
+		return `[${out.join(', ')}]`
+	}
 	const cpiContext = (ctx: string, l: number, roles: string[]): { accounts: CpiParts['accounts']; seeds?: string } | undefined => {
 		const fo = (s: string) => { const m = /^s([0-9a-f]+)(?: \+ (0x[0-9a-f]+|\d+))?$/.exec(s.trim()); return m ? -parseInt(m[1], 16) + Number(m[2] ?? 0) : undefined }
 		const Y = fo(ctx)
@@ -284,7 +312,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		// (the accounts the callee requires to sign: the authority, the system transfer's source)
 		return {
 			accounts: accts.map((a, i) => ({ role: roles[i] ?? `account${i}`, text: a ?? '?', s: /^(authority|from|current_authority)$/.test(roles[i] ?? '') ? 1 : undefined })),
-			seeds: seedLen !== undefined && !/^(0x)?0$/.test(seedLen) ? `? (${seedLen} seeds)` : undefined,
+			seeds: seedLen !== undefined && !/^(0x)?0$/.test(seedLen) ? (seedLen === '1' && signerSeeds(words.get(Y + 0x18 + 0x30 * infos.length), l)) || `? (${seedLen} seeds)` : undefined,
 		}
 	}
 	const helperCall = (n: Node, callee: number, main: boolean, err: boolean) => {

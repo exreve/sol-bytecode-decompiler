@@ -1184,6 +1184,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       },
       irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
       calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
+      strAt: (a, n) => sem.strAt(a, n),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     if (facts.has(pc)) facts.get(pc)!.expr = e => pr.u(e, 0);
