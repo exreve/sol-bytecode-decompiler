@@ -857,6 +857,7 @@ export interface AcctResolver {
 	refs: (e: Expr, b?: number) => AcctRef[]              // account fields an expression (a branch condition, else evaluated at the end of block b) reads
 	store: (s: Stmt) => (AcctRef & { how?: '=' | '+=' | '-=' }) | undefined // the account field a store writes (lamports, data[a..b]), how (a sum / difference stored)
 	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
+	valueRef: (e: Expr, s: Stmt) => AcctRef | undefined     // the account field an expression of a statement is (a key: the pointer to it)
 }
 
 /**
@@ -1387,7 +1388,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		return cmp(x)
 	}
-	res = { byName, refs, store, sides }
+	const valueRef = (e: Expr, s: Stmt): AcctRef | undefined => { const p = pos.get(s); return p === undefined ? undefined : asRef(ev(e, p)) }
+	res = { byName, refs, store, sides, valueRef }
 	resMemo.set(fo.f, res)
 	return res
 }

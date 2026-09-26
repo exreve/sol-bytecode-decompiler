@@ -242,7 +242,7 @@ export function phase2(a: Analysis, r: Result) {
 					en.push({ kind: 'stored', what: `${s.name}.key == ${field}`, status: x.status, writtenBy: authFields.get(field) ?? a.stateWrites.find(w => w.target === field)?.writes.map(w => w.ix) })
 				}
 			}
-			if (o.cpi?.seeds) en.push({ kind: 'pda', what: `PDA signature ${o.cpi.seeds}` })
+			if (o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')) en.push({ kind: 'pda', what: `PDA signature ${o.cpi?.seeds ?? '(seeds not decoded)'}` })
 			if (!en.length) en.push({ kind: 'none', what: 'no signer, stored authority or PDA signature found' })
 			auth.push({ op: oi, kind: o.kinds.filter(k => k !== 'CPI').join(', ') || 'CPI', enabledBy: en })
 		})
@@ -348,7 +348,7 @@ const RULES: Rule[] = [
 			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
 			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
-			if ((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) return []
+			if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
 			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
 		}),
 	},
@@ -429,7 +429,7 @@ const RULES: Rule[] = [
 			if (signed) return []
 			if (fromData.length) return [{ accounts: [n ?? au!.text], path: [L(o.at)], evidence: [o.text.slice(0, 140), `authority ← ${fromData.map(s => `${s.source} (${s.trust})`).join(', ')}`], confidence: fromData.some(s => s.trust === 'caller-controlled') ? 'medium' as const : 'low' as const, weight: wOf(o) }]
 			if (seedsData.length) return [{ accounts: seedsData.map(s => s.source), path: [L(o.at)], evidence: [o.text.slice(0, 140), `PDA signer seeds from unverified account data: ${seedsData.map(s => s.source).join(', ')}`], confidence: 'low' as const, weight: wOf(o) }]
-			if (!o.cpi?.seeds && au && !row) return [{ accounts: [au.text], path: [L(o.at)], evidence: [o.text.slice(0, 140), `authority ${au.text} is not an identified account with a signer check (read from memory / data)`], confidence: 'low' as const, weight: wOf(o) }]
+			if (!o.cpi?.seeds && !o.kinds.includes('PDA_SIGNATURE') && au && !row) return [{ accounts: [au.text], path: [L(o.at)], evidence: [o.text.slice(0, 140), `authority ${au.text} is not an identified account with a signer check (read from memory / data)`], confidence: 'low' as const, weight: wOf(o) }]
 			return []
 		}),
 	},
@@ -464,14 +464,15 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'recipient-unbound', title: 'Recipient / destination with no owner, mint or key binding',
-		run: ix => ix.ops.flatMap(o => {
+		run: (ix, a) => ix.ops.flatMap(o => {
 			const k = o.kinds
 			if (!k.some(x => x === 'TOKEN_TRANSFER' || x === 'LAMPORT_TRANSFER' || x === 'MINT')) return []
 			const dest = o.cpi?.accounts.find(x => x.role && /^(destination|to|account)$/.test(x.role))
 			const d = dest && /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(dest.text)?.[1]
 			const row = d ? ix.accounts.find(x => x.name === d) : undefined
 			if (!row) return []
-			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer'].filter(c => row.constraints[c] && row.constraints[c].status !== 'not_found')
+			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
+			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
 			if (bind.length || rel) return []
 			// (outflows the program signs for are the ones where an unbound destination matters most)

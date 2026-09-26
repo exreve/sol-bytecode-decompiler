@@ -79,7 +79,7 @@ export interface Op {
 export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)
 
 /** An instruction of a well-known program the code builds: a library instruction builder called, a TokenInstruction packed (for the CPI that follows). */
-export interface IxHint { line: number; program: string; family: string; ix: string; how: string }
+export interface IxHint { line: number; program: string; family: string; ix: string; how: string; call?: { fn: number; pc: number } } // call: the builder call (arguments: out, program id, the accounts in order)
 
 export interface FnFacts {
 	pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean
@@ -296,7 +296,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 			return
 		}
 		const b = BUILDER.exec(path)
-		if (b) { const [program, family] = helperProgram(b[1]); facts.ixHints.push({ line: l + 1, program, family, ix: pascal(b[3]), how: path }); return }
+		if (b) { const [program, family] = helperProgram(b[1]); facts.ixHints.push({ line: l + 1, program, family, ix: pascal(b[3]), how: path, call: n.k === 'stmt' ? { fn: inp.pc, pc: n.s.pc } : undefined }); return }
 		// (TokenInstruction::pack(out, &self): the enum's tag stored into self before)
 		if (/TokenInstruction::pack$/.test(path) || /^TokenInstruction_pack/.test(inp.calleeName(callee))) {
 			const self = /\(([^,]+), ([^,)]+)\)$/.exec(t)?.[2]?.trim()

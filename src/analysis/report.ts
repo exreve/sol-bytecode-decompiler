@@ -61,6 +61,7 @@
 import type { Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
+import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef } from './flow.ts'
 import type { Expr } from '../ir.ts'
@@ -264,13 +265,21 @@ function analyze0(r: Result): Analysis {
 			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls) }
 		}
 		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
+		/** the accounts whose keys a call passes (arguments 1.., native), by name */
+		const builderAccounts = (fn: number, pc: number): (string | undefined)[] | undefined => {
+			const fo = byPc.get(fn)
+			const s = fo?.f.blocks.flatMap(b => b.stmts).find(x => x.pc === pc && callOf(x))
+			if (!fo || !s) return undefined
+			const R = accountResolver(fo, { f: x => byPc.get(x)?.f, name: x => p.funcs.get(x)?.name ?? '' })
+			return callOf(s)!.args.slice(1, 8).map(a => { const x = R.valueRef(a, s); return x?.field === 'key' ? idxName(x.index) : undefined })
+		}
 		const hintBefore = (ff: FnFacts, line: number, depth = 2): IxHint | undefined => {
 			let best: IxHint | undefined
 			const take = (x: IxHint) => { if (x.line < line && (!best || x.line > best.line)) best = x }
 			ff.ixHints.forEach(take)
 			for (const c of ff.calls) {
 				const hs = facts.get(c.callee)?.ixHints ?? []
-				if (hs.length && hs.every(x => x.ix === hs[0].ix) && keep(ff.pc, c.pc)) take({ ...hs[0], line: c.line, how: `${facts.get(c.callee)!.name} (${hs[0].how})` })
+				if (hs.length && hs.every(x => x.ix === hs[0].ix) && keep(ff.pc, c.pc)) take({ ...hs[0], line: c.line, how: `${facts.get(c.callee)!.name} (${hs[0].how})`, call: c.pc !== undefined ? { fn: ff.pc, pc: c.pc } : undefined })
 			}
 			// (none: a wrapper of invoke called after the instruction was built, in its caller)
 			const par = !best && depth > 0 ? parents.get(ff.pc) : undefined
@@ -341,6 +350,14 @@ function analyze0(r: Result): Analysis {
 				if (h) {
 					cpi = { ...(o.cpi ?? { program: h.program, accounts: [], fields: [] }), family: h.family, ix: h.ix }
 					if (!o.cpi || o.cpi.program === '?') cpi.program = h.program
+					// (native: the builder's arguments: the program id, then the instruction's accounts in their order)
+					const ba = !r.anchor && h.call ? builderAccounts(h.call.fn, h.call.pc) : undefined
+					if (ba && !cpi.accounts.length) {
+						const roles = knownFamilies().find(([k]) => k === h.program)?.[1].ixs
+						const lay = roles && Object.values(roles).find(x => x.name === h.ix)
+						cpi.accounts = ba.slice(1, 1 + (lay?.accounts.length ?? 0)).map((a, i) => ({ role: lay!.accounts[i], text: a ?? '?' }))
+						if (ba[0]) cpi.program = ba[0]
+					}
 					kinds = [...new Set([...cpiKinds(h.family, h.ix), ...o.kinds])]
 					text = `CPI ${cpi.program}.${h.ix} [heur: the instruction built before it: ${h.how}]${o.cpi ? ` — ${o.text}` : ''}`
 				}
