@@ -52,7 +52,7 @@ Other tools:
 | `node --stack-size=65500 test/equiv.ts program.so 3 [--idl x.json]` | check a decompilation against the emulator (expected: `0 failing functions`) |
 | `node bench/run.ts [--verbose]` | score the analysis against ground truth ([bench/README.md](bench/README.md)) |
 
-Speed (8-core VM): memo 0.6 s, token-2022 2.2 s, whirlpool (173k instructions) 4.1 s, jupiter (258k instructions) 6.2 s.
+Speed (8-core VM): memo 0.6 s, token-2022 2.4 s, whirlpool (173k instructions) 4.1 s, jupiter (258k instructions) 6.7 s.
 
 ## Output
 
