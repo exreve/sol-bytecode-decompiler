@@ -1,0 +1,4 @@
+{"findings": [
+{"instruction": "flash_loan", "accounts": ["host_fee_receiver"], "issue": "host fee receiver unchecked (upstream design)", "confidence": 0.25},
+{"instruction": "borrow_obligation_liquidity", "accounts": ["host_fee_receiver"], "issue": "host fee receiver unchecked (upstream design)", "confidence": 0.2}
+], "tokens_read": 107510}

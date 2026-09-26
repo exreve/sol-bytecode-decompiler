@@ -1,0 +1,6 @@
+{"findings": [
+{"instruction": "update_candy_machine", "accounts": ["candyMachine", "wallet", "remaining_accounts[0]"], "issue": "authority-only update sets token_mint/wallet without validation initialize performs", "confidence": 0.45},
+{"instruction": "mint_nft", "accounts": ["recentBlockhashes", "candyMachine"], "issue": "predictable config line selection from recent blockhashes", "confidence": 0.4},
+{"instruction": "add_config_lines", "accounts": ["candyMachine", "authority"], "issue": "index + len not bounded by items_available (authority only)", "confidence": 0.25},
+{"instruction": "mint_nft", "accounts": ["candyMachineCreator"], "issue": "creator PDA with caller-supplied non-canonical bump", "confidence": 0.2}
+], "tokens_read": 146754}

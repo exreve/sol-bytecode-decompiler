@@ -1,0 +1,7 @@
+{"findings": [
+{"instruction": "initialize_candy_machine", "accounts": ["candyMachine", "wallet", "authority", "payer"], "issue": "no uninitialized/zero-discriminator check; anyone re-initializes a live candy machine, sets themselves as authority/wallet", "confidence": 0.85},
+{"instruction": "mint_nft", "accounts": ["recentBlockhashes", "candyMachine"], "issue": "predictable config line selection", "confidence": 0.4},
+{"instruction": "mint_nft", "accounts": ["gateway token", "gateway program", "expire feature", "payer"], "issue": "expire path skips gateway token owner/wallet/network checks", "confidence": 0.3},
+{"instruction": "update_candy_machine", "accounts": ["remaining_accounts[0]", "wallet"], "issue": "token_mint/wallet not validated (authority only)", "confidence": 0.3},
+{"instruction": "add_config_lines", "accounts": ["candyMachine"], "issue": "index+len not bounded (authority only)", "confidence": 0.25}
+], "tokens_read": 156368}

@@ -1,0 +1,4 @@
+{"findings": [
+{"instruction": "update_reserve_config", "accounts": ["reserve", "lending_market", "lending_market_authority", "lending_market_owner"], "issue": "reserve.lending_market never compared with the provided lending_market; attacker with own market overwrites victim reserve config", "confidence": 0.85},
+{"instruction": "flash_loan", "accounts": ["reserve", "lending_market", "source_liquidity", "flash_loan_fee_receiver"], "issue": "reserve owner never compared with program_id; forged reserve gives fee-free flash loans", "confidence": 0.45}
+], "tokens_read": 87521}

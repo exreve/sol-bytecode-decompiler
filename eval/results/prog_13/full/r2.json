@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "tag_4 TransferFees", "accounts": ["bridge", "fee_collector", "recipient"], "issue": "last_lamports not updated after fee transfer; PostMessage DoS", "confidence": 0.2},
+{"instruction": "tag_3/4/5/6 governance", "accounts": ["posted_vaa"], "issue": "vaa magic not checked, no PDA; blocked today by emitter check", "confidence": 0.15},
+{"instruction": "tag_0 Initialize", "accounts": ["bridge", "payer"], "issue": "initialize has no caller authorization (front-run)", "confidence": 0.2}
+], "tokens_read": 153854}

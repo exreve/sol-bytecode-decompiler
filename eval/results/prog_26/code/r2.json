@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "mint_nft", "accounts": ["remaining_accounts[0] gateway token", "remaining_accounts[1] gateway app", "remaining_accounts[2] expire feature", "payer"], "issue": "expiring gatekeeper path does not check gateway token owner/owner_wallet/network locally (relies on gateway CPI)", "confidence": 0.3}], "tokens_read": 123287}

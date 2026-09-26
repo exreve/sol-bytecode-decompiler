@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "initialize_candy_machine", "accounts": ["candyMachine", "authority", "payer"], "issue": "no uninitialized/discriminator check; authority not signer; re-initialize and seize existing candy machine", "confidence": 0.55}], "tokens_read": 137599}

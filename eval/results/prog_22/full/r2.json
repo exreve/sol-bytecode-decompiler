@@ -1,0 +1,4 @@
+{"findings": [
+{"instruction": "VerifySignatures (tag_7)", "accounts": ["account[3] instructions sysvar", "signature_set", "guardian_set"], "issue": "instructions sysvar account parsed with no key check against Sysvar1nstructions; fake account forges secp256k1 verification and guardian signatures", "confidence": 0.85},
+{"instruction": "tag_3/4/5/6 governance", "accounts": ["account[2] vaa"], "issue": "vaa magic not compared, no PDA check; posted messages might pass as governance VAAs (needs emitter control)", "confidence": 0.25}
+], "tokens_read": 128011}

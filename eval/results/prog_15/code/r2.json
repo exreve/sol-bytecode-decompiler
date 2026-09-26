@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "flash_loan", "accounts": ["reserve"], "issue": "reserve owner never compared with program id in flash_loan; fake reserve zeroes fee", "confidence": 0.55}], "tokens_read": 166484}

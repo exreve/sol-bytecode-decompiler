@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "tag_0", "accounts": ["accounts[0]"], "issue": "no signer required; reaches PDA-signed CPI", "confidence": 0.5},
+{"instruction": "tag_2", "accounts": ["accounts[0]"], "issue": "target state account mutated without signer on it", "confidence": 0.3},
+{"instruction": "tag_1", "accounts": ["accounts[0]"], "issue": "primary account not authority-gated", "confidence": 0.25}
+], "tokens_read": 135221}
