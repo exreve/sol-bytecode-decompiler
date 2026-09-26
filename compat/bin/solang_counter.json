@@ -1,0 +1,179 @@
+{
+  "version": "0.0.1",
+  "name": "counter",
+  "instructions": [
+    {
+      "name": "count",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": false
+        }
+      ],
+      "args": [],
+      "returns": "u64"
+    },
+    {
+      "name": "owner",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": false
+        }
+      ],
+      "args": [],
+      "returns": "publicKey"
+    },
+    {
+      "name": "credits",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "arg0",
+          "type": "publicKey"
+        }
+      ],
+      "returns": "u64"
+    },
+    {
+      "name": "new",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": true,
+          "isSigner": true,
+          "isOptional": false
+        },
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "isOptional": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "initialowner",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "increment",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": true,
+          "isSigner": false,
+          "isOptional": false
+        },
+        {
+          "name": "caller",
+          "isMut": false,
+          "isSigner": true,
+          "isOptional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "by",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "setOwner",
+      "accounts": [
+        {
+          "name": "dataAccount",
+          "isMut": true,
+          "isSigner": false,
+          "isOptional": false
+        },
+        {
+          "name": "auth",
+          "isMut": false,
+          "isSigner": true,
+          "isOptional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "newowner",
+          "type": "publicKey"
+        }
+      ]
+    },
+    {
+      "name": "pay",
+      "accounts": [
+        {
+          "name": "from",
+          "isMut": true,
+          "isSigner": true,
+          "isOptional": false
+        },
+        {
+          "name": "to",
+          "isMut": true,
+          "isSigner": false,
+          "isOptional": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": false
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Incremented",
+      "fields": [
+        {
+          "name": "who",
+          "type": "publicKey",
+          "index": false
+        },
+        {
+          "name": "by",
+          "type": "u64",
+          "index": false
+        },
+        {
+          "name": "total",
+          "type": "u64",
+          "index": false
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "address": "Cntr1hFhCxz6NtwJUwBNHPfM3Ch8JxLTjLmSGvHk1v9e"
+  }
+}

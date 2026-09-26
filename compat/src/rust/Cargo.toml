@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["n_vault", "p_counter"]
+
+[workspace.dependencies]
+solana-program = "=2.2.1"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

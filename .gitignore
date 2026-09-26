@@ -5,6 +5,7 @@ samples/*.so
 !samples/memo.so
 !samples/token.so
 !samples/ata.so
+!samples/svault_v3.so
 out.*.ts
 corpus/
 refbuild/out/

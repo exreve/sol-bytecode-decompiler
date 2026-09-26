@@ -32,7 +32,8 @@ export interface FnInput {
 	anchor: boolean
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
-	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
+	irRefs?: (e: Expr, failPc?: number, passPc?: number) => { field?: string }[] // native: account fields a condition reads (flow.ts accountResolver; the sides' first statements locate a rebuilt condition)
+	irCmp?: (e: Expr, failPc?: number, passPc?: number) => boolean // native: a condition on a 32-byte comparison (its accounts known in a caller's context only)
 	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 }
@@ -54,6 +55,7 @@ export interface Check {
 	via?: { fn: string; kinds: string[] } // the checks that callee makes (kinds from its Anchor error codes, see calleeChecks)
 	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
 	passPc?: number        // the first statement on the passing side (the deciding block, when the condition's code is duplicated)
+	cmp32?: boolean        // native: a 32-byte comparison whose accounts the function alone does not know (no kinds yet)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -74,6 +76,7 @@ export interface Op {
 	via?: string                  // the CPI is made through this (small) user function wrapping invoke
 	ret?: Expr                    // the returned expression making it (a site in a return statement: no pc)
 	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
+	handler?: number              // the Anchor handler whose accounts name the target (a store in a function several handlers call; flow.ts)
 }
 
 export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)
@@ -86,6 +89,8 @@ export interface FnFacts {
 	ixHints: IxHint[]                  // instructions of well-known programs built here (see IxHint)
 	lines: string[]; at: number          // the printed text (for the IR-level analyses, src/analysis/flow.ts)
 	pcLine: Map<number, number>        // statement pc -> 1-based line
+	condLine: Map<Expr, number>        // a branch / loop condition (and its && / || / ! leaves) -> the 1-based line of its `if` / loop
+	expr?: (e: Expr) => string         // the printer of the function's expressions (names as printed)
 }
 
 const ACC_FIELDS = new Set(['key', 'owner', 'is_signer', 'is_writable', 'executable', 'lamports', 'data', 'data_len', 'rent_epoch', 'original_data_len', 'dup_marker'])
@@ -101,6 +106,7 @@ export const ANCHOR_KIND: Record<string, string> = {
 	ConstraintAssociated: 'associated', ConstraintAssociatedInit: 'associated', ConstraintTokenTokenProgram: 'token_program', AccountNotSystemOwned: 'owner',
 	AccountSysvarMismatch: 'address', ConstraintSpace: 'space', ConstraintDuplicateMutableAccount: 'duplicate',
 }
+const ERROR_RAISE = /anchor::(Constraint|Account|Require)\w*|error::\w|ProgramError::\w/
 const ERROR_MARK = /anchor::\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
 const TEMP = /^([a-z]{1,2}|v\d+|s[0-9a-f]+|p\d+|r\d|fp|u\d+)$/
 const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate/i
@@ -159,7 +165,7 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
-	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), ixHints: [] }
+	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), condLine: new Map(), ixHints: [] }
 	// declared types and single-definition aliases (x = path) of the function's names
 	const alias = new Map<string, string | null>()
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
@@ -406,7 +412,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 			if (FIELD_KIND[f0]) add(FIELD_KIND[f0])
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
-		for (const x of inp.irRefs?.(n.c) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
+		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
 		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// the error raised: an IDL error, else an Anchor error that reports a constraint, else any Anchor / program error
 		let error = ''
@@ -414,7 +420,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const ams = [...ft.matchAll(/anchor::(\w+)/g)].map(x => x[1])
 		const ak = ams.find(x => ANCHOR_KIND[x])
 		if (cm2) { error = cm2[0]; add('custom') }
-		else if (ak) { error = `anchor::${ak}`; add(ANCHOR_KIND[ak]) }
+		// (Anchor `zero`: the account's discriminator must be zero, a discriminator check)
+		else if (ak) { error = `anchor::${ak}`; add(ANCHOR_KIND[ak]); if (ANCHOR_KIND[ak] === 'zero') add('discriminator') }
 		else if (ams.length) error = `anchor::${ams[0]}`
 		else { const em = /\b(Err\([^)]*\)?\))/.exec(ft) ?? /ProgramError::(\w+)/.exec(ft); if (em) error = em[0] }
 		if (!error) error = /\btrap\(|\babort\(|panic/.test(ft) || failNodes[failNodes.length - 1]?.k === 'trap' ? 'abort' : 'return'
@@ -422,11 +429,23 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const nm = /Error_with_account_name\([^\n]*?"(\w+)"/.exec(ft)
 		if (nm) named = nm[1]
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
-		if (!kinds.length && !named) return
+		// (native: a 32-byte comparison of values the function does not know as accounts (e.g. an AccountInfo parameter):
+		// kept without kinds, for the instruction's context to resolve (report.ts))
+		const cmp32 = !kinds.length && !named && !!inp.irCmp?.(n.c, firstPc(failNodes), firstPc(passNodes))
+		if (!kinds.length && !named && !cmp32) return
+		// (a pointer's alignment asserted (low bits masked, e.g. bytemuck's cast of zero-copy data): not a constraint)
+		let ac = n.c
+		while (ac.k === 'lnot') ac = ac.a
+		if (ac.k === 'cmp' && (ac.op === 'eq' || ac.op === 'ne') && ac.b.k === 'const' && ac.b.v === 0n && ac.a.k === 'bin' && ac.a.op === 'and' && ac.a.b.k === 'const' && [1n, 3n, 7n, 15n].includes(ac.a.b.v) && !error.includes('::')) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes) })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}) })
 	}
 
+	const condLines = (c: Expr, l: number) => {
+		if (!facts.condLine.has(c)) facts.condLine.set(c, l)
+		if (c.k === 'lnot') condLines(c.a, l)
+		else if (c.k === 'land' || c.k === 'lor') { condLines(c.a, l); condLines(c.b, l) }
+	}
 	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
 		let before: number | undefined
 		for (let k = 0; k < ns.length; k++) {
@@ -457,6 +476,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 				}
 				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, ret: n.e, callee: c, main, errPath: err }); break
 				case 'if': {
+					condLines(n.c, lineOf(n) + 1)
 					const rest = ns.slice(k + 1)
 					// (the rest of the list ends with the list's last node: its exit is the same for every k)
 					const after = k + 1 < ns.length ? exits(ns, cont) : cont
@@ -485,14 +505,19 @@ export function functionFacts(inp: FnInput): FnFacts {
 					break
 				}
 				case 'block': { const after = k + 1 < ns.length ? exits(ns, cont) : cont; labelCont.set(n.label, after); walk(n.body, main, err, after); before = undefined; break }
-				case 'loop': walk(n.body, n.form === 'do' ? main : false, err, false); before = undefined; break
+				case 'loop': if (n.c) condLines(n.c, lineOf(n) + 1); walk(n.body, n.form === 'do' ? main : false, err, false); before = undefined; break
 				case 'switch': { const after = k + 1 < ns.length ? exits(ns, cont) : cont; for (const c of n.cases) walk(c.body, false, err, after); before = undefined; break }
 			}
 		}
 	}
 	/** both sides exit: the one that looks like the error path (error markers; else much shorter) */
+	const out0 = sig && /^(?:export )?function \w+\((\w+)/.exec(sig)?.[1]
+	const okOut = out0 ? new RegExp(`^\\s*st64\\(${out0}, 0\\)$`, 'm') : undefined
 	const pickFail = (a: Node[], b: Node[], strict = false): 'then' | 'rest' | undefined => {
 		const la = span(a), lb = span(b)
+		// (a short side storing the Ok tag into the out object (the first parameter) and showing no error, before a rest
+		// raising a constraint / program error first thing: the success return before the error path)
+		if (!strict && okOut && la <= 8 && okOut.test(textOf(a, 80)) && !ERROR_MARK.test(textOf(a, 80)) && firstMark(b) <= 2 && ERROR_RAISE.test(textOf(b, 4))) return 'rest'
 		// (Anchor: a short side without any error marker is not the failing one when the other raises an Anchor error first thing)
 		const quiet = (x: Node[], y: Node[]) => !!inp.anchor && firstMark(y) === 0 && /anchor::\w/.test(topText(y)) && !ERROR_MARK.test(textOf(x))
 		if (!strict && la * 4 <= lb && la <= 40 && !quiet(a, b)) return 'then'

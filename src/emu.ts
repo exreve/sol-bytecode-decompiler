@@ -365,7 +365,13 @@ export function emulate(p: Program, pc: number, args: bigint[], fp: bigint, mem:
 
 /** Name of a call target the way the test hooks identify it (independent of the lifter). */
 export function callTargetName(p: Program, pc: number, imm: number): string {
-	if (p.version >= 3) return `fn:${pc + 1 + imm}`
+	if (p.version >= 3) {
+		// static syscalls: src 0 = syscall by hash, src 1 = pc-relative call
+		const src = p.insns[pc]?.src
+		if (src === 0) return `sys:${SYSCALL_BY_HASH.get(imm >>> 0)?.name ?? 'hash:' + (imm >>> 0)}`
+		if (src === 1 && pc + 1 + imm >= 0 && pc + 1 + imm < p.insns.length) return `fn:${pc + 1 + imm}`
+		return `hash:${imm >>> 0}`
+	}
 	const rel = p.elf.callRelocs.get(pc)
 	if (rel) return rel.kind === 'fn' ? `fn:${rel.targetPc}` : `sys:${rel.name}`
 	if (imm !== -1 && pc + 1 + imm >= 0 && pc + 1 + imm < p.insns.length) return `fn:${pc + 1 + imm}`

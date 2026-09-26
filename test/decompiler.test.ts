@@ -11,7 +11,7 @@ import type { Node } from '../src/structure.ts'
 import type { VarFunc } from '../src/dataflow.ts'
 import { simplifyExpr } from '../src/simplify.ts'
 import { parseFunctions, runFunction } from './evaluate.ts'
-import { TestMem, Abort } from '../src/emu.ts'
+import { TestMem, Abort, callTargetName } from '../src/emu.ts'
 import { Image } from '../src/elf.ts'
 import { checkProgram } from './equiv.ts'
 
@@ -233,4 +233,12 @@ test('typed views: x.field / x[k].field / nested embedded fields print and evalu
 		assert.equal(r.ret, want & ((1n << 64n) - 1n), src)
 	}
 	assert.ok(viewed > 100, `only ${viewed} loads printed as views`)
+})
+
+test('sBPF v3 call targets: src 0 is a syscall by hash, src 1 a pc-relative call (regression: svault_v3.so)', () => {
+	const hash = hashName('sol_log_')
+	const p = { version: 3, insns: [{ opc: 0x85, src: 0, imm: hash | 0 }, { opc: 0x85, src: 1, imm: 1 }, { opc: 0x95 }, { opc: 0x95 }], elf: { callRelocs: new Map() } } as any
+	assert.equal(callTargetName(p, 0, hash | 0), 'sys:sol_log_')
+	assert.equal(callTargetName(p, 1, 1), 'fn:3')
+	assert.equal(callTargetName(p, 1, 1000), 'hash:1000') // out of range: never a function
 })
