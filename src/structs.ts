@@ -46,6 +46,12 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	const find = (x: number): number => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x] } return x }
 	const fresh = (): number => { const id = parent.length; parent.push(id); cls.push({ acc: new Map(), ptr: new Map(), members: [], data: [], opaque: false }); return id }
 	const nodeOf = new Map<number, Map<number, number | null>>() // pc -> var -> node
+	const params = new Map<number, Map<number, number>>() // pc -> parameter register -> var
+	const paramVar = (pc: number, reg: number): number | undefined => {
+		let m = params.get(pc)
+		if (!m) { m = new Map(); for (const v of cfg.built.get(pc)!.f.vars) if (v.param >= 0 && !m.has(v.param)) m.set(v.param, v.id); params.set(pc, m) }
+		return m.get(reg)
+	}
 
 	// the pointee node of a field (created on demand)
 	const pointee = (n: number, off: number): number => {
@@ -249,8 +255,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				if (t.t.k !== 'fn' || cfg.skip(t.t.pc) || t.t.pc === pc || !cfg.built.has(t.t.pc) || cfg.built.get(t.t.pc)!.f.noreturn) return
 				const cpc = t.t.pc
 				const reg = cfg.paramReg(cpc, i)
-				const pv = cfg.built.get(cpc)!.f.vars.find(x => x.param === reg)
-				if (!pv) return
+				if (paramVar(cpc, reg) === undefined) return
 				// (the argument: a pointer variable, or a pointer loaded from a field)
 				let an: number | undefined
 				if (a.k === 'var') an = node(a.id)

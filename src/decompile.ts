@@ -1,6 +1,6 @@
 // End-to-end pipeline: ELF -> functions -> IR -> variables -> simplified -> structured -> TypeScript.
 import { loadProgram, type Program, fnAddr } from './program.ts';
-import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
+import { inferSignatures, recoverVars, type VarFunc, type VarInfo } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
@@ -743,10 +743,13 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const baseTypes = new Map<number, Map<number, string>>();
   const structTypes = new Map<number, Map<number, string>>(); // inferred struct views of parameters (structs.ts)
   // the view type of a (user) function's parameter (register reg), when it is never reassigned
+  const paramVars = new Map<number, Map<number, VarInfo>>();
   const paramView = (cpc: number, reg: number): string | undefined => {
     const cb = built.get(cpc);
     if (!cb || isLib(cpc)) return undefined;
-    const pv = cb.f.vars.find(v => v.param === reg);
+    let pm = paramVars.get(cpc);
+    if (!pm) { pm = new Map(); for (const v of cb.f.vars) if (v.param >= 0 && !pm.has(v.param)) pm.set(v.param, v); paramVars.set(cpc, pm); }
+    const pv = pm.get(reg);
     const t = pv && defCount(cb.f, pv.id) === 0 ? baseTypes.get(cpc)?.get(pv.id) : undefined;
     return t && !['AccountRecord', 'UnalignedAccount', 'Input'].includes(t) ? t : undefined;
   };
