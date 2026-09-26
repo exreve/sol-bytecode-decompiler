@@ -372,6 +372,7 @@ export class Exec {
 			}
 			case 'sol_memset_': { if (n > 1 << 20) throw new Abort('memset size'); m.write(a[0], new Uint8Array(n).fill(Number(a[1] & 0xffn)), at[1] | at[2]); return 0n }
 			case 'sol_memcmp_': {
+				if (n > 1 << 20) throw new Abort('memcmp size') // (as memcpy: beyond any compute budget)
 				const x = m.read(a[0], n), y = m.read(a[1], n)
 				let r = 0
 				for (let i = 0; i < n; i++) if (x[i] !== y[i]) { r = x[i] - y[i]; break }

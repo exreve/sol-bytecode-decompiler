@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Equivalence (tracked samples)
+        # (exits non-zero on a failing function or an error)
+        run: |
+          for s in memo token ata; do
+            node --stack-size=65500 test/equiv.ts samples/$s.so 2
+          done
+      - name: Analysis benchmark (minimum score 85)
+        run: |
+          node bench/run.ts | tee bench.log
+          score=$(grep -oP '^score \K[0-9.]+' bench.log)
+          echo "score $score"
+          awk -v s="$score" 'BEGIN { exit !(s >= 85) }'
