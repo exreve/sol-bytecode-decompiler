@@ -114,8 +114,9 @@ const HELPER_ROLES: Record<string, string[]> = {
 	Transfer: ['from', 'to', 'authority'], TransferChecked: ['from', 'mint', 'to', 'authority'], MintTo: ['mint', 'to', 'authority'], MintToChecked: ['mint', 'to', 'authority'],
 	Burn: ['mint', 'from', 'authority'], BurnChecked: ['mint', 'from', 'authority'], CloseAccount: ['account', 'destination', 'authority'], Approve: ['to', 'delegate', 'authority'],
 	Revoke: ['source', 'authority'], SetAuthority: ['current_authority', 'account_or_mint'], InitializeAccount3: ['account', 'mint', 'authority'], InitializeMint2: ['mint'],
-	FreezeAccount: ['account', 'mint', 'authority'], ThawAccount: ['account', 'mint', 'authority'], CreateAccount: ['from', 'to'], Assign: ['account_to_assign'], Allocate: ['account_to_allocate'],
+	FreezeAccount: ['account', 'mint', 'authority'], ThawAccount: ['account', 'mint', 'authority'],
 }
+const SYSTEM_ROLES: Record<string, string[]> = { Transfer: ['from', 'to'], CreateAccount: ['from', 'to'], Assign: ['account_to_assign'], Allocate: ['account_to_allocate'] }
 const pascal = (s: string) => s.replace(/(^|_)([a-z0-9])/g, (_, _u, c: string) => c.toUpperCase())
 /** a library path's program: [program, family] */
 const helperProgram = (p: string): [string, string] => /system/.test(p) ? ['SYSTEM_PROGRAM', 'system'] : /token_2022/.test(p) ? ['TOKEN_2022_PROGRAM', 'token2022'] : /token_interface/.test(p) ? ['TOKEN_PROGRAM|TOKEN_2022_PROGRAM', 'token'] : ['TOKEN_PROGRAM', 'token']
@@ -285,7 +286,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (h) {
 			const [program, family] = helperProgram(h[1]), ix = pascal(h[2])
 			const amount = /^(?:(?:const |let )?\w+ = )?\w+\(([^,]*), ([^,]*), (.*)\)$/.exec(t)?.[3]
-			const ctx = cpiContext(/\w+\(([^,]*), ([^,]*)[,)]/.exec(t)?.[2] ?? '', l, HELPER_ROLES[ix] ?? [])
+			const ctx = cpiContext(/\w+\(([^,]*), ([^,]*)[,)]/.exec(t)?.[2] ?? '', l, (family === 'system' ? SYSTEM_ROLES[ix] : HELPER_ROLES[ix]) ?? [])
 			const cpi = { program, known: program.includes('|') ? undefined : program, accounts: ctx?.accounts ?? [], fields: amount ? [[/^system/.test(family) ? 'lamports' : 'amount', amount] as [string, string]] : [], family, ix, seeds: ctx?.seeds }
 			const text = `CPI ${program}.${ix}${cpi.accounts.length ? ` { ${cpi.accounts.map(x => `${x.role}: ${x.text}`).join(', ')} }` : ''}${ctx?.seeds ? ' (PDA-signed)' : ''} [lib: ${path}]`
 			const kinds = cpiKinds(family, ix)
