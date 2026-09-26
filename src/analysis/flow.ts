@@ -697,6 +697,88 @@ function visitPos(f: VarFunc): number[] {
 	return r
 }
 
+const keepMemo = new WeakMap<VarFunc, Set<number>>()
+/**
+ * The statements (of visitPos) an AnchorEval context of a callee (ctxOf, its roots: parameters) may evaluate
+ * to something derived from its roots: a parameter, through single / multiple definitions, `+ const`, casts
+ * and 8-byte loads, including loads of frame words that may hold one (stored there, or by a call getting a
+ * frame pointer and such a value). The other expressions evaluate to nothing or to a pointer into the
+ * callee's own frame (see ev0): they write no account and give the callee's callees nothing derived from
+ * the roots. An over-approximation: calleeWrites skips the other statements of a callee.
+ */
+function rootKeep(f: VarFunc, D: Defs): Set<number> {
+	let keep = keepMemo.get(f)
+	if (keep) return keep
+	const depVar = new Set<number>()
+	for (const v of f.vars) if (v.param >= 1 && v.param !== 10 && v.id !== D.fp) depVar.add(v.id)
+	// (frame byte ranges that may hold a value derived from the roots)
+	const ranges: [number, number][] = []
+	const setDefs = new Map<number, Expr[]>()
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' && s.dst >= 0) { const l = setDefs.get(s.dst); if (l) l.push(s.e); else setDefs.set(s.dst, [s.e]) }
+	/** the offset in the frame an expression evaluates to as a pointer: 'no' (not one), 'any' (unknown) */
+	const fr = (e: Expr, d = 0): number | 'no' | 'any' => {
+		const o = D.fpOff(e)
+		if (o !== undefined) return o
+		if (d > 12) return 'any'
+		switch (e.k) {
+			case 'var': {
+				const x = D.defs.get(e.id)
+				if (x) return x.k === 'call' ? 'no' : fr(x, d + 1)
+				if (!D.multi.has(e.id)) return 'no'
+				let r: number | 'no' | 'any' | undefined
+				for (const y of setDefs.get(e.id) ?? []) { const q = y.k === 'call' ? 'no' : fr(y, d + 1); if (r === undefined) r = q; else if (r !== q) return 'any' }
+				return r ?? 'no'
+			}
+			case 'ext': return fr(e.a, d + 1)
+			case 'bin': { if (e.op !== 'add' || e.b.k !== 'const') return 'no'; const a = fr(e.a, d + 1); return typeof a === 'number' ? a + sNum(e.b.v) : a }
+			case 'load': return e.size === 8 ? 'any' : 'no'
+		}
+		return 'no'
+	}
+	const frameRead = (addr: Expr, n: number): boolean => {
+		if (!ranges.length) return false
+		const z = fr(addr)
+		return z === 'no' ? false : z === 'any' || ranges.some(([a, b]) => z < b && a < z + n)
+	}
+	const dep = (e: Expr): boolean => {
+		switch (e.k) {
+			case 'var': return depVar.has(e.id)
+			case 'ext': return dep(e.a)
+			case 'bin': return e.op === 'add' && e.b.k === 'const' && dep(e.a)
+			case 'load': return e.size === 8 && (dep(e.addr) || frameRead(e.addr, 8))
+		}
+		return false
+	}
+	// (a pointer a callee gets: derived from the roots, or into a frame that may hold such a value (read at any offset))
+	const ptrDep = (e: Expr): boolean => dep(e) || (ranges.length > 0 && fr(e) !== 'no')
+	for (let changed = true; changed;) {
+		changed = false
+		const mark = (z: number, n: number) => { if (!ranges.some(([a, b]) => a <= z && z + n <= b)) { ranges.push([z, z + n]); changed = true } }
+		for (const b of f.blocks) for (const s of b.stmts) {
+			if (s.k === 'set' && s.dst >= 0 && !depVar.has(s.dst) && s.e.k !== 'call' && dep(s.e)) { depVar.add(s.dst); changed = true }
+			const z = s.k === 'store' || s.k === 'stores' ? D.fpOff(s.addr) : s.k === 'copy' ? D.fpOff(s.dst) : undefined
+			if (z !== undefined) {
+				if (s.k === 'store' && dep(s.v)) mark(z, s.size)
+				if (s.k === 'stores' && s.vals.some(dep)) mark(z, s.size * s.vals.length)
+				if (s.k === 'copy' && (dep(s.src) || frameRead(s.src, s.n))) mark(z, s.n)
+			}
+			// (a call writing a frame object it gets a pointer to: a copy (its size), or a callee's stores (0x80 bytes, see outOf))
+			const c = callOf(s)
+			if (c && c.args.some(a => D.fpOff(a) !== undefined) && c.args.some(ptrDep)) {
+				const n = c.args.length >= 3 && c.args[2].k === 'const' && c.args[2].v <= 0x2000n ? Math.max(0x80, Number(c.args[2].v)) : 0x80
+				for (const a of c.args) { const q = D.fpOff(a); if (q !== undefined) mark(q, n) }
+			}
+		}
+	}
+	keep = new Set()
+	for (const q of visitPos(f)) {
+		const s = f.blocks[q >> 16].stmts[q & 0xffff], c = callOf(s)
+		if (c ? c.args.some(ptrDep) : dep(s.k === 'copy' ? s.dst : (s as Extract<Stmt, { k: 'store' | 'stores' }>).addr)) keep.add(q)
+	}
+	keepMemo.set(f, keep)
+	return keep
+}
+
 /**
  * Writes the handler's logic makes in the functions it calls with pointers into its frame (the Context
  * holding &Accounts, the Accounts struct, AccountInfo copies; 3 levels of calls): a store to a field of an
@@ -725,6 +807,8 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		seen.set(vk, depth)
 		const X = ctxOf(C, roots, 2)
 		ctxKey.set(X, vk)
+		// (a callee: statements without an expression derived from its roots are skipped, see rootKeep)
+		const keep = C === H ? undefined : rootKeep(C.f, X.D)
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
@@ -766,7 +850,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				push(o.acct, x.name, ['ACCOUNT_DATA_WRITE'], `an object of the handler ${H.name}'s frame, serialized back by ${o.exit}`)
 		}
 		const bs = C.f.blocks
-		for (const q of visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
+		for (const q of keep ?? visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
 	}
 	visit(H, new Map(), 3)
 }
@@ -1175,6 +1259,7 @@ const resMemo = new WeakMap<object, AcctResolver>(), seedMemo = new WeakMap<obje
 export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number> }
 /** writes through a pointer argument, by the callee's name (library code not decompiled) */
 const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_program_address/, 33], [/^(sol_)?(memcpy|memmove|memset)/, -1]]
+const libWrites = new Map<string, number>() // name -> its LIB_WRITES entry's size (0: none)
 /**
  * How many bytes a call may write through its argument j (a pointer to the caller's frame): the stores the
  * callee makes through that parameter (and through the calls it passes it to, 3 levels); 0x80 when unknown
@@ -1182,7 +1267,9 @@ const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_p
  */
 function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee, depth = 3): number {
 	const nm = t.k === 'sys' ? t.name : t.k === 'fn' ? cl.name(t.pc) : ''
-	for (const [re, n] of LIB_WRITES) if (re.test(nm)) return n < 0 ? (j === 0 ? 0x80 : 0) : n
+	let lw = libWrites.get(nm)
+	if (lw === undefined) { lw = 0; for (const [re, n] of LIB_WRITES) if (re.test(nm)) { lw = n; break } libWrites.set(nm, lw) }
+	if (lw) return lw < 0 ? (j === 0 ? 0x80 : 0) : lw
 	if (t.k === 'sys') return /log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80
 	if (t.k !== 'fn' || depth <= 0) return 0x80
 	// (by depth too: a result cut off deeper is not the one asked higher up)
