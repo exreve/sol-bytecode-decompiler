@@ -35,7 +35,7 @@ export interface Helper { name: string; params: string[]; vars: VarInfo[]; names
 export interface OutlineUse { helper: Helper; args: Expr[] }
 export interface Outlines { at: Map<Node[], Map<number, OutlineUse>>; helpers: Helper[] }
 
-const MAX_NODES = 40, MAX_PARAMS = 8
+const MAX_NODES = 16, MAX_PARAMS = 8
 
 /** Printed lines of a node list (as printBody prints it; else-if chains count one line less, fine for an estimate). */
 function lineCount(ns: Node[]): number {
@@ -49,7 +49,8 @@ interface Cand { fi: number; list: Node[]; i: number; lines: number; params: Exp
 export function findOutlines(fns: OutlineFn[], taken: (name: string) => boolean, minLines = 3): Outlines {
 	const groups = new Map<string, Cand[]>()
 	fns.forEach((fn, fi) => {
-		const total = occurrences(fn.body)
+		let total0: Map<number, number> | undefined
+		const total = () => (total0 ??= occurrences(fn.body))
 		const visit = (ns: Node[]) => {
 			for (const n of ns) {
 				if (n.k === 'if') { visit(n.then); visit(n.else) }
@@ -133,7 +134,7 @@ function returnsValue(n: Node): boolean {
  * numbered by first occurrence, parameters and locals told apart) and the parameters' values at the
  * call. null: node i can never be part of a run (nor any longer suffix); undefined: not this suffix.
  */
-function candidate(fn: OutlineFn, ns: Node[], i: number, total: Map<number, number>): { key: string; params: Expr[]; lead?: number } | null | undefined {
+function candidate(fn: OutlineFn, ns: Node[], i: number, total0: () => Map<number, number>): { key: string; params: Expr[]; lead?: number } | null | undefined {
 	const { fp, ret } = fn
 	// a leading call `v = f(…)`: printed at the call site as the helper's last argument (evaluated before its
 	// body runs, after the other arguments, which are plain values), v being that parameter
@@ -142,7 +143,7 @@ function candidate(fn: OutlineFn, ns: Node[], i: number, total: Map<number, numb
 	const run = ns.slice(i)
 	for (const n of run.slice(1)) if (!okNode(fn, n)) return undefined
 	// variables occurring only in the run: locals of the helper (the caller may not even declare them)
-	const inRun = occurrences(run)
+	const inRun = occurrences(run), total = total0()
 	const only = (id: number) => inRun.get(id) === total.get(id) && !(fn.f.vars[id]?.param >= 0)
 	const vars = new Map<number, string>(), frames = new Map<number, string>()
 	const params: Expr[] = []

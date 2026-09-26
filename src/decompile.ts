@@ -968,9 +968,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const list = [...usedBases].sort((a, b) => b - a);
       if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)}${objType.has(b) ? `: ${objType.get(b)}` : ''} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
       const named = list.filter(b => objName.has(b));
-      if (named.length) frameNote = `stack objects [heur: ${[...new Set(named.map(b => objWhy.get(b)!))].join('; ')}]: ${named.map(b => nm(b)).join(', ')}`;
+      // (the names' provenance ends the declaration line)
+      if (named.length) frameDecl += ` // named [heur: ${[...new Set(named.map(b => objWhy.get(b)!))].join('; ')}]`;
     };
-    let frameNote = '';
     // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
     const varTypes = new Map<number, string>();
     const dataNotes: string[] = [];
@@ -1157,7 +1157,6 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         lines.push(`// names [str: account-error string on the failing branch; which variable holds the account is inferred${idlAcc.size ? '; [idl]: also an account name in the IDL' : ''}]: ${recovered.map(tag).join(', ')}`);
       }
     }
-    if (frameNote) lines.push(`// ${frameNote}`);
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
     if (frameDecl) lines.push(frameDecl);
@@ -1723,7 +1722,7 @@ function storedStrings(body: Node[]): Map<Stmt, string> {
         const lo = offs[0], txt = offs.map(o => bytes.get(o)!);
         if (offs[offs.length - 1] - lo === BigInt(offs.length - 1) && txt.every(c => c >= 0x20 && c < 0x7f) && txt.some(c => /[A-Za-z]/.test(String.fromCharCode(c)))) out.set(last, JSON.stringify(String.fromCharCode(...txt)));
       }
-      base = undefined; bytes = new Map(); last = undefined;
+      if (last) { base = undefined; bytes = new Map(); last = undefined; }
     };
     for (const n of ns) {
       const s = n.k === 'stmt' ? n.s : undefined;

@@ -10,7 +10,7 @@
 // disjoint frame ranges (then order is irrelevant too).
 import type { VarFunc } from './dataflow.ts'
 import { type Expr, type Stmt, exprEq, hasSideEffectsOrMem, walkExpr, mapExpr, isMemIntrinsic, isDivOp, safeDivisor } from './ir.ts'
-import { stmtExprs, mapStmtExprs, stmtInfo } from './simplify.ts'
+import { mapStmtExprs, stmtInfo } from './simplify.ts'
 
 function baseOff(e: Expr): [Expr, bigint] {
 	if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') return [e.a, BigInt.asIntN(64, e.b.v)]
@@ -52,12 +52,12 @@ export function sinkFrameLoads(f: VarFunc) {
 		})
 		return ok && r.length ? r : undefined
 	}
-	const uses = (s: Stmt, v: number) => { let n = 0; for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'var' && x.id === v) n++ }); return n }
+	const uses = (s: Stmt, v: number) => { let n = 0; for (const x of stmtInfo(s).vars) if (x === v) n++; return n }
 	for (const b of f.blocks) {
 		const ends = b.term.k === 'ret' || b.term.k === 'trap'
 		for (let i = 0; i < b.stmts.length; i++) {
 			const s = b.stmts[i]
-			if (s.k !== 'set' || f.vars[s.dst]?.param >= 0) continue
+			if (s.k !== 'set' || !stmtInfo(s).load || f.vars[s.dst]?.param >= 0) continue
 			const rd = frameReads(s.e)
 			if (!rd) continue
 			const reads = new Set<number>()
@@ -156,6 +156,15 @@ function firstLoad(e: Expr): Extract<Expr, { k: 'load' }> | null {
  */
 function gatherFrame(win: Store[], fp: number): Store[] {
 	if (win.length < 3) return win
+	// (nothing to gather when each store extends the range of the ones before it)
+	{
+		let lo = baseOff(win[0].addr)[1], hi = lo + BigInt(win[0].size), ok = true
+		for (let i = 1; i < win.length && ok; i++) {
+			const o = baseOff(win[i].addr)[1], e = o + BigInt(win[i].size)
+			if (e === lo) lo = o; else if (o === hi) hi = e; else ok = false
+		}
+		if (ok) return win
+	}
 	const info = win.map(s => {
 		const o = baseOff(s.addr)[1]
 		const fx = hasSideEffectsOrMem(s.v)

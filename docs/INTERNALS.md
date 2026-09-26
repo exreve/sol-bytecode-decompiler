@@ -29,7 +29,7 @@ Built-in views: `AccountInfo` (Rust; `lamports` / `data` point to `LamportsCell`
 `acc0`). A variable defined once as such a field (`const j = acc.data`) gets the field's view type. A view is an exact alias whatever the variable holds; *which*
 variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
 
-**Stack objects** (`[heur]`, per function: `// stack objects [heur: …]: ix, metas, err`). A frame object is
+**Stack objects** (`[heur]`, the frame declaration line ends with `// named [heur: …]`). A frame object is
 named after its role, and typed when its layout is fixed by that role, when the role is consistent:
 
 * the objects of a CPI / PDA / fmt site read back from the frame (`src/cpi.ts` `siteObjects`): the instruction
