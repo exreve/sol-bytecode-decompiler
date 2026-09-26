@@ -582,7 +582,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? cpiOnly(invokeAbi(t.name)) : t.k === 'fn' ? cpiOnly(invokeThunks.get(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : null) : null));
       if (sites.size !== 1) continue;
       const [[node, site]] = [...sites];
-      const env: CpiEnv = { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), strAt: (a, n) => sem.strAt(a, n), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) };
+      const env: CpiEnv = { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), strAt: (a, n) => sem.strAt(a, n, true), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) };
       let d = site.abi === 'invoke' ? undefined : cpiDesc(site, env), ran = false;
       if (!d?.ix) {
         // an instruction built on the heap: the CPI a run of the function makes (cpiexec.ts)
@@ -782,7 +782,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (let i = 0n; i < n; i++) {
       const a = p.image.region(ptr + 16n * i, 16)?.exec === false ? p.image.read(ptr + 16n * i, 8) : undefined, l = a === undefined ? undefined : p.image.read(ptr + 16n * i + 8n, 8);
       if (a === undefined || l === undefined || l > 64n) return undefined;
-      const s = sem.strAt(a, l);
+      const s = sem.strAt(a, l, true);
       if (s !== undefined && /^[\x20-\x7e]*$/.test(s)) { out.push(JSON.stringify(s)); continue; }
       const bytes: string[] = [];
       for (let j = 0n; j < l; j++) { const b = p.image.read(a + j, 1); if (b === undefined) return undefined; bytes.push(b.toString(16).padStart(2, '0')); }
@@ -881,8 +881,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const ctx: PrintCtx = {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
-      strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strLit(ptr, len),
-      strNote: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      strAt: opts.sugar === false ? undefined : (ptr, len, isPtr) => sem.strLit(ptr, len, isPtr),
+      strNote: opts.sugar === false ? undefined : (ptr, len, isPtr) => sem.strAt(ptr, len, isPtr),
       keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
@@ -1082,7 +1082,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           named,
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           tainted: e => exprTainted(taint.get(pc), e, fpVar),
-          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
+          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len, true),
           constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
         // sites the frame contents do not describe as a well-known instruction: run the function (cpiexec.ts)
@@ -1125,7 +1125,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     if (opts.sugar !== false && fpVar !== undefined && userInvoke.size && wrapBudget.steps > 0) {
       const env: CpiEnv = {
-        fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len), tainted: e => exprTainted(taint.get(pc), e, fpVar),
+        fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len, true), tainted: e => exprTainted(taint.get(pc), e, fpVar),
         constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined),
       };
       const visit = (ns: Node[]) => {
@@ -1228,7 +1228,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const hf = { vars: h.vars } as unknown as VarFunc;
     const hpr = new Printer({
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n), constComment: (v, role) => sem.constComment(v, role), varName: id => h.names[id],
-      strAt: (ptr, len) => sem.strLit(ptr, len), strNote: (ptr, len) => sem.strAt(ptr, len), keyAt: ptr => sem.keyAt(ptr), dropUndefArgs: true, exprHook: (e, pr) => sem.sugar(e, pr),
+      strAt: (ptr, len, isPtr) => sem.strLit(ptr, len, isPtr), strNote: (ptr, len, isPtr) => sem.strAt(ptr, len, isPtr), keyAt: ptr => sem.keyAt(ptr), dropUndefArgs: true, exprHook: (e, pr) => sem.sugar(e, pr),
     });
     const { decls, hoisted } = declarations(hf, h.body);
     outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });

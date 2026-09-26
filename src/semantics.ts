@@ -339,9 +339,10 @@ export class Semantics {
 		return b && b.some(x => x !== 0) ? b58(b) : undefined
 	}
 
-	strAt(ptr: bigint, len: bigint): string | undefined {
+	/** isPtr: ptr is known to be an address (a syscall's string argument, a seed): rodata mapped at 0 (sBPF v3) counts */
+	strAt(ptr: bigint, len: bigint, isPtr = false): string | undefined {
 		// (tiny values are counts and flags, not rodata addresses, even where rodata is mapped at 0)
-		if (len < 1n || len > 512n || ptr < 0x100n || !this.p.image.region(ptr, Number(len))) return undefined
+		if (len < 1n || len > 512n || (ptr < 0x100n && !isPtr) || !this.p.image.region(ptr, Number(len))) return undefined
 		const b = this.p.image.bytesAt(ptr, Number(len))
 		if (!b) return undefined
 		const s = UTF8.decode(b)
@@ -355,8 +356,8 @@ export class Semantics {
 	 * ptr is the first occurrence of those bytes in program memory (see stringAddr), so the literal
 	 * determines the address.
 	 */
-	strLit(ptr: bigint, len: bigint): string | undefined {
-		const s = this.strAt(ptr, len)
+	strLit(ptr: bigint, len: bigint, isPtr = false): string | undefined {
+		const s = this.strAt(ptr, len, isPtr)
 		if (s === undefined || s.includes('\ufffd')) return undefined
 		const b = this.p.image.bytesAt(ptr, Number(len))!
 		if (!Buffer.from(s, 'utf8').equals(Buffer.from(b.buffer, b.byteOffset, b.byteLength))) return undefined

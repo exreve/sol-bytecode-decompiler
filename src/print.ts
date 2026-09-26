@@ -10,6 +10,9 @@ import { maxBits } from './simplify.ts';
 import { b58 } from './semantics.ts';
 import type { Views } from './views.ts';
 
+/** syscalls whose first two arguments are a string (pointer, length) */
+const STR_SYSCALLS = new Set(['sol_log_', 'sol_panic_'])
+
 /** base58 of the 32-byte key whose little-endian 8-byte words are the given constants */
 export function keyB58(words: Expr[]): string {
   const b = new Uint8Array(32);
@@ -22,8 +25,8 @@ export interface PrintCtx {
   fnAddrName: (addr: bigint) => string | undefined;   // function pointer constants
   sysName: (name: string) => string;
   constComment: (v: bigint, role: 'value' | 'addr' | 'ret') => string | undefined; // well-known key / error code
-  strAt?: (ptr: bigint, len: bigint) => string | undefined; // exact rodata string for (ptr, len) argument pairs
-  strNote?: (ptr: bigint, len: bigint) => string | undefined; // rodata text for (ptr, len) pairs not printable as a literal (shown in a comment)
+  strAt?: (ptr: bigint, len: bigint, isPtr?: boolean) => string | undefined; // exact rodata string for (ptr, len) argument pairs (isPtr: a syscall's string argument)
+  strNote?: (ptr: bigint, len: bigint, isPtr?: boolean) => string | undefined; // rodata text for (ptr, len) pairs not printable as a literal (shown in a comment)
   keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
@@ -267,9 +270,10 @@ export class Printer {
     if (this.ctx.strAt) for (let i = 0; i + 1 < args.length; i++) {
       const x = args[i], y = args[i + 1];
       if (x.k === 'const' && y.k === 'const') {
-        const str = this.ctx.strAt(x.v, y.v);
+        const isPtr = i === 0 && t.k === 'sys' && STR_SYSCALLS.has(t.name);
+        const str = this.ctx.strAt(x.v, y.v, isPtr);
         if (str !== undefined) a[i] = JSON.stringify(str);
-        else { const n = this.ctx.strNote?.(x.v, y.v); if (n !== undefined && !a[i].includes('/*')) a[i] = `${a[i]} /* ${JSON.stringify(n).replaceAll('*/', '*\\/')} */`; }
+        else { const n = this.ctx.strNote?.(x.v, y.v, isPtr); if (n !== undefined && !a[i].includes('/*')) a[i] = `${a[i]} /* ${JSON.stringify(n).replaceAll('*/', '*\\/')} */`; }
       }
     }
     this.keyArgs(args, a);

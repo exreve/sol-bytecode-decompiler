@@ -173,7 +173,7 @@ export function parseElf(input: Uint8Array): Elf {
   const regions: Region[] = [];
   let textVaddr: bigint;
   if (strict) {
-    // v3+: program headers give exact vm addresses (bytecode at 0, rodata at 1<<32)
+    // v3+: program headers give exact vm addresses (rodata at 0, bytecode at 1<<32: solana-sbpf MM_RODATA_START / MM_BYTECODE_START)
     textVaddr = BigInt(text.addr);
     for (let i = 0; i < phnum; i++) {
       const o = phoff + i * phentsize;
