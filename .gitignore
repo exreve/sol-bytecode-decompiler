@@ -10,3 +10,4 @@ out.*.ts
 corpus/
 refbuild/out/
 .claude/
+eval/packets/prog_*/
