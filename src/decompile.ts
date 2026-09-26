@@ -925,13 +925,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (!fpv) return;
       const { bases, all } = frameOffsets(f, fpv.id);
       // a role claimed consistently (one name; a view type only when every claim gives the same one)
-      const objName = new Map<number, string>(), objType = new Map<number, string>(), objWhy = new Map<number, string>(), outObj = new Set<number>();
+      const objName = new Map<number, string>(), objType = new Map<number, string>(), objWhy = new Map<number, string>(), outObj = new Set<number>(), extentOf = new Map<number, number>();
       for (const [o, cs] of [...claims].sort((x, y) => y[0] - x[0])) {
         if (o >= 0 || o < -0x2000 || cs.some(c => c.name !== cs[0].name)) continue;
         bases.add(o);
         objName.set(o, unique(cs[0].name));
         objWhy.set(o, cs[0].why);
         if (cs[0].out) outObj.add(o);
+        if (cs[0].extent) extentOf.set(o, cs[0].extent);
         const t = cs[0].type;
         if (t && cs.every(c => c.type === t) && views.map.get(t) === BUILTIN_VIEW[t]) objType.set(o, t);
       }
@@ -944,10 +945,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
       // a typed object is only one when every access to it fits its view, an out object when the function
       // never writes it itself (else: a slot reused for other data)
-      if (objType.size || outObj.size) for (const a of frameAccesses(f, fpv.id)) {
+      if (objType.size || outObj.size || extentOf.size) for (const a of frameAccesses(f, fpv.id)) {
         const [b, d] = pick(a.off);
-        const t = objType.get(b);
-        if ((t && !fitsAccess(views, t, d, a.size, a.copy)) || (a.write && outObj.has(b))) { objType.delete(b); objName.delete(b); }
+        const t = objType.get(b), x = extentOf.get(b);
+        if ((t && !fitsAccess(views, t, d, a.size, a.copy)) || (a.write && outObj.has(b)) || (x !== undefined && d + a.size > x)) { objType.delete(b); objName.delete(b); }
       }
       for (const o of all) if (o < 0 && o >= -0x2000) usedBases.add(pick(o)[0]); // (frameRef names these only)
       const nm = (b: number) => objName.get(b) ?? `s${(-b).toString(16)}`;
@@ -1032,6 +1033,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         }
         return undefined;
       };
+    }
+    // text written by constant stores (e.g. an account name put in a fresh String): `// "owner_token_account"`
+    if (opts.sugar !== false) {
+      const strs = storedStrings(body);
+      if (strs.size) { const prev = ctx.stmtTail; ctx.stmtTail = (s, p) => prev?.(s, p) ?? strs.get(s); }
     }
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
@@ -1214,7 +1220,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 const BUILTIN_VIEW: Record<string, View> = Object.fromEntries(BUILTIN_VIEWS.map(v => [v.name, v]));
 
 /** A role of a stack object: a name for it, its view type when the layout is known, and where the role comes from. */
-interface FrameClaim { name: string; type?: string; why: string; out?: boolean }
+interface FrameClaim { name: string; type?: string; why: string; out?: boolean; extent?: number }
 
 /**
  * Stack-object role of the first argument of a call to a (library) function of this name: where it writes
@@ -1253,7 +1259,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   for (const s of sites) for (const o of siteObjects(s, fp, read)) { let l = sited.get(o.off); if (!l) sited.set(o.off, (l = [])); l.push({ name: o.name, type: o.type, why: 'the CPI / PDA / fmt calls they are built for' }); }
   // out parameters: every use of the object's address is as the first argument of such calls
   const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
-  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>();
+  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
+  const keyUse = (o: number) => keyUses.set(o, (keyUses.get(o) ?? 0) + 1);
   const visit = (e: Expr, addr: boolean) => {
     const o = fo(e);
     if (o !== undefined) { if (!addr) escapes.set(o, (escapes.get(o) ?? 0) + 1); return; }
@@ -1262,6 +1269,9 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
       case 'call': {
         const o0 = e.args[0] && fo(e.args[0]);
         const r = o0 !== undefined && e.t.k === 'fn' ? outRole(fnName(e.t.pc)) ?? (outTags.has(e.t.pc) ? { name: 'res', type: `Tagged${outTags.get(e.t.pc)! * 8}` } : undefined) : undefined;
+        // 32-byte comparisons: the operands are public keys
+        const cn = e.t.k === 'fn' ? fnName(e.t.pc) : e.t.k === 'sys' ? e.t.name : '';
+        if (/^(sol_)?memcmp_?$/.test(cn) && e.args[2]?.k === 'const' && e.args[2].v === 32n) for (const a of e.args.slice(0, 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
         if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ ...r, why: 'out parameter of the calls they are passed to', out: true }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
         if (e.t.k === 'ind') visit(e.t.e, false);
@@ -1271,7 +1281,10 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
       case 'bin': case 'cmp': case 'land': case 'lor': visit(e.a, false); visit(e.b, false); break;
       case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, false); break;
       case 'sel': visit(e.c, false); visit(e.a, false); visit(e.b, false); break;
-      case 'fn': e.args.forEach(a => visit(a, false)); break;
+      case 'fn':
+        if (e.name === 'keyeq' || (e.name === 'memeq' && e.args[2]?.k === 'const' && e.args[2].v === 32n)) for (const a of e.args.slice(0, e.name === 'keyeq' ? 1 : 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
+        e.args.forEach(a => visit(a, false));
+        break;
     }
   };
   for (const b of f.blocks) {
@@ -1288,6 +1301,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   // (a site object passed to other calls too is a slot reused for something else)
   for (const [o, cs] of sited) if ((argEsc.get(o) ?? 0) <= cs.length) cs.forEach(c => add(o, c));
   for (const [o, cs] of outs) if (cs.length === escapes.get(o) && !claims.has(o)) cs.forEach(c => add(o, c));
+  // (a key: its address only ever an operand of 32-byte comparisons; its accesses inside its 32 bytes, see setupFrame)
+  for (const [o, n] of keyUses) if (n === escapes.get(o) && !claims.has(o)) add(o, { name: 'key', why: 'operands of 32-byte comparisons (public keys)', extent: 32 });
   return claims;
 }
 
@@ -1691,6 +1706,43 @@ function nameThunks(p: Program) {
     taken.add(name);
     f.name = name;
   }
+}
+
+/**
+ * Runs of consecutive stores of constants through one base (p + c) whose bytes, in store order, make a
+ * printable text of 4+ bytes without gaps: the text, keyed by the run's last store.
+ */
+function storedStrings(body: Node[]): Map<Stmt, string> {
+  const out = new Map<Stmt, string>();
+  const split = (a: Expr): [Expr, bigint] => (a.k === 'bin' && a.op === 'add' && a.b.k === 'const' ? [a.a, BigInt.asIntN(64, a.b.v)] : [a, 0n]);
+  const visit = (ns: Node[]) => {
+    let base: Expr | undefined, bytes = new Map<bigint, number>(), last: Stmt | undefined;
+    const flush = () => {
+      if (last && bytes.size >= 4) {
+        const offs = [...bytes.keys()].sort((x, y) => (x < y ? -1 : 1));
+        const lo = offs[0], txt = offs.map(o => bytes.get(o)!);
+        if (offs[offs.length - 1] - lo === BigInt(offs.length - 1) && txt.every(c => c >= 0x20 && c < 0x7f) && txt.some(c => /[A-Za-z]/.test(String.fromCharCode(c)))) out.set(last, JSON.stringify(String.fromCharCode(...txt)));
+      }
+      base = undefined; bytes = new Map(); last = undefined;
+    };
+    for (const n of ns) {
+      const s = n.k === 'stmt' ? n.s : undefined;
+      if (s && (s.k === 'store' || s.k === 'stores') && (s.k === 'store' ? [s.v] : s.vals).every(v => v.k === 'const')) {
+        const [b, o] = split(s.addr);
+        if (!base || !exprEq(b, base)) { flush(); base = b; }
+        (s.k === 'store' ? [s.v] : s.vals).forEach((v, i) => { for (let j = 0; j < s.size; j++) bytes.set(o + BigInt(i * s.size + j), Number(((v as { v: bigint }).v >> BigInt(8 * j)) & 0xffn)); });
+        last = s;
+        continue;
+      }
+      flush();
+      if (n.k === 'if') { visit(n.then); visit(n.else); }
+      else if (n.k === 'block' || n.k === 'loop') visit(n.body);
+      else if (n.k === 'switch') n.cases.forEach(c => visit(c.body));
+    }
+    flush();
+  };
+  visit(body);
+  return out;
 }
 
 /** Loads, stores and copies of the frame: offset, size in bytes, copy or not. */

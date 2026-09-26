@@ -42,7 +42,9 @@ named after its role, and typed when its layout is fixed by that role, when the 
   role is known, and that the function never writes itself: u128 builtins (`prod`, `quot`, `rem: U128`:
   `prod.lo`, `prod.hi`), Anchor error constructors (`err`), `AccountInfo::clone` (`info: AccountInfo`),
   `try_borrow_data` (`data_ref`), sysvar getters (`rent`, `clock`), `try_accounts` (`accts`), RawVec growth
-  (`vec`), and user functions whose out parameter holds an enum with a clear tag (`res: Tagged64`, below).
+  (`vec`), and user functions whose out parameter holds an enum with a clear tag (`res: Tagged64`, below);
+* objects whose address is only ever an operand of 32-byte comparisons (`memcmp(…, 0x20)`, `memeq`, `keyeq`) and
+  that are only accessed within their 32 bytes: `key` (a public key: `memcmp(key_2, key, 0x20)`).
 
 ```ts
 	const prod: U128 = fp - 0x40
@@ -239,6 +241,9 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   the `Ok` value being inferred per program (it depends on the solana-program version);
 * public keys: known program ids, 32-byte rodata keys compared/copied by address (`/* key <base58> */`),
   keys written as four constant words; Anchor error codes, discriminators, `ProgramError` return codes;
+* constant stores through one pointer whose bytes form a text of 4+ printable characters (an account name put in
+  a fresh String, a seed built in the frame): `st64(p + 8, 0x6f6363615f6e656b) // "owner_token_account"` on the
+  last store of the run;
 * `ld64(0x300000000 /* heap bump-allocator cursor */)`; `(p + ld64(p + 0x50) + 0x2867 & -8 /* next account record */)`
   in input parsing loops;
 * stores through recognized account pointers name the field too: `st64(f + 0x48 /* lamports */, v)`;
