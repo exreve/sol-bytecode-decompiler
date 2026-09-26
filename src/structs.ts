@@ -94,7 +94,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 						else if (e.k === 'load') {
 							const b = base(e.addr); const bn = b && node(b.v)
 							if (bn !== undefined) dn = pointee(bn, b!.off)
-							else if (fo(e.addr) !== undefined) { const r = resultField(x, fo(e.addr)!); if (r) { dn = fresh(); fieldEdges.push([dn, r.cpc * 256 + r.reg, r.rel]) } else dn = cell(fo(e.addr)!) }
+							else if (fo(e.addr) !== undefined) { const r = resultField(x, fo(e.addr)!); if (r === 'opaque') dn = undefined; else if (r) { dn = fresh(); fieldEdges.push([dn, r.cpc * 256 + r.reg, r.rel]) } else dn = cell(fo(e.addr)!) }
 						}
 						if (dn === undefined) { ns.length = 0; break }
 						ns.push(dn)
@@ -113,7 +113,8 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 						// (a pointer field of a call's result in the frame: the callee's out object's field)
 						else if (fo(e.addr) !== undefined) {
 							const r = resultField(d[0], fo(e.addr)!)
-							if (r) { n = fresh(); fieldEdges.push([n, r.cpc * 256 + r.reg, r.rel]) }
+							if (r === 'opaque') n = undefined
+							else if (r) { n = fresh(); fieldEdges.push([n, r.cpc * 256 + r.reg, r.rel]) }
 							else n = cell(fo(e.addr)!)
 							if (n !== undefined) direct.add(`${pc}:${v}`)
 						}
@@ -176,9 +177,10 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		/**
 		 * The call whose out object a frame word read by statement st lies in (the last call before it given a
 		 * frame address at most 0x100 below the word, through single-predecessor blocks, with no store over the word
-		 * in between): its user callee, the parameter and the word's offset in the object.
+		 * in between): its user callee, the parameter and the word's offset in the object ('opaque': another callee's;
+		 * undefined: none, e.g. a spill slot stored before).
 		 */
-		const resultField = (st: Stmt, off: number): { cpc: number; reg: number; rel: number } | undefined => {
+		const resultField = (st: Stmt, off: number): { cpc: number; reg: number; rel: number } | 'opaque' | undefined => {
 			let [bi, si] = where.get(st)!
 			for (let depth = 0; depth < 8; depth++) {
 				const ss = f.blocks[bi].stmts
@@ -193,9 +195,9 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 					if (!c) continue
 					let best: { i: number; O: number } | undefined
 					c.args.forEach((a, i) => { const O = fo(a); if (O !== undefined && O <= off && off - O < 0x100 && (!best || O > best.O)) best = { i, O } })
-					if (!best) { if (c.t.k !== 'fn') return undefined; continue }
+					if (!best) { if (c.t.k !== 'fn') return 'opaque'; continue }
 					const { i, O } = best
-					if (c.t.k !== 'fn' || cfg.skip(c.t.pc) || !cfg.built.has(c.t.pc) || cfg.built.get(c.t.pc)!.f.noreturn) return undefined
+					if (c.t.k !== 'fn' || cfg.skip(c.t.pc) || !cfg.built.has(c.t.pc) || cfg.built.get(c.t.pc)!.f.noreturn) return 'opaque'
 					return { cpc: c.t.pc, reg: cfg.paramReg(c.t.pc, i), rel: off - O }
 				}
 				const ps = f.blocks[bi].preds
