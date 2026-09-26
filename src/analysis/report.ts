@@ -7,7 +7,8 @@
 //   found      a check dominates every sensitive operation of the instruction (real dominators, across
 //              calls: see phase2.ts dominance); in an instruction without one, it is on every path that
 //              does not exit early (not nested under other branching, in its function nor at the calls)
-//   partial    a check was found, but it dominates only some operations (or is only on some paths)
+//   partial    a check was found (complete: e.g. all 32 bytes of a key compared), but it dominates only some operations
+//              (or is only on some paths); shown as "found on some paths"
 //   not_found  no check was found (not a proof of absence: it may be made in a way not recognized)
 //   runtime    enforced by the Solana runtime (a written account must be writable and owned by the
 //              program; a CPI's signer / writable privileges cannot exceed the caller's; the invoked
@@ -52,6 +53,10 @@
 //   state_machine [ { field (account.field), set_by: [ { ix, value, at } ], checked_by: [ { ix, cond, at } ] } ]: status-like fields
 //   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low' | 'info': informational, not in the Findings lists), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
 //   authority_fields [ { field, writtenBy: [ix] } ]: stored fields written by an AUTHORITY_WRITE
+//   validation_consistency [ { role (IDL account type | 'data_len <n>' | account name), by ('type' | 'data_len' | 'name'),
+//                              instructions: [ { ix, account, validations: [owner | type | signer | writable | address | '<field> == <role>.key' | 'key == <role>.<field>'], uses } ],
+//                              inconsistencies: [ { instruction, account, validation, applied_in: [ { instruction, account, at } ], others, uses } ] } ]
+//                (consistency.ts: a validation >= 2 and >= 2/3 of the other instructions of the role apply, missing where the account's data is used)
 //   pdas         [ { seeds, program, derived_in: [ix], signs_in: [ix], accounts: [ix.account with a seeds constraint], compared: status } ]
 //   state_writes [ { target (account.field), writes: [ { ix, how, at } ] } ]
 //   dependencies [ { target, read_by: [ix] (in checks), written_by: [ix] } ]
@@ -68,6 +73,7 @@ import { addExitWrites, indirectTargets, splitDispatch, accountResolver, calleeO
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
+import type { RoleView, Inconsistency } from './consistency.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -129,6 +135,7 @@ export interface Analysis {
 	findings?: Finding[]  // phase 2 rule engine (phase2.ts)
 	authorityFields?: { field: string; writtenBy: string[] }[]
 	states?: StateField[] // phase 3 state machine (phase3.ts)
+	consistency?: RoleView[] // validation consistency across instructions (consistency.ts)
 }
 
 /** Sensitivity weights (ranking of the instruction surface). */
@@ -575,7 +582,9 @@ function analyze0(r: Result): Analysis {
 export type Where = (ix: string | undefined, at: Loc) => { file: string; line: number } | undefined
 
 const at2s = (w: Where, ix: string | undefined, at: Loc) => { const x = w(ix, at); return x ? `${x.file}:${x.line}` : `${at.fn}:${at.line}` }
-const ST: Record<Status, string> = { found: 'found', partial: 'PARTIAL', not_found: 'NOT FOUND', runtime: 'runtime' }
+// (partial: the check is there (a complete comparison: e.g. all 32 bytes of a key) but does not dominate every operation / is
+// not on every path; not an incomplete comparison)
+const ST: Record<Status, string> = { found: 'found', partial: 'found on some paths', not_found: 'NOT FOUND', runtime: 'runtime' }
 
 /** security/analysis.json */
 export function renderJson(a: Analysis, where: Where): string {
@@ -583,7 +592,7 @@ export function renderJson(a: Analysis, where: Where): string {
 	const ev = (ix: string, e: Evidence) => ({ status: e.status, at: e.at && L(ix, e.at), via: e.via, note: e.note })
 	const doc = {
 		schema: 'sbpf-decompiler/security@1',
-		note: 'derived, over-approximate facts read off the decompiled code (the verified source of truth); statuses: found | partial | not_found (no check found, not a proof of absence) | runtime (enforced by the Solana runtime)',
+		note: 'derived, over-approximate facts read off the decompiled code (the verified source of truth); statuses: found | partial (a complete check, not on every path to the operations) | not_found (no check found, not a proof of absence) | runtime (enforced by the Solana runtime)',
 		program: a.program,
 		instructions: a.ixs.map(ix => ({
 			name: ix.name, handler: ix.handler, kind: ix.kind, dispatch: ix.dispatch, score: ix.score, effects: ix.effects, functions: ix.functions, indirect: ix.indirect.length ? ix.indirect : undefined,
@@ -608,6 +617,7 @@ export function renderJson(a: Analysis, where: Where): string {
 		dependencies: a.deps.map(d => ({ target: d.target, read_by: d.readBy, written_by: d.writtenBy })),
 		findings: a.findings?.map(f => ({ rule: f.rule, instruction: f.ix, confidence: f.confidence, title: f.title, accounts: f.accounts, path: f.path, evidence: f.evidence })),
 		authority_fields: a.authorityFields,
+		validation_consistency: a.consistency?.length ? a.consistency.map(v => ({ role: v.role, by: v.by, instructions: v.members, inconsistencies: v.inconsistencies.map(x => ({ instruction: x.ix, account: x.account, validation: x.validation, applied_in: x.appliedIn.map(y => ({ instruction: y.ix, account: y.account, at: y.at && L(y.ix, y.at) })), others: x.others, uses: x.uses })) })) : undefined,
 		unattributed_operations: a.unattributed.map(o => ({ at: L(undefined, o.at), kinds: o.kinds, text: o.text, target: o.target, how: o.how, cpi: o.cpi && { program: o.cpi.program, known: o.cpi.known, instruction: o.cpi.ix, accounts: o.cpi.accounts, fields: o.cpi.fields, seeds: o.cpi.seeds } })),
 	}
 	return JSON.stringify(doc, (_, v) => (v === undefined ? undefined : v), 1) + '\n'
@@ -615,7 +625,7 @@ export function renderJson(a: Analysis, where: Where): string {
 
 const HEADER = [
 	'DERIVED, over-approximate view of the decompiled code (the verified source of truth: ../index.ts, ../bundle/).',
-	'Statuses: found (on every non-failing path) · PARTIAL (some paths) · NOT FOUND (no check recognized — not a proof of absence) · runtime (enforced by Solana).',
+	'Statuses: found (on every non-failing path) · found on some paths (the check itself is complete, e.g. a full 32-byte key comparison, but it is not on every path to the operations) · NOT FOUND (no check recognized — not a proof of absence) · runtime (enforced by Solana).',
 ]
 
 /** Flags an auditor should look at first, per instruction. */
@@ -657,11 +667,46 @@ function renderFindings(a: Analysis, where: Where): string[] {
 	return out
 }
 
+const vText = (v: string) => v === 'owner' ? 'no owner check' : v === 'type' ? 'no type (discriminator / length) check' : v === 'signer' ? 'no signer check' : v === 'address' ? 'no address / PDA check' : `no \`${v}\``
+const incLine = (x: Inconsistency, where: Where, head: boolean) => `${head ? `${x.ix} · ${x.account} [${x.role}] (${x.uses.join(', ')}): ` : ''}${vText(x.validation)}; ${x.appliedIn.length}/${x.others} other instructions of the role apply it: ${x.appliedIn.slice(0, head ? 2 : 3).map(y => `${y.ix}${y.at ? ` ${at2s(where, y.ix, y.at)}` : ''}`).join(', ')}${x.appliedIn.length > (head ? 2 : 3) ? `, +${x.appliedIn.length - (head ? 2 : 3)}` : ''}${head ? '' : ` (here: ${x.uses.join(', ')})`}`
+/** summary.md: validations most instructions apply to an account role, missing in one using the account (consistency.ts) */
+function renderConsistency(a: Analysis, where: Where): string[] {
+	const xs = (a.consistency ?? []).flatMap(v => v.inconsistencies).sort((x, y) => y.weight - x.weight || y.appliedIn.length - x.appliedIn.length)
+	if (!xs.length) return []
+	const out = ['## Validation consistency (a validation most instructions apply to an account role, missing in one using its data; leads)', '']
+	for (const x of xs.slice(0, 6)) out.push(`- ${incLine(x, where, true)}`.slice(0, 360))
+	if (xs.length > 6) out.push(`- … ${xs.length - 6} more in analysis.json (validation_consistency)`)
+	return [...out, '']
+}
+/**
+ * summary.md: stored-key gaps (<ix>.md Stored keys): GAP lines, and program accounts (type checked) of an instruction moving
+ * value / changing an authority that no stored field of binds, bound only through another program account's field (not
+ * a token account's mint / owner) and not pinned by their own key (PDA / address / key / has_one); then GAP lines of such
+ * instructions; at most 5 lines
+ */
+function renderStoredGaps(a: Analysis): string[] {
+	const gaps: string[] = [], only: string[] = []
+	const moves = (ix: IxOut) => ix.ops.some(o => o.kinds.some(k => ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'BURN', 'ACCOUNT_CLOSE', 'AUTHORITY_WRITE'].includes(k)) || (o.kinds.includes('LAMPORT_WRITE') && o.how === '-='))
+	for (const ix of a.ixs) for (const k of ix.storedKeys ?? []) {
+		const x = ix.accounts.find(y => y.name === k.account)
+		const on = (c: string) => !!x?.constraints[c] && x.constraints[c].status !== 'not_found'
+		if (moves(ix)) for (const g of k.gaps) gaps.push(`- ${ix.name} · GAP: ${g}`)
+		const via = k.referencedBy.filter(b => !/\.(mint|owner|data)$/.test(b))
+		// (token accounts / mints by name: their data is the token program's)
+		if (!k.compared.length && via.length && via.length === k.referencedBy.length && on('discriminator') && !/mint|vault|token|_ata$|^ata/i.test(k.account) && !['pda', 'address', 'key', 'has_one'].some(on) && moves(ix))
+			only.push(`- ${ix.name} · ${k.account}${k.type ? ` (${k.type})` : ''}: none of its stored fields is compared with a provided account (bound only through ${via.join(', ')})`)
+	}
+	const out = [...only.slice(0, 2), ...gaps.slice(0, 5 - Math.min(2, only.length))]
+	if (!out.length) return []
+	const more = gaps.length + only.length - out.length
+	return ['## Stored keys not compared (accounts whose data is used; see <ix>.md Stored keys)', '', ...out, ...(more ? [`- … ${more} more in the <ix>.md files`] : []), '']
+}
+
 /** security/summary.md: the ranked instruction surface tree. */
 export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => string): string {
 	const out = ['# Security summary', '', ...HEADER, '',
 		`Program: sBPF v${a.program.version}, ${a.program.instructions} instructions, ${a.program.functions} functions${a.program.anchor ? ', Anchor' : ''}${a.program.idl ? ' (with IDL)' : ''}. Machine-readable: analysis.json.`, '',
-		...renderFindings(a, where), '## Instructions (most sensitive first)', '']
+		...renderFindings(a, where), ...renderConsistency(a, where), ...renderStoredGaps(a), '## Instructions (most sensitive first)', '']
 	for (const ix of a.ixs) {
 		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => `${x.name} (${ST[x.constraints.signer.status]})`)
 		const anon = ix.checks.filter(c => c.kinds.includes('signer') && (!c.account || c.account.endsWith('?'))).length
@@ -814,6 +859,19 @@ export function renderIx(ix: IxOut, where: Where, a?: Analysis): string {
 			if (!k.compared.length) out.push(`  - none of its stored fields is compared with a provided account${k.referencedBy.length ? ` (bound only through ${k.referencedBy.join(', ')})` : ''}`)
 			if (k.never.length) out.push(`  - stored keys never compared: ${k.never.join(', ')}`)
 			for (const g of k.gaps) out.push(`  - GAP: ${g}`)
+		}
+	}
+	const mine = (a?.consistency ?? []).filter(v => v.members.some(m => m.ix === ix.name))
+	if (mine.length) {
+		out.push('', '## Validation consistency (account roles shared with other instructions: the validations each applies)', '')
+		for (const v of mine.slice(0, 12)) {
+			const n = new Set(v.members.map(m => m.ix)).size
+			for (const m of v.members.filter(m => m.ix === ix.name)) {
+				const others = new Map<string, number>()
+				for (const o of v.members) if (o.ix !== ix.name) for (const x of new Set(o.validations)) others.set(x, (others.get(x) ?? 0) + 1)
+				out.push(`- ${m.account} [${v.role}; ${n} instructions]: here ${m.validations.join(', ') || 'none'}; in the others ${[...others].sort((p, q) => q[1] - p[1]).slice(0, 6).map(([x, c]) => `${x} ${c}`).join(', ') || 'none'}`.slice(0, 300))
+				for (const x of v.inconsistencies.filter(x => x.ix === ix.name && x.account === m.account)) out.push(`  - ⚠ ${incLine(x, where, false)}`.slice(0, 400))
+			}
 		}
 	}
 	const tr = ix.trust?.filter(t => t.trust !== 'validated' || t.evidence.length) ?? []

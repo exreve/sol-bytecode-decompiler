@@ -74,9 +74,9 @@ export function budgetMarkdown(text: string, max: number, order: RegExp[], where
 }
 
 /** Section order for security/<ix>.md (dropped first → last). */
-export const IX_ORDER = [/Path conditions/, /Relations/, /Trust/, /Authorization chains/, /Proof trees/, /Arithmetic/, /Dominance/, /Authority/, /^## Checks/, /Operations/, /PDAs derived/, /CPIs/, /Constraints per account/, /Findings/, /Account privileges/, /Look first/]
+export const IX_ORDER = [/Path conditions/, /Relations/, /Trust/, /Validation consistency/, /Authorization chains/, /Proof trees/, /Arithmetic/, /Dominance/, /Authority/, /^## Checks/, /Operations/, /PDAs derived/, /CPIs/, /Constraints per account/, /Findings/, /Account privileges/, /Look first/]
 /** Section order for security/summary.md. */
-export const SUMMARY_ORDER = [/Read\/write dependencies/, /State machine/, /Authority fields/, /State writes/, /^## PDAs/, /not attributed/, /Findings/, /Instructions/]
+export const SUMMARY_ORDER = [/Read\/write dependencies/, /State machine/, /Authority fields/, /State writes/, /^## PDAs/, /not attributed/, /Stored keys not compared/, /Validation consistency/, /Findings/, /Instructions/]
 
 /**
  * Cut security/analysis.json to `max` bytes: lowest-priority detail first (path conditions, bypass paths,
@@ -111,7 +111,7 @@ export function budgetJson(text: string, max: number): string {
 		() => each(ix => { for (const p of ix.path_conditions ?? []) cap(p, 'conditions', 4, 'path_conditions[].conditions'); for (const c of ix.auth_chains ?? []) cap(c, 'chains', 2, 'auth_chains[].chains'); cap(ix, 'proof', 24, 'proof'); cap(ix, 'authority', 24, 'authority') }),
 		() => each(ix => { cap(ix, 'path_conditions', 0, 'path_conditions'); cap(ix, 'auth_chains', 0, 'auth_chains'); cap(ix, 'relations', 0, 'relations'); cap(ix, 'proof', 0, 'proof'); cap(ix, 'arithmetic', 40, 'arithmetic'); cap(ix, 'functions', 60, 'functions') }),
 		() => each(ix => { for (const o of ix.operations ?? []) { cap(o, 'bypass', 0, 'operations[].bypass'); cap(o, 'guarded_by', 16, 'operations[].guarded_by') }; cap(ix, 'checks', 150, 'checks'); cap(ix, 'operations', 150, 'operations'); cap(ix, 'trust', 0, 'trust'); cap(ix, 'authority', 0, 'authority') }),
-		() => { cap(doc, 'findings', 300, 'findings'); cap(doc, 'unattributed_operations', 100, 'unattributed_operations'); cap(doc, 'state_writes', 200, 'state_writes'); each(ix => { cap(ix, 'checks', 60, 'checks'); cap(ix, 'operations', 60, 'operations'); cap(ix, 'arithmetic', 0, 'arithmetic'); cap(ix, 'divisions', 20, 'divisions') }) },
+		() => { cap(doc, 'findings', 300, 'findings'); cap(doc, 'unattributed_operations', 100, 'unattributed_operations'); cap(doc, 'state_writes', 200, 'state_writes'); cap(doc, 'validation_consistency', 30, 'validation_consistency'); each(ix => { cap(ix, 'checks', 60, 'checks'); cap(ix, 'operations', 60, 'operations'); cap(ix, 'arithmetic', 0, 'arithmetic'); cap(ix, 'divisions', 20, 'divisions') }) },
 	]
 	const out = () => JSON.stringify({ ...doc, budget: { max_bytes: max, note: 'detail dropped to fit the size budget, lowest priority first (<key>_omitted: entries cut from that list); the decompiled code is complete', omitted } }, null, 1) + '\n'
 	let s = out()
