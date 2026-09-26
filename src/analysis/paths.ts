@@ -52,6 +52,22 @@ export function stmtAt(I: Ir, fn: number, pc: number): [Stmt, number] | undefine
 	return m.get(pc)
 }
 
+/** the value a single store statement writes, with its position */
+export function storedAt(I: Ir, fn: number, pc: number): [Expr, number] | undefined {
+	const st = stmtAt(I, fn, pc)
+	if (!st) return undefined
+	const [s, p] = st
+	const v = s.k === 'store' ? s.v : s.k === 'stores' && s.vals.length === 1 ? s.vals[0] : undefined
+	return v && [v, p]
+}
+
+/** the position of a point: its statement, else the end of the block returning `ret` */
+export function posAt(I: Ir, fn: number, pc?: number, ret?: Expr): number | undefined {
+	if (pc !== undefined) return stmtAt(I, fn, pc)?.[1]
+	const b = blockAt(I, fn, undefined, ret)
+	return b === undefined ? undefined : b << 16 | I.byPc.get(fn)!.f.blocks[b].stmts.length
+}
+
 // ---- dominators of the part of a native dispatcher an instruction's tags reach ----
 
 const ridom = new WeakMap<IxCtx, Map<number, Int32Array>>()

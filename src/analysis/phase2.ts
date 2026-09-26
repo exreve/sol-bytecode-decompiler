@@ -13,10 +13,13 @@
 import type { Result } from '../decompile.ts'
 import type { OpKind } from './facts.ts'
 import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
-import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
+import { cfgOf, decisionBlock, dominates, bypass, blockPc, callOf, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { structFields } from '../idl.ts'
+import { irOf, posAt, stmtAt, storedAt } from './paths.ts'
+import { sourceCtx, type Source } from './sources.ts'
+import type { Expr } from '../ir.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
@@ -186,20 +189,36 @@ export function phase2(a: Analysis, r: Result) {
 			if (bare && !out.length) out.push({ source: `${bare}.key`, trust: trustOf(`${bare}.key`) ?? 'caller-controlled' })
 			return out.filter((x, i) => out.findIndex(y => y.source === x.source) === i)
 		}
+		// (on the IR where the parameter's expression is known: sources.ts; else by the printed text)
+		const S = sourceCtx(r, ix), I = irOf(r)
+		const trustSrc = (x: Source): string => x.kind === 'ix' || x.kind === 'remaining' ? 'caller-controlled' : x.kind === 'sysvar' || x.kind === 'lamports' || x.kind === 'owner' ? 'runtime'
+			: x.kind === 'return-data' ? 'partially-validated' : trustOf(x.kind === 'key' ? `${x.acct}.key` : `${x.acct}.data`) ?? 'caller-controlled'
 		for (const o of ix.ops) {
 			if (!isSensitive(o)) continue
-			const params: [string, string][] = []
+			const fn = o.fnPc
+			const pos = fn === undefined ? undefined : posAt(I, fn, o.at.pc, o.ret)
+			const call = fn !== undefined && o.at.pc !== undefined ? stmtAt(I, fn, o.at.pc) : undefined
+			const args = call && callOf(call[0])?.args
+			const printed = (v: string) => { const ex = fn !== undefined ? r.facts.get(fn)?.expr : undefined; return ex && args?.find(a => ex(a) === v.replace(/ \[ix data\?\]$/, '')) }
+			const params: [string, string, Expr | undefined][] = []
 			if (o.cpi) {
-				if (!o.cpi.known && o.cpi.program !== '?') params.push(['program', o.cpi.program])
-				for (const x of o.cpi.accounts) params.push([x.role ?? 'account', x.text])
-				for (const [k, v] of o.cpi.fields) params.push([k, v])
-				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds])
+				const cs = o.cpi.src
+				if (!o.cpi.known && o.cpi.program !== '?') params.push(['program', o.cpi.program, cs?.program])
+				o.cpi.accounts.forEach((x, i) => params.push([x.role ?? 'account', x.text, cs?.accounts[i]]))
+				o.cpi.fields.forEach(([k, v], i) => params.push([k, v, cs?.fields[i] ?? printed(v)]))
+				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds, undefined])
 			}
-			if (o.pda) params.push(['seeds', o.pda.seeds])
-			if (o.value !== undefined && o.target) params.push([o.target, o.value])
+			if (o.pda) params.push(['seeds', o.pda.seeds, undefined])
+			if (o.value !== undefined && o.target) params.push([o.target, o.value, fn !== undefined && o.at.pc !== undefined ? storedAt(I, fn, o.at.pc)?.[0] : undefined])
 			const src: NonNullable<OpOut['sources']> = []
-			for (const [p, t] of params) for (const s of classify(t)) src.push({ param: p, ...s })
-			if (src.length) o.sources = src.slice(0, 24)
+			for (const [p, t, e] of params) {
+				// (an account passed to a CPI is named by the account model; its key's flow is the account itself)
+				const ir = e && fn !== undefined && pos !== undefined ? S.of(fn, e, pos) : undefined
+				if (ir?.length) for (const x of ir) src.push({ param: p, source: x.source, trust: trustSrc(x) })
+				else for (const x of classify(t)) src.push({ param: p, ...x })
+			}
+			const uniq = src.filter((x, i) => src.findIndex(y => y.param === x.param && y.source === x.source) === i)
+			if (uniq.length) o.sources = uniq.slice(0, 24)
 		}
 		// relations: two sides of an equality check, at least one an account key / field
 		const rel: Relation[] = []

@@ -250,6 +250,7 @@ export interface CpiParts {
 	accounts: { role?: string; text: string; w?: number; s?: number }[]
 	fields: [string, string][]
 	seeds?: string
+	src?: { program?: Expr; accounts: (Expr | undefined)[]; fields: (Expr | undefined)[] } // the expressions (at the call) the program id, account keys and fields come from (the analysis)
 }
 
 /** One-line description of a CPI site, or undefined when its instruction is not in the frame. */
@@ -321,7 +322,7 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		const mo = metas && fo(metas)
 		if (nAcc !== undefined && mo !== undefined && mo !== null && nAcc <= 24) for (let i = 0; i < nAcc; i++) {
 			const pk = at(mo + 16 * i, 8)
-			accounts.push({ text: pk ? keyPtr(pk).known ?? env.expr(pk) : '?', w: num(at(mo + 16 * i + 8, 1)), s: num(at(mo + 16 * i + 9, 1)) })
+			accounts.push({ text: pk ? keyPtr(pk).known ?? env.expr(pk) : '?', w: num(at(mo + 16 * i + 8, 1)), s: num(at(mo + 16 * i + 9, 1)), src: pk })
 		}
 	} else {
 		program = keyInFrame(ix + 48) ?? { text: '?' }
@@ -330,7 +331,8 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 		const metas = at(ix, 8), mo = metas && fo(metas)
 		if (nAcc !== undefined && mo !== undefined && mo !== null && nAcc <= 24) for (let i = 0; i < nAcc; i++) {
 			const b = mo + 34 * i
-			accounts.push({ text: keyInFrame(b)?.text ?? '?', w: num(at(b + 33, 1)), s: num(at(b + 32, 1)) })
+			const k = keyInFrame(b)
+			accounts.push({ text: k?.text ?? '?', w: num(at(b + 33, 1)), s: num(at(b + 32, 1)), src: k?.src })
 		}
 	}
 	const dl = num(dataLen)
@@ -345,7 +347,7 @@ export function cpiDesc(site: CpiSite, env: CpiEnv): CpiDesc | undefined {
 
 /** A 32-byte key: its text (known name, `key <base58>`, `*src`), the known name, the address it was read from. */
 export interface KeyText { text: string; known?: string; src?: Expr }
-export interface Acc { text: string; w?: number; s?: number }
+export interface Acc { text: string; w?: number; s?: number; src?: Expr }
 /**
  * An instruction passed to a CPI, as far as it is known: program id, account metas, data (bytes
  * relative to the data start, when it is a known object), signer seeds (text).
@@ -387,20 +389,20 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 			if (!lay) continue
 			// a guess (program not constant) must match the data length and the account count exactly
 			if (!fam && (lay.len === undefined || lay.len !== dl || (nAcc !== undefined && nAcc !== lay.accounts.length))) continue
-			const parts: string[] = [], fields: [string, string][] = []
+			const parts: string[] = [], fields: [string, string][] = [], fsrc: (Expr | undefined)[] = []
 			accounts.forEach((a, i) => parts.push(`${lay.accounts[i] ?? `account${i}`}: ${accText(a)}`))
 			if (!accounts.length && nAcc !== undefined && nAcc !== lay.accounts.length) parts.push(`${nAcc} accounts`)
 			for (const [name, off, size] of lay.fields) {
 				if (off >= dl) continue
 				let v: string
-				if (size === 'key') { const k = data.key(off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : '') }
-				else { const e = data.at(off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?' }
+				if (size === 'key') { const k = data.key(off); v = (k?.text ?? '?') + (k?.src && env.tainted?.(k.src) ? IXD : ''); fsrc.push(k?.src) }
+				else { const e = data.at(off, size); v = e ? env.expr(e) + (env.tainted?.(e) ? IXD : '') : '?'; fsrc.push(e) }
 				parts.push(`${name}: ${v}`)
 				fields.push([name, v])
 			}
 			const head = fam ? `${program.text}.${lay.name}` : `program ${program.text}${check} — data and accounts match ${F.label} ${lay.name}; if it is ${F.label}:`
 			const family = program.known === 'TOKEN_2022_PROGRAM' ? 'token2022' : F === TOKEN ? 'token' : F === SYSTEM ? 'system' : F === ATA ? 'ata' : F === STAKE ? 'stake' : 'compute_budget'
-			const cp: CpiParts = { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields, accounts: accounts.map((a, i) => ({ role: lay.accounts[i], text: a.text, w: a.w, s: a.s })) }
+			const cp: CpiParts = { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields, accounts: accounts.map((a, i) => ({ role: lay.accounts[i], text: a.text, w: a.w, s: a.s })), src: { program: program.src, accounts: accounts.map(a => a.src), fields: fsrc } }
 			return { text: `CPI ${head} ${parts.length ? `{ ${parts.join(', ')} }` : '{}'}${tail}`, family, ix: lay.name, guessed: !fam, parts: cp }
 		}
 	}
@@ -413,7 +415,7 @@ export function formatIx(m: IxModel, env: CpiEnv): CpiDesc | undefined {
 	if (dl !== undefined) parts.push(`data ${dl} byte${dl === 1 ? '' : 's'}${data ? describeData(data.at, dl, env) : ''}`)
 	else if (m.dataText) parts.push(`data ${m.dataText}`)
 	if (program.text === '?' && parts.length === 1) return undefined
-	return { text: `CPI${event ? ' emit_cpi! (Anchor event self-invocation)' : ''}: ${parts.join(', ')}${tail}`, parts: { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields: event ? [['event', 'emit_cpi!']] : [], accounts: accounts.map(a => ({ text: a.text, w: a.w, s: a.s })) } }
+	return { text: `CPI${event ? ' emit_cpi! (Anchor event self-invocation)' : ''}: ${parts.join(', ')}${tail}`, parts: { program: program.text, known: program.known, checked: check.trim() || undefined, seeds: signerSeeds(seeds), fields: event ? [['event', 'emit_cpi!']] : [], accounts: accounts.map(a => ({ text: a.text, w: a.w, s: a.s })), src: { program: program.src, accounts: accounts.map(a => a.src), fields: [] } } }
 }
 
 /** signer seeds text of a CPI, undefined when it has none */

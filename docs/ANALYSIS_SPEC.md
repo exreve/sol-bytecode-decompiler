@@ -68,8 +68,14 @@ Phase 2:
 
 Status (implemented, src/analysis/phase2.ts, flow.ts): dominance on the IR's CFGs (a check takes effect at
 its deciding block and, when on every path of its function, at the call sites up the call path; statuses
-found/partial come from it); trust of account keys / data / instruction args; parameter sources (taint.ts
-`[ix data?]` marks, account keys, stored fields: text-level); relations from equality checks and Anchor
+found/partial come from it); trust of account keys / data / instruction args; parameter sources on the IR
+(src/analysis/sources.ts: a backward walk from the parameter's expression through reaching definitions, frame
+slots, call-site arguments up the call path, what a call leaves in an object it is passed (its arguments) and
+pointers (the base a value is loaded through, not the offsets added to it), down to instruction data (native: the
+pointer the dispatch tag is read from; Anchor: the handler's ix_args, `ix.<arg>` by the printed load), account
+keys / data / lamports / owners (native: the account model; Anchor: the Accounts struct's AccountInfo words and the
+objects serialized back), remaining accounts, sysvars and CPI return data by the syscalls producing them; the
+printed text only for parameters without an expression (seeds)); relations from equality checks and Anchor
 has_one; authority graph; rules `cpi-unchecked-program`, `value-move-no-signer`,
 `signer-not-related-to-authority`, `check-bypassable`, `token-mint-unrelated`,
 `caller-controlled-sensitive-param`, `unverified-account-data`. Phase-1 gaps closed alongside: Anchor
@@ -138,5 +144,6 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   seeds), instruction builders and TokenInstruction::pack tags before an undecoded invoke (native: the builder's
   arguments give the accounts); unnamed create / find_program_address by their syscall (analysis only).
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
-temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts; value identity
+temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
+account object's neighbouring words are only a guess for the writes); value identity
 follows one call path per function (the first found) and treats memory as unchanged between two reads.

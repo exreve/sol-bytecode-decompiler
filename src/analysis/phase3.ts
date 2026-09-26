@@ -23,7 +23,8 @@ import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
 import { cfgOf, blockPc, condKey, callOf, accountResolver, type Cfg } from './flow.ts'
-import { irOf, pathTo, blockAt, checkAt, valueKey, cmpsOf, keyIn, follow, stmtAt, defsIn, type IrCond } from './paths.ts'
+import { sourceCtx } from './sources.ts'
+import { irOf, pathTo, blockAt, checkAt, valueKey, cmpsOf, keyIn, follow, stmtAt, storedAt, defsIn, type IrCond } from './paths.ts'
 
 export interface PathCond { at: Loc; cond: string; holds: boolean; how: 'branch' | 'exit-check' | 'loop' | 'before'; check?: number } // before: an earlier sibling if (either side may be taken)
 export interface PathInfo { op: number; conds: PathCond[]; notRequired: { check: number; path?: Loc[] }[]; truncated?: boolean }
@@ -120,8 +121,8 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		return { at: { fn: ff.name, line: condLineOf(ff, g, c), pc: blockPc(g, c.b) }, cond: ff.expr?.(c.c) ?? '?', holds: c.holds ?? false, how, check }
 	}
 	const guardOf = (c: IrCond) => ({ at: shown(c).at, cond: text(c.fn, c.c) })
-	const argNames = (r.instructions.find(i => i.name === ix.name)?.args ?? []).map(s => s.split(':')[0].trim())
-	const callerCtl = (s: string) => /\[ix data\?\]|ix_args|ix_data/.test(s) || argNames.some(g => new RegExp(`\\b${g}\\b`).test(s))
+	const S = sourceCtx(r, ix)
+	const callerCtl = (fn: number, e: Expr, p: number) => S.of(fn, e, p).some(x => x.kind === 'ix')
 	// arithmetic on value paths: the sum / difference an operation stores (IR), its operands by value identity
 	const arith: ArithSite[] = []
 	const keysOf = new Map<number, [boolean, string][]>() // site -> its operands' keys, [subtracted, key]
@@ -154,20 +155,12 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		}
 		const gc = g ?? bounded
 		keysOf.set(arith.length, vars)
-		arith.push({ at: loc(ff.name, line), op, target, expr: text(fn, e), kind, status: g ? 'checked' : bounded ? 'bounded' : 'unchecked', guard: gc && guardOf(gc), caller: callerCtl(text(fn, e)) || undefined, unnamed: unnamed || undefined })
-	}
-	/** the value an operation stores (IR): the statement at its pc */
-	const stored = (o: OpOut): [Expr, number] | undefined => {
-		const st = o.fnPc !== undefined && o.at.pc !== undefined ? stmtAt(I, o.fnPc, o.at.pc) : undefined
-		if (!st) return undefined
-		const [s, p] = st
-		const v = s.k === 'store' ? s.v : s.k === 'stores' && s.vals.length === 1 ? s.vals[0] : undefined
-		return v && [v, p]
+		arith.push({ at: loc(ff.name, line), op, target, expr: text(fn, e), kind, status: g ? 'checked' : bounded ? 'bounded' : 'unchecked', guard: gc && guardOf(gc), caller: callerCtl(fn, e, q) || undefined, unnamed: unnamed || undefined })
 	}
 	ix.ops.forEach((o, oi) => {
 		const fn = o.fnPc
 		if (fn === undefined) return
-		const x = stored(o)
+		const x = o.at.pc !== undefined ? storedAt(I, fn, o.at.pc) : undefined
 		if (x && o.kinds.includes('LAMPORT_WRITE') && o.value && !o.kinds.includes('ACCOUNT_CLOSE')) site(fn, x[0], x[1], o.target ?? '?', oi, false)
 		else if (x && o.kinds.includes('ACCOUNT_DATA_WRITE') && o.value && o.target) {
 			const f = o.target.split('.').slice(1).join('.')

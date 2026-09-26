@@ -112,7 +112,7 @@ export interface IxOut {
 	divs?: DivSite[]
 	proof?: Proof[]
 }
-export interface IxCtx { handler: number; parents: Map<number, { fn: number; pc?: number; ret?: Expr }>; allowed?: (fn: number, b: number) => boolean; restricted?: Set<number> }
+export interface IxCtx { handler: number; parents: Map<number, { fn: number; pc?: number; ret?: Expr }>; allowed?: (fn: number, b: number) => boolean; restricted?: Set<number>; tag?: { fn: number; v: number } }
 export interface PdaOut { seeds: string; program: string; derivedIn: string[]; signsIn: string[]; accounts: string[]; compared: Status }
 export interface Analysis {
 	program: { version: number; instructions: number; functions: number; anchor: boolean; idl: boolean }
@@ -366,7 +366,7 @@ function analyze0(r: Result): Analysis {
 			}
 		}
 		// check statuses from real dominators (across calls), then the per-account constraints
-		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(f.name)).map(f => f.pc)) }
+		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(f.name)).map(f => f.pc)), tag: grp?.tag }
 		dominance(r, checks, ops, ctx)
 		for (const [acct, k, ci, via] of pend) note(acct, k, { status: checks[ci].status, at: checks[ci].at, via })
 		// runtime model: what the Solana runtime enforces for the operations made

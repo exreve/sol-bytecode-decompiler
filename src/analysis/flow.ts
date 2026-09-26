@@ -180,8 +180,11 @@ const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgr
  * others with `obj + off` (or a frame slot just loaded from it) of a parameter `obj`. Field i of T (IDL
  * order = Borsh order) is at in-memory offset off_i.
  */
+const exitMemo = new WeakMap<Result, Map<number, ExitFn>>()
 export function exitFns(r: Result): Map<number, ExitFn> {
-	const out = new Map<number, ExitFn>()
+	let out = exitMemo.get(r)
+	if (out) return out
+	exitMemo.set(r, (out = new Map()))
 	const p = r.program, idl = r.idl
 	const discType = new Map<bigint, string>()
 	for (const a of idl?.accounts ?? []) discType.set(a.disc, a.name)
@@ -267,7 +270,7 @@ export function addExitWrites(r: Result) {
 		if (!ff) continue
 		const fp = fpOf(fo)
 		const sites = [...stmtsOf(fo)].filter(s => { const c = callOf(s); return c?.t.k === 'fn' && exits.has(c.t.pc) })
-		if (!sites.length) { if (fo.name.startsWith('ix_')) calleeWrites(r, fo, [], exits); continue }
+		if (!sites.length) { objsMemo.set(fo, []); if (fo.name.startsWith('ix_')) calleeWrites(r, fo, [], exits); continue }
 		const g = cfgOf(fo)
 		const defs = singleDefs(fo)
 		const objs: FrameObj[] = []
@@ -334,29 +337,35 @@ export function addExitWrites(r: Result) {
 			}
 			objs.push({ X, size, acct, ex, exit: r.funcs.find(x => x.pc === callee)?.name ?? String(callee) })
 		}
+		objsMemo.set(fo, objs)
 		if (objs.length) calleeWrites(r, fo, objs, exits)
 	}
 }
 
 interface FrameObj { X: number; size: number; acct: string; ex: ExitFn; exit: string }
+const objsMemo = new WeakMap<FuncOut, FrameObj[]>() // the account objects a function serializes back (addExitWrites)
+const objLo = (o: FrameObj) => Math.min(...o.ex.fields.map(x => x.off))
 /**
  * A value in the handler or a function it calls: a pointer into a frame (of the function `ctx`, as at
  * position `at`); an account's &AccountInfo (info), the RcBox of its lamports (rc) / data (drc), a pointer
  * to its lamports (lam) / data (data, at `off`); ty: the account's type.
  */
-type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data'; acct: string; ty?: string; off: number }
-interface EvCtx { fo: FuncOut; D: Defs; ev: (e: Expr, p: number, d?: number) => HVal | undefined }
+export type HVal = { k: 'fr'; ctx: EvCtx; z: number; at: number } | { k: 'info' | 'rc' | 'drc' | 'lam' | 'data' | 'keyp' | 'ownp'; acct: string; ty?: string; off: number; guess?: boolean } // keyp / ownp: a pointer to its key / owner; guess: the account by the words around an account object
+export interface EvCtx { fo: FuncOut; D: Defs; ev: (e: Expr, p: number, d?: number) => HVal | undefined }
+export interface AnchorEval {
+	ctxOf: (fo: FuncOut, roots: Map<number, HVal>, depth: number) => EvCtx
+	zcField: (ty: string | undefined, off: number, n: number) => string | undefined
+	/** the account (and field) a frame word of the handler holds: an object serialized back, or the Accounts struct try_accounts returned */
+	frameAcct: (z: number, n: number, at: number) => { acct: string; field?: string; info?: boolean } | undefined
+}
 
 /**
- * Writes the handler's logic makes in the functions it calls with pointers into its frame (the Context
- * holding &Accounts, the Accounts struct, AccountInfo copies; 3 levels of calls): a store to a field of an
- * object the handler serializes back on exit (ACCOUNT_DATA_WRITE), to an account's lamports through the
- * RefCell of its AccountInfo (LAMPORT_WRITE), or to its data through the RefCell (a zero-copy account:
- * the IDL fields after the discriminator). The &AccountInfo words are those of the account objects, or of
- * the Accounts struct as try_accounts returns it (its layout); values a call returns in an object the
- * caller passes are the callee's single store there.
+ * The values of an Anchor handler and the functions it calls (HVal): pointers into its frame, an account's
+ * &AccountInfo (the words of the account objects, or of the Accounts struct as try_accounts returns it: its
+ * layout), the RcBoxes of its lamports / data, pointers to its key / owner / lamports / data; values a call
+ * returns in an object the caller passes are the callee's single store there.
  */
-function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>) {
+function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
 	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' }
 	const D = defsOf(H.f, cl)
 	const layout = r.acctLayouts?.get(H.pc) ?? []
@@ -364,25 +373,28 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 	const isInfo = (t: FieldType) => t.k === 'ref' && t.to === 'AccountInfo'
 	const discType = new Map((r.idl?.accounts ?? []).map(a => [a.disc, a.name] as [bigint, string]))
 	/** the account whose &AccountInfo the handler's frame word z holds (at position at): copies followed back to try_accounts' out object */
-	const infoAcct = (z: number, at: number): { acct: string; ty?: string } | undefined => {
-		for (const o of objs) if (z >= o.X && z < o.X + o.size && !o.ex.fields.some(x => z < o.X + x.off + x.size && o.X + x.off < z + 8)) return { acct: o.acct, ty: o.ex.type }
+	const infoAcct = (z0: number, at0: number): { acct: string; ty?: string; guess?: boolean } | undefined => {
+		// (the Accounts struct's layout; else the account object's own words: among its fields, or its &AccountInfo right
+		// before / after them)
+		const ow = () => { for (const o of objs) if (z0 >= o.X + objLo(o) - 8 && z0 < ((o.X + o.size + 7) & ~7) + 8 && !o.ex.fields.some(x => z0 < o.X + x.off + x.size && o.X + x.off < z0 + 8)) return { acct: o.acct, ty: o.ex.type, guess: true }; return undefined }
+		let z = z0, at = at0
 		for (let k = 0; k < 6; k++) {
 			const y = D.reaching(D.SLOT(z), at, true)
-			if (!y) return undefined
+			if (!y) return ow()
 			let [e, p] = y
-			for (let j = 0; j < 4 && e.k === 'var'; j++) { const d: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!d) return undefined; [e, p] = d }
+			for (let j = 0; j < 4 && e.k === 'var'; j++) { const d: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!d) return ow(); [e, p] = d }
 			if (e.k === 'call' && e.t.k === 'fn' && e.t.pc === tryPc) {
 				// (an &AccountInfo field, or the info word of an account deserialized in place)
 				const T = D.fpOff(e.args[0])
 				const f = T === undefined ? undefined : layout.find(x => (T + x.off === z && isInfo(x.t)) || (x.t.k === 'embed' && r.views.map.get(x.t.type)?.fields.some(y => T + x.off + y.off === z && isInfo(y.t))))
-				return f && { acct: f.name, ty: f.t.k === 'embed' ? f.t.type : /account of type (\w+)/.exec(f.doc ?? '')?.[1] }
+				return f ? { acct: f.name, ty: f.t.k === 'embed' ? f.t.type : /account of type (\w+)/.exec(f.doc ?? '')?.[1] } : ow()
 			}
 			const w = e.k === 'load' && e.size === 8 ? D.fpOff(e.addr) : undefined
-			if (w === undefined) return undefined
+			if (w === undefined) return ow()
 			z = w
 			at = p
 		}
-		return undefined
+		return ow()
 	}
 	/** a zero-copy account's field at a data offset (the IDL fields after the discriminator, no padding) */
 	const zcField = (ty: string | undefined, off: number, n: number): string | undefined => {
@@ -396,7 +408,6 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		}
 		return undefined
 	}
-	const done = new Set<string>()
 	const ctxOf = (fo: FuncOut, roots: Map<number, HVal>, depth: number): EvCtx => {
 		const CD = fo === H ? D : defsOf(fo.f, cl)
 		const self: EvCtx = { fo, D: CD, ev: () => undefined }
@@ -424,8 +435,16 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			if (x.k === 'data' && !x.ty) for (const b of g.f.blocks) if (b.term.k === 'br') walkExpr(b.term.c, y => { if (y.k === 'const' && !x.ty) x.ty = discType.get(y.v) })
 			return x
 		}
+		const memo = new Map<Expr, Map<number, HVal | undefined>>()
 		const ev = (e: Expr, p: number, d = 0): HVal | undefined => {
 			if (d > 16) return undefined
+			const m = memo.get(e)
+			if (m?.has(p)) return m.get(p)
+			const x = ev0(e, p, d)
+			if (d === 0) { if (m) m.set(p, x); else memo.set(e, new Map([[p, x]])) }
+			return x
+		}
+		const ev0 = (e: Expr, p: number, d: number): HVal | undefined => {
 			const o = CD.fpOff(e)
 			if (o !== undefined) return { k: 'fr', ctx: self, z: o, at: p }
 			switch (e.k) {
@@ -452,9 +471,9 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 						const ia = a.ctx.fo === H ? infoAcct(a.z, a.at) : undefined
 						return ia ? { k: 'info', ...ia, off: 0 } : undefined
 					}
-					if (!a || a.k === 'lam' || a.k === 'data') return undefined
-					const next = a.k === 'info' ? (a.off === 8 ? 'rc' : a.off === 0x10 ? 'drc' : undefined) : a.off === 0x18 ? (a.k === 'rc' ? 'lam' : a.k === 'drc' ? 'data' : undefined) : undefined
-					return next ? { k: next, acct: a.acct, ty: a.ty, off: 0 } : undefined
+					if (!a || a.k === 'lam' || a.k === 'data' || a.k === 'keyp' || a.k === 'ownp') return undefined
+					const next = a.k === 'info' ? (a.off === 0 ? 'keyp' : a.off === 8 ? 'rc' : a.off === 0x10 ? 'drc' : a.off === 0x18 ? 'ownp' : undefined) : a.off === 0x18 ? (a.k === 'rc' ? 'lam' : a.k === 'drc' ? 'data' : undefined) : undefined
+					return next ? { k: next, acct: a.acct, ty: a.ty, off: 0, guess: a.guess } : undefined
 				}
 			}
 			return undefined
@@ -462,6 +481,49 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		self.ev = ev
 		return self
 	}
+	const frameAcct = (z: number, n: number, at: number): { acct: string; field?: string; info?: boolean } | undefined => {
+		for (const o of objs) if (z >= o.X + objLo(o) && z < o.X + o.size) { const f = o.ex.fields.find(x => z < o.X + x.off + x.size && o.X + x.off < z + n); if (f) return { acct: o.acct, field: f.name } }
+		// (a word of the Accounts struct try_accounts returned: an &AccountInfo, or the data of an account deserialized in place)
+		const y = D.reaching(D.SLOT(z), at, true)
+		if (!y) return undefined
+		let [e, p] = y
+		for (let j = 0; j < 4 && e.k === 'var'; j++) { const q: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!q) return undefined; [e, p] = q }
+		if (e.k !== 'call' || e.t.k !== 'fn' || e.t.pc !== tryPc) return undefined
+		const T = D.fpOff(e.args[0])
+		if (T === undefined) return undefined
+		const f = layout.find(x => z >= T + x.off && z < T + x.off + Math.max(8, x.t.k === 'embed' ? r.views.map.get(x.t.type)?.size ?? 8 : 8))
+		if (!f) return undefined
+		if (isInfo(f.t)) return { acct: f.name, info: true }
+		const fl = f.t.k === 'embed' ? r.views.map.get(f.t.type)?.fields.find(y => z >= T + f.off + y.off && z < T + f.off + y.off + 8) : undefined
+		return fl && isInfo(fl.t) ? { acct: f.name, info: true } : { acct: f.name, field: fl?.name }
+	}
+	return { ctxOf, zcField, frameAcct }
+}
+
+const anchorMemo = new WeakMap<FuncOut, AnchorEval>()
+/** The Anchor account evaluator of a handler (its objects serialized back, its Accounts struct): see calleeWrites. */
+export function anchorEval(r: Result, H: FuncOut): AnchorEval {
+	let a = anchorMemo.get(H)
+	// (made by addExitWrites for the handlers it visits)
+	if (!a) anchorMemo.set(H, (a = anchorEval0(r, H, objsMemo.get(H) ?? [], exitFns(r))))
+	return a
+}
+
+/**
+ * Writes the handler's logic makes in the functions it calls with pointers into its frame (the Context
+ * holding &Accounts, the Accounts struct, AccountInfo copies; 3 levels of calls): a store to a field of an
+ * object the handler serializes back on exit (ACCOUNT_DATA_WRITE), to an account's lamports through the
+ * RefCell of its AccountInfo (LAMPORT_WRITE), or to its data through the RefCell (a zero-copy account:
+ * the IDL fields after the discriminator). The &AccountInfo words are those of the account objects, or of
+ * the Accounts struct as try_accounts returns it (its layout); values a call returns in an object the
+ * caller passes are the callee's single store there.
+ */
+function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>) {
+	const A = anchorEval0(r, H, objs, exits)
+	anchorMemo.set(H, A)
+	const { ctxOf, zcField } = A
+	const tryPc = r.tryOf.get(H.pc)
+	const done = new Set<string>()
 	const visit = (C: FuncOut, roots: Map<number, HVal>, depth: number) => {
 		const ff = r.facts.get(C.pc)
 		if (!ff || exits.has(C.pc) || tryPc === C.pc) return
@@ -593,11 +655,12 @@ export interface DispatchGroup {
 	dispatchers: string[]              // the functions matching on the tag
 	keep: (fn: number, pc: number) => boolean    // is code at pc of fn reachable with one of the group's tags? (true outside the dispatchers)
 	allowed: (fn: number, b: number) => boolean  // the same for a block of fn
+	tag: { fn: number; v: number }               // the variable holding the tag (read from the instruction data) in the first dispatcher
 }
 
 const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').replace(/\W+/g, '_').replace(/^_|_$/g, '').toLowerCase()
 
-interface TagStates { fo: FuncOut; inS: (Tags | undefined)[]; family: Set<number> }
+interface TagStates { fo: FuncOut; inS: (Tags | undefined)[]; family: Set<number>; primary: number }
 
 /**
  * The tags each block of `fo` can be reached with: the variables compared with several small constants
@@ -691,7 +754,7 @@ function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
 			else for (const x of f.blocks[b].succs) succ(x, t)
 		}
 	}
-	return { fo, inS, family }
+	return { fo, inS, family, primary }
 }
 
 /**
@@ -799,12 +862,12 @@ function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<nu
 	let groups: DispatchGroup[] = small.map(c => {
 		const { allowed, keep } = mk(c === small[small.length - 1] && rest && c.tags.length === 1 && c.tags[0] === rest.tags[0] ? rest.tags : c.tags)
 		const name = c.logs.size === 1 ? [...c.logs][0] : c.tags.length === 1 ? `tag_${c.tags[0]}` : `tags_${c.tags.join('_')}`
-		return { tags: c.tags, name, source: c.logs.size === 1 ? 'str' as const : 'tag' as const, dispatchers: ds.map(d => d.fo.name), keep, allowed }
+		return { tags: c.tags, name, source: c.logs.size === 1 ? 'str' as const : 'tag' as const, dispatchers: ds.map(d => d.fo.name), keep, allowed, tag: { fn: ds[0].fo.pc, v: ds[0].primary } }
 	})
 	if (groups.length < 2) return undefined
 	if (before[0] && ds[0].inS.some((_, b) => before[0](b) && ds[0].fo.f.blocks[b].stmts.some(s => callOf(s) || s.k === 'store' || s.k === 'stores'))) {
 		const { allowed, keep } = mk('before')
-		groups.push({ tags: [], name: `${ds[0].fo.name}_before_dispatch`, source: 'tag', dispatchers: [ds[0].fo.name], keep, allowed })
+		groups.push({ tags: [], name: `${ds[0].fo.name}_before_dispatch`, source: 'tag', dispatchers: [ds[0].fo.name], keep, allowed, tag: { fn: ds[0].fo.pc, v: ds[0].primary } })
 	}
 	// a well-known program's layout (the program's own id referenced, or exactly its tags)
 	if (groups.every(x => x.source === 'tag')) {
@@ -858,6 +921,7 @@ export interface AcctResolver {
 	store: (s: Stmt) => (AcctRef & { how?: '=' | '+=' | '-=' }) | undefined // the account field a store writes (lamports, data[a..b]), how (a sum / difference stored)
 	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
 	valueRef: (e: Expr, s: Stmt) => AcctRef | undefined     // the account field an expression of a statement is (a key: the pointer to it)
+	valueAt: (e: Expr, p: number) => AcctRef | undefined     // the same at a position (block << 16 | index)
 }
 
 /**
@@ -1389,7 +1453,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return cmp(x)
 	}
 	const valueRef = (e: Expr, s: Stmt): AcctRef | undefined => { const p = pos.get(s); return p === undefined ? undefined : asRef(ev(e, p)) }
-	res = { byName, refs, store, sides, valueRef }
+	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)) }
 	resMemo.set(fo.f, res)
 	return res
 }
