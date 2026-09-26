@@ -648,8 +648,13 @@ const RULES: Rule[] = [
 			// (not a movement of the signer's own funds: a CPI the signer signs, e.g. a deposit)
 			const own = (o: OpOut) => !!o.cpi?.accounts.some(x => x.s && signers.has(/^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1] ?? ''))
 			const row = (ix.authority ?? []).find(x => !initMechanics(ix, ix.ops[x.op]) && !initWrite(ix, ix.ops[x.op]) && !own(ix.ops[x.op]))
+			// (else a write to the data of the account holding the authority field (below): e.g. its configuration changed; not
+			// with a transfer of the signer's own funds (a deposit), nor with a check raising an error of the program's on no account
+			// (a custom error, e.g. require_keys_eq! in a helper))
+			const wr = !row && !ix.ops.some(own) && !ix.checks.some(c => !c.account && c.kinds.includes('custom'))
+			const wrote = (acct: string) => wr ? ix.ops.find(o => o.kinds.includes('ACCOUNT_DATA_WRITE') && o.target?.startsWith(`${acct}.`) && !initMechanics(ix, o) && !initWrite(ix, o)) : undefined
 			// (a has_one check the analysis did not attribute to an account: it may be this one)
-			if (!a.program.anchor || !row || ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides)) return []
+			if (!a.program.anchor || (!row && !(a.authorityFields ?? []).some(x => wrote(x.field.slice(0, x.field.indexOf('.'))))) || ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides)) return []
 			const signerKeyOf = (acct: string) => ix.checks.some(c => c.account === acct && c.kinds.some(k => k === 'has_one' || k === 'key') && !c.kinds.includes('pda') && !c.sides)
 			return (a.authorityFields ?? []).flatMap(({ field, writtenBy }) => {
 				const [acct, f] = [field.slice(0, field.indexOf('.')), field.slice(field.indexOf('.') + 1)]
@@ -657,7 +662,8 @@ const RULES: Rule[] = [
 				if ((ix.relations ?? []).some(x => x.a === field || x.b === field || ((x.a === `${f}.key` || x.b === `${f}.key`) && (x.a.startsWith(`${acct}.`) || x.b.startsWith(`${acct}.`))))) return []
 				// (a key comparison on the account whose sides the analysis did not resolve (a has_one compared through copies))
 				if (signerKeyOf(acct)) return []
-				const o = ix.ops[row.op]
+				const o = row ? ix.ops[row.op] : wrote(acct)
+				if (!o) return []
 				return [{ accounts: [f, acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${field} (the stored authority ${writtenBy.join(', ')} writes) is not compared with the signer ${f}`], confidence: 'low' as const, weight: wOf(o) }]
 			}).slice(0, 1)
 		},

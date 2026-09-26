@@ -124,10 +124,14 @@ export function consistency(a: Analysis, r: Result): RoleView[] {
 		if (ixs.size < 3) continue
 		const inc: Inconsistency[] = []
 		const all = new Set(g.members.flatMap(m => [...m.v.keys()]))
+		// (a stored key the analysis does not name the field of (a raw constraint's bytes) stands for any field compared with
+		// the same counterpart)
+		const same = (x: string, y: string) => { const a = /^(.+) == (.+)$/.exec(x), b = /^(.+) == (.+)$/.exec(y); return x === y || (!!a && !!b && a[2] === b[2] && !a[1].startsWith('key') && !b[1].startsWith('key') && (a[1] === 'stored key' || b[1] === 'stored key')) }
+		const hasV = (vs: Map<string, Loc | undefined>, v: string) => vs.has(v) || [...vs.keys()].some(x => same(x, v))
 		for (const m of g.members) {
 			if (!m.uses.length) continue
 			for (const v of all) {
-				if (m.v.has(v)) continue
+				if (hasV(m.v, v)) continue
 				const k = kindOf(v)
 				// (a relation: only where the instruction has an account of the counterpart's role)
 				const cr = k === 'relation' ? /== (.+?)\.[^.]+$/.exec(v)?.[1] : undefined
@@ -139,10 +143,10 @@ export function consistency(a: Analysis, r: Result): RoleView[] {
 				// AccountLoader<T> check owner and discriminator themselves (a loader when loaded): a missing one is mostly the analysis')
 				if (!(k in WEIGHT) || ((k === 'owner' || k === 'type') && r.anchor)) continue
 				const others = [...ixs].filter(ix => ix !== m.ix && eligible(ix))
-				const applied = g.members.filter(o => o.ix !== m.ix && o.v.has(v) && others.includes(o.ix))
+				const applied = g.members.filter(o => o.ix !== m.ix && hasV(o.v, v) && others.includes(o.ix))
 				const n = new Set(applied.map(o => o.ix)).size
 				if (n < 2 || n * 3 < others.length * 2) continue
-				const appliedIn = applied.filter((o, i) => applied.findIndex(p => p.ix === o.ix) === i).map(o => ({ ix: o.ix.name, account: o.x.name, at: o.v.get(v) }))
+				const appliedIn = applied.filter((o, i) => applied.findIndex(p => p.ix === o.ix) === i).map(o => ({ ix: o.ix.name, account: o.x.name, at: o.v.get(v) ?? o.v.get([...o.v.keys()].find(x => same(x, v)) ?? v) }))
 				inc.push({ role, ix: m.ix.name, account: m.x.name, validation: v, appliedIn, others: others.length, uses: m.uses, weight: WEIGHT[k] ?? 1 })
 			}
 		}

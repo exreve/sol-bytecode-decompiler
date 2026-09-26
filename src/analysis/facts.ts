@@ -59,6 +59,7 @@ export interface Check {
 	passPc?: number        // the first statement on the passing side (the deciding block, when the condition's code is duplicated)
 	cmp32?: boolean        // native: a 32-byte comparison whose accounts the function alone does not know (no kinds yet)
 	logRel?: [string, string] // the key equality the failing side's log states (vipers assert_keys_eq!: "self.a != self.b.c"): the two paths
+	pubkeys?: boolean      // Anchor: the failing side reports the two keys compared (Error::with_pubkeys: has_one / address / token constraints)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -113,7 +114,7 @@ export const ANCHOR_KIND: Record<string, string> = {
 }
 const ERROR_RAISE = /anchor::(Constraint|Account|Require)\w*|error::\w|ProgramError::\w/
 // (Anchor's codes 100-103 (Instruction*) name small constants too, e.g. a space of 0x64 bytes: markers only when raised)
-const ERROR_MARK = /anchor::(?!Instruction(?:Missing|FallbackNotFound|DidNotDeserialize|DidNotSerialize)\b)\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
+const ERROR_MARK = /anchor::(?!Instruction(?:Missing|FallbackNotFound|DidNotDeserialize|DidNotSerialize)\b)\w|error::\w|\bErr\(|ProgramError::|Error_with_(?:account_name|pubkeys|values)\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
 /** a two-letter account name built on the heap (inlineString wants three): one 16-bit store, the String's length 2 */
 export const shortName = (t: string): string | undefined => {
 	const m = /\bst16\((\w+), (0x[0-9a-f]{4})\)/.exec(t)
@@ -532,7 +533,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		while (ac.k === 'lnot') ac = ac.a
 		if (ac.k === 'cmp' && (ac.op === 'eq' || ac.op === 'ne') && ac.b.k === 'const' && ac.b.v === 0n && ac.a.k === 'bin' && ac.a.op === 'and' && ac.a.b.k === 'const' && [1n, 3n, 7n, 15n].includes(ac.a.b.v) && !error.includes('::')) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}), ...(logRel ? { logRel } : {}) })
+		const pubkeys = !!inp.anchor && /\bError_with_pubkeys\(/.test(ft)
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}), ...(logRel ? { logRel } : {}), ...(pubkeys ? { pubkeys } : {}) })
 	}
 
 	const condLines = (c: Expr, l: number) => {
@@ -659,6 +661,10 @@ export function functionFacts(inp: FnInput): FnFacts {
 			const ma0 = marks(a), mb0 = marks(b)
 			if (!ma0 && mb0 >= 2 && la <= 60 && inlineString(a)) return 'then'
 			if (!mb0 && ma0 >= 2 && lb <= 60 && inlineString(b)) return 'rest'
+			// (the same with one error on the other side, raised only after a nested check: e.g. Anchor 0.29's inlined
+			// try_accounts, `if (signer ok) { if (mut ok) {..} ConstraintMut } <the signer's error, its name built inline>`)
+			if (!ma0 && mb0 === 1 && firstMark(b) > 0 && b[0]?.k === 'if' && la <= 60 && inlineString(a)) return 'then'
+			if (!mb0 && ma0 === 1 && firstMark(a) > 0 && a[0]?.k === 'if' && lb <= 60 && inlineString(b)) return 'rest'
 		}
 		// (the failing side raises its error first thing; the passing side, if at all, after further checks)
 		const fa = firstMark(a), fb = firstMark(b)

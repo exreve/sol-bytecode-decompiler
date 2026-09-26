@@ -71,7 +71,7 @@ import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
-import type { Expr } from '../ir.ts'
+import type { Expr, Stmt } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
 import { libCpiOps } from './libcpi.ts'
@@ -311,7 +311,17 @@ function analyze0(r: Result): Analysis {
 			}
 			if (!calls.size) return undefined
 			const acctVar = (id: number) => { const n = fo.names[id]; return n && accounts.some(x => x.name === n) ? n : undefined }
-			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls, acctVar) }
+			// (an account try_accounts takes as an AccountInfo: the slice's first pointer, loaded on the passing side of the
+			// count check naming it)
+			const infos = { pos: new Map<number, string>(), vars: new Map<number, string>() }
+			for (const c of ff.checks) {
+				if (!c.named || !c.kinds.includes('count') || !c.c || c.passPc === undefined) continue
+				const pb = g.pcBlock.get(c.passPc)
+				const ss = pb === undefined ? [] : blocks[pb].stmts
+				const i = ss.findIndex(st => st.k === 'set' && st.e.k === 'load' && st.e.size === 8 && st.e.addr.k === 'var')
+				if (i >= 0) { infos.pos.set(pb! << 16 | i, c.named); infos.vars.set((ss[i] as Extract<Stmt, { k: 'set' }>).dst, c.named) }
+			}
+			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls, acctVar, infos) }
 		}
 		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
 		/** the accounts whose keys a call passes (arguments 1.., native), by name */
@@ -412,9 +422,17 @@ function analyze0(r: Result): Analysis {
 				if (ac) {
 					const dat = ac.find(x => x.direct), key = ac.find(x => !x.direct)
 					const d = canon(dat?.acct), k = canon(key?.acct)
+					// (a comparison whose failing side reports the two keys (Error::with_pubkeys), no other constraint kind: has_one
+					// with an error of the program's)
+					if (d && k && d !== k && c.pubkeys && !kinds.some(x => x === 'has_one' || x === 'address' || x === 'pda' || x === 'token_mint' || x === 'token_owner')) kinds.push('has_one')
 					if (d && k && d !== k) {
 						sides = [`${d}.${kinds.includes('has_one') ? k : kinds.includes('token_mint') ? 'mint' : kinds.includes('token_owner') ? 'owner' : 'data'}`, `${k}.key`]
 						if (!account || account.endsWith('?')) account = d
+					} else if (k && !d && c.pubkeys && account && canon(account) === account && account !== k && !kinds.some(x => x === 'address' || x === 'pda' || x === 'token_mint' || x === 'token_owner')) {
+						// (Anchor has_one with an error of the program's (Error::with_pubkeys, the account holding the constraint
+						// named): the other account's key against the named account's field, when that side's bytes are not resolved)
+						sides = [`${account}.${k}`, `${k}.key`]
+						if (!kinds.includes('has_one')) kinds.push('has_one')
 					} else if (!key && ac.length === 2 && kinds.includes('token_mint')) {
 						// (token::mint = <account>.<field>: two data sides, the token account's first)
 						const [t, o] = ac.map(x => canon(x.acct))

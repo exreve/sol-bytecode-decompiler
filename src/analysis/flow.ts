@@ -1645,7 +1645,7 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
  * which the check right after it names (`calls`: call position -> account). `direct`: the bytes are in the
  * frame (a copy of the deserialized account's data) rather than behind a pointer (an AccountInfo's key).
  */
-export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number, string>, acctVar?: (id: number) => string | undefined): { acct: string; direct: boolean }[] | undefined {
+export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number, string>, acctVar?: (id: number) => string | undefined, infos?: { pos: Map<number, string>; vars: Map<number, string> }): { acct: string; direct: boolean }[] | undefined {
 	let x = c
 	while (x.k === 'lnot') x = x.a
 	const cmpArgs = (e: Expr): [Expr, Expr] | undefined => (e.k === 'call' || (e.k === 'fn' && e.name === 'memeq')) && e.args.length >= 3 && e.args[2].k === 'const' && e.args[2].v === 0x20n ? [e.args[0], e.args[1]] : undefined
@@ -1672,6 +1672,10 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 			if (!y) return undefined
 			const [v, q] = follow(y[0], y[1])
 			if (v.k === 'call') { const a = calls.get(y[1]); return a ? { acct: a, direct } : undefined }
+			// (an &AccountInfo taken from the accounts slice right after the count check naming the account; a variable
+			// also set on paths the analysis does not know to fail)
+			const ia = direct ? undefined : v.k === 'load' ? infos?.pos.get(q) : v.k === 'var' ? infos?.vars.get(v.id) : undefined
+			if (ia) return { acct: ia, direct }
 			// (a pointer to another frame object, e.g. a copy of an account object: the bytes are there, as read here)
 			if (!direct && D.fpOff(v) !== undefined) return prov(v, p, true, d + 1)
 			return v.k === 'load' ? prov(v.addr, q, direct, d + 1) : undefined
