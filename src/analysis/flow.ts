@@ -728,9 +728,10 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
-			// (the handler's logic borrowing an account's data itself (not a deserialization of try_accounts): a data read)
+			// (the handler's logic borrowing an account's data itself, to read it (not a deserialization of try_accounts, not a
+			// mutable borrow: e.g. an AccountLoader's load_init / load_mut))
 			// (not a borrow followed by a discriminator check of its own: an AccountLoader's load)
-			if (c?.t.k === 'fn' && /try_borrow_(mut_)?data/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && !ff.checks.some(k => k.kinds.includes('discriminator'))) for (const x of c.args) {
+			if (c?.t.k === 'fn' && /try_borrow_data/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && !ff.checks.some(k => k.kinds.includes('discriminator'))) for (const x of c.args) {
 				// (an &AccountInfo, or a clone of one in a frame (to_account_info): its data RcBox at +0x10)
 				let v = X.ev(x, p)
 				if (v?.k === 'fr') { const w = X.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: x, b: { k: 'const', v: 0x10n } } }, p); v = w?.k === 'drc' ? { ...w, k: 'info' } : undefined }
@@ -771,7 +772,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 }
 
 const dataReadsMemo = new WeakMap<Result, Map<number, Set<string>>>()
-/** Anchor: the accounts whose data an instruction's logic borrows itself (AccountInfo::try_borrow_data), by handler */
+/** Anchor: the accounts whose data an instruction's logic borrows itself (AccountInfo::try_borrow_data, not mutably), by handler */
 export const dataReads = (r: Result, handler: number): Set<string> | undefined => dataReadsMemo.get(r)?.get(handler)
 
 const byPcMemo = new WeakMap<Result, Map<number, FuncOut>>()

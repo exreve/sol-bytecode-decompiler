@@ -60,7 +60,7 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 		if (o.kinds.some(k => VALUE_OPS.has(k))) {
 			const es: Expr[] = s.k === 'store' ? [s.v] : c ? c.args.slice(2).filter(x => D.fpOff(x) === undefined) : []
 			for (const e of es) {
-				const x = narrowed(e, p, D, 0)
+				const x = narrowed(e, p, D, 0, paramWidth(I, ctx, fn))
 				if (!x) continue
 				const ss = src(fn, x.inner, x.p).filter(y => y.kind === 'ix' || y.kind === 'data' || y.kind === 'lamports')
 				if (ss.length) { out.casts.push({ op: oi, expr: o.text.slice(0, 100), bits: x.bits, source: ss[0].source }); break }
@@ -186,32 +186,49 @@ function stmtExprsOf(s: Stmt): Expr[] {
 }
 
 /** an `ext` narrowing a wider value on the way to e (through variables' definitions): the inner value and its width */
-function narrowed(e: Expr, p: number, D: NonNullable<ReturnType<typeof defsIn>>, d: number): { inner: Expr; p: number; bits: number } | undefined {
+type PW = (id: number) => number
+function narrowed(e: Expr, p: number, D: NonNullable<ReturnType<typeof defsIn>>, d: number, pw: PW): { inner: Expr; p: number; bits: number } | undefined {
 	if (d > 6) return undefined
 	let found: { inner: Expr; p: number; bits: number } | undefined
 	walkExpr(e, x => {
 		if (found) return
-		if (x.k === 'ext' && width(x.a, p, D, 0) > x.bits) found = { inner: x.a, p, bits: x.bits }
+		if (x.k === 'ext' && width(x.a, p, D, 0, pw) > x.bits) found = { inner: x.a, p, bits: x.bits }
 		else if (x.k === 'var') {
 			const y: [Expr, number] | null = D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : D.multi.has(x.id) ? D.reaching(x.id, p) : null
-			if (y && y[0].k !== 'call') found = narrowed(y[0], y[1], D, d + 1)
+			if (y && y[0].k !== 'call') found = narrowed(y[0], y[1], D, d + 1, pw)
 		}
 	})
 	return found
 }
-/** the width in bits of a value (64 when not known) */
-function width(e: Expr, p: number, D: NonNullable<ReturnType<typeof defsIn>>, d: number): number {
-	if (d > 6) return 64
+/** the width in bits of a value, 0 when not known (a parameter or call result: a narrow argument's upper bits are
+ * undefined, its `ext` normalizes it) */
+function width(e: Expr, p: number, D: NonNullable<ReturnType<typeof defsIn>>, d: number, pw: PW): number {
+	if (d > 6) return 0
 	switch (e.k) {
 		case 'load': return e.size * 8
 		case 'ext': return e.bits
 		case 'const': return e.v < 0x100n ? 8 : e.v < 0x10000n ? 16 : e.v < 0x100000000n ? 32 : 64
-		case 'bin': return e.op === 'and' ? Math.min(width(e.a, p, D, d + 1), width(e.b, p, D, d + 1)) : ['shr', 'sar', 'div', 'udiv', 'mod', 'umod'].includes(e.op) ? width(e.a, p, D, d + 1) : Math.max(width(e.a, p, D, d + 1), width(e.b, p, D, d + 1))
+		case 'bin': {
+			const [a, b] = [width(e.a, p, D, d + 1, pw), width(e.b, p, D, d + 1, pw)]
+			if ((!a && e.a.k !== 'const') || (!b && e.b.k !== 'const')) return e.op === 'and' ? Math.max(a, b) : 0
+			return e.op === 'and' ? Math.min(a, b) : ['shr', 'sar', 'div', 'udiv', 'mod', 'umod'].includes(e.op) ? a : Math.max(a, b)
+		}
 		case 'var': {
 			const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null
-			return y && y[0].k !== 'call' ? width(y[0], y[1], D, d + 1) : 64
+			return y ? (y[0].k !== 'call' ? width(y[0], y[1], D, d + 1, pw) : 0) : pw(e.id)
 		}
-		default: return 64
+		default: return 0
+	}
+}
+
+/** the width of a function's parameter: its argument's at the call site up the instruction's call path (0: not known) */
+function paramWidth(I: ReturnType<typeof irOf>, ctx: IxOut['ctx'], fn: number, depth = 0): PW {
+	return id => {
+		const fo = I.byPc.get(fn), k = fo?.f.vars.find(v => v.id === id)?.param ?? -1
+		const par = ctx && fn !== ctx.handler ? ctx.parents.get(fn) : undefined
+		if (!par || par.pc === undefined || k < 1 || k > 5 || depth > 3) return 0
+		const st = stmtAt(I, par.fn, par.pc), c = st && callOf(st[0]), D = defsIn(I, par.fn)
+		return c && D && c.args[k - 1] ? width(c.args[k - 1], st![1], D, 0, paramWidth(I, ctx, par.fn, depth + 1)) : 0
 	}
 }
 
