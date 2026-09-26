@@ -68,10 +68,18 @@ Phase 2:
 
 Status (implemented, src/analysis/phase2.ts, flow.ts): dominance on the IR's CFGs (a check takes effect at
 its deciding block and, when on every path of its function, at the call sites up the call path; statuses
-found/partial come from it); trust of account keys / data / instruction args; parameter sources (taint.ts
-`[ix data?]` marks, account keys, stored fields: text-level); relations from equality checks and Anchor
+found/partial come from it); trust of account keys / data / instruction args; parameter sources on the IR
+(src/analysis/sources.ts: a backward walk from the parameter's expression through reaching definitions, frame
+slots, call-site arguments up the call path, what a call leaves in an object it is passed (its arguments) and
+pointers (the base a value is loaded through, not the offsets added to it), down to instruction data (native: the
+pointer the dispatch tag is read from; Anchor: the handler's ix_args, `ix.<arg>` by the printed load), account
+keys / data / lamports / owners (native: the account model; Anchor: the Accounts struct's AccountInfo words and the
+objects serialized back), remaining accounts, sysvars and CPI return data by the syscalls producing them; the
+printed text only for parameters without an expression (seeds)); relations from equality checks and Anchor
 has_one; authority graph; rules `cpi-unchecked-program`, `value-move-no-signer`,
-`signer-not-related-to-authority`, `check-bypassable`, `token-mint-unrelated`,
+`signer-not-related-to-authority` (also, Anchor: a stored authority field another instruction writes, named like a
+signer of this one (the has_one convention), not compared with it here, before an operation other than a CPI that
+signer signs), `check-bypassable`, `token-mint-unrelated`,
 `caller-controlled-sensitive-param`, `unverified-account-data`. Phase-1 gaps closed alongside: Anchor
 fields written back on exit, native instruction split on the tag dispatch (with account[i] resolution),
 function pointers / tables / vtables, Anchor checks naming the account with a heap-built string.
@@ -94,24 +102,35 @@ Phase 3 additions (pattern rules over the facts, each with evidence + confidence
 - unchecked (wrapping) subtraction on value paths with no dominating bound check;
 - recipient/destination with no owner or mint binding.
 
-Status (implemented, src/analysis/phase3.ts; rules in phase2.ts): read off the printed code, whose indentation
-gives the statement tree, with per-operation budgets (40 conditions, 6000 lines scanned, 40 arithmetic sites,
-20 divisions per instruction).
-- path conditions: enclosing branches (polarity from then / else / else-if chains) and earlier sibling ifs whose
-  body exits, in the operation's function and at the call sites up to the handler; plus the relevant checks
-  (signer / owner / key / has_one / pda / custom / state) that do not dominate it, with a path when phase 2 found one;
+Status (implemented, src/analysis/phase3.ts on src/analysis/paths.ts; rules in phase2.ts): conditions, operands and
+divisors on the IR, names from the printed code, with per-operation budgets (80 conditions, 40 arithmetic sites, 20
+divisions per instruction).
+- path conditions: the edges of branching blocks that dominate the operation (the edge's target dominates it and is
+  entered only from the branch or from inside its own region), up the dominator tree of its function and from the call
+  sites up to the handler (labeled-block exits, early returns and loops are plain edges; in a native dispatcher, the
+  part of the CFG the instruction's tags reach); plus the relevant checks (signer / owner / key / has_one / pda /
+  custom / state) that do not dominate it, with a path when phase 2 found one;
+- value identity: a canonical key per expression and position (variables by their reaching definitions, frame slots
+  by the store reaching the load, parameters by the argument at the call site up the call path, sums flattened with
+  constants folded); a condition guards an operand when one of its comparisons contains the operand's key;
 - authorization chains: from the authority rows (phase 2) through the stored field to the instructions writing it
   and their signers;
-- arithmetic: `+` / `-` on value paths (value-named fields, lamports, 8-byte native fields, CPI amounts), locals
-  resolved two levels; `checked` when a comparison of all non-constant operands is on the way (Rust overflow
-  traps, checked_* error returns, bound checks), `saturating` for sat_add / sat_sub, else `unchecked`; divisions
-  (`/`, __udivti3, sdiv) by supply / balance-like values with or without a comparison of the divisor on the way;
+- arithmetic: `+` / `-` stored on value paths (value-named fields, lamports, 8-byte native fields, CPI amounts):
+  `checked` when a comparison on the way (any dominating branch) reads every non-constant operand, or the result and an
+  operand (Rust overflow traps, checked_* error returns, bound checks); `bounded` when each subtracted operand is
+  compared with another value on every path (an invariant between them, e.g. an amount checked against a token balance
+  and then debited from the lamports), or an addition of an amount the instruction subtracts, checked, from another
+  balance (a transfer: the total stays within a supply); `saturating` for sat_sub; else `unchecked`;
+- divisions (`/`, sdiv, __udivti3) by supply / balance-like values (by name along the divisor's provenance) or a 128-bit
+  product divided by a value read from an account's data (native: the account model), with or without a comparison of
+  the divisor on the way (a required edge; not the division-by-zero panic the compiler inserts: a side that aborts);
 - proof trees for token transfers, mints / burns, lamport moves, closes, authority writes, data writes and CPIs to
   account-supplied programs;
 - state machine: fields set to small constants (status-named, or native single bytes that are checked) and fields
   compared with small constants in checks / branch conditions;
 - rules `state-write-ungated`, `share-price-zero-supply`, `mint-burn-authority-from-data`, `cpi-forwarder`,
-  `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound`.
+  `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound` (native: also a transfer's destination no
+  check of the instruction reads at all; not a mint's: the token program requires it to hold the mint).
 Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/README.md):
 - native accounts by an IR account model: `&[AccountInfo]` slices, input records and arrays of pointers to them
   (pinocchio), the RefCell'd lamports / data of an AccountInfo, frame spills and multiply-assigned variables
@@ -119,15 +138,38 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
   key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote);
   the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
+  a condition the structuring rebuilt is located by the branch deciding it (its shape, the sides' first statements);
+  in a function the instruction calls, pointer parameters are bound to the caller's values at the call site of this
+  instruction's call path (a helper's checks on the AccountInfo it is passed, e.g. `config.owner != program_id`);
+  32-byte comparisons of values the function alone does not know as accounts wait for that context; pointers into
+  the function's own frame are values too (a struct a helper filled from an account's data, copied around the frame:
+  `config.admin == admin.key` through Config returned by a helper);
+- Anchor try_accounts when the decompiler names none (the first function the handler calls whose checks name
+  accounts) and the Accounts struct's &AccountInfo words its success path stores (one word from the call the check
+  right after names; the out object may be spilled to the frame and reloaded; two accounts of one type: the check
+  first in the flow after each call; an account whose call leaves several words: its call's first word), with the
+  decompiler's layout for the other accounts (analysis only: the printed views keep the decompiler's); a callee's
+  writes through a parameter it spills to its frame count for reaching definitions (not only the first 0x80 bytes); a zero-copy account's type by the IDL account type named like it; Anchor `zero` is a discriminator
+  check; alignment asserts (a pointer's low bits masked) are not checks; a success return writing the Ok tag before an
+  error raised first thing is not the failing side;
 - Anchor writes in the functions the handler passes its frame to (Context.accounts: object fields serialized back
   on exit, through the exit wrappers of the Accounts struct), lamports and zero-copy data through the RefCells of the
   &AccountInfo words (traced back to try_accounts' out object and the Accounts layout);
 - Anchor key comparisons (has_one, token::mint / token::authority) by the provenance of the compared bytes: the
   account whose try-call produced them (the check right after it names it), data vs key;
 - CPIs by library helper (anchor_lang::system_program, anchor_spl::token*: name, CpiContext accounts, signer
-  seeds), instruction builders and TokenInstruction::pack tags before an undecoded invoke (native: the builder's
-  arguments give the accounts); unnamed create / find_program_address by their syscall (analysis only).
+  seeds; CpiContext accounts the printed text leaves unnamed: its AccountInfo copies, the program's first, then the
+  accounts struct's in field order), instruction builders and TokenInstruction::pack tags before an undecoded invoke
+  (native: the builder's arguments give the accounts); a program id the printed text leaves unnamed: the instruction
+  struct followed up the call path (read-only memory, constant stores into a caller's frame on straight-line code) to
+  a known id, its instruction by the tag (e.g. pinocchio-system); unnamed create / find_program_address by their
+  syscall (analysis only);
+- Anchor stores in a function several handlers call (e.g. a close helper) named with one handler's accounts count
+  only for that handler's instruction.
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
-temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts; guards are
-still matched by operand text (definitions and slot reloads followed); labeled-block exits (`break Bn`) are not
-followed by the path conditions.
+temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
+account object's neighbouring words are only a guess for the writes), e.g. an AccountInfo try_accounts takes straight
+from the accounts slice (a_escrow take: its close to maker is not attributed); per-instruction context covers Anchor
+helper stores; values a library function not decompiled fills (n_token's dest via TokenAccount::unpack: the
+config~dest relation) are not followed back to the account; value identity
+follows one call path per function (the first found) and treats memory as unchanged between two reads.

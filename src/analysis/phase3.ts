@@ -5,23 +5,32 @@
 //   chains      backward authorization chains: operation -> signer / PDA signature / stored authority
 //               field related to a signer -> the instructions writing that field -> their signers
 //   arithmetic  additions / subtractions on value paths (amounts, balances, lamports): checked (a bound /
-//               overflow check on the way), saturating, or unchecked (wrapping: sBPF arithmetic wraps)
+//               overflow check of the operands on the way), bounded (each subtracted operand compared with
+//               another value on every path: an invariant between them; an amount added that the instruction
+//               subtracts, checked, from another balance: a transfer), saturating, or unchecked (wrapping)
 //   divisions   divisions by a supply / balance-like value, and whether a zero / minimum check is on the way
 //   proof       per-operation property checklist: the properties expected for the operation's kind, each
 //               found / partial / runtime / not_found with its evidence
 //   states      state machine: status / enum-like fields, the instructions setting them (to which values)
 //               and the instructions checking them
-// Everything is read off the printed code (indentation gives the structure of the statement tree) with
-// per-operation budgets: DERIVED and OVER-APPROXIMATE like the rest of security/.
+// Conditions, operands and divisors come from the IR (paths.ts: edges dominating the operation across calls,
+// values by their definitions); names and field kinds from the printed code. Per-operation budgets:
+// DERIVED and OVER-APPROXIMATE like the rest of security/.
 import type { Result } from '../decompile.ts'
 import type { FnFacts, OpKind } from './facts.ts'
-import type { Analysis, IxOut, OpOut, Loc, Status } from './report.ts'
+import type { Analysis, IxOut, OpOut, Loc, Status, IxCtx } from './report.ts'
+import type { Expr, Stmt } from '../ir.ts'
+import { walkExpr } from '../ir.ts'
+import { stmtExprs } from '../simplify.ts'
+import { cfgOf, blockPc, condKey, callOf, accountResolver, type Cfg } from './flow.ts'
+import { sourceCtx } from './sources.ts'
+import { irOf, pathTo, blockAt, checkAt, valueKey, cmpsOf, keyIn, follow, stmtAt, storedAt, defsIn, type IrCond } from './paths.ts'
 
 export interface PathCond { at: Loc; cond: string; holds: boolean; how: 'branch' | 'exit-check' | 'loop' | 'before'; check?: number } // before: an earlier sibling if (either side may be taken)
 export interface PathInfo { op: number; conds: PathCond[]; notRequired: { check: number; path?: Loc[] }[]; truncated?: boolean }
 export interface ChainStep { kind: 'op' | 'signer' | 'pda' | 'stored' | 'writer' | 'none'; what: string; status?: string }
 export interface Chain { op: number; steps: ChainStep[][] } // alternatives, each a chain from the operation back to a signer
-export interface ArithSite { at: Loc; op?: number; target: string; expr: string; kind: 'add' | 'sub'; status: 'checked' | 'saturating' | 'unchecked'; guard?: { at: Loc; cond: string }; caller?: boolean; unnamed?: boolean }
+export interface ArithSite { at: Loc; op?: number; target: string; expr: string; kind: 'add' | 'sub'; status: 'checked' | 'bounded' | 'saturating' | 'unchecked'; guard?: { at: Loc; cond: string }; caller?: boolean; unnamed?: boolean }
 export interface DivSite { at: Loc; expr: string; divisor: string; status: 'checked' | 'not_found'; guard?: { at: Loc; cond: string } }
 export interface Prop { prop: string; status: Status; evidence: string }
 export interface Proof { op: number; kind: string; props: Prop[] }
@@ -32,12 +41,8 @@ export const isValueOp = (o: OpOut) => o.kinds.some(k => VALUE_OPS.includes(k)) 
 const VALUE_FIELD = /amount|balance|lamports|supply|total|claimed|deposit|reserve|share|liquidity|fee|debt|collateral|stake|reward|fund|minted|burn|withdraw|borrow|owed|volume|principal|interest|vault|pot|prize|payout|bet|tokens?\b/i
 const SUPPLY = /supply|shares|total|balance|reserve|liquidity|deposit|lamports|staked|tvl|pool_token|\.amount\b|_amount\b|virtual/i
 const STATUS_FIELD = /(^|_)(status|state|phase|stage|initiali[sz]ed|active|paused|frozen|closed|locked|enabled|started|ended|finished|settled|resolved|mode)$|(^|\.)is_[a-z_]+$/i
-const CMP = /[<>]|[!=]=/
-const EXIT = /^\s*(return\b|abort\(|trap\(|panic|throw\b)|anchor::\w|error::\w|\bErr\(|ProgramError::|sol_panic|anchor_error_from\(|panic_fmt/
-const ind = (s: string) => { let i = 0; while (s.charCodeAt(i) === 9) i++; return i }
-const ns = (s: string) => s.replace(/\s+/g, '')
 
-// ---- per-function helpers (memoized per result) ----
+// ---- per-function text (the operations' lines; the close evidence) ----
 
 interface FnText { ff: FnFacts; lineAt: (line: number) => number | undefined }
 const fnMemo = new WeakMap<Result, Map<string, FnText>>()
@@ -52,257 +57,179 @@ function fnText(r: Result): Map<string, FnText> {
 	fnMemo.set(r, m)
 	return m
 }
-
-/** the `if (…) {` condition of a line (also `} else if (…) {`), or undefined */
-function ifCond(s: string): { cond: string; elseIf: boolean } | undefined {
-	const m = /^\s*(\} else )?if \((.*)\) \{$/.exec(s)
-	return m ? { cond: m[2], elseIf: !!m[1] } : undefined
-}
-
-/**
- * The conditions holding on every path to `line` of a function, read off the printed statement tree:
- * enclosing branches (with their polarity: then / else side, else-if chains), and earlier sibling `if`s
- * whose body exits (the path continues only when they do not hold). Bounded by `budget` lines.
- */
-function condsIn(ff: FnFacts, line: number, budget: { lines: number }): PathCond[] {
-	const L = ff.lines, out: PathCond[] = []
-	if (line < 1 || line > L.length) return out
-	let min = ind(L[line - 1]), chainInd = -1
-	for (let i = line - 2; i >= ff.at && budget.lines-- > 0; i--) {
-		const s = L[i], k = ind(s)
-		if (k > min || !s.trim()) continue
-		const at: Loc = { fn: ff.name, line: i + 1 }
-		const ic = ifCond(s)
-		if (k < min) {
-			min = k
-			if (/^\s*\} else \{$/.test(s)) { chainInd = k; continue }
-			if (ic) { out.push({ at, cond: ic.cond, holds: true, how: 'branch' }); chainInd = ic.elseIf ? k : -1; continue }
-			const w = /^\s*while \((.*)\) \{$/.exec(s)
-			if (w) out.push({ at, cond: w[1], holds: true, how: 'loop' })
-			chainInd = -1
-			if (k === 0) break
-			continue
-		}
-		// k === min
-		if (chainInd === k && ic) { out.push({ at, cond: ic.cond, holds: false, how: 'branch' }); if (!ic.elseIf) chainInd = -1; continue }
-		if (ic && !ic.elseIf) {
-			// an earlier sibling `if` whose body (no else) exits: the path goes on when it does not hold
-			let j = i + 1, last = '', ret = false
-			for (; j < L.length && j < i + 400 && (ind(L[j]) > k || !L[j].trim()); j++) if (L[j].trim()) { last = L[j]; if (/^\s*return\b/.test(L[j])) ret = true }
-			// (the body exits: its last statement, or a return inside it, e.g. after an error was built)
-			if (L[j]?.trim() === '}' && last && (EXIT.test(last) || ret)) out.push({ at, cond: ic.cond, holds: false, how: 'exit-check' })
-			else out.push({ at, cond: ic.cond, holds: false, how: 'before' })
-		}
-	}
-	return out
-}
-
-/** conditions on the way to (fn, line), in its function and at the call sites up to the handler */
-function pathConds(r: Result, ix: IxOut, fn: string, line: number, max = 40): { conds: PathCond[]; truncated: boolean } {
-	const T = fnText(r), budget = { lines: 6000 }
-	const conds: PathCond[] = []
-	let cur: { fn: string; line: number } | undefined = { fn, line }
-	for (let d = 0; cur && d < 8; d++) {
-		const t = T.get(cur.fn)
-		if (!t) break
-		conds.push(...condsIn(t.ff, cur.line, budget))
-		const par = ix.ctx?.parents.get(t.ff.pc)
-		const pf = par && r.facts.get(par.fn)
-		const pl = par?.pc !== undefined ? pf?.pcLine.get(par.pc) : undefined
-		cur = pf && pl !== undefined ? { fn: pf.name, line: pl } : undefined
-	}
-	for (const c of conds) { const ci = ix.checks.findIndex(x => x.at.fn === c.at.fn && x.at.line === c.at.line); if (ci >= 0) c.check = ci }
-	return { conds: conds.slice(0, max), truncated: conds.length > max || budget.lines <= 0 }
-}
-
-// ---- expressions (printed text) ----
-
-/** top-level terms of a sum: [sign, text] (undefined when the expression is not a plain sum) */
-function terms(e: string): [string, string][] | undefined {
-	e = e.trim().replace(/ as [ui]\d+$/, '')
-	const out: [string, string][] = []
-	let depth = 0, start = 0, sign = '+'
-	for (let i = 0; i < e.length; i++) {
-		const c = e[i]
-		if (c === '(' || c === '[') depth++
-		else if (c === ')' || c === ']') depth--
-		else if (depth === 0 && (c === '?' || c === '<' || c === '>' || c === '&' || c === '|' || c === '=' || c === '*' || c === '/')) return undefined
-		else if (depth === 0 && (c === '+' || c === '-') && e[i - 1] === ' ' && e[i + 1] === ' ') { out.push([sign, e.slice(start, i).trim()]); sign = c; start = i + 1 }
-	}
-	out.push([sign, e.slice(start).trim()])
-	return out.length > 1 ? out : undefined
-}
-const isConst = (t: string) => /^-?(0x[0-9a-f]+|\d+)$/i.test(t)
-const mentions = (cond: string, t: string) => {
-	const c = ns(cond), x = ns(t)
-	for (let i = c.indexOf(x); i >= 0; i = c.indexOf(x, i + 1)) {
-		const b = c[i - 1] ?? '', a = c[i + x.length] ?? ''
-		if (!/[\w.]/.test(b) && !/[\w]/.test(a)) return true
-	}
-	return false
-}
-
-/** the defining expression of a local (`const x = …` / `x = …`) before a line, and its line */
-function defOf(ff: FnFacts, name: string, before: number): { expr: string; line: number } | undefined {
-	const re = new RegExp(`^\\s*(?:const |let )?${name}(?:: \\w+)? = (.+)$`)
-	for (let i = before - 2, n = 0; i >= ff.at && n < 3000; i--, n++) { const m = re.exec(ff.lines[i]); if (m) return { expr: m[1], line: i + 1 } }
-	return undefined
-}
-
-const paramMemo = new WeakMap<FnFacts, string[]>()
-function paramsOf(ff: FnFacts): string[] {
-	let p = paramMemo.get(ff)
-	if (!p) {
-		const sig = ff.lines.find(l => /^(export )?function /.test(l))
-		const m = sig && /\((.*)\)/.exec(sig)
-		p = m ? m[1].split(', ').map(x => x.split(':')[0].trim()) : []
-		paramMemo.set(ff, p)
-	}
-	return p
-}
-
-/** the top-level arguments of the call whose parenthesis is at `open` */
-function argsAt(s: string, open: number): string[] {
-	const out: string[] = []
-	let depth = 0, start = open + 1
-	for (let i = open; i < s.length; i++) {
-		const c = s[i]
-		if (c === '(' || c === '[') depth++
-		else if (c === ')' || c === ']') { if (--depth === 0) { out.push(s.slice(start, i).trim()); return out } }
-		else if (c === ',' && depth === 1) { out.push(s.slice(start, i).trim()); start = i + 1 }
-	}
-	return out
-}
-
-/** calls to function `fn` in the functions of an instruction: [caller, line, arguments] (bounded) */
-function callsTo(ix: IxOut, fn: string): [string, number, string[]][] {
-	const out: [string, number, string[]][] = []
-	const T = ixText.get(ix)
-	if (!T) return out
-	for (const f of ix.functions) {
-		const ff = T.get(f)?.ff
-		if (!ff) continue
-		for (let i = ff.at; i < ff.lines.length && out.length < 4; i++) {
-			const k = ff.lines[i].indexOf(`${fn}(`)
-			if (k < 0 || /\w/.test(ff.lines[i][k - 1] ?? '') || /^(export )?function /.test(ff.lines[i])) continue
-			out.push([f, i + 1, argsAt(ff.lines[i], k + fn.length)])
-		}
-	}
-	return out
-}
 const ixText = new WeakMap<IxOut, Map<string, FnText>>()
+
+/** the printed line of a branching block's condition: its `if` / loop (by the condition, else its shape up to negation), else the block's last statement */
+const lineMemo = new WeakMap<FnFacts, Map<string, number>>()
+function condLineOf(ff: FnFacts, g: Cfg, c: IrCond): number {
+	const l = ff.condLine.get(c.c)
+	if (l !== undefined) return l
+	let m = lineMemo.get(ff)
+	if (!m) { m = new Map(); for (const [e, x] of ff.condLine) { const k = condKey(e); if (!m.has(k)) m.set(k, x) } lineMemo.set(ff, m) }
+	const k = m.get(condKey(c.c))
+	if (k !== undefined) return k
+	const bl = g.fo.f.blocks[c.b]
+	for (const pc of [bl.stmts[bl.stmts.length - 1]?.pc, ...(bl.term.k === 'br' ? [g.fo.f.blocks[bl.term.t].stmts[0]?.pc] : [])]) { const x = pc === undefined ? undefined : ff.pcLine.get(pc); if (x !== undefined) return x }
+	return ff.at + 1
+}
+
+type IrT = ReturnType<typeof irOf>
+const isConst = (k: string) => k.startsWith('#')
+
+/** the pc of the statement at a position */
+const stmtOfPos = (I: IrT, fn: number, p: number): Stmt | undefined => I.byPc.get(fn)?.f.blocks[p >> 16]?.stmts[p & 0xffff]
+
+/** where a value comes from, as printed: the expression, its variables' definitions, frame slots' stores, parameters' arguments up the call path */
+function provenance(I: IrT, ctx: IxCtx | undefined, fn: number, e: Expr, p: number): string[] {
+	const out: string[] = []
+	const add = (f: number, x: Expr) => { const t = I.r.facts.get(f)?.expr?.(x)?.trim(); if (t && !out.includes(t)) out.push(t) }
+	add(fn, e)
+	for (let k = 0; k < 12; k++) {
+		const [x, q] = follow(I, fn, e, p, 1)
+		if (x !== e) { e = x; p = q; add(fn, e); continue }
+		// (a parameter: the argument at the call site)
+		const D = defsIn(I, fn), v = e.k === 'var' ? I.byPc.get(fn)?.f.vars[e.id] : undefined
+		if (e.k === 'var' && v && v.param >= 1 && v.param !== 10 && D && !D.defs.has(e.id) && !D.multi.has(e.id)) {
+			const par = !ctx || fn === ctx.handler ? undefined : ctx.parents.get(fn)
+			const st = par?.pc !== undefined ? stmtAt(I, par.fn, par.pc) : undefined
+			const c = st && callOf(st[0])
+			const i = v.param < 100 ? v.param - 1 : 4 + (v.param - 100)
+			if (c && c.args[i]) { e = c.args[i]; p = st![1]; fn = par!.fn; add(fn, e); continue }
+		}
+		// (a load: where its address comes from)
+		const a = e.k === 'load' ? e.addr : undefined
+		const b = a?.k === 'bin' && a.op === 'add' && a.b.k === 'const' ? a.a : a
+		if (b?.k === 'var') { const [y, q2] = follow(I, fn, b, p, 1); if (y !== b) { add(fn, y); e = y; p = q2; continue } }
+		break
+	}
+	return out.slice(0, 12)
+}
 
 // ---- per instruction ----
 
 export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
-	const T = fnText(r)
+	const T = fnText(r), I = irOf(r), ctx = ix.ctx
 	ixText.set(ix, T)
 	const loc = (fn: string, line: number): Loc => ({ fn, line, pc: T.get(fn)?.lineAt(line) })
-	// (a condition on locals: their definitions too, e.g. an overflow flag `z = y > y + c`, a reload of the operand)
-	const expandCond = (c: PathCond): string => {
-		const cf = T.get(c.at.fn)?.ff
-		if (!cf) return c.cond
-		const ds: string[] = [c.cond]
-		for (const m of new Set(c.cond.match(/(?<![\w.])[A-Za-z_]\w*(?![\w(])/g) ?? [])) { const d = defOf(cf, m, c.at.line); if (d && d.expr.length < 100) ds.push(d.expr) }
-		return ds.join(' ; ')
+	const byName = new Map([...r.facts.values()].map(f => [f.name, f]))
+	const text = (fn: number, e: Expr) => (r.facts.get(fn)?.expr?.(e) ?? '?').slice(0, 120)
+	/** a condition of the IR as the report shows it */
+	const shown = (c: IrCond): PathCond => {
+		const ff = r.facts.get(c.fn)!, g = cfgOf(I.byPc.get(c.fn)!)
+		const check = checkAt(I, ix, c.fn, c.b)
+		const how: PathCond['how'] = c.how === 'branch' && check !== undefined ? 'exit-check' : c.how
+		return { at: { fn: ff.name, line: condLineOf(ff, g, c), pc: blockPc(g, c.b) }, cond: ff.expr?.(c.c) ?? '?', holds: c.holds ?? false, how, check }
 	}
-	// arithmetic on value paths
+	const guardOf = (c: IrCond) => ({ at: shown(c).at, cond: text(c.fn, c.c) })
+	const S = sourceCtx(r, ix)
+	const callerCtl = (fn: number, e: Expr, p: number) => S.of(fn, e, p).some(x => x.kind === 'ix')
+	// arithmetic on value paths: the sum / difference an operation stores (IR), its operands by value identity
 	const arith: ArithSite[] = []
-	const argNames = (r.instructions.find(i => i.name === ix.name)?.args ?? []).map(s => s.split(':')[0].trim())
-	const callerCtl = (s: string) => /\[ix data\?\]|ix_args|ix_data/.test(s) || argNames.some(g => new RegExp(`\\b${g}\\b`).test(s))
-	const site = (fn: string, line: number, expr: string, target: string, op: number | undefined, unnamed: boolean) => {
-		const ff = T.get(fn)?.ff
+	const keysOf = new Map<number, [boolean, string][]>() // site -> its operands' keys, [subtracted, key]
+	const site = (fn: number, v: Expr, p: number, target: string, op: number | undefined, unnamed: boolean) => {
+		const ff = r.facts.get(fn)
 		if (!ff || arith.length >= 40) return
-		let e = expr.trim(), l = line
-		const results: string[] = [] // (the locals holding the result: an overflow check may compare the sum with an operand)
-		for (let k = 0; k < 2 && /^[A-Za-z_]\w*$/.test(e); k++) { const d = defOf(ff, e, l); if (!d) return; results.push(e); e = d.expr.trim(); l = d.line }
-		if (/\bsat_(sub|add)\(/.test(e)) { arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind: /sat_sub/.test(e) ? 'sub' : 'add', status: 'saturating', unnamed }); return }
-		const ts = terms(e)
-		if (!ts) return
-		const kind = ts.some(([s]) => s === '-') ? 'sub' : 'add'
-		const vars = ts.map(([, t]) => t).filter(t => !isConst(t))
-		if (!vars.length) return
-		const { conds } = pathConds(r, ix, fn, line, 80)
-		// (an operand copied from another local: `const am = z` — the check may name either)
-		const alias = (v: string): string[] => {
-			const out = [v]
-			// (a reload of a frame slot: the value stored there last, before the line)
-			const fm = /^ld64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?)\)$/.exec(v)
-			if (fm) {
-				const re = new RegExp(`^\\s*st64\\(${fm[1].replace(/[+]/g, '\\+')}, ([A-Za-z_]\\w*)\\)$`)
-				for (let i = l - 2, n = 0; i >= ff.at && n < 400; i--, n++) { const m = re.exec(ff.lines[i]); if (m) { v = m[1]; out.push(v); break } }
-			}
-			for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) }
-			return out
+		const [e, q] = follow(I, fn, v, p)
+		const line = ff.pcLine.get(stmtOfPos(I, fn, q)?.pc ?? -1) ?? ff.pcLine.get(stmtOfPos(I, fn, p)?.pc ?? -1) ?? ff.at + 1
+		if (e.k === 'fn' && e.name === 'sat_sub') { arith.push({ at: loc(ff.name, line), op, target, expr: text(fn, e), kind: 'sub', status: 'saturating', unnamed: unnamed || undefined }); return }
+		if (e.k !== 'bin' || (e.op !== 'add' && e.op !== 'sub')) return
+		// (the terms of the sum: [subtracted, term])
+		const terms: [boolean, Expr][] = []
+		const flat = (x: Expr, neg: boolean, d: number) => { if (d < 6 && x.k === 'bin' && (x.op === 'add' || x.op === 'sub')) { flat(x.a, neg, d + 1); flat(x.b, x.op === 'sub' ? !neg : neg, d + 1) } else terms.push([neg, x]) }
+		flat(e, false, 0)
+		const vars = terms.map(([n, x]) => [n, valueKey(I, ctx, fn, x, q)] as [boolean, string]).filter(([, k]) => !isConst(k))
+		// (an address: a frame object plus an offset)
+		if (!vars.length || vars.some(([, k]) => /^fp\d+$/.test(k))) return
+		const kind = terms.some(([n]) => n) ? 'sub' : 'add'
+		const sum = valueKey(I, ctx, fn, e, q)
+		let g: IrCond | undefined, bounded: IrCond | undefined
+		for (const c of pathTo(I, ctx, fn, p >> 16, 80)) {
+			const cm = cmpsOf(I, ctx, c.fn, c.c, c.pos)
+			if (!cm.length) continue
+			const K = cm.map(x => `(${x.join(' ')})`).join(' ')
+			// (a comparison of every operand, or of the result with one of them: an overflow check)
+			if (vars.every(([, k]) => keyIn(K, k)) || (keyIn(K, sum) && vars.some(([, k]) => keyIn(K, k)))) { g = c; break }
+			// (each subtracted operand bounded by another value on every path, e.g. an amount checked against a balance:
+			// the difference relies on an invariant between the two values)
+			if (!bounded && c.how !== 'before' && kind === 'sub' && vars.filter(([n]) => n).every(([, k]) => cm.some(([, x, y]) => (x === k && !isConst(y)) || (y === k && !isConst(x))))) bounded = c
 		}
-		const al = vars.map(alias)
-		const hit = (c: string, vs: string[]) => vs.some(v => mentions(c, v))
-		const opText = al.map(vs => { const d = defOf(ff, vs[vs.length - 1], l); return d && d.expr.length < 100 && !/^[A-Za-z_][\w.]*$/.test(d.expr.trim()) ? [...vs, d.expr.trim()] : vs })
-		const g = conds.find(c => { if (!CMP.test(c.cond)) return false; const t = expandCond(c); return opText.every(vs => hit(t, vs)) || (hit(t, results) && opText.some(vs => hit(t, vs))) })
-		arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind, status: g ? 'checked' : 'unchecked', guard: g && { at: g.at, cond: g.cond.slice(0, 120) }, caller: callerCtl(e) || undefined, unnamed: unnamed || undefined })
+		const gc = g ?? bounded
+		keysOf.set(arith.length, vars)
+		arith.push({ at: loc(ff.name, line), op, target, expr: text(fn, e), kind, status: g ? 'checked' : bounded ? 'bounded' : 'unchecked', guard: gc && guardOf(gc), caller: callerCtl(fn, e, q) || undefined, unnamed: unnamed || undefined })
 	}
 	ix.ops.forEach((o, oi) => {
-		if (o.kinds.includes('LAMPORT_WRITE') && o.value && !o.kinds.includes('ACCOUNT_CLOSE')) site(o.at.fn, o.at.line, o.value, o.target ?? '?', oi, false)
-		else if (o.kinds.includes('ACCOUNT_DATA_WRITE') && o.value && o.target) {
+		const fn = o.fnPc
+		if (fn === undefined) return
+		const x = o.at.pc !== undefined ? storedAt(I, fn, o.at.pc) : undefined
+		if (x && o.kinds.includes('LAMPORT_WRITE') && o.value && !o.kinds.includes('ACCOUNT_CLOSE')) site(fn, x[0], x[1], o.target ?? '?', oi, false)
+		else if (x && o.kinds.includes('ACCOUNT_DATA_WRITE') && o.value && o.target) {
 			const f = o.target.split('.').slice(1).join('.')
 			const unnamed = /^data\[/.test(f)
-			if (VALUE_FIELD.test(f) || (unnamed && o.how !== '=' )) site(o.at.fn, o.at.line, o.value, o.target, oi, unnamed)
-			else if (unnamed && /^data\[\d+\.\.\d+\]$/.test(f) && terms(o.value)) { const [x, y] = f.slice(5, -1).split('..').map(Number); if (y - x === 8) site(o.at.fn, o.at.line, o.value, o.target, oi, true) }
+			if (VALUE_FIELD.test(f) || (unnamed && o.how !== '=')) site(fn, x[0], x[1], o.target, oi, unnamed)
+			else if (unnamed && /^data\[\d+\.\.\d+\]$/.test(f)) { const [lo, hi] = f.slice(5, -1).split('..').map(Number); if (hi - lo === 8) site(fn, x[0], x[1], o.target, oi, true) }
 		}
-		for (const [k, v] of o.cpi?.fields ?? []) if (/amount|lamports|quantity/i.test(k)) site(o.at.fn, o.at.line, v, `${o.cpi!.program}.${o.cpi!.ix ?? '?'}.${k}`, oi, false)
+		// (a CPI's amount: the call's argument printed as the field's value)
+		const cs = o.cpi?.fields.length && o.at.pc !== undefined ? stmtAt(I, fn, o.at.pc) : undefined
+		const call = cs && callOf(cs[0])
+		const ff = r.facts.get(fn)
+		if (call && ff?.expr) for (const [k, v] of o.cpi!.fields) {
+			if (!/amount|lamports|quantity/i.test(k)) continue
+			const arg = call.args.find(y => ff.expr!(y) === v.replace(/ \[ix data\?\]$/, ''))
+			if (arg) site(fn, arg, cs![1], `${o.cpi!.program}.${o.cpi!.ix ?? '?'}.${k}`, oi, false)
+		}
+	})
+	// (value conserved: an addition of an amount the instruction subtracts from another balance with a check on the way, e.g.
+	// a transfer between two accounts: the sum of the balances stays within the total (a supply))
+	arith.forEach((x, i) => {
+		if (x.status !== 'unchecked' || x.kind !== 'add') return
+		const ks = keysOf.get(i) ?? []
+		const j = arith.findIndex((y, k) => (y.status === 'checked' || y.status === 'bounded') && y.kind === 'sub' && (keysOf.get(k) ?? []).some(([n, key]) => n && ks.some(([, a]) => a === key)))
+		if (j >= 0) { x.status = 'bounded'; x.guard = arith[j].guard && { at: arith[j].guard!.at, cond: `${arith[j].guard!.cond} (the amount is subtracted from ${arith[j].target}: a transfer)` } }
 	})
 	ix.arith = arith
-	// (where a value comes from: locals' definitions, and a parameter's arguments at the calls in this instruction)
-	const provenance = (fn: string, e: string, line: number, depth: number, out: string[]) => {
-		if (out.length >= 12 || out.includes(e.trim())) return
-		out.push(e.trim())
-		const ff = T.get(fn)?.ff
-		if (!ff) return
-		const ids = [...new Set([...e.replace(/\bld\d+\((?:[^()]|\([^()]*\))*\)/g, '').matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w.(])/g)].map(m => m[1]))].slice(0, 4)
-		const params = paramsOf(ff)
-		for (const id of ids) {
-			const d = defOf(ff, id, line)
-			if (d) { provenance(fn, d.expr, d.line, depth, out); continue }
-			const pi = params.indexOf(id)
-			if (pi < 0 || depth <= 0) continue
-			for (const [cf, cl, args] of callsTo(ix, fn).slice(0, 3)) if (args[pi]) provenance(cf, args[pi], cl, depth - 1, out)
-		}
-	}
-	// divisions by a supply / balance-like value
+	// divisions by a supply / balance-like value (IR: udiv / sdiv, the 128-bit division helpers)
 	const divs: DivSite[] = []
-	for (const fn of ix.functions) {
-		const ff = T.get(fn)?.ff
-		if (!ff || divs.length >= 20) continue
-		for (let i = ff.at; i < ff.lines.length && divs.length < 20; i++) {
-			const s = ff.lines[i]
-			if (!/ \/ |__udivti3\(|\bu?div(64|128)?\(|\bsdiv\(/.test(s) || /^\s*\/\//.test(s)) continue
-			const cands: string[] = []
-			for (const m of s.matchAll(/ \/ (\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z_][\w.]*(?:\([^()]*\))?)/g)) cands.push(m[1])
-			const u = /__udivti3\(([^,]+), ([^,]+), ([^,]+), ([^,)]+)/.exec(s)
-			if (u) cands.push(u[4])
-			for (const dv of cands) {
-				if (isConst(dv.replace(/[()]/g, ''))) continue
-				const seen: string[] = []
-				provenance(fn, dv, i + 1, 2, seen)
-				// (a supply-like name, or a u128 product divided by a value read from memory (an account's field, not the frame))
-				const acctBase = (b: string) => b === 'accounts' || /Account|Data$/.test(ff.types.get(b) ?? '') || /(^|\.)accounts$/.test(defOf(ff, b, i + 1)?.expr.trim() ?? '')
-				const stored = u && dv === u[4] && seen.some(x => { const m = /\bld(?:32|64)\(([A-Za-z_]\w*)/.exec(x); return !!m && acctBase(m[1]) })
-				if (!seen.some(x => SUPPLY.test(x)) && !stored) continue
-				const { conds } = pathConds(r, ix, fn, i + 1, 80)
-				const names = seen.map(x => x.trim()).filter(x => x.length < 100)
-				// (a guard: the path requires it; an earlier `if` whose side does not exit (e.g. a runtime panic call) is not
-				// one; the condition's locals by their definitions too)
-				const g = conds.find(c => c.how !== 'before' && CMP.test(c.cond) && names.some(x => mentions(expandCond(c), x)))
-				divs.push({ at: loc(fn, i + 1), expr: s.trim().slice(0, 140), divisor: seen.join(' ← ').slice(0, 160), status: g ? 'checked' : 'not_found', guard: g && { at: g.at, cond: g.cond.slice(0, 120) } })
-			}
-		}
+	for (const fname of ix.functions) {
+		const ff = byName.get(fname), fo = ff && I.byPc.get(ff.pc)
+		if (!ff || !fo || divs.length >= 20) continue
+		const g = cfgOf(fo)
+		const R = !r.anchor ? accountResolver(fo, { f: x => I.byPc.get(x)?.f, name: x => r.program.funcs.get(x)?.name ?? '' }) : undefined
+		fo.f.blocks.forEach((bl, bi) => {
+			if (g.rpo[bi] < 0 || divs.length >= 20 || (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi))) return
+			bl.stmts.forEach((s, si) => {
+				if (divs.length >= 20) return
+				const p = bi << 16 | si
+				const cands: [Expr, boolean][] = []
+				for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv' || x.op === 'sdiv32') && x.b.k !== 'const') cands.push([x.b, false]) })
+				const c = callOf(s)
+				if (c?.t.k === 'fn' && /^__u?divti3/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && c.args[3] && c.args[3].k !== 'const') cands.push([c.args[3], true])
+				for (const [dv, wide] of cands) {
+					const seen = provenance(I, ctx, ff.pc, dv, p)
+					// (a supply-like name, or a 128-bit product divided by a value read from an account's data)
+					let acct = false
+					if (wide && !seen.some(x => SUPPLY.test(x))) {
+						const [fe, fq] = follow(I, ff.pc, dv, p)
+						acct = fe.k === 'load' && (R ? /^data/.test(R.valueRef(fe, stmtOfPos(I, ff.pc, fq) ?? s)?.field ?? '') : seen.some(x => /\bld(?:32|64)\(accounts\b|\.accounts\.|[A-Za-z_]\w*\.(?!data\b)[a-z_]\w*\)?$/.test(x)))
+					}
+					if (!seen.some(x => SUPPLY.test(x)) && !acct) continue
+					const k = valueKey(I, ctx, ff.pc, dv, p)
+					if (isConst(k)) continue
+					// (a guard: required on the way (one side of it does not reach the division), comparing the divisor; not the
+					// division-by-zero panic the compiler inserts: a side that aborts rather than returning an error)
+					const gc = pathTo(I, ctx, ff.pc, bi, 80).find(x => x.how !== 'before' && !x.panics && cmpsOf(I, ctx, x.fn, x.c, x.pos).some(([, u, v]) => keyIn(u, k) || keyIn(v, k)))
+					const line = ff.pcLine.get(s.pc) ?? ff.at + 1
+					divs.push({ at: loc(ff.name, line), expr: ff.lines[line - 1]?.trim().slice(0, 140) ?? '', divisor: seen.join(' ← ').slice(0, 160), status: gc ? 'checked' : 'not_found', guard: gc && guardOf(gc) })
+				}
+			})
+		})
 	}
 	ix.divs = divs
 	// path conditions to the sensitive operations
 	const paths: PathInfo[] = []
 	ix.ops.forEach((o, oi) => {
-		if (paths.length >= 30 || !o.kinds.some(k => k !== 'PDA_DERIVE') || (o.kinds.length === 1 && o.kinds[0] === 'CPI' && o.cpi?.known)) return
-		const pc = pathConds(r, ix, o.at.fn, o.at.line, 60), conds = pc.conds.filter(c => c.how !== 'before').slice(0, 40), truncated = pc.truncated
+		if (paths.length >= 30 || !o.kinds.some(k => k !== 'PDA_DERIVE') || (o.kinds.length === 1 && o.kinds[0] === 'CPI' && o.cpi?.known) || o.fnPc === undefined) return
+		const all = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc, o.ret), 80).filter(c => c.how !== 'before')
+		const conds = all.slice(0, 40).map(shown)
 		const acct = new Set([o.target?.split('.')[0], ...(o.cpi?.accounts ?? []).map(x => /^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1])].filter(Boolean) as string[])
 		const req = new Set(conds.map(c => c.check).filter(x => x !== undefined))
 		const notRequired: PathInfo['notRequired'] = []
@@ -313,7 +240,7 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 			if (!o.guards) return
 			notRequired.push({ check: ci, path: o.bypass?.find(b => b.check === ci)?.path })
 		})
-		paths.push({ op: oi, conds, notRequired, truncated: truncated || undefined })
+		paths.push({ op: oi, conds, notRequired, truncated: all.length > 40 || undefined })
 	})
 	ix.paths = paths
 	ix.chains = chains(ix, a)

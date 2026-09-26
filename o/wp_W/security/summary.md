@@ -1,0 +1,465 @@
+# Security summary
+
+DERIVED, over-approximate view of the decompiled code (the verified source of truth: ../index.ts, ../bundle/).
+Statuses: found (on every non-failing path) · PARTIAL (some paths) · NOT FOUND (no check recognized — not a proof of absence) · runtime (enforced by Solana).
+
+Program: sBPF v0, 172969 instructions, 921 functions, Anchor. Machine-readable: analysis.json.
+
+## Findings (ranked; rule engine over the facts: leads to review, not verdicts)
+
+- [low] **signer-not-related-to-authority** · close_bundled_position · position_bundle_authority · fn_13aee8:23 — st64(ld64(m + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_position · position_authority · fn_13aee8:23 — st64(ld64(m + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_position_with_token_extensions · position_authority · fn_13aee8:23 — st64(ld64(m + 0x18), 0)
+- [low] **signer-not-related-to-authority** · delete_position_bundle · position_bundle_owner · fn_13aee8:23 — st64(ld64(m + 0x18), 0)
+- [low] **cpi-unchecked-program** · decrease_liquidity · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · decrease_liquidity_v2 · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · increase_liquidity · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · increase_liquidity_by_token_amounts_v2 · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · increase_liquidity_v2 · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · reposition_liquidity_v2 · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · swap · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **cpi-unchecked-program** · two_hop_swap · *(b + 0x30) · fn_13f4b8:71 — CPI: program *(b + 0x30) (id not a constant, and not compared with a known program id in this function), data r[..q]
+- [low] **state-write-ungated** · idl_resize_account · token_badge · fn_1434c0:21 — writes token_badge.data[-8..0]
+- [low] **state-write-ungated** · update_fees_and_rewards · account?, position · fn_3adf0:76 — writes account?.data[197..205], position.data[88..96], position.data[80..88]
+- by rule: signer-not-related-to-authority 4, cpi-unchecked-program 8, state-write-ungated 2
+
+## Instructions (most sensitive first)
+
+- **reposition_liquidity_v2** — score 40 · [reposition_liquidity_v2.md](reposition_liquidity_v2.md) · ../bundle/reposition_liquidity_v2.ts
+  - signers: funder (PARTIAL), position_authority (PARTIAL)
+  - LAMPORT MOVE: CPI → t + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].Transfer
+  - CPI: CPI → *(w + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → *(ac + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - TOKEN MOVE: CPI → *(ak + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked
+  - TOKEN MOVE: CPI → q + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked (PDA-signed)
+  - CPI: CPI → *(g + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **increase_liquidity_by_token_amounts_v2** — score 24 · [increase_liquidity_by_token_amounts_v2.md](increase_liquidity_by_token_amounts_v2.md) · ../bundle/increase_liquidity_by_token_amounts_v2.ts
+  - signers: position_authority (PARTIAL)
+  - CPI: CPI → *(w + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - TOKEN MOVE: CPI → *(ak + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked
+  - TOKEN MOVE: CPI → q + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **increase_liquidity_v2** — score 24 · [increase_liquidity_v2.md](increase_liquidity_v2.md) · ../bundle/increase_liquidity_v2.ts
+  - signers: position_authority (PARTIAL)
+  - CPI: CPI → *(w + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - TOKEN MOVE: CPI → *(ak + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked
+  - TOKEN MOVE: CPI → q + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].TransferChecked (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **close_position** — score 15 · [close_position.md](close_position.md) · ../bundle/close_position.ts
+  - signers: position_authority (found)
+  - DERIVE PDA ["position", *y]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - LAMPORT IN receiver.lamports
+  - CLOSE (lamports = 0) token_badge.lamports
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **close_position_with_token_extensions** — score 15 · [close_position_with_token_extensions.md](close_position_with_token_extensions.md) · ../bundle/close_position_with_token_extensions.ts
+  - signers: position_authority (found)
+  - DERIVE PDA ["position", *y]
+  - LAMPORT IN receiver.lamports
+  - CLOSE (lamports = 0) token_badge.lamports
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **delete_position_bundle** — score 15 · [delete_position_bundle.md](delete_position_bundle.md) · ../bundle/delete_position_bundle.ts
+  - signers: position_bundle_owner (found)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - LAMPORT IN receiver.lamports
+  - CLOSE (lamports = 0) token_badge.lamports
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **initialize_adaptive_fee_tier** — score 13 · [initialize_adaptive_fee_tier.md](initialize_adaptive_fee_tier.md) · ../bundle/initialize_adaptive_fee_tier.ts
+  - signers: funder (found), fee_authority (found)
+  - WRITE adaptive_fee_tier.data[8..40] (=)
+  - DERIVE PDA ["fee_tier", *t, u16 ld16(s1ba) [ix data?]]
+  - WRITE adaptive_fee_tier.data[40..42] (=)
+  - WRITE adaptive_fee_tier.data[42..44] (=)
+  - WRITE adaptive_fee_tier.data[108..110] (=)
+  - WRITE adaptive_fee_tier.data[44..76] (=)
+  - WRITE adaptive_fee_tier.data[114..116] (=)
+  - WRITE adaptive_fee_tier.data[112..114] (=)
+  - WRITE adaptive_fee_tier.data[110..112] (=)
+  - WRITE adaptive_fee_tier.data[126..128] (=)
+  - WRITE adaptive_fee_tier.data[124..126] (=)
+  - WRITE adaptive_fee_tier.data[120..124] (=)
+  - … 2 more (see initialize_adaptive_fee_tier.md)
+- **decrease_liquidity** — score 12 · [decrease_liquidity.md](decrease_liquidity.md) · ../bundle/decrease_liquidity.ts
+  - signers: position_authority (PARTIAL)
+  - TOKEN MOVE: CPI → n + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].Transfer (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **decrease_liquidity_v2** — score 12 · [decrease_liquidity_v2.md](decrease_liquidity_v2.md) · ../bundle/decrease_liquidity_v2.ts
+  - signers: position_authority (PARTIAL)
+  - CPI: CPI → *(ac + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → *(g + 8) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **increase_liquidity** — score 12 · [increase_liquidity.md](increase_liquidity.md) · ../bundle/increase_liquidity.ts
+  - signers: position_authority (PARTIAL)
+  - TOKEN MOVE: CPI → n + 8 [account-supplied program id; (id not a constant, and not compared with a known program id in this function)].Transfer (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **close_bundled_position** — score 11 · [close_bundled_position.md](close_bundled_position.md) · ../bundle/close_bundled_position.ts
+  - signers: position_bundle_authority (found)
+  - DERIVE PDA ["bundled_position", *s38, ?]
+  - LAMPORT IN receiver.lamports
+  - CLOSE (lamports = 0) token_badge.lamports
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **delete_token_badge** — score 11 · [delete_token_badge.md](delete_token_badge.md) · ../bundle/delete_token_badge.ts
+  - signers: token_badge_authority (found)
+  - DERIVE PDA ["token_badge", *s, *aa]
+  - LAMPORT IN receiver.lamports
+  - CLOSE (lamports = 0) token_badge.lamports
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **swap** — score 10 · [swap.md](swap.md) · ../bundle/swap.ts
+  - signers: token_authority (PARTIAL), authority (PARTIAL)
+  - DERIVE PDA ["oracle", *ba]
+  - DERIVE PDA ["tick_array", *s20, ?]
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+- **two_hop_swap** — score 10 · [two_hop_swap.md](two_hop_swap.md) · ../bundle/two_hop_swap.ts
+  - signers: token_authority (PARTIAL), authority (PARTIAL)
+  - DERIVE PDA ["oracle", *cc]
+  - DERIVE PDA ["oracle", *s2b0]
+  - DERIVE PDA ["tick_array", *s20, ?]
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer (PDA-signed)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+- **set_preset_adaptive_fee_constants** — score 7 · [set_preset_adaptive_fee_constants.md](set_preset_adaptive_fee_constants.md) · ../bundle/set_preset_adaptive_fee_constants.ts
+  - signers: fee_authority (found)
+  - WRITE adaptive_fee_tier.data[114..116] (=)
+  - WRITE adaptive_fee_tier.data[112..114] (=)
+  - WRITE adaptive_fee_tier.data[110..112] (=)
+  - WRITE adaptive_fee_tier.data[126..128] (=)
+  - WRITE adaptive_fee_tier.data[124..126] (=)
+  - WRITE adaptive_fee_tier.data[120..124] (=)
+  - WRITE adaptive_fee_tier.data[116..120] (=)
+- **collect_fees** — score 6 · [collect_fees.md](collect_fees.md) · ../bundle/collect_fees.ts
+  - signers: position_authority (found)
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer (PDA-signed)
+  - CPI: CPI → program not decoded
+- **collect_protocol_fees** — score 6 · [collect_protocol_fees.md](collect_protocol_fees.md) · ../bundle/collect_protocol_fees.ts
+  - signers: collect_protocol_fees_authority (found)
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer (PDA-signed)
+  - CPI: CPI → program not decoded
+- **collect_reward** — score 6 · [collect_reward.md](collect_reward.md) · ../bundle/collect_reward.ts
+  - signers: position_authority (found)
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer (PDA-signed)
+  - CPI: CPI → program not decoded
+- **initialize_config** — score 6 · [initialize_config.md](initialize_config.md) · ../bundle/initialize_config.ts
+  - signers: funder (found), config (PARTIAL)
+  - WRITE config.data[8..40] (=)
+  - WRITE config.data[40..72] (=)
+  - WRITE config.data[72..104] (=)
+  - WRITE config.data[104..106] (=)
+  - WRITE config.data[106..108] (=)
+  - CPI: CPI → program not decoded
+- **collect_fees_v2** — score 5 · [collect_fees_v2.md](collect_fees_v2.md) · ../bundle/collect_fees_v2.ts
+  - signers: position_authority (found)
+  - DERIVE PDA ["extra-account-metas", *g [ix data?]]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+  - DERIVE PDA ?
+- **collect_protocol_fees_v2** — score 5 · [collect_protocol_fees_v2.md](collect_protocol_fees_v2.md) · ../bundle/collect_protocol_fees_v2.ts
+  - signers: collect_protocol_fees_authority (found)
+  - DERIVE PDA ["extra-account-metas", *g [ix data?]]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+  - DERIVE PDA ?
+- **collect_reward_v2** — score 5 · [collect_reward_v2.md](collect_reward_v2.md) · ../bundle/collect_reward_v2.ts
+  - signers: position_authority (found)
+  - DERIVE PDA ["extra-account-metas", *g [ix data?]]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+  - DERIVE PDA ?
+- **initialize_pool** — score 5 · [initialize_pool.md](initialize_pool.md) · ../bundle/initialize_pool.ts
+  - signers: token_vault_a (found), token_vault_b (found), funder (found), authority (PARTIAL)
+  - DERIVE PDA ["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2) [ix data?]]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_pool_v2** — score 5 · [initialize_pool_v2.md](initialize_pool_v2.md) · ../bundle/initialize_pool_v2.ts
+  - signers: token_vault_a (found), funder (found), token_vault_b (found), authority (PARTIAL)
+  - DERIVE PDA ["whirlpool", *ay, *az, *ba, u16 ld16(s33a) [ix data?]]
+  - DERIVE PDA ["token_badge", *cg, *s120]
+  - DERIVE PDA ["token_badge", *cn, *s120]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_pool_with_adaptive_fee** — score 5 · [initialize_pool_with_adaptive_fee.md](initialize_pool_with_adaptive_fee.md) · ../bundle/initialize_pool_with_adaptive_fee.ts
+  - signers: token_vault_a (found), funder (found), token_vault_b (found), initialize_pool_authority (found), authority (PARTIAL)
+  - DERIVE PDA ["whirlpool", *an, *ao, *ap, u16 aq]
+  - DERIVE PDA ["oracle", *s130]
+  - DERIVE PDA ["token_badge", *db, *sa0]
+  - DERIVE PDA ["token_badge", *di, *sa0]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_position_bundle** — score 5 · [initialize_position_bundle.md](initialize_position_bundle.md) · ../bundle/initialize_position_bundle.ts
+  - signers: position_bundle_mint (PARTIAL), funder (found)
+  - DERIVE PDA ["position_bundle", *s108]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+- **initialize_position_bundle_with_metadata** — score 5 · [initialize_position_bundle_with_metadata.md](initialize_position_bundle_with_metadata.md) · ../bundle/initialize_position_bundle_with_metadata.ts
+  - signers: position_bundle_mint (PARTIAL), funder (found)
+  - DERIVE PDA ["position_bundle", *s108]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_reward** — score 5 · [initialize_reward.md](initialize_reward.md) · ../bundle/initialize_reward.ts
+  - signers: reward_authority (found), funder (found), reward_vault (found)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+- **initialize_reward_v2** — score 5 · [initialize_reward_v2.md](initialize_reward_v2.md) · ../bundle/initialize_reward_v2.ts
+  - signers: reward_authority (found), funder (found), reward_vault (found)
+  - DERIVE PDA ["token_badge", *(ak + 0x188), *s2b0]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+- **lock_position** — score 5 · [lock_position.md](lock_position.md) · ../bundle/lock_position.ts
+  - signers: funder (found), position_authority (found)
+  - DERIVE PDA ["lock_config", *s70]
+  - DERIVE PDA ["position", *bq]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **open_bundled_position** — score 5 · [open_bundled_position.md](open_bundled_position.md) · ../bundle/open_bundled_position.ts
+  - signers: funder (found), position_bundle_authority (found)
+  - DERIVE PDA ["bundled_position", *s2f8, ?]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **open_position** — score 5 · [open_position.md](open_position.md) · ../bundle/open_position.ts
+  - signers: funder (found), position_mint (PARTIAL)
+  - DERIVE PDA ["position", *s338]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **open_position_with_metadata** — score 5 · [open_position_with_metadata.md](open_position_with_metadata.md) · ../bundle/open_position_with_metadata.ts
+  - signers: funder (found), position_mint (PARTIAL)
+  - DERIVE PDA ["position", *s338]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **open_position_with_token_extensions** — score 5 · [open_position_with_token_extensions.md](open_position_with_token_extensions.md) · ../bundle/open_position_with_token_extensions.ts
+  - signers: funder (found), position_mint (found)
+  - DERIVE PDA ["position", *s2c0]
+  - CPI: CPI → program not decoded
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **swap_v2** — score 5 · [swap_v2.md](swap_v2.md) · ../bundle/swap_v2.ts
+  - signers: token_authority (found), authority (PARTIAL)
+  - DERIVE PDA ["oracle", *by]
+  - DERIVE PDA ["tick_array", *s20, ?]
+  - DERIVE PDA ["extra-account-metas", *g [ix data?]]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+  - DERIVE PDA ?
+- **two_hop_swap_v2** — score 5 · [two_hop_swap_v2.md](two_hop_swap_v2.md) · ../bundle/two_hop_swap_v2.ts
+  - signers: token_authority (PARTIAL), authority (PARTIAL)
+  - DERIVE PDA ["oracle", *s2b0]
+  - DERIVE PDA ["tick_array", *s20, ?]
+  - DERIVE PDA ["extra-account-metas", *g [ix data?]]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+  - CPI: CPI → program not decoded
+  - DERIVE PDA ?
+- **idl_create_account** — score 4 · [idl_create_account.md](idl_create_account.md) · ../bundle/idl_create_account.ts
+  - signers: none found
+  - DERIVE PDA ?
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccountWithSeed (PDA-signed)
+  - CPI: CPI → program not decoded
+- **idl_resize_account** — score 4 · [idl_resize_account.md](idl_resize_account.md) · ../bundle/idl_resize_account.ts
+  - signers: none found
+  - CPI: CPI → program not decoded
+  - REALLOC b.data.len
+  - WRITE token_badge.data[-8..0] (=)
+- **initialize_dynamic_tick_array** — score 4 · [initialize_dynamic_tick_array.md](initialize_dynamic_tick_array.md) · ../bundle/initialize_dynamic_tick_array.ts
+  - signers: funder (found)
+  - DERIVE PDA ["tick_array", *s20, ?]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_fee_tier** — score 4 · [initialize_fee_tier.md](initialize_fee_tier.md) · ../bundle/initialize_fee_tier.ts
+  - signers: funder (found), fee_authority (found)
+  - WRITE fee_tier.data[8..40] (=)
+  - WRITE fee_tier.data[40..42] (=)
+  - WRITE fee_tier.data[42..44] (=)
+  - DERIVE PDA ["fee_tier", *t, u16 ld16(s14a) [ix data?]]
+  - CPI: CPI → program not decoded
+- **reset_position_range** — score 4 · [reset_position_range.md](reset_position_range.md) · ../bundle/reset_position_range.ts
+  - signers: funder (found), position_authority (found)
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **set_collect_protocol_fees_authority** — score 4 · [set_collect_protocol_fees_authority.md](set_collect_protocol_fees_authority.md) · ../bundle/set_collect_protocol_fees_authority.ts
+  - signers: collect_protocol_fees_authority (found)
+  - SET authority whirlpools_config.data[40..72]
+- **set_config_extension_authority** — score 4 · [set_config_extension_authority.md](set_config_extension_authority.md) · ../bundle/set_config_extension_authority.ts
+  - signers: config_extension_authority (found)
+  - SET authority whirlpools_config_extension.data[40..72]
+- **set_delegated_fee_authority** — score 4 · [set_delegated_fee_authority.md](set_delegated_fee_authority.md) · ../bundle/set_delegated_fee_authority.ts
+  - signers: fee_authority (found)
+  - SET authority adaptive_fee_tier.data[76..108]
+- **set_fee_authority** — score 4 · [set_fee_authority.md](set_fee_authority.md) · ../bundle/set_fee_authority.ts
+  - signers: fee_authority (found)
+  - SET authority whirlpools_config.data[8..40]
+- **set_initialize_pool_authority** — score 4 · [set_initialize_pool_authority.md](set_initialize_pool_authority.md) · ../bundle/set_initialize_pool_authority.ts
+  - signers: fee_authority (found)
+  - SET authority adaptive_fee_tier.data[44..76]
+- **set_reward_emissions_super_authority** — score 4 · [set_reward_emissions_super_authority.md](set_reward_emissions_super_authority.md) · ../bundle/set_reward_emissions_super_authority.ts
+  - signers: reward_emissions_super_authority (found)
+  - SET authority whirlpools_config.data[72..104]
+- **set_token_badge_authority** — score 4 · [set_token_badge_authority.md](set_token_badge_authority.md) · ../bundle/set_token_badge_authority.ts
+  - signers: config_extension_authority (found)
+  - SET authority whirlpools_config_extension.data[72..104]
+- **transfer_locked_position** — score 4 · [transfer_locked_position.md](transfer_locked_position.md) · ../bundle/transfer_locked_position.ts
+  - signers: position_authority (found)
+  - DERIVE PDA ["position", *ac]
+  - CPI: CPI → *(b + 0x30) [account-supplied program id; (id not a constant, and not compared with a known program id in this function)]
+- **initialize_token_badge** — score 3 · [initialize_token_badge.md](initialize_token_badge.md) · ../bundle/initialize_token_badge.ts
+  - signers: funder (found), token_badge_authority (found)
+  - WRITE token_badge.data[8..40] (=)
+  - WRITE token_badge.data[72..73] (=)
+  - DERIVE PDA ["token_badge", *ab, *s20]
+  - CPI: CPI → program not decoded
+- **update_fees_and_rewards** — score 3 · [update_fees_and_rewards.md](update_fees_and_rewards.md) · ../bundle/update_fees_and_rewards.ts
+  - signers: none found
+  - WRITE account?.data[197..205] (=)
+  - WRITE position.data[88..96] (=)
+  - WRITE position.data[80..88] (=)
+- **initialize_config_extension** — score 2 · [initialize_config_extension.md](initialize_config_extension.md) · ../bundle/initialize_config_extension.ts
+  - signers: funder (found), fee_authority (found)
+  - WRITE config_extension.data[8..40] (=)
+  - DERIVE PDA ["config_extension", *s118]
+  - CPI: CPI → program not decoded
+- **set_default_protocol_fee_rate** — score 2 · [set_default_protocol_fee_rate.md](set_default_protocol_fee_rate.md) · ../bundle/set_default_protocol_fee_rate.ts
+  - signers: fee_authority (found)
+  - WRITE whirlpools_config.data[8..40] (=)
+  - WRITE whirlpools_config.data[104..106] (=)
+- **initialize_tick_array** — score 1 · [initialize_tick_array.md](initialize_tick_array.md) · ../bundle/initialize_tick_array.ts
+  - signers: funder (found)
+  - DERIVE PDA ["tick_array", *s50, ?]
+  - CPI: CPI → program not decoded
+- **set_config_feature_flag** — score 1 · [set_config_feature_flag.md](set_config_feature_flag.md) · ../bundle/set_config_feature_flag.ts
+  - signers: authority (found)
+  - WRITE whirlpools_config.data[106..108] (=)
+- **set_default_base_fee_rate** — score 1 · [set_default_base_fee_rate.md](set_default_base_fee_rate.md) · ../bundle/set_default_base_fee_rate.ts
+  - signers: fee_authority (found)
+  - WRITE adaptive_fee_tier.data[108..110] (=)
+- **set_default_fee_rate** — score 1 · [set_default_fee_rate.md](set_default_fee_rate.md) · ../bundle/set_default_fee_rate.ts
+  - signers: fee_authority (found)
+  - WRITE fee_tier.data[42..44] (=)
+- **set_fee_rate** — score 1 · [set_fee_rate.md](set_fee_rate.md) · ../bundle/set_fee_rate.ts
+  - signers: fee_authority (found)
+  - WRITE whirlpool.data[45..47] (=)
+- **set_fee_rate_by_delegated_fee_authority** — score 1 · [set_fee_rate_by_delegated_fee_authority.md](set_fee_rate_by_delegated_fee_authority.md) · ../bundle/set_fee_rate_by_delegated_fee_authority.ts
+  - signers: delegated_fee_authority (found)
+  - WRITE whirlpool.data[45..47] (=)
+- **set_protocol_fee_rate** — score 1 · [set_protocol_fee_rate.md](set_protocol_fee_rate.md) · ../bundle/set_protocol_fee_rate.ts
+  - signers: fee_authority (found)
+  - WRITE whirlpool.data[47..49] (=)
+- **set_reward_emissions** — score 1 · [set_reward_emissions.md](set_reward_emissions.md) · ../bundle/set_reward_emissions.ts
+  - signers: reward_authority (found)
+  - WRITE whirlpool.data[197..205] (=)
+- **set_reward_emissions_v2** — score 1 · [set_reward_emissions_v2.md](set_reward_emissions_v2.md) · ../bundle/set_reward_emissions_v2.ts
+  - signers: reward_authority (found)
+  - WRITE whirlpool.data[197..205] (=)
+- **set_token_badge_attribute** — score 1 · [set_token_badge_attribute.md](set_token_badge_attribute.md) · ../bundle/set_token_badge_attribute.ts
+  - signers: token_badge_authority (found)
+  - WRITE token_badge.data[72..73] (=)
+- **idl_close_account** — score 0 · [idl_close_account.md](idl_close_account.md) · ../bundle/idl_close_account.ts
+  - signers: none found
+- **idl_include** — score 0 · [idl_include.md](idl_include.md) · ../bundle/idl_include.ts
+  - signers: none found
+- **idl_set_buffer** — score 0 · [idl_set_buffer.md](idl_set_buffer.md) · ../bundle/idl_set_buffer.ts
+  - signers: none found
+- **idl_write** — score 0 · [idl_write.md](idl_write.md) · ../bundle/idl_write.ts
+  - signers: none found
+- **migrate_repurpose_reward_authority_space** — score 0 · [migrate_repurpose_reward_authority_space.md](migrate_repurpose_reward_authority_space.md) · ../bundle/migrate_repurpose_reward_authority_space.ts
+  - signers: none found
+- **set_adaptive_fee_constants** — score 0 · [set_adaptive_fee_constants.md](set_adaptive_fee_constants.md) · ../bundle/set_adaptive_fee_constants.ts
+  - signers: fee_authority (found)
+- **set_reward_authority** — score 0 · [set_reward_authority.md](set_reward_authority.md) · ../bundle/set_reward_authority.ts
+  - signers: reward_authority (found)
+- **set_reward_authority_by_super_authority** — score 0 · [set_reward_authority_by_super_authority.md](set_reward_authority_by_super_authority.md) · ../bundle/set_reward_authority_by_super_authority.ts
+  - signers: reward_emissions_super_authority (found)
+
+## PDAs
+
+- seeds b[..c], program (caller: this program) — signs in reposition_liquidity_v2, increase_liquidity_by_token_amounts_v2, increase_liquidity_v2, decrease_liquidity, increase_liquidity
+- seeds ["position", *y], program *(ld64(s458 + 0x20)) — derived in close_position — seeds constraint on close_position.position (found)
+- seeds ["position", *y], program *(ld64(s580 + 0x20)) — derived in close_position_with_token_extensions — seeds constraint on close_position_with_token_extensions.position (found)
+- seeds ["fee_tier", *t, u16 ld16(s1ba) [ix data?]], program *(ld64(s1c8)) — derived in initialize_adaptive_fee_tier — seeds constraint on initialize_adaptive_fee_tier.adaptive_fee_tier (found)
+- seeds ["bundled_position", *s38, ?], program *(ld64(s3d0)) — derived in close_bundled_position — seeds constraint on close_bundled_position.bundled_position (found)
+- seeds ["token_badge", *s, *aa], program *(ld64(s338)) — derived in delete_token_badge — seeds constraint on delete_token_badge.token_badge (found)
+- seeds ["oracle", *ba], program *(ld64(s5e8)) — derived in swap — seeds constraint on swap.oracle (PARTIAL)
+- seeds ["tick_array", *s20, ?], program *s188 — derived in swap, two_hop_swap, swap_v2, two_hop_swap_v2 — seeds constraint on swap.oracle, two_hop_swap.oracle_one, two_hop_swap.oracle_two, swap_v2.oracle, two_hop_swap_v2.oracle_one, two_hop_swap_v2.oracle_two (found)
+- seeds (ld64(b + 0xd8))[..ld64(b + 0xe0)], program (caller: this program) — signs in swap, two_hop_swap, collect_fees, collect_protocol_fees, collect_reward
+- seeds ["oracle", *cc], program *(ld64(s8a8)) — derived in two_hop_swap — seeds constraint on two_hop_swap.oracle_one, two_hop_swap.oracle_two (PARTIAL)
+- seeds ["oracle", *s2b0], program *(ld64(s8a8)) — derived in two_hop_swap — seeds constraint on two_hop_swap.oracle_one, two_hop_swap.oracle_two (PARTIAL)
+- seeds ["extra-account-metas", *g [ix data?]], program *d — derived in collect_fees_v2, collect_protocol_fees_v2, collect_reward_v2, swap_v2, two_hop_swap_v2 — seeds constraint on swap_v2.oracle, two_hop_swap_v2.oracle_one, two_hop_swap_v2.oracle_two (found)
+- seeds ?, program ? — derived in collect_fees_v2, collect_protocol_fees_v2, collect_reward_v2, swap_v2, two_hop_swap_v2, idl_create_account — seeds constraint on swap_v2.oracle, two_hop_swap_v2.oracle_one, two_hop_swap_v2.oracle_two (found)
+- seeds ["whirlpool", *ao, *ap, *aq, u16 ld16(s2a2) [ix data?]], program *(ld64(s2b0)) — derived in initialize_pool — seeds constraint on initialize_pool.whirlpool (found)
+- seeds ["whirlpool", *ay, *az, *ba, u16 ld16(s33a) [ix data?]], program *(ld64(s348)) — derived in initialize_pool_v2 — seeds constraint on initialize_pool_v2.token_badge_a, initialize_pool_v2.token_badge_b, initialize_pool_v2.whirlpool (found)
+- seeds ["token_badge", *cg, *s120], program *(ld64(s348)) — derived in initialize_pool_v2 — seeds constraint on initialize_pool_v2.token_badge_a, initialize_pool_v2.token_badge_b, initialize_pool_v2.whirlpool (found)
+- seeds ["token_badge", *cn, *s120], program *(ld64(s348)) — derived in initialize_pool_v2 — seeds constraint on initialize_pool_v2.token_badge_a, initialize_pool_v2.token_badge_b, initialize_pool_v2.whirlpool (found)
+- seeds ["whirlpool", *an, *ao, *ap, u16 aq], program *(ld64(s208)) — derived in initialize_pool_with_adaptive_fee — seeds constraint on initialize_pool_with_adaptive_fee.token_badge_a, initialize_pool_with_adaptive_fee.token_badge_b, initialize_pool_with_adaptive_fee.whirlpool, initialize_pool_with_adaptive_fee.oracle (found)
+- seeds ["oracle", *s130], program *(ld64(s208)) — derived in initialize_pool_with_adaptive_fee — seeds constraint on initialize_pool_with_adaptive_fee.token_badge_a, initialize_pool_with_adaptive_fee.token_badge_b, initialize_pool_with_adaptive_fee.whirlpool, initialize_pool_with_adaptive_fee.oracle (found)
+- seeds ["token_badge", *db, *sa0], program *(ld64(s208)) — derived in initialize_pool_with_adaptive_fee — seeds constraint on initialize_pool_with_adaptive_fee.token_badge_a, initialize_pool_with_adaptive_fee.token_badge_b, initialize_pool_with_adaptive_fee.whirlpool, initialize_pool_with_adaptive_fee.oracle (found)
+- seeds ["token_badge", *di, *sa0], program *(ld64(s208)) — derived in initialize_pool_with_adaptive_fee — seeds constraint on initialize_pool_with_adaptive_fee.token_badge_a, initialize_pool_with_adaptive_fee.token_badge_b, initialize_pool_with_adaptive_fee.whirlpool, initialize_pool_with_adaptive_fee.oracle (found)
+- seeds ["position_bundle", *s108], program *(ld64(s1d8)) — derived in initialize_position_bundle, initialize_position_bundle_with_metadata — seeds constraint on initialize_position_bundle.position_bundle, initialize_position_bundle_with_metadata.position_bundle (found)
+- seeds ["token_badge", *(ak + 0x188), *s2b0], program *(ld64(s4e8 + 0x58)) — derived in initialize_reward_v2 — seeds constraint on initialize_reward_v2.reward_token_badge (found)
+- seeds ["lock_config", *s70], program *(ld64(s800)) — derived in lock_position — seeds constraint on lock_position.position, lock_position.lock_config (found)
+- seeds ["position", *bq], program *(ld64(s800)) — derived in lock_position — seeds constraint on lock_position.position, lock_position.lock_config (found)
+- seeds ["bundled_position", *s2f8, ?], program *(ld64(s378)) — derived in open_bundled_position — seeds constraint on open_bundled_position.bundled_position (found)
+- seeds ["position", *s338], program *(ld64(s408)) — derived in open_position, open_position_with_metadata — seeds constraint on open_position.position, open_position_with_metadata.position (found)
+- seeds ["position", *s2c0], program *(ld64(s360)) — derived in open_position_with_token_extensions — seeds constraint on open_position_with_token_extensions.position (found)
+- seeds ["oracle", *by], program *(ld64(s7e0 + 0x48)) — derived in swap_v2 — seeds constraint on swap_v2.oracle (found)
+- seeds ["oracle", *s2b0], program *(ld64(sad0)) — derived in two_hop_swap_v2 — seeds constraint on two_hop_swap_v2.oracle_one, two_hop_swap_v2.oracle_two (PARTIAL)
+- seeds [? (1 bytes)], program (caller: this program) — signs in idl_create_account
+- seeds ["tick_array", *s20, ?], program *b — derived in initialize_dynamic_tick_array — seeds constraint on initialize_dynamic_tick_array.tick_array (found)
+- seeds ["fee_tier", *t, u16 ld16(s14a) [ix data?]], program *(ld64(s158)) — derived in initialize_fee_tier — seeds constraint on initialize_fee_tier.fee_tier (found)
+- seeds ["position", *ac], program *(ld64(s698 + 0x20)) — derived in transfer_locked_position — seeds constraint on transfer_locked_position.position (found)
+- seeds ["token_badge", *ab, *s20], program *(ld64(s230)) — derived in initialize_token_badge — seeds constraint on initialize_token_badge.token_badge (found)
+- seeds ["config_extension", *s118], program *(ld64(s190)) — derived in initialize_config_extension — seeds constraint on initialize_config_extension.config_extension (found)
+- seeds ["tick_array", *s50, ?], program *(ld64(s5f0)) — derived in initialize_tick_array — seeds constraint on initialize_tick_array.tick_array (found)
+
+## State writes (account.field ← instructions)
+
+- account?.data[197..205] ← update_fees_and_rewards (=)
+- adaptive_fee_tier.data[108..110] ← initialize_adaptive_fee_tier (=), set_default_base_fee_rate (=)
+- adaptive_fee_tier.data[110..112] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[112..114] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[114..116] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[116..120] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[120..124] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[124..126] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[126..128] ← initialize_adaptive_fee_tier (=), set_preset_adaptive_fee_constants (=)
+- adaptive_fee_tier.data[40..42] ← initialize_adaptive_fee_tier (=)
+- adaptive_fee_tier.data[42..44] ← initialize_adaptive_fee_tier (=)
+- adaptive_fee_tier.data[44..76] ← initialize_adaptive_fee_tier (=), set_initialize_pool_authority (=)
+- adaptive_fee_tier.data[76..108] ← set_delegated_fee_authority (=)
+- adaptive_fee_tier.data[8..40] ← initialize_adaptive_fee_tier (=)
+- config_extension.data[8..40] ← initialize_config_extension (=)
+- config.data[104..106] ← initialize_config (=)
+- config.data[106..108] ← initialize_config (=)
+- config.data[40..72] ← initialize_config (=)
+- config.data[72..104] ← initialize_config (=)
+- config.data[8..40] ← initialize_config (=)
+- fee_tier.data[40..42] ← initialize_fee_tier (=)
+- fee_tier.data[42..44] ← initialize_fee_tier (=), set_default_fee_rate (=)
+- fee_tier.data[8..40] ← initialize_fee_tier (=)
+- position.data[80..88] ← update_fees_and_rewards (=)
+- position.data[88..96] ← update_fees_and_rewards (=)
+- receiver.lamports ← close_position (+=), close_position_with_token_extensions (+=), delete_position_bundle (+=), close_bundled_position (+=), delete_token_badge (+=)
+- token_badge.data[-8..0] ← close_position (=), close_position_with_token_extensions (=), delete_position_bundle (=), close_bundled_position (=), delete_token_badge (=), idl_resize_account (=)
+- token_badge.data[72..73] ← initialize_token_badge (=), set_token_badge_attribute (=)
+- token_badge.data[8..40] ← initialize_token_badge (=)
+- token_badge.lamports ← close_position (=), close_position_with_token_extensions (=), delete_position_bundle (=), close_bundled_position (=), delete_token_badge (=)
+- whirlpool.data[197..205] ← set_reward_emissions (=), set_reward_emissions_v2 (=)
+- whirlpool.data[45..47] ← set_fee_rate (=), set_fee_rate_by_delegated_fee_authority (=)
+- whirlpool.data[47..49] ← set_protocol_fee_rate (=)
+- whirlpools_config_extension.data[40..72] ← set_config_extension_authority (=)
+- whirlpools_config_extension.data[72..104] ← set_token_badge_authority (=)
+- whirlpools_config.data[104..106] ← set_default_protocol_fee_rate (=)
+- whirlpools_config.data[106..108] ← set_config_feature_flag (=)
+- whirlpools_config.data[40..72] ← set_collect_protocol_fees_authority (=)
+- whirlpools_config.data[72..104] ← set_reward_emissions_super_authority (=)
+- whirlpools_config.data[8..40] ← set_fee_authority (=), set_default_protocol_fee_rate (=)
+
+## Authority fields (stored authorities and the instructions writing them)
+
+- adaptive_fee_tier.data[44..76] ← initialize_adaptive_fee_tier, set_initialize_pool_authority
+- adaptive_fee_tier.data[76..108] ← set_delegated_fee_authority
+- whirlpools_config_extension.data[40..72] ← set_config_extension_authority
+- whirlpools_config_extension.data[72..104] ← set_token_badge_authority
+- whirlpools_config.data[40..72] ← set_collect_protocol_fees_authority
+- whirlpools_config.data[72..104] ← set_reward_emissions_super_authority
+- whirlpools_config.data[8..40] ← set_fee_authority, set_default_protocol_fee_rate

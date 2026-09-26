@@ -13,10 +13,16 @@
 import type { Result } from '../decompile.ts'
 import type { OpKind } from './facts.ts'
 import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
-import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
+import { cfgOf, decisionBlock, dominates, bypass, blockPc, callOf, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { structFields } from '../idl.ts'
+import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
+import { sourceCtx, type Source } from './sources.ts'
+import type { Expr } from '../ir.ts'
+import { knownIx } from '../cpi.ts'
+import { cpiKinds } from './facts.ts'
+import { b58, KNOWN_KEYS } from '../semantics.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
@@ -186,20 +192,63 @@ export function phase2(a: Analysis, r: Result) {
 			if (bare && !out.length) out.push({ source: `${bare}.key`, trust: trustOf(`${bare}.key`) ?? 'caller-controlled' })
 			return out.filter((x, i) => out.findIndex(y => y.source === x.source) === i)
 		}
+		// (on the IR where the parameter's expression is known: sources.ts; else by the printed text)
+		const S = sourceCtx(r, ix), I = irOf(r)
+		// (a CPI whose program id the printed text does not name: the instruction built up the call path (e.g. a library's
+		// instruction struct passed to its invoke function): a known program's id, its instruction by the tag)
+		for (const o of ix.ops) {
+			if (!o.cpi || o.cpi.known || o.fnPc === undefined || o.at.pc === undefined) continue
+			const st = stmtAt(I, o.fnPc, o.at.pc), c = st && callOf(st[0])
+			const nm = c?.t.k === 'sys' ? c.t.name : ''
+			if (!c?.args[0] || !/^sol_invoke_signed_(c|rust)$/.test(nm)) continue
+			const w = (k: number): Expr => ({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: c.args[0], b: { k: 'const', v: BigInt(k) } } })
+			const rust = nm.endsWith('rust')
+			const id = rust ? S.bytesAt(o.fnPc, { k: 'bin', op: 'add', a: c.args[0], b: { k: 'const', v: 48n } }, st![1], 32) : S.bytesAt(o.fnPc, w(0), st![1], 32)
+			const known = id && (id.every(x => x === 0) ? 'SYSTEM_PROGRAM' : KNOWN_KEYS[b58(id)])
+			if (!known) continue
+			// (the data pointer: SolInstruction.data, StableInstruction.data.ptr)
+			const data = S.bytesAt(o.fnPc, w(24), st![1], 4) ?? S.bytesAt(o.fnPc, w(24), st![1], 1)
+			const k = data && knownIx(known, data)
+			o.cpi = { ...o.cpi, program: known, known, checked: undefined, ...(k ? { family: k.family, ix: k.ix, accounts: o.cpi.accounts.map((x, i) => ({ ...x, role: x.role ?? k.accounts[i] })) } : {}) }
+			if (k) o.kinds = [...new Set([...o.kinds, ...cpiKinds(k.family, k.ix)])]
+		}
+		// (Anchor CPI helpers: the accounts of the CpiContext not named by the printed text, by the AccountInfo copies' key
+		// words (the program's copy first, then the accounts struct's in field order, 0x30 bytes each, after 0x18 bytes))
+		if (r.anchor) for (const o of ix.ops) {
+			if (!o.cpi?.family || !o.cpi.accounts.some(x => x.text === '?') || o.fnPc === undefined || o.at.pc === undefined) continue
+			const st = stmtAt(I, o.fnPc, o.at.pc), c = st && callOf(st[0])
+			const Y = c?.args[1] && defsIn(I, o.fnPc)?.fpOff(c.args[1])
+			if (Y === undefined || Y === null) continue
+			o.cpi.accounts = o.cpi.accounts.map((x, i) => x.text !== '?' ? x : { ...x, text: S.frameAccount(o.fnPc!, Y + 0x18 + 0x30 * (i + 1), st![1]) ?? '?' })
+		}
+		const trustSrc = (x: Source): string => x.kind === 'ix' || x.kind === 'remaining' ? 'caller-controlled' : x.kind === 'sysvar' || x.kind === 'lamports' || x.kind === 'owner' ? 'runtime'
+			: x.kind === 'return-data' ? 'partially-validated' : trustOf(x.kind === 'key' ? `${x.acct}.key` : `${x.acct}.data`) ?? 'caller-controlled'
 		for (const o of ix.ops) {
 			if (!isSensitive(o)) continue
-			const params: [string, string][] = []
+			const fn = o.fnPc
+			const pos = fn === undefined ? undefined : posAt(I, fn, o.at.pc, o.ret)
+			const call = fn !== undefined && o.at.pc !== undefined ? stmtAt(I, fn, o.at.pc) : undefined
+			const args = call && callOf(call[0])?.args
+			const printed = (v: string) => { const ex = fn !== undefined ? r.facts.get(fn)?.expr : undefined; return ex && args?.find(a => ex(a) === v.replace(/ \[ix data\?\]$/, '')) }
+			const params: [string, string, Expr | undefined][] = []
 			if (o.cpi) {
-				if (!o.cpi.known && o.cpi.program !== '?') params.push(['program', o.cpi.program])
-				for (const x of o.cpi.accounts) params.push([x.role ?? 'account', x.text])
-				for (const [k, v] of o.cpi.fields) params.push([k, v])
-				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds])
+				const cs = o.cpi.src
+				if (!o.cpi.known && o.cpi.program !== '?') params.push(['program', o.cpi.program, cs?.program])
+				o.cpi.accounts.forEach((x, i) => params.push([x.role ?? 'account', x.text, cs?.accounts[i]]))
+				o.cpi.fields.forEach(([k, v], i) => params.push([k, v, cs?.fields[i] ?? printed(v)]))
+				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds, undefined])
 			}
-			if (o.pda) params.push(['seeds', o.pda.seeds])
-			if (o.value !== undefined && o.target) params.push([o.target, o.value])
+			if (o.pda) params.push(['seeds', o.pda.seeds, undefined])
+			if (o.value !== undefined && o.target) params.push([o.target, o.value, fn !== undefined && o.at.pc !== undefined ? storedAt(I, fn, o.at.pc)?.[0] : undefined])
 			const src: NonNullable<OpOut['sources']> = []
-			for (const [p, t] of params) for (const s of classify(t)) src.push({ param: p, ...s })
-			if (src.length) o.sources = src.slice(0, 24)
+			for (const [p, t, e] of params) {
+				// (an account passed to a CPI is named by the account model; its key's flow is the account itself)
+				const ir = e && fn !== undefined && pos !== undefined ? S.of(fn, e, pos) : undefined
+				if (ir?.length) for (const x of ir) src.push({ param: p, source: x.source, trust: trustSrc(x) })
+				else for (const x of classify(t)) src.push({ param: p, ...x })
+			}
+			const uniq = src.filter((x, i) => src.findIndex(y => y.param === x.param && y.source === x.source) === i)
+			if (uniq.length) o.sources = uniq.slice(0, 24)
 		}
 		// relations: two sides of an equality check, at least one an account key / field
 		const rel: Relation[] = []
@@ -257,13 +306,13 @@ export function phase2(a: Analysis, r: Result) {
 	// phase 3 views (after every instruction's authority rows: the chains follow the writers), then the rules
 	for (const ix of a.ixs) phase3Ix(r, ix, a)
 	a.states = stateMachine(a)
+	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
 	const rank = { high: 3, medium: 2, low: 1 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
-	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 }
 
 /**
@@ -275,8 +324,22 @@ const runtimeAuthorized = (o: OpOut) => !!o.cpi && !!(o.cpi.known || o.cpi.famil
 /** the system CPIs creating an account (create_account, or transfer + allocate + assign of a funded one) in an instruction that creates one */
 const initMechanics = (ix: IxOut, o: OpOut) => o.cpi?.family === 'system' && /^(CreateAccount|Assign|Allocate|Transfer)$/.test(o.cpi.ix ?? '') && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE') || (x.cpi?.family === 'system' && x.cpi.ix === 'Allocate'))
 
+/**
+ * Initialization: a write to an account the instruction creates (no discriminator / type check on it), or one the
+ * program requires to be uninitialized (Anchor `zero`: its discriminator must be zero).
+ */
+const initWrite = (ix: IxOut, o: OpOut) => {
+	const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
+	if (!t) return false
+	const z = t.constraints.zero
+	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found'))
+}
+
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
 const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
+
+/** a source that is the key of an account the instruction checks to be a signer */
+const signerKey = (ix: IxOut, src: string) => { const m = /^(.+)\.key$/.exec(src); const c = m && ix.accounts.find(x => x.name === m[1])?.constraints.signer; return !!c && c.status !== 'not_found' }
 
 const snakeName = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
 
@@ -321,6 +384,18 @@ const W: Partial<Record<OpKind, number>> = { TOKEN_TRANSFER: 5, LAMPORT_TRANSFER
 const wOf = (o: OpOut) => Math.max(0, ...o.kinds.map(k => W[k] ?? 0))
 const L = (at: Loc) => `${at.fn}:${at.line}`
 
+/** value movements / authority changes a signer enables with no stored authority related to it (and no PDA signature) */
+const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => (ix.authority ?? []).flatMap(row => {
+	const o = ix.ops[row.op]
+	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
+	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
+	if (initWrite(ix, o)) return []
+	// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
+	// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
+	if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
+	return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
+})
+
 const RULES: Rule[] = [
 	{
 		id: 'cpi-unchecked-program', title: 'CPI to an account-supplied program id with no dominating check against a known id',
@@ -348,18 +423,24 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'signer-not-related-to-authority', title: 'Value movement or authority change with a signer but no relation between the signer key and a stored authority field',
-		run: ix => (ix.authority ?? []).flatMap(row => {
-			const o = ix.ops[row.op]
-			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
-			if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
-			// (initialization: a write to an account the instruction creates (no discriminator / type check on it))
-			const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
-			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
-			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
-			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
-			if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
-			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
-		}),
+		run: (ix, a) => {
+			const out = signerUnrelated(ix)
+			if (out.length) return out
+			// (Anchor's has_one convention: an authority field another instruction stores, named like a signer of this one, with
+			// no relation between the two here; e.g. a PDA-signed outflow from a per-user account whose owner is not checked)
+			const signers = new Set(ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => x.name))
+			// (not a movement of the signer's own funds: a CPI the signer signs, e.g. a deposit)
+			const own = (o: OpOut) => !!o.cpi?.accounts.some(x => x.s && signers.has(/^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1] ?? ''))
+			const row = (ix.authority ?? []).find(x => !initMechanics(ix, ix.ops[x.op]) && !initWrite(ix, ix.ops[x.op]) && !own(ix.ops[x.op]))
+			if (!a.program.anchor || !row) return []
+			return (a.authorityFields ?? []).flatMap(({ field, writtenBy }) => {
+				const [acct, f] = [field.slice(0, field.indexOf('.')), field.slice(field.indexOf('.') + 1)]
+				if (!signers.has(f) || writtenBy.includes(ix.name) || !ix.accounts.some(x => x.name === acct)) return []
+				if ((ix.relations ?? []).some(x => x.a === field || x.b === field || ((x.a === `${f}.key` || x.b === `${f}.key`) && (x.a.startsWith(`${acct}.`) || x.b.startsWith(`${acct}.`))))) return []
+				const o = ix.ops[row.op]
+				return [{ accounts: [f, acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${field} (the stored authority ${writtenBy.join(', ')} writes) is not compared with the signer ${f}`], confidence: 'low' as const, weight: wOf(o) }]
+			}).slice(0, 1)
+		},
 	},
 	{
 		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
@@ -382,7 +463,8 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
-		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi)))).slice(0, 2).map(s => ({
+		// (an authority set to the key of an account that signed, or while initializing: the usual assignments)
+		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o)))).slice(0, 2).map(s => ({
 			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
 	},
@@ -480,9 +562,11 @@ const RULES: Rule[] = [
 			const dest = o.cpi?.accounts.find(x => x.role && /^(destination|to|account)$/.test(x.role))
 			const d = dest && /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(dest.text)?.[1]
 			const row = d ? ix.accounts.find(x => x.name === d) : undefined
-			if (!row) return []
+			// (native: an account by index no check of the instruction reads has no row: nothing binds it; not a mint's
+			// destination: the token program requires it to hold the mint minted)
+			if (!row && !(d && !a.program.anchor && /^account\[\d+\]$/.test(d) && !k.includes('MINT'))) return []
 			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
-			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
+			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
 			if (bind.length || rel) return []
 			// (outflows the program signs for are the ones where an unbound destination matters most)
