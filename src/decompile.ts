@@ -99,6 +99,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   nameThunks(p);
   // names of the output language's own helpers stay unambiguous
   for (const f of p.funcs.values()) if (HELPERS.has(f.name) || /^(ld|st)(8|16|32|64)$|^bswap(16|32|64)$/.test(f.name)) f.name += '_';
+  // symbol names that are not identifiers (Solang `counter::counter::function::count`, `.llvm.123` suffixes, keywords)
+  const symNotes = new Map<number, string>() // pc -> original symbol name
+  {
+    const taken = new Set([...p.funcs.values()].map(f => f.name))
+    for (const f of p.funcs.values()) {
+      if (/^[A-Za-z_$][\w$]*$/.test(f.name) && !JS_KEYWORDS.has(f.name)) continue
+      let nm = f.name.replace(/::/g, '__').replace(/[^\w$]+/g, '_').replace(/^(?=\d)|^$/, '_')
+      if (JS_KEYWORDS.has(nm)) nm += '_'
+      if (taken.has(nm)) nm += `_${(p.elf.text.addr + f.pc * 8).toString(16)}`
+      symNotes.set(f.pc, f.name)
+      taken.add(nm)
+      f.name = nm
+    }
+  }
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
@@ -277,6 +291,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (uses.size) hint = 'uses ' + [...uses].slice(0, 4).join(', ') + (uses.size > 4 ? ', …' : '');
     }
     if (heurNames.has(pc)) hint = heurNames.get(pc) + (hint ? `; ${hint}` : '');
+    if (symNotes.has(pc)) hint = `symbol ${symNotes.get(pc)}` + (hint ? `; ${hint}` : '')
     stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${hint ? ' ' + hint : ''}`);
   }
 
@@ -1141,6 +1156,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
     if (heurNames.has(pc)) lines.push(`// ${heurNames.get(pc)}`);
+    if (symNotes.has(pc)) lines.push(`// symbol: ${symNotes.get(pc)}`)
     const tp = taint.get(pc);
     if (tp && !sem.ixNames.has(pc)) {
       const ps = f.vars.filter(v => v.param >= 1 && v.param !== 10 && tp.vars.has(v.id) && names[v.id]).map(v => `${names[v.id]} (${tp.vars.get(v.id) === 'ptr' ? 'points to it' : 'value'})`);
@@ -1669,6 +1685,11 @@ function keyCompares(f: VarFunc, ptr: Expr, keyAt: (a: bigint) => string | undef
 function childLists(n: Node): Node[][] {
   return n.k === 'if' ? [n.then, n.else] : n.k === 'block' || n.k === 'loop' ? [n.body] : n.k === 'switch' ? n.cases.map(c => c.body) : [];
 }
+
+/** JavaScript / TypeScript reserved words (not usable as function names). */
+const JS_KEYWORDS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
+  'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
+  'typeof', 'var', 'void', 'while', 'with', 'implements', 'interface', 'let', 'package', 'private', 'protected', 'public', 'static', 'yield', 'await'])
 
 const RESERVED_TS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
   'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
