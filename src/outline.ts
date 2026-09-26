@@ -206,9 +206,10 @@ function candidate(fn: OutlineFn, ns: Node[], i: number, total: Map<number, numb
 			default: throw new Error('unexpected node')
 		}
 	}).join(';')
-	if (lead) vars.set(lead.dst, 'C')
-	const key = (lead ? 'C;' : '') + list(lead ? run.slice(1) : run, true)
-	if (lead) params.push(lead.call)
+	if (lead) vars.set(lead.dst, '@C')
+	let key = list(lead ? run.slice(1) : run, true)
+	// (the call's result is the last parameter: the same key as a run without the call whose variable is first seen last)
+	if (lead) { key = key.replaceAll('@C', `P${params.length}`); params.push(lead.call) }
 	if (params.length > MAX_PARAMS) return undefined
 	// (the out parameter itself is not reassigned by construction: pureOutParams)
 	void ret
