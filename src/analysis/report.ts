@@ -418,6 +418,8 @@ function analyze0(r: Result): Analysis {
 		for (const x of accounts) for (const [k, ev] of Object.entries(x.constraints)) if (ev.status === 'not_found' && (k === 'signer' || k === 'pda' || k === 'address')) score += 2
 		const kind: IxOut['kind'] = grp ? 'native' : !h.name.startsWith('ix_') ? (procNames.has(h.name) ? 'processor' : 'entrypoint') : r.anchor ? 'anchor' : 'native'
 		const dispatch = grp && `${grp.tags.length ? `tag ${grp.tags.join(', ')}` : 'paths leaving before the tag is matched'} (instruction data) matched in ${grp.dispatchers.join(', ')}; name ${grp.source === 'str' ? '[str: its "Instruction: …" log]' : grp.source === 'known' ? '[heur: the layout of a well-known program with these tags]' : '[the tag]'}`
+		// (a tag region doing nothing the analysis sees, e.g. the invalid-tag default of the match: left out)
+		if (grp && !ops.length && !checks.length) continue
 		ixs.push({ name, handler: h.name, kind, functions: fns.map(f => f.name), accounts, checks, ops, score, effects, indirect, dispatch, ctx })
 	}
 	ixs.sort((x, y) => y.score - x.score || x.name.localeCompare(y.name))
