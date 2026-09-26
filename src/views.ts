@@ -360,7 +360,7 @@ export class Views {
 /** The prelude lines defining the view notation. */
 export const VIEW_NOTATION = [
 	'type at<Offset extends number, T> = T // view field: a T at byte offset Offset of the object (x.f: scalar = its load, ref<U> = the loaded pointer, other = its address)',
-	'type ref<T> = T                        // view field holding a pointer (8 bytes) to a T',
+	'type ref<T> = T                        // view field holding a pointer (8 bytes) to a T (x.f = p stores the pointer)',
 	'interface sized<Size extends number> {} // a view of that many bytes: x[k] is the k-th such object from x (at x + k * Size)',
 ]
 

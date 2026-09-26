@@ -144,8 +144,11 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				// (the argument: a pointer variable, or a pointer loaded from a field)
 				let an: number | undefined
 				if (a.k === 'var') an = node(a.id)
-				else if (a.k === 'load' && a.size === 8) { const b = base(a.addr); const bn = b && node(b.v); if (bn !== undefined) an = pointee(bn, b!.off) }
-				else if (fo(a) !== undefined) an = frameArg(fo(a)!, stmts, at)
+				else if (a.k === 'load' && a.size === 8) {
+					const b = base(a.addr); const bn = b && node(b.v)
+					if (bn !== undefined) an = pointee(bn, b!.off)
+					else if (cfg.dataPtr?.(pc, a)) { an = fresh(); cls[an].data.push({ pc, v: -1 }) }
+				} else if (fo(a) !== undefined) an = frameArg(fo(a)!, stmts, at)
 				if (an !== undefined) edges.push([an, -1 - cpc * 256 - reg]) // (resolved after phase 1: the callee's node)
 			})
 		}
@@ -352,7 +355,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 			fields.push(t ? { name: `f${hex}_ref`, off: a.off, t: { k: 'ref', to: t } } : { name: `f${hex}_u${a.size * 8}`, off: a.off, t: { k: 'scalar', size: a.size as 1 | 2 | 4 | 8 } })
 		}
 		const fns = new Set(c.members.map(x => x.pc))
-		const where = dm ? `an account's data pointer (acc.data.ptr) in ${cfg.fnName(dm.pc)}${c.data.length > 1 || c.members.length ? ' and the functions it is passed to' : ''} (field offsets: in the account data)` : m ? `parameter ${PARAM_NAMES[cfg.built.get(m.pc)!.f.vars[m.v].param] ?? 'p'} of ${cfg.fnName(m.pc)}${fns.size > 1 ? ` and ${fns.size - 1} more function${fns.size > 2 ? 's' : ''}` : ''}` : `the objects the field ${hint.replace(/_0x/, '.0x')} points to`
+		const where = dm ? `an account's data pointer (acc.data.ptr: offsets in the account data) in ${cfg.fnName(dm.pc)}${c.data.length > 1 || c.members.length ? ' and the functions it is passed to' : ''}` : m ? `parameter ${PARAM_NAMES[cfg.built.get(m.pc)!.f.vars[m.v].param] ?? 'p'} of ${cfg.fnName(m.pc)}${fns.size > 1 ? ` and ${fns.size - 1} more function${fns.size > 2 ? 's' : ''}` : ''}` : `the objects the field ${hint.replace(/_0x/, '.0x')} points to`
 		view.doc = (`[heur] layout from the fixed-offset accesses through ${where} (fields: offset and size${hinted ? `; ${hinted} named after ${hintWhy}` : ''}; other bytes not described)`)
 		return name
 	}

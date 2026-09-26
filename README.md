@@ -89,7 +89,8 @@ types and comments are derived and say where they come from:
 | `[heur]` | structural inference: verify before relying on it |
 | `[exec]` | read from concrete runs of the function in the reference interpreter |
 
-Untagged names are plain temporaries (`a..e` = register arguments r1..r5, `ret` an out parameter, then `f, g, …`; `s30` stack objects;
+Untagged names are plain temporaries (`a..e` = register arguments r1..r5, `ret` an out parameter, then `f, g, …`; `s30` stack objects,
+`res` / `arg` a call's result / argument object where the slot is reused;
 `fn_<addr>` unnamed functions). How each name, view and annotation is recovered: [docs/INTERNALS.md](docs/INTERNALS.md).
 
 ### Runtime model
@@ -115,7 +116,8 @@ Also emitted as `lib.d.ts` / the single-file prelude.
 | `undef` | a register value left over by a callee (unspecified); also variables read before assignment and omitted trailing call arguments |
 | `"text"` argument | address of the first occurrence of those UTF-8 bytes in program memory (next argument is the length) |
 | memory map | `0x1_0000_0000` program/rodata, `0x2_…` stack, `0x3_…` heap, `0x4_…` input |
-| `x: AccountInfo`, `x.is_signer` | typed view: `x.f` is exactly the load / address its declaration gives, `x.f = v` the store |
+| `x: AccountInfo`, `x.is_signer` | typed view: `x.f` is exactly the load / address its declaration gives, `x.f = v` the store (a scalar or `ref<>` field) |
+| `x: S_2a00_b`, `x.f0x18_u64`, `acc.d0x29_u16` | inferred view (`[heur]`): fields named after their offset and size (`d…`: offset in the account data); still exactly the load / store at that offset |
 | `x[k]`, `x.f[k]` | for a view declared `extends sized<N>`: the k-th such object from x (`x + k * N`) |
 | `ret_tail_3(ret, err, r)`, `tail_7(…)` | outlined tail: a function defined in the output (`// outlined tails` section, `outlined.ts`) whose body is exactly the statements (ending in a return) each call replaces; its arguments are the values and stack-object addresses they use |
 

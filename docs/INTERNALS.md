@@ -221,7 +221,61 @@ name when given: `program_error_from(err, 0x1c /* error::FeeRateMaxExceeded = 60
 **Parameter types** (`[heur]`): a parameter (never reassigned) gets a view type when at least half of the direct
 calls pass an object of that view type and none one of another — or, with fewer, when every load and store through
 it hits a field of the view exactly and at least 3 fields: `// types [heur]: b: Whirlpool (1 of 3 calls pass one, …)`,
-then `b.tick_current_index = h`, `st64(b.liquidity, i, j)`.
+then `b.tick_current_index = h`, `st64(b.liquidity, i, j)`. The other way too: a parameter, or a variable defined once
+as a loaded word or a copy of a variable, passed where the callee's parameter has a view type, when every such call
+agrees and its own accesses fit the view (`passed where the callee's parameter is one: fn_…`); solana_program's
+`AccountInfo` methods (`AccountInfo_try_borrow_data`, `…_realloc`, `…_assign`, …) type their `AccountInfo`
+parameter when its accesses fit. Both directions are repeated to a fixed point over the call graph.
+
+**Inferred struct views** (`[heur]`, `src/structs.ts`): pointers still without a view get one made from the program's
+own fixed-offset accesses through them. A pointer is a parameter never reassigned, a variable defined once as a
+word loaded from such an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to), or a frame object passed
+to a call (the stores building it right before the call). Objects are unified (one view) along the data flow,
+Steensgaard style — a parameter with the arguments calls pass it, a loaded pointer with every other pointer loaded
+from or stored at the same field of the same object — and a merge is made only when the layouts agree (no access of
+one overlaps an access of another size of the other, recursively through their pointer fields). Pointers used in
+arithmetic with a non-constant or at a negative offset (buffers, arrays, a caller's stack arguments), those of
+library and noreturn functions get none. Each field is named after its offset and size: `f0x18_u64`, an 8-byte field
+whose value is used as such a pointer `f0x10_ref: at<0x10, ref<S_…>>` (x.f = p stores the pointer); at each offset
+the most used access, the others (overlapping it) stay raw; 2+ fields. The view is named after the first function
+whose parameter it is: `S_<function>_<parameter>` (`S_27d8_ret`, `S_accounts_swap_c`), a pointed-to object without
+one after the field (`S_27d8_b_0x10`). try_accounts' out object gets the Accounts struct's account names. A class
+whose accesses — and those through its pointers, followed — all fit `AccountInfo` exactly (3+ fields), with a flag
+byte accessed or its data / lamports RefCell box followed to the borrow flag and value, gets `AccountInfo` instead
+(`// types [heur]: b: AccountInfo (its accesses, and those through the pointers it holds, fit the view …)`):
+
+```ts
+function fn_27d8(ret: S_27d8_ret, b: AccountInfo) {
+	const g: DataCell = b.data
+	…
+	ret.f0x18_u8 = k
+	ret.f0x10_u64 = l
+interface S_27d8_ret { // [heur] layout from the fixed-offset accesses through parameter a of fn_27d8 (fields: offset and size; other bytes not described)
+	f0x0_ref:  at<0x00, ref<AccountInfo>>
+	f0x8_u64:  at<0x08, u64>
+```
+
+A stack object passed to calls whose parameter has a view gets it — for the whole function when every use of its
+address is such an argument of one view (`s370: S_11b068_b`), else per call as a frame region (below): `res` for an
+out parameter's result, `arg` for an argument object, from the stores building it right before the call (same
+statement list, back to another call or a store that does not fit) to the next write over its start. Stores of
+several words into fields of a typed object print one per line (`arg.f0x0_ref = d + 8` / `arg.f0x8_u64 = e - 8`,
+same order) when no stored value reads memory or calls. Error objects (`err`) are `Result64` words.
+
+**Account data without an IDL** (`[heur]`): an Anchor account type the IDL does not give (or all, without one) is
+found by its discriminator — `account:<Name>` for the names in the program's strings and the selector database —
+held as an immediate by the account-taking callee of try_accounts. Its in-memory layout comes from runs of the callee
+(`src/anchorstate.ts` probeLayout) on accounts of that type (owner: the program's declared id) whose data after the
+discriminator holds bit patterns (run b: the byte at index i is bit b of i + 1): each output byte that is a copy of
+one data byte is decoded from the runs it is 1 in, checked by two runs of pseudo-random bits. Runs of consecutive
+copied bytes, cut at their natural alignment (8 bytes at most), are the fields, named after their offset in the
+account data, discriminator included: `whirlpool_box.d0x49_u64` is the 8 bytes at data offset 0x49. Fields after a
+variable-length one (Option, Vec, String, enum payload) are not found (their offset moves with the data). The view,
+box variables and Accounts fields follow as for IDL types. A native program's deserializer — a user function called
+as `f(out, acc.data.ptr, acc.data.len)` (Borsh `try_from_slice`, `Pack::unpack`, …) — is run the same way (data of
+the length a run on zeros reads, else 10 KiB): the fields of its out object's inferred view that are data bytes
+copied in order are renamed `dN_uS`. An account's data pointer (`acc.data.ptr`) held in a variable or passed to a
+call gets an inferred view `Data_<function>` of its fixed-offset accesses (`f0x2d_u8`: the byte at data offset 0x2d).
 
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
