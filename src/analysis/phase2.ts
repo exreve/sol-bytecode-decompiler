@@ -19,7 +19,7 @@ import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { structFields } from '../idl.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
-export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'; status: 'found' | 'partial'; at: Loc; negated?: boolean }
+export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
 export interface Enabler { kind: 'signer' | 'stored' | 'pda' | 'none'; what: string; status?: string; writtenBy?: string[] }
 export interface AuthorityRow { op: number; kind: string; enabledBy: Enabler[] }
 export interface Finding { rule: string; title: string; ix: string; accounts: string[]; path: string[]; evidence: string[]; confidence: 'high' | 'medium' | 'low'; weight: number }
@@ -219,7 +219,7 @@ export function phase2(a: Analysis, r: Result) {
 			}
 			const [x, y] = [norm(sides[0]), norm(sides[1])]
 			if (!x && !y) continue
-			const kind: Relation['kind'] = x?.endsWith('.key') && y?.endsWith('.key') ? 'key_eq' : x && y ? 'field_eq' : 'compare'
+			const kind: Relation['kind'] = c.kinds.some(k => k === 'token_mint' || k === 'token_owner') ? 'token' : x?.endsWith('.key') && y?.endsWith('.key') ? 'key_eq' : x && y ? 'field_eq' : 'compare'
 			rel.push({ a: x ?? sides[0].slice(0, 60), b: y ?? sides[1].slice(0, 60), kind, status: c.status, at: c.at })
 		}
 		ix.relations = rel
@@ -236,7 +236,8 @@ export function phase2(a: Analysis, r: Result) {
 				en.push({ kind: 'signer', what: s.name, status: s.constraints.signer.status })
 				for (const x of rel) {
 					const other = x.a === `${s.name}.key` ? x.b : x.b === `${s.name}.key` ? x.a : undefined
-					if (!other || other.endsWith('.key') && x.kind !== 'has_one') continue
+					// (a token account's owner is not an authority the program stores)
+					if (!other || (other.endsWith('.key') && x.kind !== 'has_one') || x.kind === 'token') continue
 					const field = x.kind === 'has_one' && other.endsWith('?') ? [...authFields.keys()].find(f => f.endsWith(`.${s.name}`)) ?? other.replace(/\?$/, '') : other
 					en.push({ kind: 'stored', what: `${s.name}.key == ${field}`, status: x.status, writtenBy: authFields.get(field) ?? a.stateWrites.find(w => w.target === field)?.writes.map(w => w.ix) })
 				}

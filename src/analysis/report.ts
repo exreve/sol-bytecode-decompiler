@@ -39,7 +39,7 @@
 //                     guarded_by?: [check id] (dominating checks), bypass?: [ { check, path: [at] } ] (a path reaching it without that check),
 //                     sources?: [ { param, source (ix data / ix.<arg> / <account>.key / <account>.<field>), trust } ] } ],
 //     trust:     [ { value (<account>.key | <account>.data | ix.<arg>), trust ('caller-controlled' | 'validated' | 'partially-validated' | 'runtime'), evidence } ],
-//     relations: [ { a, b, kind ('key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'), status, at } ],
+//     relations: [ { a, b, kind ('key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token': a token account's mint / owner), status, at } ],
 //     authority: [ { operation (index), kind, enabled_by: [ { kind ('signer' | 'stored' | 'pda' | 'none'), what, status?, writtenBy? } ] } ],
 //     path_conditions: [ { operation (index), conditions: [ { at, cond, holds (false: the path needs it not to hold), how ('branch' | 'exit-check' | 'loop'), check? (id) } ],
 //                          not_required: [ { check, path? } ] (relevant checks some path to it does not make), truncated? } ]            (phase3.ts)

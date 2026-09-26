@@ -967,6 +967,12 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 	return ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
 }
 
+/** a memcpy / memmove of a constant size: [dst, src, n] */
+function memcpyOf(c: { t: CallTarget; args: Expr[] }, callee?: Callee): [Expr, Expr, number] | undefined {
+	const nm = c.t.k === 'sys' ? c.t.name : c.t.k === 'fn' ? callee?.name(c.t.pc) ?? '' : ''
+	return /^(sol_)?(memcpy|memmove)_?$/.test(nm) && c.args.length >= 3 && c.args[2].k === 'const' && c.args[2].v <= 0x400n ? [c.args[0], c.args[1], Number(c.args[2].v)] : undefined
+}
+
 /** a stored value that is a sum / difference (through its variables' definitions): += / -=, else = */
 export function arithHow(D: Defs, e: Expr, p: number): '=' | '+=' | '-=' {
 	for (let k = 0; k < 6; k++) {
@@ -1028,6 +1034,15 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 			return { k: 'load', size: 8, addr: src !== undefined ? { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } : k ? { k: 'bin', op: 'add', a: s.src, b: { k: 'const', v: k } } : s.src }
 		}
 		const c = callOf(s)
+		// (memcpy / memmove of a constant size: a copy)
+		const mc = c && memcpyOf(c, callee)
+		if (mc) {
+			const a = fpOff(mc[0])
+			if (a === undefined || a >= o + 8 || a + mc[2] <= o) return undefined
+			if (a > o || a + mc[2] < o + 8) return null
+			const src = fpOff(mc[1]), k = BigInt.asUintN(64, BigInt(o - a))
+			return { k: 'load', size: 8, addr: src !== undefined ? { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } : k ? { k: 'bin', op: 'add', a: mc[1], b: { k: 'const', v: k } } : mc[1] }
+		}
 		// (a callee may write the structure it gets a pointer to)
 		if (c) for (let j = 0; j < c.args.length; j++) { const p = fpOff(c.args[j]); if (p !== undefined && p <= o && o < p + (callee ? callWrites(c.t, j, callee) : 0x80)) return loose ? { k: 'call', t: c.t, args: c.args } : null }
 		return undefined
@@ -1090,7 +1105,13 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		const GD = defsOf(g, callee)
 		const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
 		const vs: [Expr, number][] = []
-		g.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => { if (s.k === 'store' && s.size === 8 && at(s.addr) === off) vs.push([s.v, bi << 16 | i]) }))
+		g.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => {
+			if (s.k === 'store' && s.size === 8 && at(s.addr) === off) vs.push([s.v, bi << 16 | i])
+			// (a copy into the parameter's object: the bytes copied)
+			const mc = callOf(s) && memcpyOf(callOf(s)!, callee)
+			const a = mc && at(mc[0])
+			if (mc && a !== undefined && a <= off && off + 8 <= a + mc[2]) vs.push([{ k: 'load', size: 8, addr: off > a ? { k: 'bin', op: 'add', a: mc[1], b: { k: 'const', v: BigInt(off - a) } } : mc[1] }, bi << 16 | i])
+		}))
 		if (!vs.length || vs.length > 8) return undefined
 		const rs = new Map<number, AV>()
 		c.args.forEach((a, k) => { const x = k === j ? undefined : ev(a, p, d + 1); const q = g.vars.find(u => u.param === k + 1)?.id; if (x && q !== undefined) rs.set(q, x) })
