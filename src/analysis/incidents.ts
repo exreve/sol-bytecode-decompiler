@@ -20,8 +20,8 @@ import { walkExpr } from '../ir.ts'
 import type { Analysis, IxOut, Loc, OpOut } from './report.ts'
 import type { Finding } from './phase2.ts'
 import type { FnFacts } from './facts.ts'
-import { irOf, defsIn, valueKey, posAt, stmtAt } from './paths.ts'
-import { cfgOf, callOf, anchorEval } from './flow.ts'
+import { irOf, defsIn, valueKey, posAt, stmtAt, storedAt, keyIn } from './paths.ts'
+import { cfgOf, callOf, anchorEval, reaches, tryInfo } from './flow.ts'
 import { sourceCtx, type Source } from './sources.ts'
 import { evaluatorsFor } from './audit.ts'
 
@@ -31,6 +31,9 @@ export interface FundMover { instruction: string; authority: string; kind: strin
 export const INCIDENT_RULES: Record<string, string> = {
 	'introspection-unchecked': 'Instructions sysvar parsed without its key check, the loaded instruction\'s program id check, or with an index from instruction data',
 	'flash-repay-unbound': 'Flash-loan introspection: the found instruction\'s accounts / amount are not compared with this instruction\'s',
+	'rounding-favors-user': '(experimental) Share math rounded in the caller\'s favor: up on a credit, down on a debit',
+	'token2022-amount-assumed': 'Inbound transfer through a program that may be Token-2022, state credited with the input amount (no balance delta)',
+	'stale-after-cpi': 'Account data read before a CPI that may write the account, used after it without re-reading (reload)',
 	'signer-to-untrusted-program': 'PDA signature or a signer forwarded to a CPI whose program id is an account key no check pins',
 	'oracle-unvalidated': 'Oracle (Pyth) price used without its status / staleness (/ confidence, before a value move) read',
 }
@@ -478,12 +481,282 @@ function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
  * The incident rules' findings. `prior`: the rule engine's (phase2.ts); a signer-to-untrusted-program finding on a CPI
  * cpi-unchecked-program already reports is merged into it (escalated to high when the PDA signs, its evidence appended).
  */
+// ---- stale account data after a CPI ----
+
+/** position a is before position b in function fn: b reachable from a and not a from b (same block: by index) */
+function before(fo: FuncOut, a: number, b: number): boolean {
+	if (a >> 16 === b >> 16) return (a & 0xffff) < (b & 0xffff)
+	const g = cfgOf(fo)
+	return reaches(g, a >> 16, b >> 16) && !reaches(g, b >> 16, a >> 16)
+}
+
+/**
+ * A value read from an account's data before a CPI that may write the account (passed writable; an account the CPI's
+ * decoded metas do not resolve: a writable account the program itself does not write, i.e. not its own), used in a
+ * condition after the CPI: native, a variable defined before the call; Anchor, the deserialized copy in the handler's
+ * frame read after the call with no call in between taking that copy (reload). Not a balance delta (the condition also
+ * reads the account afresh).
+ */
+function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
+	const I = irOf(r), src = srcOf(r, ix), out: F[] = []
+	const cpis = ix.ops.filter(o => o.kinds.includes('CPI') && o.fnPc !== undefined && !o.kinds.includes('ACCOUNT_CREATE') && !/^(CreateAccount|Assign|Allocate|Transfer|InitializeAccount\d?|InitializeMint\d?|SyncNative)$/.test(o.cpi?.ix ?? ''))
+	if (!cpis.length) return []
+	const own = new Set(ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')).map(o => o.target?.split('.')[0] ?? ''))
+	const H = r.anchor ? I.byPc.get(ix.ctx!.handler) : undefined, A = H && anchorEval(r, H), E = r.anchor ? evaluatorsFor(r, ix.ctx!) : undefined
+	const allowed = (fn: number, b: number) => !ix.ctx!.allowed || ix.ctx!.allowed(fn, b)
+	const seen = new Set<string>()
+	for (const o of cpis) {
+		const cp0 = posAt(I, o.fnPc!, o.at.pc, o.ret)
+		if (cp0 === undefined) continue
+		const st = [undefined, cp0] as const
+		// (the accounts the CPI may write)
+		const metas = (o.cpi?.accounts ?? []).flatMap((x, i) => { const e = o.cpi!.src?.accounts[i]; return x.w && e ? [...src(o.fnPc!, e, st[1]), ...src(o.fnPc!, ld8(e), st[1])].filter(y => y.kind === 'key').map(y => y.acct!) : [] })
+		// (not resolved: the accounts the program does not write itself (the IDL's writable ones))
+		const W = new Set(metas.length ? metas : ix.accounts.filter(x => (r.anchor ? x.expected.writable || x.constraints.writable : true) && !own.has(x.name) && !x.expected.signer).map(x => x.name))
+		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('stale op', ix.name, o.text.slice(0, 50), JSON.stringify(o.cpi?.accounts), [...W], metas)
+		if (!W.size) continue
+		// (the call site at each level up to the handler)
+		let lv: [number, number] | undefined = [o.fnPc!, st[1]]
+		for (let d = 0; lv && d < 6; d++) {
+			const [fn, cp]: [number, number] = lv
+			if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('stale lv', ix.name, o.text.slice(0, 40), r.facts.get(fn)?.name, cp, [...W])
+			const fo = I.byPc.get(fn), D = defsIn(I, fn)
+			if (!fo || !D) break
+			const g = cfgOf(fo)
+			for (let b = 0; b < fo.f.blocks.length; b++) {
+				const bl = fo.f.blocks[b]
+				if (bl.term.k !== 'br' || g.rpo[b] < 0 || !allowed(fn, b) || !reaches(g, cp >> 16, b)) continue
+				const q = b << 16 | bl.stmts.length
+				if (!before(fo, cp, q) && b !== cp >> 16) continue
+				const stale: [string, string][] = [], fresh = new Set<string>()
+				// (the condition's reads: variables through their definitions, loads)
+				const visit = (e: Expr, p: number, depth: number) => walkExpr(e, x => {
+					if (x.k === 'var' && depth < 4) {
+						const y: [Expr, number] | null = D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : D.multi.has(x.id) ? D.reaching(x.id, p) : null
+						if (!y) return
+						// (a value a call left in the frame (a helper reading the account, e.g. its token amount): the accounts passed to
+						// the call writing that slot, the last one before the read in its block)
+						const o8 = y[0].k === 'load' ? D.fpOff(y[0].addr) : undefined
+						const cs = o8 !== undefined ? callOut(fo, D, o8, y[1]) : undefined
+						const ss = [...src(fn, y[0], y[1]).filter(s => s.kind === 'data'), ...(cs ? cs.args.flatMap(e => [...src(fn, e, cs.p), ...src(fn, ld8(e), cs.p)]).filter(s => s.kind === 'key' || s.kind === 'data') : [])].filter(s => W.has(s.acct!))
+						if (before(fo, y[1], cp)) { for (const s of ss) stale.push([s.acct!, s.kind === 'key' ? `a value a call reads from ${s.acct}` : s.source]) }
+						else { for (const s of ss) fresh.add(s.acct!); visit(y[0], y[1], depth + 1) }
+					} else if (x.k === 'load') {
+						const ss = src(fn, x, p).filter(s => s.kind === 'data' && W.has(s.acct!))
+						// (Anchor: the deserialized copy in the handler's frame, not refreshed by a call taking it after the CPI)
+						const h = E?.(fn)?.ev(x.addr, p)
+						const copy = !!h && h.k === 'fr' && h.ctx.fo === H && !!A?.frameAcct(h.z, x.size, h.at)
+						// (Anchor: a word of an account's deserialized copy the sources do not name, e.g. an InterfaceAccount's amount)
+						const cc = r.anchor && !ss.length ? copyAcct(r, ix, fn, x.addr, p) : undefined
+						if (cc && !cc.info && W.has(cc.acct)) { if (reloaded(r, ix, fn, fo, cp, p, cc.acct)) fresh.add(cc.acct); else stale.push([cc.acct, `${cc.acct} (its deserialized copy: ${r.facts.get(fn)?.expr?.(x) ?? 'a load'})`]); return }
+						for (const s of ss) {
+							if (!copy) { fresh.add(s.acct!); continue }
+							if (reloaded(r, ix, fn, fo, cp, p, s.acct!)) fresh.add(s.acct!)
+							else stale.push([s.acct!, s.source])
+						}
+					}
+				})
+				visit(bl.term.c, q, 0)
+				if ((globalThis as { __incDebug?: boolean }).__incDebug && (stale.length || fresh.size)) console.error('  cond', lineText({ pc: fn, fo, ff: r.facts.get(fn), blocks: [] }, q).slice(0, 80), JSON.stringify(stale), [...fresh])
+				for (const [acct, what] of stale) {
+					if (fresh.has(acct) || seen.has(acct)) continue
+					seen.add(acct)
+					const at = locOf({ pc: fn, fo, ff: r.facts.get(fn), blocks: [] }, q)
+					out.push({ rule: 'stale-after-cpi', ix: ix.name, accounts: [acct], path: [L(o.at), L(at)], evidence: [`${what} is read before the CPI (${o.text.slice(0, 80)}) that may write ${acct}, and used after it: ${lineText({ pc: fn, fo, ff: r.facts.get(fn), blocks: [] }, q).slice(0, 100)}`, r.anchor ? `no reload of ${acct} (a call taking its deserialized copy) between the CPI and the read` : `the value is not read again after the CPI`], confidence: 'medium', weight: 4 })
+				}
+			}
+			// (up one level: the call site of this function)
+			const par: { fn: number; pc?: number; ret?: Expr } | undefined = fn === ix.ctx!.handler ? undefined : ix.ctx!.parents.get(fn)
+			const at = callAt(I, fn, par)
+			lv = at && par ? [par.fn, at[1]] : undefined
+		}
+	}
+	return out
+}
+
+/** the call statement writing frame offset o (its out object: an argument pointing at most 0x80 bytes below), the last before position p in p's block */
+function callOut(fo: FuncOut, D: NonNullable<ReturnType<typeof defsIn>>, o: number, p: number): { args: Expr[]; p: number } | undefined {
+	const bl = fo.f.blocks[p >> 16]
+	for (let i = Math.min(p & 0xffff, bl.stmts.length) - 1; i >= 0; i--) {
+		const st = bl.stmts[i], c = callOf(st)
+		if (st.k === 'store' || st.k === 'stores') { const a = D.fpOff(st.addr); if (a !== undefined && a <= o && o < a + (st.k === 'store' ? st.size : st.size * st.vals.length)) return undefined }
+		if (!c) continue
+		if (c.args.some(e => { const a = D.fpOff(e); return a !== undefined && a <= o && o < a + 0x80 })) return { args: c.args.filter(e => D.fpOff(e) === undefined), p: p >> 16 << 16 | i }
+	}
+	return undefined
+}
+
+/**
+ * Anchor: the account whose deserialized copy in the Accounts struct an address points into (the struct's layout from
+ * try_accounts; the base evaluated to the handler's frame, printed as the Accounts struct), with whether it is the account's AccountInfo word rather than its data
+ */
+function copyAcct(r: Result, ix: IxOut, fn: number, addr: Expr, p: number): { acct: string; info: boolean } | undefined {
+	const I = irOf(r), H = I.byPc.get(ix.ctx!.handler), T = H && tryInfo(r, H), A = H && anchorEval(r, H)
+	const E = evaluatorsFor(r, ix.ctx!)(fn)
+	if (!T?.layout.length || !E || !A) return undefined
+	const s = sumOf(addr)
+	if (s.terms.length !== 1 || s.c > 0x4000n) return undefined
+	const c = Number(s.c), h = E.ev(s.terms[0], p)
+	if (!h || h.k !== 'fr' || h.ctx.fo !== H) return undefined
+	const fs = [...T.layout].sort((x, y) => x.off - y.off)
+	let i = -1
+	fs.forEach((f, k) => { if (f.off <= c) i = k })
+	if (i < 0) return undefined
+	const f = fs[i], end = fs[i + 1]?.off ?? f.off + (f.t.k === 'embed' ? r.views.map.get(f.t.type)?.size ?? 8 : 8)
+	if (c >= end) return undefined
+	// (the base is the struct: some field's word maps to that field's account)
+	// (the base is the struct: the printer names it after the Accounts struct (the same layout))
+	if (!/^acc(oun)?ts(_\d+)?$/.test(r.facts.get(fn)?.expr?.(s.terms[0]) ?? '')) return undefined
+	return { acct: f.name, info: c - f.off < 8 && f.t.k === 'ref' }
+}
+
+/** Anchor: a call between the CPI and the read taking a pointer into the account's deserialized copy (reload()) */
+function reloaded(r: Result, ix: IxOut, fn: number, fo: FuncOut, cp: number, rp: number, acct: string): boolean {
+	const E = evaluatorsFor(r, ix.ctx!)(fn), H = irOf(r).byPc.get(ix.ctx!.handler), A = H && anchorEval(r, H)
+	if (!E || !A) return false
+	const g = cfgOf(fo)
+	for (let b = 0; b < fo.f.blocks.length; b++) {
+		if (g.rpo[b] < 0 || !reaches(g, cp >> 16, b) || !reaches(g, b, rp >> 16)) continue
+		const bl = fo.f.blocks[b]
+		for (let i = 0; i < bl.stmts.length; i++) {
+			const p = b << 16 | i
+			if (!before(fo, cp, p) || !before(fo, p, rp)) continue
+			const c = callOf(bl.stmts[i])
+			if (c) for (const a of c.args) {
+				const h = E.ev(a, p)
+				if (h?.k === 'fr' && h.ctx.fo === H && A.frameAcct(h.z, 8, h.at)?.acct === acct) return true
+				if (h && h.k !== 'fr' && h.acct === acct) return true
+				if (copyAcct(r, ix, fn, a, p)?.acct === acct) return true
+			}
+		}
+	}
+	return false
+}
+
+// ---- Token-2022: the transfer's input amount credited ----
+
+/**
+ * An inbound token transfer (the program does not sign it) through a program that may be Token-2022 (a CPI to it, or a
+ * comparison with its id: an either-or check), and state credited (+=) with a value from instruction data that no
+ * account balance read (the destination's balance after the transfer) contributes to: a transfer fee / hook makes the
+ * vault receive less than credited. Clean when the mint / token account length is compared exactly with the plain SPL
+ * sizes (82 / 165: extensions rejected).
+ */
+function token2022Amount(r: Result, ix: IxOut, sc: Fn[]): F[] {
+	// (inbound: not signed by the program; Anchor CPI helpers whose seeds / accounts are not decoded: no PDA derived here)
+	const derives = ix.ops.some(o => o.kinds.includes('PDA_DERIVE'))
+	const moves = ix.ops.filter(o => o.kinds.includes('TOKEN_TRANSFER') && !signs(r, ix, o) && !(derives && !o.cpi?.accounts.length))
+	if (!moves.length) return []
+	const cmps = compares(r, sc)
+	const via = ix.ops.find(o => /TOKEN_2022/.test(`${o.cpi?.known ?? ''} ${o.cpi?.program ?? ''}`) || /2022/.test(o.cpi?.family ?? ''))
+	const cmp = via ? undefined : cmps.find(k => /TOKEN_2022_PROGRAM/.test(lineText(k.fn, k.p)))
+	if (!via && !cmp && !ix.checks.some(c => /TOKEN_2022_PROGRAM/.test(c.cond))) return []
+	// (extensions rejected: a length compared for equality with a plain mint / account size)
+	if (cmps.some(k => (k.e.k === 'cmp' && (k.e.op === 'eq' || k.e.op === 'ne')) && [k.a, k.b].some(x => x.k === 'const' && (x.v === 82n || x.v === 165n)))) return []
+	const I = irOf(r), src = srcOf(r, ix)
+	const own = new Set(ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE')).map(o => o.target?.split('.')[0] ?? ''))
+	for (const o of ix.ops) {
+		if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || o.how !== '+=' || o.fnPc === undefined || o.at.pc === undefined) continue
+		const v = storedAt(I, o.fnPc, o.at.pc)
+		if (!v) continue
+		const ss = src(o.fnPc, v[0], v[1])
+		const arg = ss.find(y => y.kind === 'ix')
+		if (!arg || ss.some(y => y.kind === 'data' && !own.has(y.acct!))) continue
+		const m = moves[0]
+		return [{ rule: 'token2022-amount-assumed', ix: ix.name, accounts: [o.target!.split('.')[0]], path: [L(m.at), L(o.at)], evidence: [`${o.target} += ${arg.source} (${o.text.slice(0, 80)}): the credited amount is the transfer's input, not what the destination received`, `the token program may be Token-2022 (${via ? `CPI ${via.cpi?.known ?? via.cpi?.program}` : cmp ? `compared with its id: ${lineText(cmp.fn, cmp.p).slice(0, 80)}` : 'a check names its id'}): a transfer fee (or hook) makes the destination receive less; no read of the destination's balance after the transfer (balance delta) found`, `transfer: ${m.text.slice(0, 100)}`], confidence: 'medium', weight: 4 }]
+	}
+	return []
+}
+
+// ---- rounding direction of share math (experimental) ----
+
+const DIV128 = /^(__udivti3|__divti3|udivti3|u128_div)(_[0-9a-f]+)?$/
+const MUL128 = /^(__multi3)(_[0-9a-f]+)?$/
+/**
+ * Share conversions (a product divided by a value read from an account) whose rounding favors the caller: rounded up
+ * ((n + d - 1) / d) and credited (+=), paired with another credit of the instruction (the deposit itself), not a debt;
+ * rounded down and debited (-=) from a share-like balance (named so, or: another debit pairs it and the outflow's amount
+ * is the caller's argument, not the quotient). Low confidence (experimental).
+ */
+function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
+	const I = irOf(r), src = srcOf(r, ix), out: F[] = []
+	interface Div { fn: Fn; p: number; q: string[]; ceil: boolean; text: string }
+	const divs: Div[] = []
+	const K = (fn: Fn, e: Expr, p: number) => valueKey(I, ix.ctx, fn.pc, e, p)
+	// (a product: a multiplication, or the result a 128-bit multiplication (__multi3) left in the frame slot read)
+	const muls = new Map<number, Set<number>>()
+	eachCall(sc, (fn, name, args) => { const o = MUL128.test(name) && args.length ? defsIn(I, fn.pc)?.fpOff(args[0]) : undefined; if (o !== undefined) { let m = muls.get(fn.pc); if (!m) muls.set(fn.pc, (m = new Set())); m.add(o) } }, r)
+	const product = (fn: Fn, e: Expr, p: number) => {
+		if (/\(mul /.test(K(fn, e, p))) return true
+		const D = defsIn(I, fn.pc), x = e.k === 'var' && D?.defs.has(e.id) ? D.defs.get(e.id)! : e
+		const o = x.k === 'load' ? D?.fpOff(x.addr) : undefined
+		return o !== undefined && !!muls.get(fn.pc)?.has(o)
+	}
+	const fromAcct = (fn: Fn, e: Expr, p: number) => src(fn.pc, e, p).some(y => y.kind === 'data')
+	const isCeil = (nk: string, dk: string) => nk.startsWith('(+ ') && / #-1\)$/.test(nk) && keyIn(nk, dk)
+	eachExpr(sc, (fn, x, p) => {
+		if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv') && x.b.k !== 'const' && fromAcct(fn, x.b, p)) {
+			const nk = K(fn, x.a, p), dk = K(fn, x.b, p)
+			if (!product(fn, x.a, p) && !isCeil(nk, dk)) return
+			divs.push({ fn, p, q: [K(fn, x, p)], ceil: isCeil(nk, dk), text: lineText(fn, p) })
+		}
+	})
+	eachCall(sc, (fn, name, args, p) => {
+		if (!DIV128.test(name) || args.length < 5 || args[3].k === 'const') return
+		const nk = K(fn, args[1], p), dk = K(fn, args[3], p)
+		if (!isCeil(nk, dk) && !product(fn, args[1], p)) return
+		const o = defsIn(I, fn.pc)?.fpOff(args[0])
+		divs.push({ fn, p, q: [`call${fn.pc}@${p}`, ...(o !== undefined ? [`fs${fn.pc}@${o}:8`] : [])], ceil: isCeil(nk, dk), text: lineText(fn, p) })
+	}, r)
+	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('divs', ix.name, JSON.stringify(divs.map(d => [d.q, d.ceil, d.text.slice(0, 60)])))
+	if (!divs.length) return []
+	// (the writes of the instruction: target, how, the stored value's key)
+	const writes = ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') && (o.how === '+=' || o.how === '-=') && o.fnPc !== undefined && o.at.pc !== undefined).flatMap(o => {
+		const v = storedAt(I, o.fnPc!, o.at.pc!)
+		return v ? [{ o, k: valueKey(I, ix.ctx, o.fnPc!, v[0], v[1]) }] : []
+	})
+	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('writes', ix.name, JSON.stringify(writes.map(w => [w.o.target, w.o.how, w.k.slice(0, 150)])))
+	const field = (t?: string) => t?.split('.').slice(1).join('.') ?? ''
+	const outflowArg = ix.ops.filter(o => (o.kinds.includes('TOKEN_TRANSFER') || o.kinds.includes('LAMPORT_TRANSFER')) && o.sources?.length).every(o => o.sources!.filter(y => y.param === 'amount' || y.param === 'lamports').every(y => /instruction data|^ix\./.test(y.source)))
+	for (const d of divs) {
+		// (the quotient in a stored value, directly or through a variable one of whose definitions holds it (a branch's result))
+		const has = (k: string, depth = 0): boolean => d.q.some(q => keyIn(k, q)) || (depth < 3 && [...k.matchAll(/\b(v|fs)(\d+)[.@](-?\d+)\b/g)].some(([, kind, f, id]) => {
+			const fo = I.byPc.get(Number(f)), D = defsIn(I, Number(f))
+			return !!fo && !!D && fo.f.blocks.some((b, bi) => b.stmts.some((st, i) => {
+				const v = kind === 'v' ? (st.k === 'set' && st.dst === Number(id) ? st.e : undefined) : st.k === 'store' && st.size === 8 && D.fpOff(st.addr) === Number(id) ? st.v : undefined
+				return !!v && has(valueKey(I, ix.ctx, Number(f), v, bi << 16 | i), depth + 1)
+			}))
+		}))
+		const uses = writes.filter(w => has(w.k))
+		// (the quotient paid out (a lamport debit, a transfer's amount): an asset amount, rounded down in the program's favor)
+		const paid = ix.ops.some(o => {
+			if (o.fnPc === undefined) return false
+			if (o.kinds.includes('LAMPORT_WRITE') && o.how === '-=' && o.at.pc !== undefined) { const v = storedAt(I, o.fnPc, o.at.pc); return !!v && has(valueKey(I, ix.ctx, o.fnPc, v[0], v[1])) }
+			const q = posAt(I, o.fnPc, o.at.pc, o.ret)
+			return !!o.cpi && q !== undefined && (o.cpi.fields ?? []).some(([n], i) => /amount|lamports/.test(n) && !!o.cpi!.src?.fields[i] && has(valueKey(I, ix.ctx, o.fnPc!, o.cpi!.src!.fields[i]!, q)))
+		})
+		if (!d.ceil && paid) continue
+		for (const w of uses) {
+			const others = writes.filter(x => x !== w && x.o.how === w.o.how && !uses.includes(x))
+			const f = field(w.o.target)
+			let why: string | undefined
+			if (d.ceil && w.o.how === '+=' && !/debt|borrow|owed|liab|fee/i.test(f) && others.length) why = `rounded up ((n + d - 1) / d) and credited to ${w.o.target}, next to ${others[0].o.target} += (the deposit): the caller gets up to one unit more than the exact share`
+			else if (!d.ceil && w.o.how === '-=' && (/share|lp|supply|units/i.test(f) || (!/[a-z]/.test(f.replace(/data\[\d+\.\.\d+\]/, '')) && others.length && outflowArg))) why = `rounded down and debited from ${w.o.target}${others.length ? `, next to ${others[0].o.target} -= (the assets out)` : ''}: the caller burns up to one unit less than the exact share`
+			if (!why) continue
+			out.push({ rule: 'rounding-favors-user', ix: ix.name, accounts: [w.o.target!.split('.')[0]], path: [L(locOf(d.fn, d.p)), L(w.o.at)], evidence: [`share conversion ${d.text.slice(0, 90)} (a product divided by a stored value)`, why, 'experimental: rounding direction recognized from the division\'s shape and the write it flows into'], confidence: 'low', weight: 3 })
+			break
+		}
+		if (out.length) break
+	}
+	return out
+}
+
 export function incidentFindings(a: Analysis, r: Result, prior: Finding[] = []): Finding[] {
 	const out: Finding[] = []
 	for (const ix of a.ixs) {
 		if (!ix.ctx) continue
 		const sc = scope(r, ix)
-		for (const rule of [introspection, signerForward, oracle]) {
+		for (const rule of [introspection, rounding, token2022Amount, staleAfterCpi, signerForward, oracle]) {
 			// (a rule failing on an unexpected shape reports nothing, the analysis goes on)
 			try {
 				for (const f of rule(r, ix, sc)) {
@@ -494,7 +767,7 @@ export function incidentFindings(a: Analysis, r: Result, prior: Finding[] = []):
 						same.accounts = [...new Set([...same.accounts, ...f.accounts])]
 					} else out.push({ ...f, title: INCIDENT_RULES[f.rule] })
 				}
-			} catch { /* nothing */ }
+			} catch (e) { if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error(e) }
 		}
 	}
 	return out
