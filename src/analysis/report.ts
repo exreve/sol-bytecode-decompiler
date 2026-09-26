@@ -59,8 +59,8 @@
 // constraint kinds: signer, writable, owner, discriminator, initialized, pda, address, executable, has_one, key, state,
 //   custom (IDL error), raw, rent_exempt, count, token_mint, token_owner, …; op kinds: see facts.ts OpKind.
 import type { Result } from '../decompile.ts'
-import type { FnFacts, Op, OpKind } from './facts.ts'
-import { refOf } from './facts.ts'
+import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
+import { refOf, cpiKinds } from './facts.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
 import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup, type AcctRef } from './flow.ts'
 import type { Expr } from '../ir.ts'
@@ -241,6 +241,17 @@ function analyze0(r: Result): Analysis {
 		const pend: [string, string, number, string | undefined][] = []
 		const ops: OpOut[] = []
 		const idxName = (i: number) => accounts.find(y => y.index === i)?.name ?? `account[${i}]`
+		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
+		const hintBefore = (ff: FnFacts, line: number): IxHint | undefined => {
+			let best: IxHint | undefined
+			const take = (x: IxHint) => { if (x.line < line && (!best || x.line > best.line)) best = x }
+			ff.ixHints.forEach(take)
+			for (const c of ff.calls) {
+				const hs = facts.get(c.callee)?.ixHints ?? []
+				if (hs.length && hs.every(x => x.ix === hs[0].ix) && keep(ff.pc, c.pc)) take({ ...hs[0], line: c.line, how: `${facts.get(c.callee)!.name} (${hs[0].how})` })
+			}
+			return best
+		}
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
 			// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice)
@@ -286,7 +297,16 @@ function analyze0(r: Result): Analysis {
 				if (ff.wrapper && !o.cpi && fns.some(g => g.ops.some(x => x.via === ff.name))) continue
 				const at = loc(ff, o.line, o.pc)
 				const tgt = o.target ? `${cn(o.target.acct) ?? o.target.acct}${o.target.field ? '.' + o.target.field : ''}` : undefined
-				ops.push({ at, kinds: o.kinds, text: o.text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi: o.cpi, pda: o.pda, fnPc: ff.pc })
+				let { kinds, text, cpi } = o
+				// (a CPI whose instruction is not in the frame: the instruction built before it in the function)
+				const h = o.kinds.includes('CPI') && !o.cpi?.ix ? hintBefore(ff, o.line) : undefined
+				if (h) {
+					cpi = { ...(o.cpi ?? { program: h.program, accounts: [], fields: [] }), family: h.family, ix: h.ix }
+					if (!o.cpi || o.cpi.program === '?') cpi.program = h.program
+					kinds = [...new Set([...cpiKinds(h.family, h.ix), ...o.kinds])]
+					text = `CPI ${cpi.program}.${h.ix} [heur: the instruction built before it: ${h.how}]${o.cpi ? ` — ${o.text}` : ''}`
+				}
+				ops.push({ at, kinds, text: text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi, pda: o.pda, fnPc: ff.pc })
 			}
 		}
 		// check statuses from real dominators (across calls), then the per-account constraints

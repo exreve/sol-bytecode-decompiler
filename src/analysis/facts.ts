@@ -10,7 +10,7 @@ import type { Node } from '../structure.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
-import type { CpiDesc, CpiParts } from '../cpi.ts'
+import { knownFamilies, type CpiDesc, type CpiParts } from '../cpi.ts'
 import { inlineString } from '../anchorstate.ts'
 import type { Program } from '../program.ts'
 import { extentOf } from '../exec.ts'
@@ -34,6 +34,7 @@ export interface FnInput {
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
 	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
 	irStore?: (s: Stmt) => { index: number; field?: string } | undefined // native: the account field a store writes (flow.ts accountResolver)
+	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -75,8 +76,12 @@ export interface Op {
 
 export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)
 
+/** An instruction of a well-known program the code builds: a library instruction builder called, a TokenInstruction packed (for the CPI that follows). */
+export interface IxHint { line: number; program: string; family: string; ix: string; how: string }
+
 export interface FnFacts {
 	pc: number; name: string; checks: Check[]; ops: Op[]; calls: Call[]; types: Map<string, string>; wrapper?: boolean
+	ixHints: IxHint[]                  // instructions of well-known programs built here (see IxHint)
 	lines: string[]; at: number          // the printed text (for the IR-level analyses, src/analysis/flow.ts)
 	pcLine: Map<number, number>        // statement pc -> 1-based line
 }
@@ -98,6 +103,33 @@ const ERROR_MARK = /anchor::\w|error::\w|\bErr\(|ProgramError::|Error_with_accou
 const TEMP = /^([a-z]{1,2}|v\d+|s[0-9a-f]+|p\d+|r\d|fp|u\d+)$/
 const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate/i
 
+/** the CPI helpers of the Anchor crates (by library path): the CPI they make is their name */
+const CPI_HELPER = /^(anchor_lang::system_program|anchor_spl::(?:token|token_2022|token_interface))::(\w+)$/
+/** instruction builders (by library path) */
+const BUILDER = /^(solana_program::system_instruction|solana_system_interface::instruction|spl_token(?:_2022)?::instruction)::(\w+)$/
+const pascal = (s: string) => s.replace(/(^|_)([a-z0-9])/g, (_, _u, c: string) => c.toUpperCase())
+/** a library path's program: [program, family] */
+const helperProgram = (p: string): [string, string] => /system/.test(p) ? ['SYSTEM_PROGRAM', 'system'] : /token_2022/.test(p) ? ['TOKEN_2022_PROGRAM', 'token2022'] : /token_interface/.test(p) ? ['TOKEN_PROGRAM|TOKEN_2022_PROGRAM', 'token'] : ['TOKEN_PROGRAM', 'token']
+const tokenIx = (tag: number) => knownFamilies().find(([k]) => k === 'TOKEN_PROGRAM')?.[1].ixs[tag]?.name
+
+/** the operation kinds of a well-known program's instruction */
+export function cpiKinds(fam: string, ix: string): OpKind[] {
+	const kinds: OpKind[] = ['CPI']
+	if (fam === 'token' || fam === 'token2022') {
+		if (/^Transfer/.test(ix)) kinds.push('TOKEN_TRANSFER')
+		else if (/^MintTo/.test(ix)) kinds.push('MINT')
+		else if (/^Burn/.test(ix)) kinds.push('BURN')
+		else if (ix === 'CloseAccount') kinds.push('ACCOUNT_CLOSE')
+		else if (/^(SetAuthority|Approve|Revoke)/.test(ix)) kinds.push('AUTHORITY_WRITE')
+	} else if (fam === 'system') {
+		if (/^Transfer/.test(ix)) kinds.push('LAMPORT_TRANSFER')
+		else if (/^CreateAccount/.test(ix)) kinds.push('ACCOUNT_CREATE')
+		else if (/^Assign/.test(ix)) kinds.push('OWNER_ASSIGN')
+		else if (/^Allocate/.test(ix)) kinds.push('ACCOUNT_REALLOC')
+	}
+	return kinds
+}
+
 /** Split a dotted path into the account it names and the field (see Ref); undefined when no account is involved. */
 export function refOf(path: string, types: Map<string, string>): Ref | undefined {
 	const seg = path.split('.')
@@ -117,7 +149,7 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
-	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map() }
+	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), ixHints: [] }
 	// declared types and single-definition aliases (x = path) of the function's names
 	const alias = new Map<string, string | null>()
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
@@ -189,6 +221,41 @@ export function functionFacts(inp: FnInput): FnFacts {
 	}
 	const exprCallees = (e: Expr): number[] => { const out: number[] = []; walkExpr(e, x => { if (x.k === 'call' && x.t.k === 'fn') out.push(x.t.pc) }); return out }
 
+	/**
+	 * A call to a library CPI helper (anchor_lang::system_program::transfer, anchor_spl::token::mint_to, ...): the
+	 * CPI it makes, by the helper's name (the site the call may be as a wrapper of invoke gets the instruction);
+	 * an instruction builder (system_instruction::transfer, spl_token::instruction::burn, ...) or a
+	 * TokenInstruction packed: a hint for the CPI that follows (see IxHint).
+	 */
+	const helperCall = (n: Node, callee: number, main: boolean, err: boolean) => {
+		const path = inp.calleePath?.(callee) ?? '', l = lineOf(n), t = lines[l]?.trim() ?? ''
+		const h = CPI_HELPER.exec(path)
+		if (h) {
+			const [program, family] = helperProgram(h[1]), ix = pascal(h[2])
+			const amount = /^(?:(?:const |let )?\w+ = )?\w+\(([^,]*), ([^,]*), (.*)\)$/.exec(t)?.[3]
+			const cpi = { program, known: program.includes('|') ? undefined : program, accounts: [], fields: amount ? [[/^system/.test(family) ? 'lamports' : 'amount', amount] as [string, string]] : [], family, ix }
+			const text = `CPI ${program}.${ix} [lib: ${path}]`
+			const prev = facts.ops.find(o => o.line === l + 1 && o.kinds.includes('CPI') && !o.cpi?.ix)
+			if (prev) { prev.cpi = { ...prev.cpi, ...cpi, accounts: prev.cpi?.accounts ?? [] }; prev.kinds = [...new Set([...cpiKinds(family, ix), ...prev.kinds])]; prev.text = text }
+			else facts.ops.push({ line: l + 1, pc: n.k === 'stmt' ? n.s.pc : undefined, kinds: cpiKinds(family, ix), text, main, errPath: err, cpi })
+			return
+		}
+		const b = BUILDER.exec(path)
+		if (b) { const [program, family] = helperProgram(b[1]); facts.ixHints.push({ line: l + 1, program, family, ix: pascal(b[3]), how: path }); return }
+		// (TokenInstruction::pack(out, &self): the enum's tag stored into self before)
+		if (/TokenInstruction::pack$/.test(path) || /^TokenInstruction_pack/.test(inp.calleeName(callee))) {
+			const self = /\(([^,]+), ([^,)]+)\)$/.exec(t)?.[2]?.trim()
+			if (!self) return
+			const esc = self.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+			for (let k = l - 1; k >= Math.max(0, l - 40); k--) {
+				const m = new RegExp(`^\\s*st(?:8|16|32)\\(${esc}, (0x[0-9a-f]+|\\d+)\\b`).exec(lines[k])
+				if (!m) continue
+				const ix = tokenIx(Number(m[1]))
+				if (ix) facts.ixHints.push({ line: l + 1, program: 'TOKEN_PROGRAM', family: 'token', ix, how: `TokenInstruction::pack (tag ${Number(m[1])})` })
+				break
+			}
+		}
+	}
 	const site = (n: Node, main: boolean, err: boolean) => {
 		const s = inp.sites.get(n)
 		if (!s) return
@@ -201,20 +268,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 			return
 		}
 		const d = s.desc
-		const kinds: OpKind[] = ['CPI']
-		const ix = d?.ix ?? '', fam = d?.family ?? '', known = d?.parts?.known ?? ''
-		if (fam === 'token' || fam === 'token2022') {
-			if (/^Transfer/.test(ix)) kinds.push('TOKEN_TRANSFER')
-			else if (/^MintTo/.test(ix)) kinds.push('MINT')
-			else if (/^Burn/.test(ix)) kinds.push('BURN')
-			else if (ix === 'CloseAccount') kinds.push('ACCOUNT_CLOSE')
-			else if (/^(SetAuthority|Approve|Revoke)/.test(ix)) kinds.push('AUTHORITY_WRITE')
-		} else if (fam === 'system') {
-			if (/^Transfer/.test(ix)) kinds.push('LAMPORT_TRANSFER')
-			else if (/^CreateAccount/.test(ix)) kinds.push('ACCOUNT_CREATE')
-			else if (/^Assign/.test(ix)) kinds.push('OWNER_ASSIGN')
-			else if (/^Allocate/.test(ix)) kinds.push('ACCOUNT_REALLOC')
-		}
+		const known = d?.parts?.known ?? ''
+		const kinds = cpiKinds(d?.family ?? '', d?.ix ?? '')
 		if (/UPGRADEABLE/.test(known)) kinds.push('PROGRAM_UPGRADE')
 		if (d ? d.parts?.seeds : /signer seeds (?!\[\])/.test(text) && !/no signer seeds/.test(text)) kinds.push('PDA_SIGNATURE')
 		facts.ops.push({ line: l + 1, pc, kinds, text: text || `CPI (instruction not decoded): ${lines[l]?.trim()}`, main, errPath: err, cpi: d?.parts ? { ...d.parts, family: d.family, ix: d.ix } : undefined, via: s.via })
@@ -331,6 +386,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 							const prog = /, (\w+)\)$/.exec(t)?.[1] ?? '?'
 							facts.ops.push({ line: lineOf(n) + 1, pc: n.s.pc, kinds: ['PDA_DERIVE'], text: t, main, errPath: err, pda: { fn: nm.replace(/_[0-9a-f]+$/, ''), seeds: seeds ?? '? (not in the frame)', program: prog } })
 						}
+						helperCall(n, c, main, err)
 						if (/realloc|resize/i.test(nm)) facts.ops.push({ line: lineOf(n) + 1, pc: n.s.pc, kinds: ['ACCOUNT_REALLOC'], text: lines[lineOf(n)]?.trim() ?? '', main, errPath: err })
 					}
 					if (cs.length) before = cs[cs.length - 1]

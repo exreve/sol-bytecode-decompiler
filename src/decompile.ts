@@ -1097,6 +1097,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
       irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }, callee).refs(e),
       irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
+      calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
