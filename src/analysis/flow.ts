@@ -307,7 +307,7 @@ export function addExitWrites(r: Result) {
 		const sites = [...stmtsOf(fo)].filter(s => { const c = callOf(s); return c?.t.k === 'fn' && exits.has(c.t.pc) })
 		if (!sites.length) { objsMemo.set(fo, []); if (fo.name.startsWith('ix_')) calleeWrites(r, fo, [], exits); continue }
 		const g = cfgOf(fo)
-		const defs = singleDefs(fo), D = defsOf(fo.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
+		const defs = singleDefs(fo), D = defsOf(fo.f, calleeOf(r))
 		const objs: FrameObj[] = []
 		for (const s0 of sites) for (const ex of exitObjs(exits.get((callOf(s0)!.t as { pc: number }).pc)!)) {
 			const c = callOf(s0)!
@@ -423,7 +423,7 @@ interface EvMemo<T> { p: number; x: T | undefined; more?: Map<number, T | undefi
 /** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
 const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
-	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo }
+	const cl = calleeOf(r)
 	const D = defsOf(H.f, cl)
 	const ti = tryInfo(r, H)
 	const layout = ti?.layout ?? []
@@ -599,7 +599,7 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 		const T = tpc !== undefined ? byPcOf(r).get(tpc) : undefined
 		const tf = tpc !== undefined ? r.facts.get(tpc) : undefined
 		if (T && tf) {
-			const D = defsOf(T.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
+			const D = defsOf(T.f, calleeOf(r))
 			const out = T.f.vars.find(v => v.param === 1)?.id
 			// (per block: the words stored into the out object that come from named calls; the block storing the most is the
 			// success path)
@@ -714,6 +714,100 @@ function visitPos(f: VarFunc): number[] {
 }
 
 /**
+ * The expressions of a function that may be derived from the seed variables (an over-approximation): a seed,
+ * through single / multiple definitions (not call results), `+ const`, casts and 8-byte loads, including
+ * loads of frame words that may hold such a value (stored there, copied, or written by a call getting a
+ * frame pointer and such a value). ptrDep: also a pointer into a frame holding one (a callee reads it at
+ * any offset). What the account evaluators (ctxOf, avEvaluator) compute from other expressions is nothing
+ * or a pointer into the function's own frame.
+ */
+function derivedFrom(f: VarFunc, D: Defs, seed: (v: number) => boolean): { dep: (e: Expr) => boolean; ptrDep: (e: Expr) => boolean } {
+	const depVar = new Set<number>()
+	// (frame byte ranges that may hold a value derived from the seeds)
+	const ranges: [number, number][] = []
+	const setDefs = new Map<number, Expr[]>()
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' && s.dst >= 0) { const l = setDefs.get(s.dst); if (l) l.push(s.e); else setDefs.set(s.dst, [s.e]) }
+	/** the offset in the frame an expression evaluates to as a pointer: 'no' (not one), 'any' (unknown) */
+	const fr = (e: Expr, d = 0): number | 'no' | 'any' => {
+		const o = D.fpOff(e)
+		if (o !== undefined) return o
+		if (d > 12) return 'any'
+		switch (e.k) {
+			case 'var': {
+				const x = D.defs.get(e.id)
+				if (x) return x.k === 'call' ? 'no' : fr(x, d + 1)
+				if (!D.multi.has(e.id)) return 'no'
+				let r: number | 'no' | 'any' | undefined
+				for (const y of setDefs.get(e.id) ?? []) { const q = y.k === 'call' ? 'no' : fr(y, d + 1); if (r === undefined) r = q; else if (r !== q) return 'any' }
+				return r ?? 'no'
+			}
+			case 'ext': return fr(e.a, d + 1)
+			case 'bin': { if (e.op !== 'add' || e.b.k !== 'const') return 'no'; const a = fr(e.a, d + 1); return typeof a === 'number' ? a + sNum(e.b.v) : a }
+			case 'load': return e.size === 8 ? 'any' : 'no'
+		}
+		return 'no'
+	}
+	const frameRead = (addr: Expr, n: number): boolean => {
+		if (!ranges.length) return false
+		const z = fr(addr)
+		return z === 'no' ? false : z === 'any' || ranges.some(([a, b]) => z < b && a < z + n)
+	}
+	const dep = (e: Expr): boolean => {
+		switch (e.k) {
+			case 'var': return depVar.has(e.id) || seed(e.id)
+			case 'ext': return dep(e.a)
+			case 'bin': return e.op === 'add' && e.b.k === 'const' && dep(e.a)
+			case 'load': return e.size === 8 && (dep(e.addr) || frameRead(e.addr, 8))
+		}
+		return false
+	}
+	// (a pointer a callee gets: derived from the seeds, or into a frame that may hold such a value (read at any offset))
+	const ptrDep = (e: Expr): boolean => dep(e) || (ranges.length > 0 && fr(e) !== 'no')
+	for (let changed = true; changed;) {
+		changed = false
+		const mark = (z: number, n: number) => { if (!ranges.some(([a, b]) => a <= z && z + n <= b)) { ranges.push([z, z + n]); changed = true } }
+		for (const b of f.blocks) for (const s of b.stmts) {
+			if (s.k === 'set' && s.dst >= 0 && !depVar.has(s.dst) && !seed(s.dst) && s.e.k !== 'call' && dep(s.e)) { depVar.add(s.dst); changed = true }
+			const z = s.k === 'store' || s.k === 'stores' ? D.fpOff(s.addr) : s.k === 'copy' ? D.fpOff(s.dst) : undefined
+			if (z !== undefined) {
+				if (s.k === 'store' && dep(s.v)) mark(z, s.size)
+				if (s.k === 'stores' && s.vals.some(dep)) mark(z, s.size * s.vals.length)
+				if (s.k === 'copy' && (dep(s.src) || frameRead(s.src, s.n))) mark(z, s.n)
+			}
+			// (a call writing a frame object it gets a pointer to: a copy (its size), or a callee's stores (0x80 bytes, see outOf))
+			const c = callOf(s)
+			if (c && c.args.some(a => D.fpOff(a) !== undefined) && c.args.some(ptrDep)) {
+				const n = c.args.length >= 3 && c.args[2].k === 'const' && c.args[2].v <= 0x2000n ? Math.max(0x80, Number(c.args[2].v)) : 0x80
+				for (const a of c.args) { const q = D.fpOff(a); if (q !== undefined) mark(q, n) }
+			}
+		}
+	}
+	return { dep, ptrDep }
+}
+
+const keepMemo = new WeakMap<VarFunc, Map<string, Set<number>>>()
+/**
+ * The statements (of visitPos) through which an AnchorEval context of a callee (ctxOf) may reach something
+ * derived from its roots (derivedFrom; by the root variables). The others write no account and give the
+ * callee's callees nothing derived from the roots: calleeWrites skips them.
+ */
+function rootKeep(f: VarFunc, D: Defs, roots: Map<number, unknown>): Set<number> {
+	let m = keepMemo.get(f)
+	if (!m) keepMemo.set(f, (m = new Map()))
+	const k = [...roots.keys()].sort((a, b) => a - b).join(',')
+	let keep = m.get(k)
+	if (keep) return keep
+	const { dep, ptrDep } = derivedFrom(f, D, v => roots.has(v) && v !== D.fp)
+	keep = new Set()
+	for (const q of visitPos(f)) {
+		const s = f.blocks[q >> 16].stmts[q & 0xffff], c = callOf(s)
+		if (c ? c.args.some(ptrDep) : dep(s.k === 'copy' ? s.dst : (s as Extract<Stmt, { k: 'store' | 'stores' }>).addr)) keep.add(q)
+	}
+	m.set(k, keep)
+	return keep
+}
+
+/**
  * Writes the handler's logic makes in the functions it calls with pointers into its frame (the Context
  * holding &Accounts, the Accounts struct, AccountInfo copies; 3 levels of calls): a store to a field of an
  * object the handler serializes back on exit (ACCOUNT_DATA_WRITE), to an account's lamports through the
@@ -741,6 +835,9 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		seen.set(vk, depth)
 		const X = ctxOf(C, roots, 2)
 		ctxKey.set(X, vk)
+		// (a callee: statements without an expression derived from its roots are skipped, see rootKeep)
+		const keep = C === H ? undefined : rootKeep(C.f, X.D, roots)
+		if (keep && !keep.size) return
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
@@ -782,7 +879,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				push(o.acct, x.name, ['ACCOUNT_DATA_WRITE'], `an object of the handler ${H.name}'s frame, serialized back by ${o.exit}`)
 		}
 		const bs = C.f.blocks
-		for (const q of visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
+		for (const q of keep ?? visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
 	}
 	visit(H, new Map(), 3)
 }
@@ -792,6 +889,9 @@ const dataReadsMemo = new WeakMap<Result, Map<number, Set<string>>>()
 export const dataReads = (r: Result, handler: number): Set<string> | undefined => dataReadsMemo.get(r)?.get(handler)
 
 const byPcMemo = new WeakMap<Result, Map<number, FuncOut>>()
+const calleeMemo = new WeakMap<Result, Callee>()
+/** the functions of a result as a Callee (one object per result: its memo of callWrites is shared) */
+export const calleeOf = (r: Result): Callee => { let c = calleeMemo.get(r); if (!c) calleeMemo.set(r, (c = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo })); return c }
 const byPcOf = (r: Result) => { let m = byPcMemo.get(r); if (!m) byPcMemo.set(r, (m = new Map(r.funcs.map(x => [x.pc, x])))); return m }
 
 // ---- indirect calls: constant function pointers, tables, vtables ----
@@ -1193,31 +1293,60 @@ const resMemo = new WeakMap<object, AcctResolver>(), seedMemo = new WeakMap<obje
 export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number>; legacy?: boolean } // legacy: the pre-repr(C) AccountInfo
 /** writes through a pointer argument, by the callee's name (library code not decompiled) */
 const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_program_address/, 33], [/^(sol_)?(memcpy|memmove|memset)/, -1]]
+const libWrites = new Map<string, number>() // name (a syscall: "\0" + name) -> its LIB_WRITES entry's size (0: none; a syscall: its size + 0x100)
 /**
  * How many bytes a call may write through its argument j (a pointer to the caller's frame): the stores the
  * callee makes through that parameter (and through the calls it passes it to, 3 levels); 0x80 when unknown
  * (the pointer escapes, or library code not known).
  */
+const writesMemo = new WeakMap<VarFunc, { defs: Map<number, Expr[] | null>; fpv: number; fst: [number, Expr][]; narrow: number[] }>()
+/** (callWrites) a function's variables' definitions (null: a call result), its 8-byte frame stores, and their offsets
+ * overlapped by other frame writes */
+function writesInfo(f: VarFunc) {
+	let w = writesMemo.get(f)
+	if (w) return w
+	const defs = new Map<number, Expr[] | null>()
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { const l = defs.get(s.dst); if (s.k === 'call' || l === null) defs.set(s.dst, null); else if (l) l.push(s.e); else defs.set(s.dst, [s.e]) }
+	const fpv = f.vars.find(v => v.param === 10)?.id ?? -1
+	const fst: [number, Expr][] = []
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined) fst.push([z, s.v]) }
+	const ys = [...new Set(fst.map(x => x[0]))].sort((a, b) => a - b), hit = new Set<number>()
+	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' && s.size !== 8) || s.k === 'stores' || s.k === 'copy') {
+		const z = offOf(s.k === 'copy' ? s.dst : s.addr, fpv)
+		if (z === undefined) continue
+		const hi = z + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n)
+		let lo = 0, up = ys.length
+		while (lo < up) { const m = (lo + up) >> 1; if (ys[m] < z - 7) lo = m + 1; else up = m }
+		for (let i = lo; i < ys.length && ys[i] < hi; i++) hit.add(ys[i])
+	}
+	w = { defs, fpv, fst, narrow: [...hit] }
+	writesMemo.set(f, w)
+	return w
+}
 function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee, depth = 3): number {
-	const nm = t.k === 'sys' ? t.name : t.k === 'fn' ? cl.name(t.pc) : ''
-	for (const [re, n] of LIB_WRITES) if (re.test(nm)) return n < 0 ? (j === 0 ? 0x80 : 0) : n
-	if (t.k === 'sys') return /log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80
-	if (t.k !== 'fn' || depth <= 0) return 0x80
-	// (by depth too: a result cut off deeper is not the one asked higher up)
-	const key = (t.pc * 0x10000 + j) * 4 + depth
+	// (by depth too: a result cut off deeper is not the one asked higher up; library functions are not memoized here)
+	const key = t.k === 'fn' ? (t.pc * 0x10000 + j) * 4 + depth : -1
 	const memo = cl.memo ??= new Map()
-	const m = memo.get(key)
-	if (m !== undefined) return m
+	if (key >= 0 && depth > 0) { const m = memo.get(key); if (m !== undefined) return m }
+	const nm = t.k === 'sys' ? t.name : t.k === 'fn' ? cl.name(t.pc) : ''
+	const nk = t.k === 'sys' ? '\0' + nm : nm
+	let lw = libWrites.get(nk)
+	if (lw === undefined) {
+		lw = 0
+		for (const [re, n] of LIB_WRITES) if (re.test(nm)) { lw = n; break }
+		// (a syscall: its size + 0x100)
+		if (!lw && t.k === 'sys') lw = 0x100 + (/log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80)
+		libWrites.set(nk, lw)
+	}
+	if (lw) return lw < 0 ? (j === 0 ? 0x80 : 0) : lw >= 0x100 ? lw - 0x100 : lw
+	if (t.k !== 'fn' || depth <= 0) return 0x80
 	const f = cl.f(t.pc)
 	const pv = f?.vars.find(v => v.param === j + 1)?.id
 	let n = 0
 	if (f && pv !== undefined) {
-		// (a variable's definitions (null: a call result))
-		const defs = new Map<number, Expr[] | null>()
-		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { const l = defs.get(s.dst); if (s.k === 'call' || l === null) defs.set(s.dst, null); else if (l) l.push(s.e); else defs.set(s.dst, [s.e]) }
+		const { defs, fpv, fst, narrow } = writesInfo(f)
 		// (param + c through variables all of whose definitions agree (e.g. reloaded from a spill), and frame words
 		// holding only the parameter (spilled and reloaded))
-		const fpv = f.vars.find(v => v.param === 10)?.id ?? -1
 		const spill = new Map<number, boolean>()
 		const off = (e: Expr, d = 0): number | undefined => {
 			if (d > 8) return undefined
@@ -1233,10 +1362,9 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 			return undefined
 		}
 		// (optimistic: every frame word stored to is a spill until a store of something else is found there)
-		const fst: [number, Expr][] = []
-		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined) { fst.push([z, s.v]); spill.set(z, true) } }
+		for (const [z] of fst) spill.set(z, true)
 		for (let ch = true, k = 0; ch && k < 4; k++) { ch = false; for (const [z, v] of fst) if (spill.get(z) && off(v) !== 0) { spill.set(z, false); ch = true } }
-		for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' && s.size !== 8) || s.k === 'stores' || s.k === 'copy') { const z = offOf(s.k === 'copy' ? s.dst : s.addr, fpv); if (z !== undefined) for (const [y] of fst) if (y >= z - 7 && y < z + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n)) spill.set(y, false) }
+		for (const y of narrow) spill.set(y, false)
 		outer: for (const b of f.blocks) for (const s of b.stmts) {
 			// (the parameter spilled to the frame: not an escape)
 			if (s.k === 'store' && s.size === 8 && spill.get(offOf(s.addr, fpv) ?? NaN)) continue
@@ -1736,7 +1864,9 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return undefined
 	}
 	const byName = new Map<string, AcctRef>()
-	for (const [v, e] of defs) {
+	// (without roots nor an entrypoint's arrays, every value is a frame address or nothing: no account, and nothing
+	// the queries below could find in the evaluator's memo but frame addresses)
+	if (roots.size || arr !== undefined || infos !== undefined) for (const [v, e] of defs) {
 		const nm = fo.names[v]
 		const a = nm ? ev(e, defPos.get(v)!) : undefined
 		if (!a) continue

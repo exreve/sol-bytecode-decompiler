@@ -64,7 +64,7 @@ import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
@@ -282,7 +282,7 @@ function analyze0(r: Result): Analysis {
 		const anchorCompares = (ff: FnFacts): ((c: FnFacts['checks'][number]) => { acct: string; direct: boolean }[] | undefined) | undefined => {
 			const fo = byPc.get(ff.pc)
 			if (!fo || !ff.checks.some(c => c.named && c.before !== undefined)) return undefined
-			const D = defsOf(fo.f, { f: pc => byPc.get(pc)?.f, name: pc => p.funcs.get(pc)?.name ?? '' })
+			const D = defsOf(fo.f, calleeOf(r))
 			const g = cfgOf(fo), blocks = fo.f.blocks
 			// (each account's call: the last call of the checked callee before the check naming the account)
 			const calls = new Map<number, string>()
@@ -307,7 +307,7 @@ function analyze0(r: Result): Analysis {
 			const fo = byPc.get(fn)
 			const s = fo?.f.blocks.flatMap(b => b.stmts).find(x => x.pc === pc && callOf(x))
 			if (!fo || !s) return undefined
-			const R = accountResolver(fo, { f: x => byPc.get(x)?.f, name: x => p.funcs.get(x)?.name ?? '', legacy: r.legacyInfo })
+			const R = accountResolver(fo, calleeOf(r))
 			return callOf(s)!.args.slice(1, 8).map(a => { const x = R.valueRef(a, s); return x?.field === 'key' ? idxName(x.index) : undefined })
 		}
 		const hintBefore = (ff: FnFacts, line: number, depth = 2): IxHint | undefined => {
@@ -325,7 +325,7 @@ function analyze0(r: Result): Analysis {
 		}
 		// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice; in a function the
 		// instruction calls, its pointer parameters bound to the values at the call site of this instruction's call path)
-		const clr = { f: (pc: number) => byPc.get(pc)?.f, name: (pc: number) => p.funcs.get(pc)?.name ?? '', legacy: r.legacyInfo }
+		const clr = calleeOf(r)
 		const resMemo = new Map<number, AcctResolver | undefined>()
 		const resolverFor = (fn: number, d = 0): AcctResolver | undefined => {
 			if (resMemo.has(fn)) return resMemo.get(fn)

@@ -22,7 +22,7 @@ import type { Analysis, IxOut, OpOut, Loc, Status, IxCtx } from './report.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
-import { cfgOf, blockPc, condKey, callOf, accountResolver, type Cfg } from './flow.ts'
+import { cfgOf, blockPc, condKey, callOf, accountResolver, calleeOf, type Cfg } from './flow.ts'
 import { sourceCtx } from './sources.ts'
 import { irOf, pathTo, blockAt, checkAt, valueKey, cmpsOf, keyIn, follow, stmtAt, storedAt, defsIn, type IrCond } from './paths.ts'
 
@@ -210,7 +210,7 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		const ff = byName.get(fname), fo = ff && I.byPc.get(ff.pc)
 		if (!ff || !fo || divs.length >= 20) continue
 		const g = cfgOf(fo)
-		const R = !r.anchor ? accountResolver(fo, { f: x => I.byPc.get(x)?.f, name: x => r.program.funcs.get(x)?.name ?? '', legacy: r.legacyInfo }) : undefined
+		const R = !r.anchor ? accountResolver(fo, calleeOf(r)) : undefined
 		for (const { bi, si, s, cands } of divCands(r, fo.f)) {
 			if (g.rpo[bi] < 0 || divs.length >= 20 || (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi))) continue
 			{

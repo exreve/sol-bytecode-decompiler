@@ -102,7 +102,11 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 		const b = blockOf(o.fnPc, o.at.pc, o.ret)
 		return chainUp(o.fnPc, b === undefined ? undefined : { fn: o.fnPc, b, pc: o.at.pc ?? Infinity })
 	})
-	const doms = (ci: number, oi: number) => siteOf[ci].some(s => pointsOf[oi].some(p => p.fn === s.fn && dom(s.fn, s, p)))
+	const doms = (ci: number, oi: number) => {
+		const ss = siteOf[ci], ps = pointsOf[oi]
+		for (let i = 0; i < ss.length; i++) for (let j = 0; j < ps.length; j++) if (ps[j].fn === ss[i].fn && dom(ss[i].fn, ss[i], ps[j])) return true
+		return false
+	}
 	const sens = ops.map((o, i) => i).filter(i => isSensitive(ops[i]) && pointsOf[i].length)
 	for (const oi of sens) ops[oi].guards = []
 	checks.forEach((c, ci) => {
