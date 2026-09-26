@@ -55,7 +55,17 @@ no such signal is left at the target in @fixed. `--verbose` lists the signals.
 To add a program: a crate under `programs/` (add it to the workspace), `v_*` features, `bench/build.sh <crate>`,
 an IDL for Anchor, and `expected/<crate>.json`.
 
-## Corpus noise of the audit rules
+## Corpus noise baseline
+
+    node bench/corpus.ts [corpusDir=corpus] [--budget s=1800] [--timeout s=240] [--jobs n] [--save]
+
+Decompiles every `corpus/*.so` (with `corpus/idl/<id>.json` when present; ~7 min on 6 workers) and prints per rule the
+programs hit, the findings and the findings per 100 programs; informational findings and the validation_consistency /
+stored-key gap signals get their own rows. The corpus programs are presumed clean, so this is the noise floor. The
+table is compared with `bench/corpus-baseline.json` (same programs only; a changed row shows the baseline programs /
+findings); `--save` rewrites the baseline (per rule totals and per-program counts, for diffs).
+
+## Corpus noise of the audit rules (history)
 
 Programs of the 400-program corpus with >= 1 finding (decompile project mode): `sysvar-account-unchecked` 0,
 `pda-bump-from-ix` 5 (7 findings), `duplicate-mutable-accounts` 0, `account-type-unchecked` 3, `cpi-result-ignored` 1,
