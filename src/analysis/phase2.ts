@@ -541,12 +541,16 @@ const W: Partial<Record<OpKind, number>> = { TOKEN_TRANSFER: 5, LAMPORT_TRANSFER
 const wOf = (o: OpOut) => Math.max(0, ...o.kinds.map(k => W[k] ?? 0))
 const L = (at: Loc) => `${at.fn}:${at.line}`
 
-/** value movements / authority changes a signer enables with no stored authority related to it (and no PDA signature) */
-const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => (ix.authority ?? []).flatMap(row => {
+/** value movements / authority changes a signer enables with no stored authority related to it (and no PDA signature);
+ * none when a has_one check is not attributed to an account (it may bind the signer) */
+const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides && c.status !== 'not_found') ? [] : (ix.authority ?? []).flatMap(row => {
 	const o = ix.ops[row.op]
 	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 	// (a signer checked against a constant address: a known admin, related to no stored field by design)
 	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o) || row.enabledBy.some(e => e.kind === 'signer' && addressChecked(ix, e.what))) return []
+	// (a signer whose key a check compares on every path (e.g. with a stored creator copied out of the account's data, the
+	// relation's other side not resolved): bound to something)
+	if (row.enabledBy.some(e => e.kind === 'signer' && ix.accounts.find(x => x.name === e.what)?.constraints.key?.status === 'found')) return []
 	// (Anchor's close constraint on an account bound by has_one: the rent goes to the target its stored data names, e.g. a
 	// permissionless trade closing the maker's escrow to the maker)
 	const closed = o.anchorClose && o.target ? o.target.split('.')[0] + '.' : undefined
@@ -643,10 +647,13 @@ const RULES: Rule[] = [
 			const row = (ix.authority ?? []).find(x => !initMechanics(ix, ix.ops[x.op]) && !initWrite(ix, ix.ops[x.op]) && !own(ix.ops[x.op]))
 			// (a has_one check the analysis did not attribute to an account: it may be this one)
 			if (!a.program.anchor || !row || ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides)) return []
+			const signerKeyOf = (acct: string) => ix.checks.some(c => c.account === acct && c.kinds.some(k => k === 'has_one' || k === 'key') && !c.kinds.includes('pda') && !c.sides)
 			return (a.authorityFields ?? []).flatMap(({ field, writtenBy }) => {
 				const [acct, f] = [field.slice(0, field.indexOf('.')), field.slice(field.indexOf('.') + 1)]
 				if (!signers.has(f) || writtenBy.includes(ix.name) || !ix.accounts.some(x => x.name === acct)) return []
 				if ((ix.relations ?? []).some(x => x.a === field || x.b === field || ((x.a === `${f}.key` || x.b === `${f}.key`) && (x.a.startsWith(`${acct}.`) || x.b.startsWith(`${acct}.`))))) return []
+				// (a key comparison on the account whose sides the analysis did not resolve (a has_one compared through copies))
+				if (signerKeyOf(acct)) return []
 				const o = ix.ops[row.op]
 				return [{ accounts: [f, acct], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${field} (the stored authority ${writtenBy.join(', ')} writes) is not compared with the signer ${f}`], confidence: 'low' as const, weight: wOf(o) }]
 			}).slice(0, 1)
@@ -693,7 +700,8 @@ const RULES: Rule[] = [
 			if (out.length) return out
 			// (a check deciding a value move compares the data of an account whose owner the program does not check:
 			// an account of another owner with chosen data passes it)
-			const checked = (a: string) => { const c = ix.accounts.find(x => x.name === a)?.constraints.owner; return !!c && (c.status === 'found' || c.status === 'partial') }
+			// (the instruction debits the account's lamports (e.g. closes it), which only its owner may: the runtime checks it)
+			const checked = (a: string) => { const c = ix.accounts.find(x => x.name === a)?.constraints.owner; return !!c && (c.status === 'found' || c.status === 'partial') || ix.ops.some(o => o.target === `${a}.lamports` && (o.kinds.includes('ACCOUNT_CLOSE') || o.how === '-=')) }
 			for (const o of ix.ops) {
 				if (!isValueOrAuth(o) || runtimeAuthorized(o)) continue
 				for (const ci of o.guards ?? []) {
@@ -886,14 +894,6 @@ const RULES: Rule[] = [
 			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
 			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
-			// (a token account bound by its mint only, on an outflow the program signs: whoever holds it receives; informational
-			// (the signer usually picks its own account))
-			const drel = (ix.relations ?? []).filter(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
-			const mintOnly = (bind.length ? bind.every(b => b === 'token_mint') : drel.length > 0) && drel.every(x => /\.mint\b/.test(x.a + ' ' + x.b) && !/owner|authority/.test(x.a + x.b))
-			// (a token owner check the analysis names after a local copy of the account (dest_acc for dest): its owner bound)
-			const aliasOwner = ix.checks.some(c => c.kinds.includes('token_owner') && !!c.account && c.account.startsWith(`${d}_`))
-			if (mintOnly && !aliasOwner && o.cpi?.seeds && k.includes('TOKEN_TRANSFER'))
-				return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: its mint is checked, its owner (token::authority) is not; the program signs this outflow (PDA)`], confidence: 'info' as const, weight: wOf(o) }]
 			if (bind.length || rel) return []
 			// (a finding when anyone may call it (no signer check) or the destination is named after another party of the
 			// instruction that does not sign it (maker_ata_b while the taker signs); a destination the signer picks for

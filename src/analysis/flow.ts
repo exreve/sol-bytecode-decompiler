@@ -2328,12 +2328,13 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		let st = false
 		walkExpr(e, x => { if (fpOff(x) !== undefined) st = true })
 		if (st) {
-			const c = origin(e, p)
-			if (c && pdaCall(c.t)) return 'pda'
-			// (a frame copy of an account's key / data, e.g. a struct a helper read from the account: by its first word)
+			// (a frame copy of an account's key / data, e.g. a struct a helper read from the account: by its first word; before
+			// a PDA: the helper filling the struct may derive one too, e.g. to check the account's address)
 			const w = ev({ k: 'load', size: 8, addr: e }, p)
 			const m = w?.k === 'val' ? /^data\[(\d+)\.\.\d+\]$/.exec(w.f) : undefined
 			if (w?.k === 'val' && (m || w.f === 'key' || w.f === 'owner')) return { index: w.i, field: m ? `data[${m[1]}..${Number(m[1]) + 32}]` : w.f }
+			const c = origin(e, p)
+			if (c && pdaCall(c.t)) return 'pda'
 			return 'stack'
 		}
 		return e.k === 'const' || (e.k === 'var' && defs.get(e.id)?.k === 'const') ? 'const' : undefined
