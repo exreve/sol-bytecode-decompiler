@@ -306,7 +306,7 @@ function printSets(verbose: boolean) {
 			for (const f of t.info) console.log(`  info on a clean base: ${f}`)
 			for (const f of t.extra) console.log(`  extra ${f}`)
 		}
-		const label = name === 'realistic' ? 'realistic clean (bench/real r_*)' : 'open-source programs (bench/real o_*)'
+		const label = name === 'realistic' ? 'realistic clean programs (bench/real*, r_*)' : 'open-source programs (bench/real o_*)'
 		console.log(`${label}: ${t.progs} clean programs, ${t.falses.length} false findings (+${t.info.length} inconsistencies)${t.n ? `; ${t.caught}/${t.n} variants caught (recall ${(100 * t.caught / t.n).toFixed(1)}%), ${t.extra.length} unexpected findings in variants` : ''}`)
 	}
 	console.log()

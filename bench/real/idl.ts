@@ -1,4 +1,4 @@
-// Writes bench/idl/<prog>.json (Anchor 0.30+ spec) for the Anchor programs of bench/real from the compact specs below,
+// Writes bench/idl/<prog>.json (Anchor 0.30+ spec) for the Anchor programs of bench/real and bench/real29 from the compact specs below,
 // written from the sources (accounts: `name[:w][s]` in Accounts struct order; args and fields as IDL types).
 // usage: node bench/real/idl.ts
 import { writeFileSync } from 'node:fs'
@@ -87,6 +87,31 @@ const SPECS: Record<string, Spec> = {
 		},
 		events: ['ConfigUpdated', 'Staked', 'Unstaked', 'Claimed', 'RewardsFunded'],
 		errors: ['FeeTooHigh', 'RateTooHigh', 'Unauthorized', 'NotPendingAdmin', 'InvalidProgramData', 'SameMint', 'InvalidVault', 'InvalidMint', 'InvalidPosition', 'ZeroAmount', 'Paused', 'InsufficientStake', 'PositionNotEmpty', 'MathOverflow'],
+	},
+	r_a29_market: {
+		address: 'E8kSAFnyqQdXis8mCgX3pAXyG3ZLasYJX9AYEAVyRhZh',
+		ixs: [
+			['init_market', 'admin:ws market:w fee_vault:w system_program', [['fee_bps', 'u16']]],
+			['set_fee', 'market:w admin:s', [['fee_bps', 'u16']]],
+			['set_paused', 'market:w admin:s', [['paused', 'bool']]],
+			['transfer_admin', 'market:w admin:s new_admin:s'],
+			['withdraw_fees', 'market admin:s fee_vault:w destination:w system_program', [['amount', 'u64']]],
+			['list', 'seller:ws market mint seller_token:w listing:w escrow:w token_program system_program', [['price', 'u64'], ['amount', 'u64']]],
+			['update_price', 'listing:w seller:s', [['price', 'u64']]],
+			['cancel_listing', 'seller:ws listing:w escrow:w seller_token:w token_program'],
+			['buy', 'buyer:ws market listing:w escrow:w seller:w fee_vault:w buyer_token:w token_program system_program', [['amount', 'u64'], ['max_price', 'u64']]],
+			['sweep_listing', 'listing:w escrow:w seller:w token_program'],
+		],
+		accounts: ['Market', 'Listing'],
+		types: {
+			Market: [['admin', 'pubkey'], ['fee_bps', 'u16'], ['paused', 'bool'], ['bump', 'u8'], ['fee_vault_bump', 'u8']],
+			Listing: [['seller', 'pubkey'], ['mint', 'pubkey'], ['escrow', 'pubkey'], ['price', 'u64'], ['remaining', 'u64'], ['bump', 'u8'], ['escrow_bump', 'u8']],
+			Listed: [['listing', 'pubkey'], ['seller', 'pubkey'], ['mint', 'pubkey'], ['price', 'u64'], ['amount', 'u64']],
+			Sold: [['listing', 'pubkey'], ['buyer', 'pubkey'], ['amount', 'u64'], ['cost', 'u64'], ['fee', 'u64']],
+			FeesWithdrawn: [['amount', 'u64'], ['destination', 'pubkey']],
+		},
+		events: ['Listed', 'Sold', 'FeesWithdrawn'],
+		errors: ['Unauthorized', 'FeeTooHigh', 'Paused', 'InvalidAmount', 'PriceChanged', 'InvalidEscrow', 'NotSoldOut', 'InsufficientFees', 'MathOverflow'],
 	},
 }
 
