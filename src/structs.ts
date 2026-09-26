@@ -22,6 +22,7 @@ export interface StructCfg {
 	fnName(pc: number): string
 	outParam(pc: number): boolean                 // its first parameter is an out pointer (named `ret`)
 	paramReg(callee: number, i: number): number   // the parameter register of a call's i-th argument
+	fieldHints?(pc: number, reg: number): { fields: Map<number, Field>; why: string } | undefined // known fields of a parameter's object (by offset), and where from
 }
 
 interface Acc { off: number; size: number; n: number }
@@ -115,7 +116,16 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				case 'fn': e.args.forEach(visit); break
 			}
 		}
-		const call = (t: Stmt & { k: 'call' } | Expr & { k: 'call' }) => {
+		// frame addresses passed to calls (object starts)
+		const fpv = f.vars.find(v => v.param === 10)?.id
+		const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fpv && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined)
+		const starts: number[] = []
+		for (const b of f.blocks) for (const s of b.stmts) {
+			const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
+			for (const a of c?.args ?? []) { const o = fo(a); if (o !== undefined) starts.push(o) }
+		}
+		starts.sort((x, y) => x - y)
+		const call = (t: Stmt & { k: 'call' } | Expr & { k: 'call' }, stmts: Stmt[], at: number) => {
 			if (t.t.k === 'ind') visit(t.t.e)
 			t.args.forEach((a, i) => {
 				visit(a)
@@ -128,14 +138,41 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				let an: number | undefined
 				if (a.k === 'var') an = node(a.id)
 				else if (a.k === 'load' && a.size === 8) { const b = base(a.addr); const bn = b && node(b.v); if (bn !== undefined) an = pointee(bn, b!.off) }
+				else if (fo(a) !== undefined) an = frameArg(fo(a)!, stmts, at)
 				if (an !== undefined) edges.push([an, -1 - cpc * 256 - reg]) // (resolved after phase 1: the callee's node)
 			})
 		}
+		// a frame object passed to a call: the stores building it right before (same block, back to another call),
+		// up to the next object start
+		const frameArg = (O: number, stmts: Stmt[], at: number): number | undefined => {
+			let hi = O + 0x100
+			for (const x of starts) if (x > O) { hi = Math.min(hi, x); break }
+			let n: number | undefined
+			for (let k = at - 1; k >= 0; k--) {
+				const s = stmts[k]
+				if (s.k === 'call' || (s.k === 'set' && s.e.k === 'call') || s.k === 'copy') break
+				if (s.k !== 'store' && s.k !== 'stores') continue
+				const D = fo(s.addr)
+				if (D === undefined || D < O || D >= hi) continue
+				n ??= fresh()
+				const vals = s.k === 'store' ? [s.v] : s.vals
+				vals.forEach((x, j) => {
+					const off = D - O + j * s.size
+					if (D + j * s.size + s.size > hi) return
+					const c = cls[find(n!)], key = `${off}:${s.size}`
+					const acc = c.acc.get(key)
+					if (acc) acc.n++; else c.acc.set(key, { off, size: s.size, n: 1 })
+					if (s.size === 8 && x.k === 'var') { const xn = node(x.id); if (xn !== undefined) edges.push([pointee(n!, off), xn]) }
+				})
+			}
+			return n
+		}
 		for (const b of f.blocks) {
-			for (const s of b.stmts) {
+			for (let si = 0; si < b.stmts.length; si++) {
+				const s = b.stmts[si]
 				switch (s.k) {
-					case 'set': if (s.e.k === 'call') call(s.e); else visit(s.e); break
-					case 'call': call(s); s.extra?.forEach(visit); break
+					case 'set': if (s.e.k === 'call') call(s.e, b.stmts, si); else visit(s.e); break
+					case 'call': call(s, b.stmts, si); s.extra?.forEach(visit); break
 					case 'eval': visit(s.e); break
 					case 'store': case 'stores': {
 						const vals = s.k === 'store' ? [s.v] : s.vals
@@ -284,14 +321,22 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		const view = { name, doc: '', fields }
 		views.add(view) // (reserved: pointer fields may refer back to it)
 		synth.add(name)
+		// (names known for a member's fields, e.g. the Accounts struct try_accounts returns through its out parameter)
+		const hints = new Map<number, Field>()
+		let hintWhy: string | undefined
+		for (const x of c.members) { const h = cfg.fieldHints?.(x.pc, cfg.built.get(x.pc)!.f.vars[x.v].param); if (h) { hintWhy ??= h.why; for (const [o, f] of h.fields) if (!hints.has(o)) hints.set(o, f) } }
+		const names = new Set<string>()
+		let hinted = 0
 		for (const a of chosen) {
 			const hex = `0x${a.off.toString(16)}`
+			const h = hints.get(a.off)
+			if (h && !names.has(h.name) && ((h.t.k === 'ref' && a.size === 8) || (h.t.k === 'scalar' && h.t.size === a.size))) { fields.push({ ...h, off: a.off }); names.add(h.name); hinted++; continue }
 			const t = a.size === 8 && c.ptr.has(a.off) && !empty(c.ptr.get(a.off)!) ? build(c.ptr.get(a.off)!, `${name}_${hex}`) : undefined
 			fields.push(t ? { name: `f${hex}_ref`, off: a.off, t: { k: 'ref', to: t } } : { name: `f${hex}_u${a.size * 8}`, off: a.off, t: { k: 'scalar', size: a.size as 1 | 2 | 4 | 8 } })
 		}
 		const fns = new Set(c.members.map(x => x.pc))
 		const where = m ? `parameter ${PARAM_NAMES[cfg.built.get(m.pc)!.f.vars[m.v].param] ?? 'p'} of ${cfg.fnName(m.pc)}${fns.size > 1 ? ` and ${fns.size - 1} more function${fns.size > 2 ? 's' : ''}` : ''}` : `the objects the field ${hint.replace(/_0x/, '.0x')} points to`
-		view.doc = (`[heur] layout from the fixed-offset accesses through ${where} (fields: offset and size; other bytes not described)`)
+		view.doc = (`[heur] layout from the fixed-offset accesses through ${where} (fields: offset and size${hinted ? `; ${hinted} named after ${hintWhy}` : ''}; other bytes not described)`)
 		return name
 	}
 	const out = new Map<number, Map<number, string>>()

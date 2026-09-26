@@ -343,6 +343,19 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
       }
       case 'eval': out.push(`${I(d)}${s.e.k === 'fn' && (s.e.name === 'rc_inc' || s.e.name === 'rc_dec') ? '' : 'void '}${pr.u(s.e, P.unary)}`); break;
       case 'stores': {
+        // stores into fields of a typed object, one per line (the same stores in the same order; only when no value
+        // reads memory or calls, which could see an earlier store of the run)
+        if (pr.ctx.views && !s.vals.some(v => hasLoadOrCall(v))) {
+          const at = (i: number): Expr => (i === 0 ? s.addr : s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.b.k === 'const'
+            ? { ...s.addr, b: { k: 'const', v: BigInt.asUintN(64, s.addr.b.v + BigInt(i * s.size)) } }
+            : { k: 'bin', op: 'add', a: s.addr, b: { k: 'const', v: BigInt(i * s.size) } });
+          const lvs = s.vals.map((_, i) => pr.viewLvalue(s.size, at(i)));
+          if (lvs.every(Boolean) && !(pr.ctx.keyAt && s.size === 8 && s.vals.length === 4 && s.vals.every(v => v.k === 'const' && v.v > 1n << 48n))) {
+            const tail = pr.ctx.stmtTail?.(s, prevStmt);
+            s.vals.forEach((v, i) => out.push(`${I(d)}${lvs[i]} = ${pr.u(v, P.assign)}${i === 0 && tail ? ` // ${tail}` : ''}`));
+            break;
+          }
+        }
         pr.addrDepth++; const a = pr.u(s.addr, P.assign); pr.addrDepth--;
         // four large constant words: a public key written in place
         const key = pr.ctx.keyAt && s.size === 8 && s.vals.length === 4 && s.vals.every(v => v.k === 'const' && v.v > 1n << 48n) ? ` // key ${keyB58(s.vals)}`
@@ -454,4 +467,11 @@ function wrapped(t: string): boolean {
     else if (ch === ')' && --d === 0) return i === t.length - 1;
   }
   return false;
+}
+
+/** Does evaluating e read memory or call (a load, a call, an intrinsic)? */
+function hasLoadOrCall(e: Expr): boolean {
+  let r = false;
+  walkExpr(e, x => { if (x.k === 'load' || x.k === 'call' || x.k === 'fn') r = true; });
+  return r;
 }

@@ -925,6 +925,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const st = inferStructs({
       built, skip: pc => isLib(pc), typed: (pc, v) => baseTypes.get(pc)!.has(v), fnName: pc => p.funcs.get(pc)!.name, outParam: pc => outParams.has(pc),
       paramReg: (cpc, i) => (built.get(cpc)!.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1),
+      fieldHints: (pc, reg) => {
+        // (try_accounts' out object: the Accounts struct's account fields)
+        const hpc = reg === 1 ? [...tryOf].find(([, t]) => t === pc)?.[0] : undefined;
+        const fs = hpc === undefined ? undefined : acctLayouts.get(hpc);
+        return fs && { fields: new Map(fs.map(x => [x.off, x])), why: 'the account fields of the Accounts struct it returns' };
+      },
     }, views);
     for (const [pc, m] of st.types) {
       structTypes.set(pc, new Map([...m].filter(([, t]) => st.synth.has(t))));
@@ -1224,6 +1230,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         typedSrc: e => { if (e.k !== 'var' || !names[e.id]) return undefined; const t = varTypes.get(e.id); return t && !BUILTIN_VIEW[t] ? { type: t, name: names[e.id] } : undefined; },
         fits: (t, d, n) => fitsLoose(views, t, d, n),
         embedded: (t, off) => { const r = views.resolve(t, off); return r && !r.rest && r.last.k === 'embed' && views.map.has(r.last.type) ? { type: r.last.type, name: r.path[r.path.length - 1].replace(/\[(\d+)\]$/, '_$1') } : undefined; },
+        argRoot: (t, _args, _at, i) => {
+          if (t.k !== 'fn') return undefined;
+          const reg = built.get(t.pc)?.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
+          const type = paramView(t.pc, reg);
+          return type ? { name: 'arg', copyName: 'arg_copy', type, why: 'an argument object of the call taking it (typed as its parameter; per call, with the stores building it)' } : undefined;
+        },
         rootOf: (t, _args, at) => {
           if (t.k !== 'fn') return undefined;
           if (accounts && t.pc === tpc) return { name: 'accounts_res', copyName: 'ctx_accounts', type: accounts, shift: acctShift.get(pc) ?? 0, why: `the Accounts struct try_accounts returns (the result of accounts_${ix}), and copies of it` };

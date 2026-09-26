@@ -28,6 +28,7 @@ export interface Region {
 	out: boolean // a call's result (ends when the slot's start is overwritten)
 	reused?: boolean // (only a region when the slot holds several results)
 	bad?: boolean    // an access does not fit the view: the name stays, the type goes
+	args?: boolean   // (an argument object: also the stores building it before the call)
 	dropped?: boolean
 }
 
@@ -35,6 +36,7 @@ export interface RegionCfg {
 	fp: number
 	bases: number[] // frame object starts (sorted): the extent of an untyped result
 	rootOf(t: CallTarget, args: Expr[], pc: number): Root | undefined
+	argRoot?(t: CallTarget, args: Expr[], pc: number, i: number): Root | undefined // an argument object of a known layout (built before the call, read after it)
 	typedSrc(e: Expr): { type: string; name: string } | undefined // a typed object outside the frame (a copy source)
 	isCopy(t: CallTarget): boolean
 	sizeOf(type: string): number | undefined
@@ -139,14 +141,28 @@ export function frameRegions(body: Node[], cfg: RegionCfg): Regions {
 		if (cfg.isCopy(t) && args.length >= 3 && args[2].k === 'const' && args[2].v < 0x10000n) { onCopy(args[0], args[1], Number(args[2].v)); return }
 		for (const a of args) { const g = fo(a); if (g !== undefined) { clobber(g, 0x100); if (t.k === 'sys') overwrite(g, 1) } }
 		const O = args[0] && fo(args[0])
-		if (O === undefined) return
-		const r = cfg.rootOf(t, args, pc)
-		if (!r) { overwrite(O, 1); return }
-		const lo = O + (r.shift ?? 0), size = r.type ? r.size ?? cfg.sizeOf(r.type) : undefined
-		const hi = size ? lo + size : nextBase(O)
-		const id = open({ base: lo, lo, hi, type: size ? r.type : undefined, name: r.name, copyName: r.copyName, why: r.why, root: list.length, out: true, reused: r.reused })
-		if (size) for (let w = 0; w + 8 <= size; w += 8) org.set(lo + w, { r: id, off: w })
+		const r = O === undefined ? undefined : cfg.rootOf(t, args, pc)
+		if (O !== undefined && !r) overwrite(O, 1)
+		if (O !== undefined && r) {
+			const lo = O + (r.shift ?? 0), size = r.type ? r.size ?? cfg.sizeOf(r.type) : undefined
+			const hi = size ? lo + size : nextBase(O)
+			const id = open({ base: lo, lo, hi, type: size ? r.type : undefined, name: r.name, copyName: r.copyName, why: r.why, root: list.length, out: true, reused: r.reused })
+			if (size) for (let w = 0; w + 8 <= size; w += 8) org.set(lo + w, { r: id, off: w })
+		}
+		// argument objects of a known layout: from the call on, and the stores building them before it (see below)
+		if (cfg.argRoot) args.forEach((a, i) => {
+			const g = fo(a)
+			if (g === undefined || (i === 0 && r)) return
+			const x = cfg.argRoot!(t, args, pc, i), size = x?.type ? cfg.sizeOf(x.type) : undefined
+			if (!x || !size) return
+			const id = open({ base: g, lo: g, hi: g + size, type: x.type, name: x.name, copyName: x.copyName, why: x.why, root: list.length, out: true })
+			for (let w = 0; w + 8 <= size; w += 8) org.set(g + w, { r: id, off: w })
+			if (here) built.push({ ...here, id })
+		})
 	}
+	// (the node list and index of the statement being walked: where an argument object's stores are looked for)
+	let here: { ns: Node[]; i: number } | undefined
+	const built: { ns: Node[]; i: number; id: number }[] = []
 	const put = (D: number, i: number, v: Org | undefined) => {
 		clobber(D + i, 8)
 		if (!v) { overwrite(D + i, 8); return }
@@ -215,12 +231,13 @@ export function frameRegions(body: Node[], cfg: RegionCfg): Regions {
 	}
 	const meet = (xs: number[][]) => xs[0].filter(id => xs.every(x => x.includes(id)))
 	const walk = (ns: Node[]) => {
-		for (const n of ns) {
+		for (let i = 0; i < ns.length; i++) {
+			const n = ns[i]
 			if (n.k === 'loop') forget(writes(n.body))
 			if (act.length && n.k !== 'stmt') at.set(n, act)
 			switch (n.k) {
 				// (a statement: the regions after it, e.g. the one its call's out argument starts)
-				case 'stmt': onStmt(n.s); if (act.length) at.set(n, act); break
+				case 'stmt': here = { ns, i }; onStmt(n.s); here = undefined; if (act.length) at.set(n, act); break
 				case 'if': {
 					loads(n.c)
 					const te = exits(n.then), ee = exits(n.else)
@@ -264,6 +281,7 @@ export function frameRegions(body: Node[], cfg: RegionCfg): Regions {
 			if (n.k === 'stmt') {
 				const s = n.s, c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
 				if (c && c.args[0] && fo(c.args[0]) !== undefined && cfg.rootOf(c.t, c.args, s.pc)) any = true
+				else if (c && cfg.argRoot && c.args.some((a, i) => fo(a) !== undefined && cfg.argRoot!(c.t, c.args, s.pc, i))) any = true
 				else if (c && cfg.isCopy(c.t) && c.args[1] && cfg.typedSrc(c.args[1])) any = true
 				else if (s.k === 'copy' && cfg.typedSrc(s.src)) any = true
 			} else if (n.k === 'if') { scan(n.then); scan(n.else) }
@@ -274,6 +292,28 @@ export function frameRegions(body: Node[], cfg: RegionCfg): Regions {
 	scan(body)
 	if (!any) return { list, at }
 	walk(body)
+	// argument objects: the stores into them right before the call (the same statement list, back to another call
+	// or a store that does not fit the view) write fields of the object
+	for (const { ns, i, id } of built) {
+		const r = list[id]
+		let any = false
+		for (let k = i - 1; k >= 0; k--) {
+			const n = ns[k]
+			if (n.k !== 'stmt') break
+			const s = n.s
+			if (s.k === 'call' || (s.k === 'set' && s.e.k === 'call') || s.k === 'trap') break
+			if (s.k !== 'store' && s.k !== 'stores') continue
+			const D = fo(s.addr)
+			if (D === undefined) continue
+			const n2 = s.k === 'store' ? 1 : s.vals.length
+			if (D + n2 * s.size <= r.lo || D >= r.hi) continue
+			if (D < r.lo || D + n2 * s.size > r.hi || !Array.from({ length: n2 }, (_, j) => cfg.fits(r.type!, D + j * s.size - r.base, s.size)).every(Boolean)) break
+			const a = at.get(n)
+			at.set(n, a ? [...a, id] : [id])
+			any = true
+		}
+		if (any) r.args = true
+	}
 	// results that are regions only where the slot is reused; copies of at least two words
 	const perSlot = new Map<number, number>()
 	for (const r of list) if (r.out && !r.dropped) perSlot.set(r.lo, (perSlot.get(r.lo) ?? 0) + 1)
