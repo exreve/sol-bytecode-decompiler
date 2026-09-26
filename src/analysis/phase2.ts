@@ -260,6 +260,15 @@ export function phase2(a: Analysis, r: Result) {
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 }
 
+/**
+ * A CPI to a well-known program (system, token) the program does not sign for: the callee requires the
+ * signature of the account it debits / reassigns itself (the runtime enforces it).
+ */
+const runtimeAuthorized = (o: OpOut) => !!o.cpi && !!(o.cpi.known || o.cpi.family) && !o.cpi.seeds && !o.kinds.includes('PDA_SIGNATURE')
+
+/** the system CPIs creating an account (create_account, or transfer + allocate + assign of a funded one) in an instruction that creates one */
+const initMechanics = (ix: IxOut, o: OpOut) => o.cpi?.family === 'system' && /^(CreateAccount|Assign|Allocate|Transfer)$/.test(o.cpi.ix ?? '') && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE') || (x.cpi?.family === 'system' && x.cpi.ix === 'Allocate'))
+
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
 const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
 
@@ -321,7 +330,11 @@ const RULES: Rule[] = [
 		run: ix => {
 			const signers = ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))
 			if (signers) return []
-			return ix.ops.filter(o => isValueOrAuth(o) && !o.cpi?.seeds && !o.kinds.includes('PDA_SIGNATURE')).slice(0, 3).map(o => ({ accounts: [...opAccounts(o)], path: [L(o.at)], evidence: [o.text.slice(0, 140)], confidence: 'medium' as const, weight: wOf(o) }))
+			// (the program signing for the move authorizes nobody in particular: low)
+			return ix.ops.filter(o => isValueOrAuth(o) && !runtimeAuthorized(o) && !initMechanics(ix, o)).slice(0, 3).map(o => {
+				const pda = !!o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')
+				return { accounts: [...opAccounts(o)], path: [L(o.at)], evidence: [o.text.slice(0, 140), ...(pda ? ['the program signs it (PDA); no caller signature is required'] : [])], confidence: pda ? 'low' as const : 'medium' as const, weight: wOf(o) }
+			})
 		},
 	},
 	{
@@ -329,7 +342,7 @@ const RULES: Rule[] = [
 		run: ix => (ix.authority ?? []).flatMap(row => {
 			const o = ix.ops[row.op]
 			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
-			if (!hasSigner || stored || o.cpi?.seeds) return []
+			if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
 			// (initialization: a write to an account the instruction creates (no discriminator / type check on it))
 			const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
 			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
@@ -341,7 +354,7 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
-		run: ix => ix.ops.flatMap(o => (o.bypass ?? []).map(b => {
+		run: ix => ix.ops.filter(o => !runtimeAuthorized(o) && !initMechanics(ix, o)).flatMap(o => (o.bypass ?? []).map(b => {
 			const c = ix.checks[b.check]
 			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`], confidence: 'medium' as const, weight: wOf(o) + 1 }
 		})),

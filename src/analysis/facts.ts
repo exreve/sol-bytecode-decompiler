@@ -327,7 +327,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const kinds = cpiKinds(d?.family ?? '', d?.ix ?? '')
 		if (/UPGRADEABLE/.test(known)) kinds.push('PROGRAM_UPGRADE')
 		// (not decoded: a call of invoke_signed itself (invoke passes no seeds))
-		if (d ? d.parts?.seeds : (/signer seeds (?!\[\])/.test(text) && !/no signer seeds/.test(text)) || /\binvoke_signed(_unchecked)?(_[0-9a-f]+)?\(/.test(lines[l] ?? '')) kinds.push('PDA_SIGNATURE')
+		if (d ? d.parts?.seeds : (/signer seeds (?!\[\])/.test(text) && !/no signer seeds/.test(text)) || /(\b|_)invoke_signed(_unchecked)?(_[0-9a-f]+)?\(/.test(lines[l] ?? '')) kinds.push('PDA_SIGNATURE')
 		facts.ops.push({ line: l + 1, pc, ret: n.k === 'return' && n.e ? n.e : undefined, kinds, text: text || `CPI (instruction not decoded): ${lines[l]?.trim()}`, main, errPath: err, cpi: d?.parts ? { ...d.parts, family: d.family, ix: d.ix } : undefined, via: s.via })
 	}
 
