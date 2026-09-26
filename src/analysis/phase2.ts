@@ -17,6 +17,7 @@ import { cfgOf, decisionBlock, dominates, bypass, reaches, blockPc, callOf, type
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { auditIx } from './audit.ts'
+import { consistency } from './consistency.ts'
 import { structFields } from '../idl.ts'
 import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
@@ -338,6 +339,7 @@ export function phase2(a: Analysis, r: Result) {
 	// phase 3 views (after every instruction's authority rows: the chains follow the writers), then the rules
 	for (const ix of a.ixs) { phase3Ix(r, ix, a); ix.audit = auditIx(r, ix) }
 	a.states = stateMachine(a)
+	a.consistency = consistency(a, r)
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))

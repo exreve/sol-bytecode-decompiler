@@ -57,3 +57,12 @@ Phase-2/3 rules after the eval precision pass (findings / programs; before → a
 `check-bypassable` 1458 / 34 → 0 (17 / 6 informational), `signer-not-related-to-authority` 658 / 64 → 184 / 53,
 `recipient-unbound` 34 / 14 → 22 / 9 (+55 informational: a destination the signer picks for itself),
 `value-move-no-signer` 262 / 53 → 188 / 53, `unverified-account-data` 91 / 15 → 79 / 18.
+
+Validation consistency (informational, no rule; src/analysis/consistency.ts): 100 inconsistencies in 28 of the 400
+programs (first version, owner / type / signer / address included: 263 in 45). A spot-check of 10 corpus hits found no
+clear true positive (Anchor loaders the analysis does not see load, a counterpart created by the instruction, labels of
+the same field under two roles, SPL token's implicit owner rules), so it stays a view. Eval pairs: spl_lending_flashloan
+flash_loan (reserve: no owner check, 6/6 others) and solend update_reserve_config (reserve: no stored-key relation with
+the lending market, 4/4 others) show in @vuln only; bench clean bases: none. Stored keys in summary.md: 25 programs
+(<= 5 lines each). Other rules unchanged by the pass except `cpi-unchecked-program` 1611 → 1606 findings (a check made
+word by word now counted on every non-failing path).
