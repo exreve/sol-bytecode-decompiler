@@ -2209,13 +2209,13 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		for (const [v, ks] of hits) if (ks.size >= 2 && infoEv.has(v) && !misfit.has(v)) roots.set(v, { k: 'slice', off: 0 })
 		for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
 	}
-	// (roots without a caller's frame pointer (ext, a loader): the roots classify sets depend on the function, the kind
-	// of callee and the roots given only (a fresh evaluator); by those, what it sets)
+	// (the roots classify sets depend on the function, the kind of callee and the roots given only (a fresh evaluator): it
+	// looks for base / elem values, which a caller's frame pointer (ext: its words by the caller's evaluator, never a base
+	// or an elem) and what is derived from it are not; by those, with ext roots as one opaque value, what it sets)
 	const classify = (roots: Map<number, AV>) => {
-		if ([...roots.values()].some(x => x.k === 'ext')) { classify0(roots); return }
 		let m = classifyMemo.get(f)
 		if (!m) classifyMemo.set(f, (m = new Map()))
-		const k = `${ck}${JSON.stringify([...roots])}`
+		const k = `${ck}${JSON.stringify([...roots].map(([v, x]) => x.k === 'ext' ? [v, 'ext'] : [v, x]))}`
 		let y = m.get(k)
 		if (!y) {
 			const r0 = new Map(roots)
