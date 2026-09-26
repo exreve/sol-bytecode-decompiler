@@ -591,8 +591,11 @@ function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<nu
 		for (const [known, fam] of knownFamilies()) {
 			const keys = Object.keys(fam.ixs).map(Number)
 			const cover = tagSet.filter(t => fam.ixs[t]).length
-			const exact = keys.length === tagSet.length && cover === keys.length
-			if (!(exact || (cover >= 0.8 * tagSet.length && cover >= 3 && r.funcs.some(x => x.text.includes(`/* ${known} */`))))) continue
+			// (its own id referenced; exactly its tags when there are many, else with its name in the program's strings:
+			// a few tags 0..n fit any small program)
+			const named = () => { const w = fam.label.toLowerCase().split(' ').slice(0, 2).join(' '); return r.funcs.some(x => x.text.toLowerCase().includes(w)) }
+			const exact = keys.length === tagSet.length && cover === keys.length && (keys.length >= 6 || named())
+			if (!(exact || (cover >= 0.8 * tagSet.length && cover >= 2 && r.funcs.some(x => x.text.includes(`/* ${known} */`))))) continue
 			for (const x of groups) if (x.tags.length === 1 && fam.ixs[x.tags[0]]) { const l = fam.ixs[x.tags[0]]; x.name = snake(l.name); x.source = 'known'; x.accounts = l.accounts }
 			break
 		}
