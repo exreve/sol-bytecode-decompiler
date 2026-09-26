@@ -231,12 +231,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // A function comparing a value with three or more instruction discriminators (IDL, or names in the program's
   // strings): on the equal side of each comparison (the blocks reached without passing another one), the first
   // function called there and on no other instruction's side is that instruction's handler.
+  // (older Anchor, ~0.17-0.20: `match sighash` compiles to the low byte, then the other 7 bytes compared as
+  // `(x & ~0xff) == disc & ~0xff`: those high bytes of an instruction discriminator name it too)
+  const discHigh = new Map<bigint, string>()
+  for (const [v, d] of sem.disc) if (d.startsWith('ix:')) { const k = v & ~0xffn; discHigh.set(k, discHigh.has(k) ? '' : d) }
   if (opts.sugar !== false && !sem.ixNames.size) for (const [dpc, { f }] of built) {
     const br = new Map<number, [string, number]>() // block -> instruction, its equal side
     for (const b of f.blocks) {
       const c = b.term.k === 'br' ? b.term.c : undefined
       if (c?.k !== 'cmp' || (c.op !== 'eq' && c.op !== 'ne') || c.b.k !== 'const' || b.term.k !== 'br') continue
-      const d = sem.disc.get(c.b.v)
+      const d = sem.disc.get(c.b.v) ?? (c.a.k === 'bin' && c.a.op === 'and' && c.a.b.k === 'const' && c.a.b.v === 0xffffffffffffff00n && !(c.b.v & 0xffn) ? discHigh.get(c.b.v) || undefined : undefined)
       if (d?.startsWith('ix:') && c.b.v >> 32n) br.set(b.id, [d.slice(3), c.op === 'eq' ? b.term.t : b.term.f])
     }
     if (new Set([...br.values()].map(x => x[0])).size < 3) continue

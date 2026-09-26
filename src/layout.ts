@@ -10,6 +10,8 @@ import type { Result, FuncOut } from './decompile.ts'
 import { SYSCALLS } from './syscalls.ts'
 import { VIEW_NOTATION } from './views.ts'
 import { renderFingerprints } from './fingerprint.ts'
+import { cfgOf } from './analysis/flow.ts'
+import { BUDGET, budgetJson, budgetMarkdown, IX_ORDER, SUMMARY_ORDER } from './budget.ts'
 import { analyze, renderJson, renderSummary, renderIx, renderSummaryComment, type Where } from './analysis/report.ts'
 
 export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wrap mod 2^64; / % unsigned; >> logical; sar() arithmetic)
@@ -74,6 +76,67 @@ declare function callx(fn: u64, ...args: u64[]): u64`
 const lineCount = (f: FuncOut) => { let n = 1; for (let i = f.text.indexOf('\n'); i >= 0; i = f.text.indexOf('\n', i + 1)) n++; return n }
 
 export interface Group { key: string; title: string; funcs: FuncOut[] }
+
+/** A function's text cut down to some of its paths: map[line - 1] = the line in text (1-based) of each original line. */
+export interface Sliced { text: string; lines: number; map: number[] }
+
+/** Net brace depth change of a line and its lowest running depth (braces in strings and comments ignored). */
+function braces(l: string): { d: number; min: number } {
+	let d = 0, min = 0
+	for (let i = 0; i < l.length; i++) {
+		const c = l[i]
+		if (c === '"' || c === "'" || c === '`') { for (i++; i < l.length && l[i] !== c; i++) if (l[i] === '\\') i++; continue }
+		if (c === '/' && l[i + 1] === '/') break
+		if (c === '/' && l[i + 1] === '*') { const e = l.indexOf('*/', i + 2); if (e < 0) break; i = e + 1; continue }
+		if (c === '{') d++
+		else if (c === '}') { d--; if (d < min) min = d }
+	}
+	return { d, min }
+}
+
+/**
+ * The text of `fo` restricted to the blocks `allowed` keeps (an instruction's part of a native dispatcher):
+ * brace-balanced runs of lines whose statements / conditions all lie in other blocks become one comment
+ * line. Only a view (the full function is in `full`); the evaluated output is never sliced.
+ */
+export function slice(r: Result, fo: FuncOut, allowed: (fn: number, b: number) => boolean, full: string): Sliced | undefined {
+	const ff = r.facts.get(fo.pc)
+	if (!ff) return undefined
+	const g = cfgOf(fo)
+	const lines = fo.text.split('\n')
+	// per line: 1 = code of this instruction, 2 = only code of others, 0 = no code (braces, declarations, comments)
+	const st = new Uint8Array(lines.length)
+	const mark = (line: number, b: number | undefined) => {
+		if (b === undefined || line < 1 || line > lines.length) return
+		if (allowed(fo.pc, b)) st[line - 1] = 1
+		else if (st[line - 1] !== 1) st[line - 1] = 2
+	}
+	for (const [pc, line] of ff.pcLine) mark(line, g.pcBlock.get(pc))
+	for (const [c, line] of ff.condLine) mark(line, g.condBlock.get(c))
+	if (!st.includes(2)) return undefined
+	const out: string[] = [], map: number[] = new Array(lines.length)
+	const br = lines.map(braces)
+	for (let i = 0; i < lines.length;) {
+		// the longest run from i without code of this instruction, brace-balanced, with code of others
+		let best = -1
+		if (st[i] !== 1) {
+			let depth = 0, other = false
+			for (let j = i; j < lines.length && st[j] !== 1; j++) {
+				if (depth + br[j].min < 0) break
+				depth += br[j].d
+				if (st[j] === 2) other = true
+				if (depth === 0 && other) best = j
+			}
+		}
+		if (best >= i) {
+			const n = best - i + 1
+			out.push(`${/^\s*/.exec(lines[i])![0]}// … ${n} lines of other instructions (full function: ${full})`)
+			for (let k = i; k <= best; k++) map[k] = out.length
+			i = best + 1
+		} else { out.push(lines[i]); map[i] = out.length; i++ }
+	}
+	return { text: out.join('\n'), lines: out.length, map }
+}
 
 /** Instruction handlers (and inline processors) reaching each function through direct calls. */
 export function handlerOwners(r: Result): { handlers: FuncOut[]; owners: Map<number, Set<number>>; isRoot: (f: FuncOut) => boolean } {
@@ -166,8 +229,8 @@ function usedViews(r: Result, funcs: FuncOut[] = r.funcs): string[] {
 	return ['// typed views: x.field is exactly the load / store / address given by the field declaration', ...VIEW_NOTATION, ...r.views.render(names)]
 }
 
-function usedSyscalls(r: Result): string[] {
-	const names = calledNames(r.funcs, SYSCALL)
+function usedSyscalls(r: Result, called?: Set<string>): string[] {
+	const names = called ?? calledNames(r.funcs, SYSCALL)
 	const out: string[] = []
 	for (const sc of SYSCALLS) if (names.has(sc.alias)) out.push(`declare function ${sc.alias}(${sc.params.map(p => `${p}: u64`).join(', ')})${sc.noreturn ? ': never' : sc.ret ? ': u64' : ': void'} // ${sc.doc}`)
 	return out
@@ -184,7 +247,7 @@ function summary(r: Result): string[] {
 	const p = r.program
 	const lines = [PROVENANCE, `// program: sBPF v${p.version}, ${p.insns.length} instructions, ${p.funcs.size} functions (${r.funcs.length} decompiled, ${r.libCount} library)`]
 	if (r.instructions.length) {
-		lines.push(r.anchor ? `// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data, as u64):` : `// instruction handlers (from their "Instruction: X" logs):`)
+		lines.push(r.anchor ? `// instructions (Anchor, discriminator = sha256("global:<name>")[..8] of instruction data, as u64):` : `// instruction handlers (named from their "Instruction: X" logs, or [heur] from the discriminator compared before the call):`)
 		for (const i of [...r.instructions].sort((a, b) => a.name.localeCompare(b.name))) {
 			lines.push(r.anchor ? `//   ${i.name.padEnd(28)} 0x${i.disc.toString(16).padStart(16, '0')}  -> ix_${i.name}` : `//   ${i.name.padEnd(28)} -> ix_${i.name}`)
 			if (i.args?.length) lines.push(`//     args [idl]: ${i.args.join(', ')}`)
@@ -232,7 +295,7 @@ export function renderProject(r: Result): Map<string, string> {
 	for (const h of r.outlined) home.set(h.name, 'outlined')
 	const libNames = new Set(r.stubs.map(s => /declare function (\w+)/.exec(s)![1]))
 	const modLoc = new Map<string, { file: string; line: number }>() // function -> its module file and first line
-	const bundleLoc = new Map<string, Map<string, number>>()           // instruction -> function -> first line in bundle/<ix>.ts
+	const bundleLoc = new Map<string, Map<string, (line: number) => number>>() // instruction -> function -> its line -> line in bundle/<ix>.ts
 	const mod = (grp: Group) => {
 		if (!grp.funcs.length) return
 		const imports = new Map<string, Set<string>>()
@@ -261,44 +324,74 @@ export function renderProject(r: Result): Map<string, string> {
 	idx.push(`export { entrypoint } from './entrypoint.ts'`)
 	files.set('index.ts', idx.join('\n') + '\n')
 	// self-contained per-instruction bundles: handler + all user code it reaches + the stubs it needs
-	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
-	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) {
-		// breadth-first (closest helpers first) up to a size budget; the rest become declarations
-		const seen = new Set<number>([h.pc]), order = [h], decl: FuncOut[] = []
-		let size = h.text.length
-		for (let i = 0; i < order.length; i++) for (const t of order[i].calls) {
-			const g = byPc.get(t)
-			if (!g || seen.has(t)) continue
-			seen.add(t)
-			if (size + g.text.length <= 150_000) { order.push(g); size += g.text.length } else decl.push(g)
+	const a = analyze(r)
+	const byName = new Map(r.funcs.map(f => [f.name, f]))
+	const outlByName = new Map(r.outlined.map(x => [x.name, x]))
+	const procNames = new Set(r.processors.map(x => x.fn))
+	const isRoot = (f: FuncOut | undefined) => !!f && (f.name.startsWith('ix_') || procNames.has(f.name))
+	const namesIn = (text: string) => new Set([...text.matchAll(CALLED)].map(m => m[1]))
+	const bundle = (ix: string, h: FuncOut, what: string, view?: (f: FuncOut) => Sliced | undefined) => {
+		// breadth-first from the handler (closest helpers first) over the functions its text calls (and the
+		// outlined tails it calls): every user function reached is in the bundle
+		const order = [h], outl: { name: string; text: string }[] = [], seen = new Set<string>([h.name]), sliced = new Map<FuncOut, Sliced>()
+		const q: string[] = []
+		// (other instructions' handlers / processors a path calls are not part of this instruction: declared)
+		const other: FuncOut[] = []
+		const visit = (names: Iterable<string>) => {
+			for (const n of names) if (!seen.has(n) && (byName.has(n) || outlByName.has(n))) { seen.add(n); if (isRoot(byName.get(n))) other.push(byName.get(n)!); else q.push(n) }
+		}
+		const v0 = view?.(h)
+		if (v0) sliced.set(h, v0)
+		visit(v0 ? namesIn(v0.text) : scan(h).called)
+		while (q.length) {
+			const n = q.shift()!, g = byName.get(n)
+			if (!g) { const o = outlByName.get(n)!; outl.push(o); visit(namesIn(o.text)); continue }
+			order.push(g)
+			const v = view?.(g)
+			if (v) sliced.set(g, v)
+			visit(v ? namesIn(v.text) : scan(g).called)
 		}
 		const sig = (f: FuncOut) => f.text.split('\n').find(l => l.startsWith('function '))!.replace(/^function /, 'declare function ').replace(/ \{$/, '')
-		const declText = decl.length ? `\n\n// not included (size budget), see ${[...new Set(decl.map(f => (home.get(f.name) ?? 'entrypoint') + '.ts'))].join(', ')}:\n` + decl.map(sig).join('\n') : ''
-		const text = order.map(f => f.text).join('\n\n') + declText
-		// (the calls in text: those of its functions and of the declarations part)
-		const used = new Set([...order.flatMap(f => scan(f).called), ...[...declText.matchAll(CALLED)].map(m => m[1])])
+		const text = order.map(f => sliced.get(f)?.text ?? f.text).join('\n\n') + (other.length ? '\n\n// other instructions\' handlers called on these paths (see their own bundle / module):\n' + other.map(f => `${sig(f)} // ${f.name.startsWith('ix_') ? `bundle/${f.name.slice(3)}.ts` : `${home.get(f.name) ?? 'entrypoint'}.ts`}`).join('\n') : '')
+		const used = new Set([...namesIn(text), ...outl.flatMap(o => [...namesIn(o.text)])])
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
-		const sys = usedSyscalls({ ...r, funcs: order })
-		const outl = r.outlined.filter(x => used.has(x.name))
-		const pre = [PRELUDE, `// instruction ${h.name.slice(3)}: handler + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ...(outl.length ? ['', OUTLINED, ...outl.map(x => x.text)] : []), ''].join('\n')
-		files.set(`bundle/${h.name.slice(3)}.ts`, pre + '\n' + text + '\n')
-		const m = new Map<string, number>()
+		const sys = usedSyscalls(r, used)
+		const outlSorted = r.outlined.filter(x => seen.has(x.name))
+		const pre = [PRELUDE, `// instruction ${ix}: ${what} + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ...(outlSorted.length ? ['', OUTLINED, ...outlSorted.map(x => x.text)] : []), ''].join('\n')
+		files.set(`bundle/${ix}.ts`, pre + '\n' + text + '\n')
+		const m = new Map<string, (line: number) => number>()
 		let at = pre.split('\n').length + 1
-		for (const f of order) { m.set(f.name, at); at += lineCount(f) + 1 }
-		bundleLoc.set(h.name.slice(3), m)
+		for (const f of order) {
+			const base = at, v = sliced.get(f)
+			m.set(f.name, v ? (l: number) => base + (v.map[l - 1] ?? l) - 1 : (l: number) => base + l - 1)
+			at += (v ? v.lines : lineCount(f)) + 1
+		}
+		bundleLoc.set(ix, m)
 	}
+	for (const h of r.funcs.filter(f => f.name.startsWith('ix_'))) bundle(h.name.slice(3), h, 'handler')
+	// instructions a native processor handles inline (a match on the instruction tag, see security/): the
+	// processor restricted to the paths this instruction's tags take, and what those paths call
+	const inline: string[] = []
+	for (const ix of a.ixs) {
+		const allowed = ix.ctx?.allowed, h = byName.get(ix.handler)
+		if (!allowed || !h || ix.handler.startsWith('ix_') || files.has(`bundle/${ix.name}.ts`)) continue
+		const restricted = ix.ctx!.restricted ?? new Set<number>()
+		bundle(ix.name, h, `${ix.handler} restricted to this instruction's paths (${ix.dispatch ?? 'instruction tag'})`,
+			f => (f === h || restricted.has(f.pc) ? slice(r, f, allowed, `${home.get(f.name) ?? 'entrypoint'}.ts`) : undefined))
+		inline.push(`//   ${ix.name.padEnd(28)} ${ix.dispatch?.replace(/ \(instruction data\).*$/, '') ?? ''} of ${ix.handler} -> bundle/${ix.name}.ts`)
+	}
+	if (inline.length) files.set('index.ts', files.get('index.ts')! + [`// instructions handled inline by a processor (a match on the instruction tag; bundle/<name>.ts: the processor restricted to that instruction's paths + what they call):`, ...inline.sort()].join('\n') + '\n')
 	// security/: the program analysis (derived views, see src/analysis/report.ts), read first
-	const a = analyze(r)
 	const where: Where = (ix, at) => {
 		const b = ix === undefined ? undefined : bundleLoc.get(ix)?.get(at.fn)
-		if (b !== undefined) return { file: `bundle/${ix}.ts`, line: b + at.line - 1 }
+		if (b !== undefined) return { file: `bundle/${ix}.ts`, line: b(at.line) }
 		const m = modLoc.get(at.fn)
 		return m && { file: m.file, line: m.line + at.line - 1 }
 	}
 	const ixFile = (ix: { name: string }) => `${ix.name}.md`
-	files.set('security/analysis.json', renderJson(a, where))
-	files.set('security/summary.md', renderSummary(a, where, ixFile))
-	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, renderIx(ix, where, a))
+	files.set('security/analysis.json', budgetJson(renderJson(a, where), BUDGET.jsonBytes))
+	files.set('security/summary.md', budgetMarkdown(renderSummary(a, where, ixFile), BUDGET.summaryLines, SUMMARY_ORDER))
+	for (const ix of a.ixs) files.set(`security/${ixFile(ix)}`, budgetMarkdown(renderIx(ix, where, a), BUDGET.ixLines, IX_ORDER))
 	files.set('security/fingerprints.json', fingerprints(r))
 	files.set('index.ts', files.get('index.ts')! + `// security/summary.md: read first — instructions ranked by sensitivity, their effects, privileges and checks (derived, over-approximate views; security/<ix>.md per instruction, security/analysis.json)\n`)
 	return files

@@ -132,7 +132,8 @@ entrypoint.ts   entrypoint, dispatcher, code not owned by a single instruction
 ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
-bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs
+bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs (an instruction a native
+                processor handles inline: the processor cut down to the paths its tag takes)
 security/       summary.md (read first), <ix>.md per instruction, analysis.json, fingerprints.json
 ```
 
@@ -157,6 +158,8 @@ Computed from the same IR in the same run (a few % of the run time); spec and kn
   vs validated values, arithmetic on value paths, a property checklist per operation; each item linked to
   `bundle/<ix>.ts:<line>`.
 * `analysis.json`: all of it (schema in `src/analysis/report.ts`).
+* Size budgets (`src/budget.ts`): summary.md ≤ 150 lines, `<ix>.md` ≤ 400 lines, analysis.json ≤ 2 MB; beyond them the
+  lowest-priority detail (path conditions first) is dropped with a "… N more" note / `<key>_omitted` counts.
 * `fingerprints.json`: per-function address-independent hashes (used by the program diff).
 
 Statuses: `found` (dominates every sensitive operation), `partial` (some paths), `not_found` (none recognized —

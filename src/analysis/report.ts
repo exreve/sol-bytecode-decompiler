@@ -626,7 +626,7 @@ export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => 
 		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => `${x.name} (${ST[x.constraints.signer.status]})`)
 		const anon = ix.checks.filter(c => c.kinds.includes('signer') && (!c.account || c.account.endsWith('?'))).length
 		if (anon) signers.push(`${anon} signer check${anon > 1 ? 's' : ''} on accounts held in temporaries (see ${ixFile(ix)})`)
-		out.push(`- **${ix.name}** — score ${ix.score} · [${ixFile(ix)}](${ixFile(ix)})${ix.handler.startsWith('ix_') ? ` · ../bundle/${ix.name}.ts` : ''}`)
+		out.push(`- **${ix.name}** — score ${ix.score} · [${ixFile(ix)}](${ixFile(ix)})${ix.handler.startsWith('ix_') || ix.ctx?.allowed ? ` · ../bundle/${ix.name}.ts` : ''}`)
 		out.push(`  - signers: ${signers.join(', ') || 'none found'}`)
 		for (const e of ix.effects.slice(0, 12)) out.push(`  - ${e}`)
 		if (ix.effects.length > 12) out.push(`  - … ${ix.effects.length - 12} more (see ${ixFile(ix)})`)
