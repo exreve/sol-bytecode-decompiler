@@ -1822,7 +1822,9 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return undefined
 	}
 	const byName = new Map<string, AcctRef>()
-	for (const [v, e] of defs) {
+	// (without roots nor an entrypoint's arrays, every value is a frame address or nothing: no account, and nothing
+	// the queries below could find in the evaluator's memo but frame addresses)
+	if (roots.size || arr !== undefined || infos !== undefined) for (const [v, e] of defs) {
 		const nm = fo.names[v]
 		const a = nm ? ev(e, defPos.get(v)!) : undefined
 		if (!a) continue
