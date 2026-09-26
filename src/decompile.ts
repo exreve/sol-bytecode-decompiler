@@ -1071,7 +1071,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       for (const [o, cs] of [...claims].sort((x, y) => y[0] - x[0])) {
         if (o >= 0 || o < -0x2000 || cs.some(c => c.name !== cs[0].name)) continue;
         bases.add(o);
-        objName.set(o, unique(cs[0].name));
+        objName.set(o, cs[0].why === GENERIC_RESULT ? cs[0].name : unique(cs[0].name)); // (generic results: after the regions, below)
         objWhy.set(o, cs[0].why);
         if (cs[0].out) outObj.add(o);
         if (cs[0].extent) extentOf.set(o, cs[0].extent);
@@ -1092,7 +1092,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if ((t && !fitsAccess(views, t, d, a.size, a.copy)) || (a.write && outObj.has(b)) || (x !== undefined && d + a.size > x)) { objType.delete(b); objName.delete(b); }
       }
       // regions (see frameregions.ts): call results of a known layout in a frame slot, and copies of them
-      const rg = frameRegionsOf(fpv.id, sorted, [...objName.keys()]);
+      // (a generic single-call result yields to a region: its layout is known there)
+      const generic = (b: number) => objWhy.get(b) === GENERIC_RESULT;
+      const rg = frameRegionsOf(fpv.id, sorted, [...objName.keys()].filter(b => !generic(b)));
+      if (rg) for (const b of [...objName.keys()]) if (generic(b) && rg.list.some(r => !r.dropped && b >= r.lo && b < r.hi)) { objName.delete(b); objType.delete(b); }
+      for (const [b, n] of objName) if (generic(b)) objName.set(b, unique(n));
       let cur: number[] = [];
       if (rg) ctx.atNode = n => { cur = rg.at.get(n) ?? []; };
       const region = (o: number) => (rg && cur.length ? innermost(rg.list, cur, o) : undefined);
@@ -1423,6 +1427,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 
 const BUILTIN_VIEW: Record<string, View> = Object.fromEntries(BUILTIN_VIEWS.map(v => [v.name, v]));
 
+const GENERIC_RESULT = 'the result of the one (library / out-parameter) call they are passed to';
 /** A role of a stack object: a name for it, its view type when the layout is known, and where the role comes from. */
 interface FrameClaim { name: string; type?: string; why: string; out?: boolean; extent?: number }
 
@@ -1478,7 +1483,7 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
         if (/^(sol_)?memcmp_?$/.test(cn) && e.args[2]?.k === 'const' && e.args[2].v === 32n) for (const a of e.args.slice(0, 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
         if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ name: r.name, type: r.type, why: r.inout ? 'the object the calls they are passed to work on' : 'out parameter of the calls they are passed to', out: !r.inout }); }
         // (another library function or one only writing through its first parameter: a result, as words)
-        else if (o0 !== undefined && e.t.k === 'fn' && outCallee(e.t.pc) && e.args.length > 1) { let l = generic.get(o0); if (!l) generic.set(o0, (l = [])); l.push({ name: 'res', type: 'Result64', why: 'out parameter of the call they are passed to', out: true }); }
+        else if (o0 !== undefined && e.t.k === 'fn' && outCallee(e.t.pc) && e.args.length > 1) { let l = generic.get(o0); if (!l) generic.set(o0, (l = [])); l.push({ name: 'res', type: 'Result64', why: GENERIC_RESULT, out: true }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
         if (e.t.k === 'ind') visit(e.t.e, false);
         e.args.forEach(a => visit(a, false));
