@@ -380,7 +380,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const kinds: OpKind[] = []
 		const f = r.field ?? ''
 		if (/^lamports\b/.test(f) || /\.lamports(\.|$)/.test(lv)) kinds.push('LAMPORT_WRITE')
-		else if (f === 'data_len') kinds.push('ACCOUNT_REALLOC')
+		else if (f === 'data_len' || f === 'data.len') kinds.push('ACCOUNT_REALLOC')
 		else if (/^(key|owner|is_signer|is_writable|executable|rent_epoch|data|original_data_len)$/.test(f)) return
 		else { kinds.push('ACCOUNT_DATA_WRITE'); if (AUTHORITY.test(f.split('.').pop() ?? '')) kinds.push('AUTHORITY_WRITE') }
 		if (kinds[0] === 'LAMPORT_WRITE' && how === '=' && /^0x0*0?$|^0$/.test(rhs)) kinds.push('ACCOUNT_CLOSE')

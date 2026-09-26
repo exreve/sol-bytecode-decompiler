@@ -87,9 +87,10 @@ function condsIn(ff: FnFacts, line: number, budget: { lines: number }): PathCond
 		if (chainInd === k && ic) { out.push({ at, cond: ic.cond, holds: false, how: 'branch' }); if (!ic.elseIf) chainInd = -1; continue }
 		if (ic && !ic.elseIf) {
 			// an earlier sibling `if` whose body (no else) exits: the path goes on when it does not hold
-			let j = i + 1, last = ''
-			for (; j < L.length && j < i + 400 && (ind(L[j]) > k || !L[j].trim()); j++) if (L[j].trim()) last = L[j]
-			if (L[j]?.trim() === '}' && last && EXIT.test(last)) out.push({ at, cond: ic.cond, holds: false, how: 'exit-check' })
+			let j = i + 1, last = '', ret = false
+			for (; j < L.length && j < i + 400 && (ind(L[j]) > k || !L[j].trim()); j++) if (L[j].trim()) { last = L[j]; if (/^\s*return\b/.test(L[j])) ret = true }
+			// (the body exits: its last statement, or a return inside it, e.g. after an error was built)
+			if (L[j]?.trim() === '}' && last && (EXIT.test(last) || ret)) out.push({ at, cond: ic.cond, holds: false, how: 'exit-check' })
 			else out.push({ at, cond: ic.cond, holds: false, how: 'before' })
 		}
 	}
@@ -197,6 +198,14 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 	const T = fnText(r)
 	ixText.set(ix, T)
 	const loc = (fn: string, line: number): Loc => ({ fn, line, pc: T.get(fn)?.lineAt(line) })
+	// (a condition on locals: their definitions too, e.g. an overflow flag `z = y > y + c`, a reload of the operand)
+	const expandCond = (c: PathCond): string => {
+		const cf = T.get(c.at.fn)?.ff
+		if (!cf) return c.cond
+		const ds: string[] = [c.cond]
+		for (const m of new Set(c.cond.match(/(?<![\w.])[A-Za-z_]\w*(?![\w(])/g) ?? [])) { const d = defOf(cf, m, c.at.line); if (d && d.expr.length < 100) ds.push(d.expr) }
+		return ds.join(' ; ')
+	}
 	// arithmetic on value paths
 	const arith: ArithSite[] = []
 	const argNames = (r.instructions.find(i => i.name === ix.name)?.args ?? []).map(s => s.split(':')[0].trim())
@@ -218,16 +227,8 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		const alias = (v: string): string[] => { const out = [v]; for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) } return out }
 		const al = vars.map(alias)
 		const hit = (c: string, vs: string[]) => vs.some(v => mentions(c, v))
-		// (a condition on locals: their definitions too, e.g. an overflow flag `z = y > y + c`, a reload of the operand)
-		const ex = (c: PathCond): string => {
-			const cf = T.get(c.at.fn)?.ff
-			if (!cf) return c.cond
-			const ds: string[] = [c.cond]
-			for (const m of new Set(c.cond.match(/(?<![\w.])[A-Za-z_]\w*(?![\w(])/g) ?? [])) { const d = defOf(cf, m, c.at.line); if (d && d.expr.length < 100) ds.push(d.expr) }
-			return ds.join(' ; ')
-		}
 		const opText = al.map(vs => { const d = defOf(ff, vs[vs.length - 1], l); return d && d.expr.length < 100 && !/^[A-Za-z_][\w.]*$/.test(d.expr.trim()) ? [...vs, d.expr.trim()] : vs })
-		const g = conds.find(c => { if (!CMP.test(c.cond)) return false; const t = ex(c); return opText.every(vs => hit(t, vs)) || (hit(t, results) && opText.some(vs => hit(t, vs))) })
+		const g = conds.find(c => { if (!CMP.test(c.cond)) return false; const t = expandCond(c); return opText.every(vs => hit(t, vs)) || (hit(t, results) && opText.some(vs => hit(t, vs))) })
 		arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind, status: g ? 'checked' : 'unchecked', guard: g && { at: g.at, cond: g.cond.slice(0, 120) }, caller: callerCtl(e) || undefined, unnamed: unnamed || undefined })
 	}
 	ix.ops.forEach((o, oi) => {
@@ -273,10 +274,15 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 				if (isConst(dv.replace(/[()]/g, ''))) continue
 				const seen: string[] = []
 				provenance(fn, dv, i + 1, 2, seen)
-				if (!seen.some(x => SUPPLY.test(x))) continue
+				// (a supply-like name, or a u128 product divided by a value read from memory (an account's field, not the frame))
+				const acctBase = (b: string) => b === 'accounts' || /Account|Data$/.test(ff.types.get(b) ?? '') || /(^|\.)accounts$/.test(defOf(ff, b, i + 1)?.expr.trim() ?? '')
+				const stored = u && dv === u[4] && seen.some(x => { const m = /\bld(?:32|64)\(([A-Za-z_]\w*)/.exec(x); return !!m && acctBase(m[1]) })
+				if (!seen.some(x => SUPPLY.test(x)) && !stored) continue
 				const { conds } = pathConds(r, ix, fn, i + 1, 80)
-				const names = seen.flatMap(x => /^[A-Za-z_][\w.]*$/.test(x.trim()) ? [x.trim()] : [])
-				const g = conds.find(c => CMP.test(c.cond) && names.some(x => mentions(c.cond, x)))
+				const names = seen.map(x => x.trim()).filter(x => x.length < 100)
+				// (a guard: the path requires it; an earlier `if` whose side does not exit (e.g. a runtime panic call) is not
+				// one; the condition's locals by their definitions too)
+				const g = conds.find(c => c.how !== 'before' && CMP.test(c.cond) && names.some(x => mentions(expandCond(c), x)))
 				divs.push({ at: loc(fn, i + 1), expr: s.trim().slice(0, 140), divisor: seen.join(' ← ').slice(0, 160), status: g ? 'checked' : 'not_found', guard: g && { at: g.at, cond: g.cond.slice(0, 120) } })
 			}
 		}

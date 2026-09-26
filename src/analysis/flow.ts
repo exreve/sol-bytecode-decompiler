@@ -1181,7 +1181,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 				if (size === 8 && (o === 8 || o === 0x10)) return { k: 'rc', i, f: o === 8 ? 'lamports' : 'data', off: 0 }
 				return fl && o >= 0x20 ? { k: 'val', i, f: fl } : undefined
 			}
-			case 'recs': return size === 8 && a.off >= 0 && a.off % 8 === 0 ? { k: 'rec', i: a.off / 8, off: 0 } : undefined
+			case 'recs': return size === 8 && a.off >= 0 && a.off < 8 * 64 && a.off % 8 === 0 ? { k: 'rec', i: a.off / 8, off: 0 } : undefined
 			case 'rec': {
 				if (a.off >= 0x58) return { k: 'val', i: a.i, f: `data[${a.off - 0x58}..${a.off - 0x58 + size}]` }
 				const x = REC_FIELD[a.off]
