@@ -168,6 +168,7 @@ function analyze0(r: Result): Analysis {
 	const ixs: IxOut[] = []
 	for (const h of roots) for (const grp of splits.get(h.pc) ?? [undefined]) {
 		const name = grp ? grp.name : h.name.startsWith('ix_') ? h.name.slice(3) : h.name
+		const hpc = h.pc
 		const info = grp ? undefined : r.instructions.find(i => i.pc === h.pc)
 		const keep = (fn: number, pc: number | undefined) => !grp || pc === undefined || grp.keep(fn, pc)
 		// (a dispatcher's branches on the tag look like checks to facts.ts: its error-path marks do not apply)
@@ -341,6 +342,8 @@ function analyze0(r: Result): Analysis {
 			}
 			for (const o of ff.ops) {
 				if ((o.errPath && !isDisp(ff.pc)) || !(o.pc === undefined && o.ret ? keepCall(ff.pc, { ret: o.ret }) : keep(ff.pc, o.pc))) continue
+				// (a store in a function several handlers call, named by another handler's accounts)
+				if (o.handler !== undefined && o.handler !== hpc) continue
 				// (a wrapper's own CPI site, when its calls in this instruction are decoded)
 				if (ff.wrapper && !o.cpi && fns.some(g => g.ops.some(x => x.via === ff.name))) continue
 				const at = loc(ff, o.line, o.pc)

@@ -17,7 +17,7 @@ import { cfgOf, decisionBlock, dominates, bypass, blockPc, callOf, type Cfg } fr
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
 import { structFields } from '../idl.ts'
-import { irOf, posAt, stmtAt, storedAt } from './paths.ts'
+import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
 import type { Expr } from '../ir.ts'
 
@@ -191,6 +191,15 @@ export function phase2(a: Analysis, r: Result) {
 		}
 		// (on the IR where the parameter's expression is known: sources.ts; else by the printed text)
 		const S = sourceCtx(r, ix), I = irOf(r)
+		// (Anchor CPI helpers: the accounts of the CpiContext not named by the printed text, by the AccountInfo copies' key
+		// words (the program's copy first, then the accounts struct's in field order, 0x30 bytes each, after 0x18 bytes))
+		if (r.anchor) for (const o of ix.ops) {
+			if (!o.cpi?.family || !o.cpi.accounts.some(x => x.text === '?') || o.fnPc === undefined || o.at.pc === undefined) continue
+			const st = stmtAt(I, o.fnPc, o.at.pc), c = st && callOf(st[0])
+			const Y = c?.args[1] && defsIn(I, o.fnPc)?.fpOff(c.args[1])
+			if (Y === undefined || Y === null) continue
+			o.cpi.accounts = o.cpi.accounts.map((x, i) => x.text !== '?' ? x : { ...x, text: S.frameAccount(o.fnPc!, Y + 0x18 + 0x30 * (i + 1), st![1]) ?? '?' })
+		}
 		const trustSrc = (x: Source): string => x.kind === 'ix' || x.kind === 'remaining' ? 'caller-controlled' : x.kind === 'sysvar' || x.kind === 'lamports' || x.kind === 'owner' ? 'runtime'
 			: x.kind === 'return-data' ? 'partially-validated' : trustOf(x.kind === 'key' ? `${x.acct}.key` : `${x.acct}.data`) ?? 'caller-controlled'
 		for (const o of ix.ops) {

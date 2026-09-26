@@ -24,7 +24,11 @@ export interface Source { source: string; kind: SrcKind; acct?: string }
 const SYSVAR = /sol_get_(clock|rent|epoch_schedule|fees|epoch_rewards|last_restart_slot|stake_history)_sysvar|sol_get_sysvar|\b(Clock|Rent|EpochSchedule|Fees|EpochRewards|LastRestartSlot)::get\b|sysvar::(clock|rent)/
 const RETURN_DATA = /sol_get_return_data|get_return_data/
 
-export interface SourceCtx { of: (fn: number, e: Expr, p: number) => Source[] }
+export interface SourceCtx {
+	of: (fn: number, e: Expr, p: number) => Source[]
+	/** Anchor: the account whose key / AccountInfo a word of a frame object at a position holds (e.g. a CpiContext's copies) */
+	frameAccount: (fn: number, off: number, p: number) => string | undefined
+}
 
 const ctxMemo = new WeakMap<IxOut, SourceCtx>()
 /** The source walker of an instruction. */
@@ -183,5 +187,11 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 		walk(fn0, e0, p0, 0)
 		return [...out.values()]
 	}
-	return { of }
+	const frameAccount = (fn: number, off: number, p: number): string | undefined => {
+		const fo = I.byPc.get(fn), D = defsIn(I, fn)
+		if (!A || !fo || !D) return undefined
+		const h = evIn(fn)?.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: { k: 'var', id: D.fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(off)) } } }, p)
+		return h && (h.k === 'keyp' || h.k === 'info') && !h.guess ? h.acct : undefined
+	}
+	return { of, frameAccount }
 }

@@ -526,31 +526,58 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 			// success path)
 			let layout: Field[] = []
 			const named = tf.checks.filter(k => k.named && k.before !== undefined && k.pc !== undefined)
-			T.f.blocks.forEach((b, bi) => { const bl: Field[] = []; b.stmts.forEach((s, i) => {
-				if (s.k !== 'store' || s.size !== 8 || out === undefined) return
-				const off = s.addr.k === 'var' && s.addr.id === out ? 0 : s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.a.k === 'var' && s.addr.a.id === out && s.addr.b.k === 'const' ? Number(s.addr.b.v) : -1
-				if (off <= 0 || off > 0x1000 || bl.some(x => x.off === off)) return
-				// (the value: a word a call left in the frame, through variables)
-				let e: Expr = s.v, p = bi << 16 | i
+			const g = cfgOf(T), dbm = new Map<object, number | undefined>()
+			const dbOf = (k: typeof named[number]) => { if (!dbm.has(k)) dbm.set(k, decisionBlock(g, k.c, k.pc, k.passPc)); return dbm.get(k) }
+			// (an expression through variables and the frame words it was saved to: its origin (a call, a parameter, …))
+			// (and the last frame word loaded on the way)
+			let slot: number | undefined
+			const follow = (e: Expr, p: number): [Expr, number] | null => {
+				slot = undefined
 				for (let k = 0; k < 6; k++) {
-					if (e.k === 'var') { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) return; [e, p] = y; continue }
+					if (e.k === 'var') { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) break; [e, p] = y; continue }
 					const o = e.k === 'load' && e.size === 8 ? D.fpOff(e.addr) : undefined
 					if (o === undefined) break
 					const y = D.reaching(D.SLOT(o), p, true)
-					if (!y) return
-					;[e, p] = y
+					if (!y) return null
+					;[e, p, slot] = [...y, o]
 				}
+				return [e, p]
+			}
+			const fpOf = (e: Expr | undefined) => e === undefined ? undefined : D.fpOff(e) ?? (e.k === 'var' && D.defs.has(e.id) ? D.fpOff(D.defs.get(e.id)!) : undefined)
+			let most = 0
+			T.f.blocks.forEach((b, bi) => { const bl: Field[] = [], wordOf = new Map<number, number | undefined>(); let nst = 0; b.stmts.forEach((s, i) => {
+				if (s.k !== 'store' || s.size !== 8 || out === undefined) return
+				// (the address: the out object (possibly saved to the frame and reloaded) plus a constant)
+				const [base, off] = s.addr.k === 'var' ? [s.addr, 0] : s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.a.k === 'var' && s.addr.b.k === 'const' ? [s.addr.a, Number(s.addr.b.v)] : [undefined, -1]
+				if (off <= 0 || off > 0x1000 || bl.some(x => x.off === off)) return
+				const ob = base && (base.id === out ? [base] : follow(base, bi << 16 | i))
+				if (!ob || ob[0].k !== 'var' || ob[0].id !== out) return
+				nst++
+				// (the value: a word a call left in the frame, through variables)
+				const y = follow(s.v, bi << 16 | i)
+				if (!y) return
+				const [e, p] = y
 				if (e.k !== 'call' || e.t.k !== 'fn') return
+				// (a word of the call's out object other than its first (the &AccountInfo; the rest: the deserialized data))
+				const a0 = fpOf(e.args[0])
+				const word = slot !== undefined && a0 !== undefined ? slot - a0 : undefined
 				const callPc = T.f.blocks[p >> 16]?.stmts[p & 0xffff]?.pc ?? -1
 				const cpc = e.t.pc
-				const c = named.filter(k => k.before === cpc && k.pc! > callPc).sort((x, y) => x.pc! - y.pc!)[0]
+				// (the check deciding right after the call: among those on the callee after it, the first in the flow (dominating
+				// the others; e.g. two accounts of one type), else the next by pc)
+				const cb = p >> 16, cand = named.filter(k => k.before === cpc && k.pc! > callPc || (k.before === cpc && dbOf(k) !== undefined && dbOf(k) !== cb && dominates(g, cb, dbOf(k)!)))
+				const flow = cand.filter(k => dbOf(k) !== undefined && dominates(g, cb, dbOf(k)!))
+				const c = flow.find(k => flow.every(x => dominates(g, dbOf(k)!, dbOf(x)!))) ?? cand.filter(k => k.pc! > callPc).sort((x, y) => x.pc! - y.pc!)[0]
 				// (the account's type: the IDL account type named like it, e.g. an AccountLoader's)
 				const ty = r.idl?.accounts?.find(a => a.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() === c?.named)?.name
+				if (c) wordOf.set(off, word)
 				if (c) bl.push({ name: c.named!, off, t: { k: 'ref', to: 'AccountInfo' }, doc: `the analysis: stored by try_accounts after the call its check names${ty ? `; account of type ${ty}` : ''}` })
 			})
 			// (several words from one account's call: its data copied in place, not an &AccountInfo)
-			const one = bl.filter(x => bl.filter(y => y.name === x.name).length === 1)
-			if (one.length > layout.length) layout = one })
+			// (unless one of them is the call's first word)
+			const one = bl.filter(x => { const same = bl.filter(y => y.name === x.name); return same.length === 1 || (wordOf.get(x.off) === 0 && same.every(y => y === x || wordOf.get(y.off))) })
+			// (a tie: the block storing more words into the out object)
+			if (one.length > layout.length || (one.length && one.length === layout.length && nst > most)) { layout = one; most = nst } })
 			// (with the decompiler's fields for the other accounts, e.g. accounts deserialized in place)
 			const size = (x: Field) => x.t.k === 'embed' ? r.views.map.get(x.t.type)?.size ?? 8 : 8
 			const all = [...layout, ...lay.filter(x => !layout.some(y => x.name === y.name || (x.off < y.off + 8 && y.off < x.off + size(x))))]
@@ -606,12 +633,12 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			const text = ff.lines[line - 1]?.trim() ?? ''
 			const push = (acct: string, field: string, kinds: OpKind[], note: string) => {
 				const key = `${C.pc}:${s.pc}:${acct}.${field}`
-				if (done.has(key) || ff.ops.some(o => o.line === line && o.target?.acct === acct && o.target.field === field)) return
+				if (done.has(key) || ff.ops.some(o => o.line === line && o.target?.acct === acct && o.target.field === field && (o.handler === undefined || o.handler === H.pc))) return
 				done.add(key)
 				const v = storeValue(text)
 				if (kinds[0] === 'LAMPORT_WRITE' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
 				if (kinds[0] === 'ACCOUNT_DATA_WRITE' && AUTHORITY.test(field)) kinds.push('AUTHORITY_WRITE')
-				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: s.k === 'store' ? arithHow(X.D, s.v, p) : '=', value: v, exit: note })
+				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: s.k === 'store' ? arithHow(X.D, s.v, p) : '=', value: v, exit: note, handler: C === H ? undefined : H.pc })
 			}
 			if (a.k === 'lam' && a.off === 0 && n === 8) push(a.acct, 'lamports', ['LAMPORT_WRITE'], `through the RefCell'd lamports of ${a.acct}'s AccountInfo (handler ${H.name})`)
 			if (a.k === 'data') push(a.acct, zcField(a.ty, a.off, n) ?? `data[${a.off}..${a.off + n}]`, ['ACCOUNT_DATA_WRITE'], `through the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
@@ -1027,23 +1054,31 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 	if (f && pv !== undefined) {
 		const defs = new Map<number, Expr>(), multi = new Set<number>()
 		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { if (defs.has(s.dst) || multi.has(s.dst) || s.k === 'call') { defs.delete(s.dst); multi.add(s.dst) } else defs.set(s.dst, s.e) }
-		// (param + c through single definitions)
+		// (param + c through single definitions, and frame words holding only the parameter (spilled and reloaded))
+		const fpv = f.vars.find(v => v.param === 10)?.id ?? -1
+		const spill = new Map<number, boolean>()
 		const off = (e: Expr, d = 0): number | undefined => {
 			if (d > 8) return undefined
 			if (e.k === 'var') return e.id === pv ? 0 : defs.has(e.id) ? off(defs.get(e.id)!, d + 1) : undefined
+			if (e.k === 'load' && e.size === 8) { const z = offOf(e.addr, fpv); return z !== undefined && spill.get(z) ? 0 : undefined }
 			if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const x = off(e.a, d + 1); return x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)) }
 			return undefined
 		}
+		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) {
+			const z = offOf(s.addr, fpv)
+			if (z !== undefined) spill.set(z, spill.get(z) !== false && off(s.v) === 0)
+		}
 		outer: for (const b of f.blocks) for (const s of b.stmts) {
+			// (the parameter spilled to the frame: not an escape)
+			if (s.k === 'store' && s.size === 8 && spill.get(offOf(s.addr, fpv) ?? NaN)) continue
 			if (s.k === 'store' || s.k === 'stores' || s.k === 'copy') {
 				const a = off(s.k === 'copy' ? s.dst : s.addr)
 				if (a !== undefined) n = Math.max(n, a + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n))
 				// (the pointer stored somewhere: it escapes)
-				if (s.k === 'store' && off(s.v) !== undefined || s.k === 'stores' && s.vals.some(v => off(v) !== undefined)) { n = 0x80; break outer }
+				if (s.k === 'store' && off(s.v) !== undefined || s.k === 'stores' && s.vals.some(v => off(v) !== undefined)) { n = Math.max(n, 0x80); break outer }
 			}
 			const c = callOf(s)
 			if (c) for (let k = 0; k < c.args.length; k++) { const a = off(c.args[k]); if (a !== undefined) n = Math.max(n, a + callWrites(c.t, k, cl, depth - 1)) }
-			if (n >= 0x80) break
 		}
 	} else n = 0x80
 	memo.set(key, n)

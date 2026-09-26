@@ -1,0 +1,562 @@
+# Security summary
+
+DERIVED, over-approximate view of the decompiled code (the verified source of truth: ../index.ts, ../bundle/).
+Statuses: found (on every non-failing path) · PARTIAL (some paths) · NOT FOUND (no check recognized — not a proof of absence) · runtime (enforced by Solana).
+
+Program: sBPF v0, 176621 instructions, 872 functions, Anchor (with IDL). Machine-readable: analysis.json.
+
+## Findings (ranked; rule engine over the facts: leads to review, not verdicts)
+
+- [low] **signer-not-related-to-authority** · close_limit_order · signer · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_limit_order · signer · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_permission_pda · owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_permission_pda · owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_position · nft_owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_position · nft_owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_protocol_position · admin · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_protocol_position · admin · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_support_mint_associated · owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- [low] **signer-not-related-to-authority** · close_support_mint_associated · owner · fn_13e190:21 — st64(ld64(l + 0x18), 0)
+- by rule: signer-not-related-to-authority 10
+
+## Instructions (most sensitive first)
+
+- **create_permissioned_pool** — score 80 · [create_permissioned_pool.md](create_permissioned_pool.md) · ../bundle/create_permissioned_pool.ts
+  - signers: payer (found)
+  - WRITE pool_state.data[391..393] (=)
+  - DERIVE PDA ["support_mint", *s128]
+  - WRITE pool_state.data[8..9] (=)
+  - WRITE pool_state.data[33..41] (=)
+  - WRITE pool_state.data[25..33] (=)
+  - WRITE pool_state.data[17..25] (=)
+  - WRITE pool_state.data[9..17] (=)
+  - WRITE pool_state.data[97..105] (=)
+  - WRITE pool_state.data[89..97] (=)
+  - WRITE pool_state.data[81..89] (=)
+  - WRITE pool_state.data[73..81] (=)
+  - WRITE pool_state.data[129..137] (=)
+  - … 43 more (see create_permissioned_pool.md)
+  - ⚠ permission: pda expected, no check found
+  - ⚠ pool_state: pda expected, no check found
+  - ⚠ token_vault_0: pda expected, no check found
+  - ⚠ token_vault_0: writable expected, no check found
+  - ⚠ token_vault_1: pda expected, no check found
+  - ⚠ token_vault_1: writable expected, no check found
+- **create_customizable_pool** — score 78 · [create_customizable_pool.md](create_customizable_pool.md) · ../bundle/create_customizable_pool.ts
+  - signers: pool_creator (found)
+  - DERIVE PDA ["support_mint", *s128]
+  - WRITE pool_state.data[8..9] (=)
+  - WRITE pool_state.data[33..41] (=)
+  - WRITE pool_state.data[25..33] (=)
+  - WRITE pool_state.data[17..25] (=)
+  - WRITE pool_state.data[9..17] (=)
+  - WRITE pool_state.data[97..105] (=)
+  - WRITE pool_state.data[89..97] (=)
+  - WRITE pool_state.data[81..89] (=)
+  - WRITE pool_state.data[73..81] (=)
+  - WRITE pool_state.data[129..137] (=)
+  - WRITE pool_state.data[121..129] (=)
+  - … 43 more (see create_customizable_pool.md)
+  - ⚠ pool_state: pda expected, no check found
+  - ⚠ token_vault_0: pda expected, no check found
+  - ⚠ token_vault_0: writable expected, no check found
+  - ⚠ token_vault_1: pda expected, no check found
+  - ⚠ token_vault_1: writable expected, no check found
+  - ⚠ observation_state: pda expected, no check found
+- **create_pool** — score 64 · [create_pool.md](create_pool.md) · ../bundle/create_pool.ts
+  - signers: pool_creator (found)
+  - DERIVE PDA ["support_mint", *s128]
+  - WRITE pool_state.data[8..9] (=)
+  - WRITE pool_state.data[33..41] (=)
+  - WRITE pool_state.data[25..33] (=)
+  - WRITE pool_state.data[17..25] (=)
+  - WRITE pool_state.data[9..17] (=)
+  - WRITE pool_state.data[97..105] (=)
+  - WRITE pool_state.data[89..97] (=)
+  - WRITE pool_state.data[81..89] (=)
+  - WRITE pool_state.data[73..81] (=)
+  - WRITE pool_state.data[129..137] (=)
+  - WRITE pool_state.data[121..129] (=)
+  - … 29 more (see create_pool.md)
+  - ⚠ pool_state: pda expected, no check found
+  - ⚠ token_vault_0: pda expected, no check found
+  - ⚠ token_vault_0: writable expected, no check found
+  - ⚠ token_vault_1: pda expected, no check found
+  - ⚠ token_vault_1: writable expected, no check found
+  - ⚠ observation_state: pda expected, no check found
+- **open_position_v2** — score 62 · [open_position_v2.md](open_position_v2.md) · ../bundle/open_position_v2.ts
+  - signers: payer (found), position_nft_mint (PARTIAL)
+  - DERIVE PDA ["position", *s1b8]
+  - DERIVE PDA ["tick_array", *cw, u32 bswap32(ld64(s8a0 + 0x70)) [ix data?]]
+  - DERIVE PDA ["tick_array", *s108, u32 bswap32(ld64(s8a0 + 0x78)) [ix data?]]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+  - CPI: CPI → program not decoded (PDA-signed)
+  - DERIVE PDA ["tick_array", *aj, u32 bswap32(f)]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *b]
+  - DERIVE PDA ["pool", *(ad + 1), *(ad + 0x41), *(ad + 0x61), (ae != 0 ? ad + 0x17f : 1)[..(ae != 0) << 1], ad[..1]]
+  - … 11 more (see open_position_v2.md)
+  - ⚠ position_nft_account: pda expected, no check found
+  - ⚠ metadata_account: writable expected, no check found
+  - ⚠ tick_array_lower: pda expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: pda expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+- **open_position** — score 60 · [open_position.md](open_position.md) · ../bundle/open_position.ts
+  - signers: payer (found), position_nft_mint (PARTIAL)
+  - DERIVE PDA ["position", *s138]
+  - DERIVE PDA ["tick_array", *cl, u32 bswap32(ld64(s790 + 0x70)) [ix data?]]
+  - DERIVE PDA ["tick_array", *s88, u32 bswap32(ld64(s790 + 0x78)) [ix data?]]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+  - CPI: CPI → program not decoded (PDA-signed)
+  - DERIVE PDA ["tick_array", *aj, u32 bswap32(f)]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *b]
+  - DERIVE PDA ["pool", *(ad + 1), *(ad + 0x41), *(ad + 0x61), (ae != 0 ? ad + 0x17f : 1)[..(ae != 0) << 1], ad[..1]]
+  - … 11 more (see open_position.md)
+  - ⚠ position_nft_account: pda expected, no check found
+  - ⚠ metadata_account: writable expected, no check found
+  - ⚠ tick_array_lower: pda expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: pda expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+- **open_position_with_token22_nft** — score 51 · [open_position_with_token22_nft.md](open_position_with_token22_nft.md) · ../bundle/open_position_with_token22_nft.ts
+  - signers: payer (found), position_nft_mint (found)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount
+  - CPI: CPI → program not decoded (PDA-signed)
+  - DERIVE PDA ["tick_array", *aj, u32 bswap32(f)]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *b]
+  - DERIVE PDA ["pool", *(ad + 1), *(ad + 0x41), *(ad + 0x61), (ae != 0 ? ad + 0x17f : 1)[..(ae != 0) << 1], ad[..1]]
+  - DERIVE PDA ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bv != 0 ? bw : 1)[..(bv != 0) << 1], bu[..1]]
+  - DERIVE PDA ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bp != 0 ? bq : 1)[..(bp != 0) << 1], bo[..1]]
+  - CPI: CPI → program not decoded
+  - MINT: CPI → TOKEN_2022_PROGRAM.MintTo (PDA-signed)
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - … 6 more (see open_position_with_token22_nft.md)
+  - ⚠ position_nft_mint: writable expected, no check found
+  - ⚠ position_nft_account: writable expected, no check found
+  - ⚠ tick_array_lower: pda expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: pda expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+- **initialize_reward** — score 33 · [initialize_reward.md](initialize_reward.md) · ../bundle/initialize_reward.ts
+  - signers: reward_funder (found)
+  - DERIVE PDA ["support_mint", *s128]
+  - WRITE pool_state.recent_epoch (=)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CPI: CPI → program not decoded (PDA-signed)
+  - ⚠ funder_token_account: writable expected, no check found
+  - ⚠ operation_state: pda expected, no check found
+  - ⚠ reward_token_vault: pda expected, no check found
+  - ⚠ reward_token_vault: writable expected, no check found
+  - ⚠ system_program: address expected, no check found
+  - ⚠ rent: address expected, no check found
+- **close_position** — score 29 · [close_position.md](close_position.md) · ../bundle/close_position.ts
+  - signers: nft_owner (found)
+  - DERIVE PDA ["position", *ao]
+  - CLOSE: CPI → TOKEN_2022_PROGRAM.CloseAccount (PDA-signed)
+  - BURN: CPI → TOKEN_2022_PROGRAM.Burn (PDA-signed)
+  - LAMPORT IN owner.lamports
+  - CLOSE (lamports = 0) permission.lamports
+  - CLOSE (lamports = 0) support_mint_associated.lamports
+  - LAMPORT IN nft_owner.lamports
+  - LAMPORT IN admin.lamports
+  - ⚠ personal_position: pda expected, no check found
+  - ⚠ personal_position: writable expected, no check found
+- **close_protocol_position** — score 22 · [close_protocol_position.md](close_protocol_position.md) · ../bundle/close_protocol_position.ts
+  - signers: admin (found)
+  - LAMPORT IN owner.lamports
+  - CLOSE (lamports = 0) permission.lamports
+  - CLOSE (lamports = 0) support_mint_associated.lamports
+  - LAMPORT IN nft_owner.lamports
+  - LAMPORT IN admin.lamports
+  - ⚠ admin: address expected, no check found
+- **close_support_mint_associated** — score 22 · [close_support_mint_associated.md](close_support_mint_associated.md) · ../bundle/close_support_mint_associated.ts
+  - signers: owner (found)
+  - DERIVE PDA ["support_mint", *aj]
+  - LAMPORT IN owner.lamports
+  - CLOSE (lamports = 0) permission.lamports
+  - CLOSE (lamports = 0) support_mint_associated.lamports
+  - LAMPORT IN nft_owner.lamports
+  - LAMPORT IN admin.lamports
+  - ⚠ support_mint_associated: pda expected, no check found
+- **open_limit_order** — score 21 · [open_limit_order.md](open_limit_order.md) · ../bundle/open_limit_order.ts
+  - signers: payer (PARTIAL)
+  - DERIVE PDA ["tick_array", *w, u32 bswap32(v)]
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - DERIVE PDA ["tick_array", *aj, u32 bswap32(f)]
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - ⚠ payer: writable expected, no check found
+  - ⚠ tick_array: writable expected, no check found
+  - ⚠ limit_order: pda expected, no check found
+  - ⚠ input_token_account: writable expected, no check found
+  - ⚠ output_token_account: writable expected, no check found
+  - ⚠ system_program: address expected, no check found
+- **close_limit_order** — score 20 · [close_limit_order.md](close_limit_order.md) · ../bundle/close_limit_order.ts
+  - signers: signer (found)
+  - LAMPORT IN owner.lamports
+  - CLOSE (lamports = 0) permission.lamports
+  - CLOSE (lamports = 0) support_mint_associated.lamports
+  - LAMPORT IN nft_owner.lamports
+  - LAMPORT IN admin.lamports
+- **close_permission_pda** — score 20 · [close_permission_pda.md](close_permission_pda.md) · ../bundle/close_permission_pda.ts
+  - signers: owner (found)
+  - LAMPORT IN owner.lamports
+  - CLOSE (lamports = 0) permission.lamports
+  - CLOSE (lamports = 0) support_mint_associated.lamports
+  - LAMPORT IN nft_owner.lamports
+  - LAMPORT IN admin.lamports
+- **decrease_liquidity_v2** — score 17 · [decrease_liquidity_v2.md](decrease_liquidity_v2.md) · ../bundle/decrease_liquidity_v2.ts
+  - signers: nft_owner (found)
+  - DERIVE PDA ["pool", *(ld64(s280 + 0x18)), *(ld64(s280 + 0x10)), *(ld64(s280 + 8)), al[..(ak != 0) << 1], y[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *am]
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - DERIVE PDA ["pool", *(h + 1), *(h + 0x41), *(h + 0x61), (i != 0 ? h + 0x17f : 1)[..(i != 0) << 1], h[..1]]
+  - DERIVE PDA ["pool", *(h + 1), *(ld64(s408 + 8)), *(ld64(s408 + 0x10)), af[..(ae != 0) << 1], ad[..1]]
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (f != 0 ? b + 0x17f : 1)[..(f != 0) << 1], b[..1]]
+  - ⚠ personal_position: writable expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+  - ⚠ recipient_token_account_0: writable expected, no check found
+  - ⚠ recipient_token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+- **collect_remaining_rewards** — score 16 · [collect_remaining_rewards.md](collect_remaining_rewards.md) · ../bundle/collect_remaining_rewards.ts
+  - signers: reward_funder (found)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - ⚠ funder_token_account: writable expected, no check found
+  - ⚠ reward_token_vault: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+  - ⚠ token_program_2022: address expected, no check found
+  - ⚠ memo_program: address expected, no check found
+- **create_operation_account** — score 15 · [create_operation_account.md](create_operation_account.md) · ../bundle/create_operation_account.ts
+  - signers: owner (found)
+  - DERIVE PDA ["operation"]
+  - WRITE owner.data[8..9] (=)
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+  - ⚠ owner: address expected, no check found
+- **decrease_limit_order** — score 15 · [decrease_limit_order.md](decrease_limit_order.md) · ../bundle/decrease_limit_order.ts
+  - signers: owner (found)
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - ⚠ limit_order: writable expected, no check found
+  - ⚠ input_token_account: writable expected, no check found
+  - ⚠ output_token_account: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+  - ⚠ token_program_2022: address expected, no check found
+- **collect_fund_fee** — score 14 · [collect_fund_fee.md](collect_fund_fee.md) · ../bundle/collect_fund_fee.ts
+  - signers: owner (found)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - ⚠ recipient_token_account_0: writable expected, no check found
+  - ⚠ recipient_token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+  - ⚠ token_program_2022: address expected, no check found
+- **collect_protocol_fee** — score 14 · [collect_protocol_fee.md](collect_protocol_fee.md) · ../bundle/collect_protocol_fee.ts
+  - signers: owner (found)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - ⚠ recipient_token_account_0: writable expected, no check found
+  - ⚠ recipient_token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+  - ⚠ token_program_2022: address expected, no check found
+- **create_amm_config** — score 14 · [create_amm_config.md](create_amm_config.md) · ../bundle/create_amm_config.ts
+  - signers: owner (found)
+  - DERIVE PDA ["amm_config", u16 bswap16(j) [ix data?]]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+  - ⚠ owner: address expected, no check found
+- **create_dynamic_fee_config** — score 14 · [create_dynamic_fee_config.md](create_dynamic_fee_config.md) · ../bundle/create_dynamic_fee_config.ts
+  - signers: owner (found)
+  - DERIVE PDA ["dynamic_fee_config", u16 bswap16(j) [ix data?]]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+  - ⚠ owner: address expected, no check found
+- **set_reward_params** — score 14 · [set_reward_params.md](set_reward_params.md) · ../bundle/set_reward_params.ts
+  - signers: authority (found)
+  - DERIVE PDA ["operation"]
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - ⚠ operation_state: pda expected, no check found
+  - ⚠ token_program_2022: address expected, no check found
+- **decrease_liquidity** — score 13 · [decrease_liquidity.md](decrease_liquidity.md) · ../bundle/decrease_liquidity.ts
+  - signers: nft_owner (found)
+  - DERIVE PDA ["pool", *(ld64(s280 + 0x18)), *(ld64(s280 + 0x10)), *(ld64(s280 + 8)), al[..(ak != 0) << 1], y[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *am]
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - DERIVE PDA ["pool", *(h + 1), *(h + 0x41), *(h + 0x61), (i != 0 ? h + 0x17f : 1)[..(i != 0) << 1], h[..1]]
+  - DERIVE PDA ["pool", *(h + 1), *(ld64(s408 + 8)), *(ld64(s408 + 0x10)), af[..(ae != 0) << 1], ad[..1]]
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (f != 0 ? b + 0x17f : 1)[..(f != 0) << 1], b[..1]]
+  - ⚠ personal_position: writable expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+  - ⚠ recipient_token_account_0: writable expected, no check found
+  - ⚠ recipient_token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+- **increase_liquidity** — score 13 · [increase_liquidity.md](increase_liquidity.md) · ../bundle/increase_liquidity.ts
+  - signers: nft_owner (found)
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *ay]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *b]
+  - DERIVE PDA ["pool", *(ad + 1), *(ad + 0x41), *(ad + 0x61), (ae != 0 ? ad + 0x17f : 1)[..(ae != 0) << 1], ad[..1]]
+  - DERIVE PDA ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bv != 0 ? bw : 1)[..(bv != 0) << 1], bu[..1]]
+  - DERIVE PDA ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bp != 0 ? bq : 1)[..(bp != 0) << 1], bo[..1]]
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - TOKEN MOVE: CPI → TOKEN_PROGRAM.Transfer
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (f != 0 ? b + 0x17f : 1)[..(f != 0) << 1], b[..1]]
+  - ⚠ personal_position: writable expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+  - ⚠ token_account_0: writable expected, no check found
+  - ⚠ token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+- **create_permission_pda** — score 12 · [create_permission_pda.md](create_permission_pda.md) · ../bundle/create_permission_pda.ts
+  - signers: owner (found)
+  - DERIVE PDA ["permission", *y]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+- **create_support_mint_associated** — score 12 · [create_support_mint_associated.md](create_support_mint_associated.md) · ../bundle/create_support_mint_associated.ts
+  - signers: owner (found)
+  - DERIVE PDA ["support_mint", *aa]
+  - LAMPORT MOVE: CPI → SYSTEM_PROGRAM.Transfer
+  - ASSIGN owner: CPI → SYSTEM_PROGRAM.Assign (PDA-signed)
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccount (PDA-signed)
+- **increase_limit_order** — score 6 · [increase_limit_order.md](increase_limit_order.md) · ../bundle/increase_limit_order.ts
+  - signers: owner (found)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - DERIVE PDA ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]]
+  - DERIVE PDA ["pool_tick_array_bitmap_extension", *s48]
+  - WRITE pool_state.tick_array_bitmap (=)
+  - ⚠ limit_order: writable expected, no check found
+  - ⚠ input_token_account: writable expected, no check found
+- **swap_v2** — score 6 · [swap_v2.md](swap_v2.md) · ../bundle/swap_v2.ts
+  - signers: payer (found)
+  - DERIVE PDA ["pool", *(ld64(s458 + 8)), *(ld64(s430 + 0x20)), *(ld64(s458)), bb[..(ba != 0) << 1], az[..1]]
+  - ⚠ pool_state: writable expected, no check found
+  - ⚠ input_token_account: writable expected, no check found
+  - ⚠ output_token_account: writable expected, no check found
+  - ⚠ input_vault: writable expected, no check found
+  - ⚠ output_vault: writable expected, no check found
+  - ⚠ observation_state: writable expected, no check found
+- **settle_limit_order** — score 5 · [settle_limit_order.md](settle_limit_order.md) · ../bundle/settle_limit_order.ts
+  - signers: signer (found)
+  - TOKEN MOVE: CPI → TOKEN_2022_PROGRAM.TransferChecked
+  - ⚠ limit_order: writable expected, no check found
+  - ⚠ output_token_account: writable expected, no check found
+- **increase_liquidity_v2** — score 4 · [increase_liquidity_v2.md](increase_liquidity_v2.md) · ../bundle/increase_liquidity_v2.ts
+  - signers: nft_owner (found)
+  - ⚠ personal_position: writable expected, no check found
+  - ⚠ tick_array_lower: writable expected, no check found
+  - ⚠ tick_array_upper: writable expected, no check found
+  - ⚠ token_account_0: writable expected, no check found
+  - ⚠ token_account_1: writable expected, no check found
+  - ⚠ token_program: address expected, no check found
+- **update_operation_account** — score 4 · [update_operation_account.md](update_operation_account.md) · ../bundle/update_operation_account.ts
+  - signers: owner (found)
+  - DERIVE PDA ["operation"]
+  - ⚠ owner: address expected, no check found
+  - ⚠ operation_state: pda expected, no check found
+- **idl_create_account** — score 3 · [idl_create_account.md](idl_create_account.md) · ../bundle/idl_create_account.ts
+  - signers: none found
+  - DERIVE PDA ?
+  - CREATE: CPI → SYSTEM_PROGRAM.CreateAccountWithSeed (PDA-signed)
+- **update_pool_status** — score 3 · [update_pool_status.md](update_pool_status.md) · ../bundle/update_pool_status.ts
+  - signers: authority (found)
+  - WRITE pool_state.status (=)
+  - ⚠ authority: address expected, no check found
+- **swap** — score 2 · [swap.md](swap.md) · ../bundle/swap.ts
+  - signers: payer (found)
+  - DERIVE PDA ["pool", *(ld64(s3d8 + 0x40)), *x, *(ld64(s458 + 0x20)), ax[..(aw != 0) << 1], av[..1]]
+  - ⚠ pool_state: writable expected, no check found
+  - ⚠ input_token_account: writable expected, no check found
+  - ⚠ output_token_account: writable expected, no check found
+  - ⚠ input_vault: writable expected, no check found
+  - ⚠ output_vault: writable expected, no check found
+  - ⚠ observation_state: writable expected, no check found
+- **swap_router_base_in** — score 2 · [swap_router_base_in.md](swap_router_base_in.md) · ../bundle/swap_router_base_in.ts
+  - signers: payer (found)
+  - DERIVE PDA ["pool", *(ld64(s458 + 8)), *(ld64(s430 + 0x20)), *(ld64(s458)), bb[..(ba != 0) << 1], az[..1]]
+  - ⚠ input_token_mint: writable expected, no check found
+  - ⚠ memo_program: address expected, no check found
+- **transfer_reward_owner** — score 2 · [transfer_reward_owner.md](transfer_reward_owner.md) · ../bundle/transfer_reward_owner.ts
+  - signers: authority (found)
+  - ⚠ authority: address expected, no check found
+- **update_amm_config** — score 2 · [update_amm_config.md](update_amm_config.md) · ../bundle/update_amm_config.ts
+  - signers: owner (found)
+  - ⚠ owner: address expected, no check found
+- **update_dynamic_fee_config** — score 2 · [update_dynamic_fee_config.md](update_dynamic_fee_config.md) · ../bundle/update_dynamic_fee_config.ts
+  - signers: owner (found)
+  - ⚠ owner: address expected, no check found
+- **idl_close_account** — score 0 · [idl_close_account.md](idl_close_account.md) · ../bundle/idl_close_account.ts
+  - signers: none found
+- **idl_set_buffer** — score 0 · [idl_set_buffer.md](idl_set_buffer.md) · ../bundle/idl_set_buffer.ts
+  - signers: none found
+- **update_reward_infos** — score 0 · [update_reward_infos.md](update_reward_infos.md) · ../bundle/update_reward_infos.ts
+  - signers: none found
+
+## Operations not attributed to an instruction
+
+In functions no handler reaches through direct calls (called through function pointers / dispatch tables, or dead code):
+
+- ix/create_pool.ts:933 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer { from: ?, to: ? } [lib: anchor_lang::system_program::transfer]
+- ix/create_pool.ts:1304 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/create_pool.ts:1666 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/open_position_with_token22_nft.ts:1081 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/open_limit_order.ts:1106 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer { from: ?, to: ? } [lib: anchor_lang::system_program::transfer]
+- ix/open_limit_order.ts:1811 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer { from: ?, to: ? } [lib: anchor_lang::system_program::transfer]
+- ix/create_customizable_pool.ts:937 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer { from: ?, to: ? } [lib: anchor_lang::system_program::transfer]
+- ix/create_customizable_pool.ts:1308 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/create_customizable_pool.ts:1670 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/create_permissioned_pool.ts:1054 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer { from: ?, to: ? } [lib: anchor_lang::system_program::transfer]
+- ix/create_permissioned_pool.ts:1432 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/create_permissioned_pool.ts:1794 CPI, LAMPORT_TRANSFER: CPI SYSTEM_PROGRAM.Transfer [lib: anchor_lang::system_program::transfer]
+- ix/create_pool.ts:1003 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_pool.ts:1054 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_pool.ts:1370 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_pool.ts:1424 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_pool.ts:1732 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_pool.ts:1786 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/open_position_with_token22_nft.ts:1147 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/open_position_with_token22_nft.ts:1201 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/open_limit_order.ts:1166 CPI, OWNER_ASSIGN: CPI SYSTEM_PROGRAM.Assign [lib: anchor_lang::system_program::assign]
+- ix/open_limit_order.ts:1224 CPI, OWNER_ASSIGN: CPI SYSTEM_PROGRAM.Assign [lib: anchor_lang::system_program::assign]
+- ix/open_limit_order.ts:1883 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/open_limit_order.ts:1938 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- ix/create_customizable_pool.ts:1007 CPI, OWNER_ASSIGN, PDA_SIGNATURE: CPI SYSTEM_PROGRAM.Assign { account_to_assign: ? } (PDA-signed) [lib: anchor_lang::system_program::assign]
+- … 23 more in analysis.json
+
+## PDAs
+
+- seeds ["support_mint", *s128], program *s108 — derived in create_permissioned_pool, create_customizable_pool, create_pool, initialize_reward
+- seeds ? (1 seeds), program (caller: this program) — signs in create_permissioned_pool, create_customizable_pool, create_pool, open_position_v2, open_position, open_position_with_token22_nft, initialize_reward, open_limit_order, create_operation_account, create_amm_config, create_dynamic_fee_config, create_permission_pda, create_support_mint_associated
+- seeds ["position", *s1b8], program *(ld64(s2e0)) — derived in open_position_v2
+- seeds ["tick_array", *cw, u32 bswap32(ld64(s8a0 + 0x70)) [ix data?]], program *(ld64(s2e0)) — derived in open_position_v2
+- seeds ["tick_array", *s108, u32 bswap32(ld64(s8a0 + 0x78)) [ix data?]], program *(ld64(s2e0)) — derived in open_position_v2
+- seeds ["tick_array", *aj, u32 bswap32(f)], program *s150 — derived in open_position_v2, open_position, open_position_with_token22_nft, open_limit_order
+- seeds ["pool_tick_array_bitmap_extension", *b], program *s20 — derived in open_position_v2, open_position, open_position_with_token22_nft, increase_liquidity
+- seeds ["pool", *(ad + 1), *(ad + 0x41), *(ad + 0x61), (ae != 0 ? ad + 0x17f : 1)[..(ae != 0) << 1], ad[..1]], program *s148 — derived in open_position_v2, open_position, open_position_with_token22_nft, increase_liquidity
+- seeds ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bv != 0 ? bw : 1)[..(bv != 0) << 1], bu[..1]], program *s148 — derived in open_position_v2, open_position, open_position_with_token22_nft, increase_liquidity
+- seeds ["pool", *(ld64(s5b0)), *(ld64(s5a8)), *(ld64(s5a8 + 8)), (bp != 0 ? bq : 1)[..(bp != 0) << 1], bo[..1]], program *s28 — derived in open_position_v2, open_position, open_position_with_token22_nft, increase_liquidity
+- seeds ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (u != 0 ? b + 0x17f : 1)[..(u != 0) << 1], b[..1]], program *s28 — derived in open_position_v2, open_position, open_position_with_token22_nft, open_limit_order, decrease_liquidity_v2, decrease_limit_order, decrease_liquidity, increase_liquidity, increase_limit_order
+- seeds ["pool_tick_array_bitmap_extension", *s48], program *sc8 — derived in open_position_v2, open_position, open_position_with_token22_nft, open_limit_order, decrease_liquidity_v2, decrease_limit_order, decrease_liquidity, increase_liquidity, increase_limit_order
+- seeds ["pool", *(b + 1), *(b + 0x41), *(b + 0x61), (f != 0 ? b + 0x17f : 1)[..(f != 0) << 1], b[..1]], program *s28 — derived in open_position_v2, open_position, open_position_with_token22_nft, decrease_liquidity_v2, decrease_liquidity, increase_liquidity
+- seeds ? (an seeds), program (caller: this program) — signs in open_position_v2, open_position, open_position_with_token22_nft, close_position
+- seeds ["position", *s138], program *(ld64(s260)) — derived in open_position
+- seeds ["tick_array", *cl, u32 bswap32(ld64(s790 + 0x70)) [ix data?]], program *(ld64(s260)) — derived in open_position
+- seeds ["tick_array", *s88, u32 bswap32(ld64(s790 + 0x78)) [ix data?]], program *(ld64(s260)) — derived in open_position
+- seeds ["position", *ao], program *(ld64(s3a8 + 0x30)) — derived in close_position
+- seeds ? (ao seeds), program (caller: this program) — signs in close_position
+- seeds ["support_mint", *aj], program *b — derived in close_support_mint_associated
+- seeds ["tick_array", *w, u32 bswap32(v)], program *s38 — derived in open_limit_order
+- seeds ["pool", *(ld64(s280 + 0x18)), *(ld64(s280 + 0x10)), *(ld64(s280 + 8)), al[..(ak != 0) << 1], y[..1]], program *s78 — derived in decrease_liquidity_v2, decrease_liquidity
+- seeds ["pool_tick_array_bitmap_extension", *am], program *s48 — derived in decrease_liquidity_v2, decrease_liquidity
+- seeds ["pool", *(h + 1), *(h + 0x41), *(h + 0x61), (i != 0 ? h + 0x17f : 1)[..(i != 0) << 1], h[..1]], program *s50 — derived in decrease_liquidity_v2, decrease_liquidity
+- seeds ["pool", *(h + 1), *(ld64(s408 + 8)), *(ld64(s408 + 0x10)), af[..(ae != 0) << 1], ad[..1]], program *s50 — derived in decrease_liquidity_v2, decrease_liquidity
+- seeds ["operation"], program *b — derived in create_operation_account, update_operation_account — seeds constraint on create_operation_account.operation_state (found)
+- seeds ["amm_config", u16 bswap16(j) [ix data?]], program *b — derived in create_amm_config — seeds constraint on create_amm_config.amm_config (found)
+- seeds ["dynamic_fee_config", u16 bswap16(j) [ix data?]], program *b — derived in create_dynamic_fee_config — seeds constraint on create_dynamic_fee_config.dynamic_fee_config (found)
+- seeds ["operation"], program *(ld64(s238 + 0x18)) — derived in set_reward_params
+- seeds ["pool_tick_array_bitmap_extension", *ay], program *sb8 — derived in increase_liquidity
+- seeds ["permission", *y], program *b — derived in create_permission_pda — seeds constraint on create_permission_pda.permission (found)
+- seeds ["support_mint", *aa], program *(ld64(s3f8 + 0x10)) — derived in create_support_mint_associated — seeds constraint on create_support_mint_associated.support_mint_associated (found)
+- seeds ["pool", *(ld64(s458 + 8)), *(ld64(s430 + 0x20)), *(ld64(s458)), bb[..(ba != 0) << 1], az[..1]], program *s78 — derived in swap_v2, swap_router_base_in
+- seeds ?, program ? — derived in idl_create_account
+- seeds [? (1 bytes)], program (caller: this program) — signs in idl_create_account
+- seeds ["pool", *(ld64(s3d8 + 0x40)), *x, *(ld64(s458 + 0x20)), ax[..(aw != 0) << 1], av[..1]], program *s28 — derived in swap
+
+## State writes (account.field ← instructions)
+
+- admin.lamports ← close_position (+=), close_protocol_position (+=), close_support_mint_associated (+=), close_limit_order (+=), close_permission_pda (+=)
+- nft_owner.lamports ← close_position (+=), close_protocol_position (+=), close_support_mint_associated (+=), close_limit_order (+=), close_permission_pda (+=)
+- owner.data[8..9] ← create_operation_account (=)
+- owner.lamports ← close_position (+=), close_protocol_position (+=), close_support_mint_associated (+=), close_limit_order (+=), close_permission_pda (+=)
+- permission.lamports ← close_position (=), close_protocol_position (=), close_support_mint_associated (=), close_limit_order (=), close_permission_pda (=)
+- pool_state.data[105..113] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[1080..1088] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[1088..1176] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[1096..1098] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1098..1100] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1100..1102] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1102..1106] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1106..1110] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1110..1114] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1114..1122] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1122..1130] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[113..121] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[1130..1138] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1138..1146] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1146..1154] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1154..1162] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1162..1170] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[1168..1176] ← create_permissioned_pool (=), create_customizable_pool (=)
+- pool_state.data[121..129] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[129..137] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[137..145] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[145..153] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[153..161] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[161..169] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[17..25] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[225..233] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[233..234] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[234..235] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[235..237] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[237..253] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[25..33] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[253..269] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[269..273] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[273..277] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[33..41] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[390..391] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[391..393] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[393..397] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[550..558] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[558..566] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[719..727] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[727..735] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[73..81] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[8..9] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[81..89] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[888..896] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[89..97] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[896..904] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[9..17] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.data[97..105] ← create_permissioned_pool (=), create_customizable_pool (=), create_pool (=)
+- pool_state.recent_epoch ← initialize_reward (=)
+- pool_state.status ← update_pool_status (=)
+- pool_state.tick_array_bitmap ← open_position_v2 (=), open_position (=), open_position_with_token22_nft (=), open_limit_order (=), decrease_liquidity_v2 (=), decrease_limit_order (=), decrease_liquidity (=), increase_liquidity (=), increase_limit_order (=)
+- support_mint_associated.lamports ← close_position (=), close_protocol_position (=), close_support_mint_associated (=), close_limit_order (=), close_permission_pda (=)

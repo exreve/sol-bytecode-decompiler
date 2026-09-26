@@ -74,6 +74,7 @@ export interface Op {
 	via?: string                  // the CPI is made through this (small) user function wrapping invoke
 	ret?: Expr                    // the returned expression making it (a site in a return statement: no pc)
 	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
+	handler?: number              // the Anchor handler whose accounts name the target (a store in a function several handlers call; flow.ts)
 }
 
 export interface Call { line: number; pc?: number; ret?: Expr; callee: number; main: boolean; errPath: boolean } // ret: the returned expression making the call (no pc)

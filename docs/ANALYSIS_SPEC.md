@@ -137,8 +137,10 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
 - Anchor try_accounts when the decompiler names none (the first function the handler calls whose checks name
   accounts) and the Accounts struct's &AccountInfo words its success path stores (one word from the call the check
-  right after names), with the decompiler's layout for the other accounts (analysis only: the printed views keep the
-  decompiler's); a zero-copy account's type by the IDL account type named like it; Anchor `zero` is a discriminator
+  right after names; the out object may be spilled to the frame and reloaded; two accounts of one type: the check
+  first in the flow after each call; an account whose call leaves several words: its call's first word), with the
+  decompiler's layout for the other accounts (analysis only: the printed views keep the decompiler's); a callee's
+  writes through a parameter it spills to its frame count for reaching definitions (not only the first 0x80 bytes); a zero-copy account's type by the IDL account type named like it; Anchor `zero` is a discriminator
   check; alignment asserts (a pointer's low bits masked) are not checks; a success return writing the Ok tag before an
   error raised first thing is not the failing side;
 - Anchor writes in the functions the handler passes its frame to (Context.accounts: object fields serialized back
@@ -147,9 +149,16 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
 - Anchor key comparisons (has_one, token::mint / token::authority) by the provenance of the compared bytes: the
   account whose try-call produced them (the check right after it names it), data vs key;
 - CPIs by library helper (anchor_lang::system_program, anchor_spl::token*: name, CpiContext accounts, signer
-  seeds), instruction builders and TokenInstruction::pack tags before an undecoded invoke (native: the builder's
-  arguments give the accounts); unnamed create / find_program_address by their syscall (analysis only).
+  seeds; CpiContext accounts the printed text leaves unnamed: its AccountInfo copies, the program's first, then the
+  accounts struct's in field order), instruction builders and TokenInstruction::pack tags before an undecoded invoke
+  (native: the builder's arguments give the accounts); unnamed create / find_program_address by their syscall
+  (analysis only);
+- Anchor stores in a function several handlers call (e.g. a close helper) named with one handler's accounts count
+  only for that handler's instruction.
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
 temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
-account object's neighbouring words are only a guess for the writes); value identity
+account object's neighbouring words are only a guess for the writes), e.g. an AccountInfo try_accounts takes straight
+from the accounts slice (a_escrow take: its close to maker is not attributed); per-instruction context covers Anchor
+helper stores, not native shared invoke sites (n_token payout / mint: recipient-unbound, the Config read via
+Pack::unpack); value identity
 follows one call path per function (the first found) and treats memory as unchanged between two reads.
