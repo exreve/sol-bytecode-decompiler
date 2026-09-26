@@ -155,6 +155,23 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   32-byte comparisons of values the function alone does not know as accounts wait for that context; pointers into
   the function's own frame are values too (a struct a helper filled from an account's data, copied around the frame:
   `config.admin == admin.key` through Config returned by a helper);
+  a call the evaluator follows gets its own budget of multiply-defined variables (64, shared with its callees'
+  evaluators): a value depends on the query only, not on the queries asked before;
+  a slice is also a base plus a variable count of 0x30-byte entries (an accounts iterator's end) or a pointer passed
+  to a callee that uses that parameter as a slice by its own evidence (2 levels: a processor only passing its accounts
+  on); an account's data plus a variable offset is its data (range unknown); a call given an account's data pointer
+  to a function storing through that parameter (itself or 2 levels of calls; not a pointer kept, not bytes only read)
+  writes the account's data (Pack::pack, a serializer);
+- native dispatch: a pc the IR duplicated into several blocks (match arms sharing a tail) is kept for an instruction
+  when a copy reached with some tags only is reached with its tags; an ix_ handler a dispatch arm hands over to gets the
+  arm's tag (`dispatch: tag N … handled by ix_x`; a default arm: its first tag when the other arms cover every tag below);
+- Anchor Box<Account<T>>: a word of the Accounts struct holding a heap copy of an account's try call out object (a
+  memcpy / copy into the allocation) is that account's boxed object; stores through it (and through a heap buffer a
+  word of it points to: a Vec's elements) are data writes of the account, the field by the exit function of its type;
+  a CPI a helper makes (a CpiContext given to anchor_spl / anchor_lang helpers) names its accounts by where their keys
+  come from up the call path; an account a local copy of Error::with_account_name names (a &str and its length);
+  a key comparison whose failing side calls Error::with_pubkeys and names the account holding it (no other constraint
+  kind) is has_one (`has_one = x @ ProgramError`), the field named after the other account;
 - Anchor try_accounts when the decompiler names none (the first function the handler calls whose checks name
   accounts) and the Accounts struct's &AccountInfo words its success path stores (one word from the call the check
   right after names; the out object may be spilled to the frame and reloaded; two accounts of one type: the check
