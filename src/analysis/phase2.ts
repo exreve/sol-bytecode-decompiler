@@ -208,7 +208,11 @@ export function phase2(a: Analysis, r: Result) {
 			// error names T, not f): by the bytes compared (c.sides), else the IDL's field names, else (no IDL) each signer)
 			if (c.kinds.includes('has_one') && c.account && !c.sides) {
 				const fields = idlFields(r, ix.handler, c.account)
-				const cands = fields ? ix.accounts.filter(x => x.name !== c.account && fields.has(x.name)) : ix.accounts.filter(x => x.name !== c.account && x.constraints.signer && x.constraints.signer.status !== 'not_found')
+				// (names compared snake_cased: IDLs before 0.30 use camelCase; the same account may appear under both)
+				const T = snakeName(c.account)
+				const byName = new Map<string, IxOut['accounts'][number]>()
+				for (const x of ix.accounts) { const k = snakeName(x.name); if (k !== T && (!byName.has(k) || x.constraints.signer)) byName.set(k, x) }
+				const cands = fields ? [...byName].filter(([k]) => fields.has(k)).map(([, x]) => x) : ix.accounts.filter(x => x.name !== c.account && x.constraints.signer && x.constraints.signer.status !== 'not_found')
 				for (const t of cands) rel.push({ a: fields ? `${c.account}.${t.name}` : hasOneField(c.account, t.name, c.cond, a), b: `${t.name}.key`, kind: 'has_one', status: c.status, at: c.at })
 			}
 			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
@@ -274,6 +278,8 @@ const initMechanics = (ix: IxOut, o: OpOut) => o.cpi?.family === 'system' && /^(
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
 const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
 
+const snakeName = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
+
 /** the fields of an account's IDL type (its type in the Accounts struct's layout, else any account type's; undefined without an IDL) */
 function idlFields(r: Result, handler: string, acct: string): Set<string> | undefined {
 	const idl = r.idl
@@ -283,7 +289,7 @@ function idlFields(r: Result, handler: string, acct: string): Set<string> | unde
 	const ty = t?.k === 'embed' ? t.type : t?.k === 'ref' && t.to !== 'AccountInfo' ? t.to : undefined
 	const types = ty && idl.accounts.some(x => x.name === ty) ? [ty] : idl.accounts.map(x => x.name)
 	const out = new Set<string>()
-	for (const x of types) for (const f of structFields(x, idl.types) ?? []) out.add(f.name)
+	for (const x of types) for (const f of structFields(x, idl.types) ?? []) out.add(snakeName(f.name))
 	return out
 }
 
@@ -333,7 +339,8 @@ const RULES: Rule[] = [
 			const signers = ix.accounts.some(x => x.constraints.signer && x.constraints.signer.status !== 'not_found') || ix.checks.some(c => c.kinds.includes('signer'))
 			if (signers) return []
 			// (the program signing for the move authorizes nobody in particular: low)
-			return ix.ops.filter(o => isValueOrAuth(o) && !runtimeAuthorized(o) && !initMechanics(ix, o)).slice(0, 3).map(o => {
+			// (Anchor's close constraint sends the lamports to its target: a cleanup anyone may run, unless the target is the caller's)
+			return ix.ops.filter(o => isValueOrAuth(o) && !runtimeAuthorized(o) && !initMechanics(ix, o) && !o.anchorClose).slice(0, 3).map(o => {
 				const pda = !!o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')
 				return { accounts: [...opAccounts(o)], path: [L(o.at)], evidence: [o.text.slice(0, 140), ...(pda ? ['the program signs it (PDA); no caller signature is required'] : [])], confidence: pda ? 'low' as const : 'medium' as const, weight: wOf(o) }
 			})

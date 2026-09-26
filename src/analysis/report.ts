@@ -85,6 +85,7 @@ export interface CheckOut {
 export interface OpOut {
 	at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda']
 	fnPc?: number; ret?: Expr                       // (internal)
+	anchorClose?: boolean                           // Anchor's `close` constraint (anchor_lang::common::close in the exit: lamports to the target, assign / realloc)
 	guards?: number[]                               // indices of the instruction's checks that dominate it (phase2.ts)
 	bypass?: { check: number; path: Loc[] }[]       // relevant checks that do not: a path reaching it without them
 	sources?: { param: string; source: string; trust: string }[] // taint: where its parameters come from (phase2.ts)
@@ -361,7 +362,7 @@ function analyze0(r: Result): Analysis {
 					kinds = [...new Set([...cpiKinds(h.family, h.ix), ...o.kinds])]
 					text = `CPI ${cpi.program}.${h.ix} [heur: the instruction built before it: ${h.how}]${o.cpi ? ` — ${o.text}` : ''}`
 				}
-				ops.push({ at, kinds, text: text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi, pda: o.pda, fnPc: ff.pc, ret: o.ret })
+				ops.push({ at, kinds, text: text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi, pda: o.pda, fnPc: ff.pc, ret: o.ret, anchorClose: r.anchor && kinds.includes('ACCOUNT_CLOSE') && !cpi && ff.lines.some(l => /\bAccountInfo_(assign|realloc|resize)\w*\(/.test(l)) || undefined })
 			}
 		}
 		// check statuses from real dominators (across calls), then the per-account constraints
