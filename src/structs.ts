@@ -22,7 +22,8 @@ export interface StructCfg {
 	fnName(pc: number): string
 	outParam(pc: number): boolean                 // its first parameter is an out pointer (named `ret`)
 	paramReg(callee: number, i: number): number   // the parameter register of a call's i-th argument
-	fieldHints?(pc: number, reg: number): { fields: Map<number, Field>; why: string } | undefined // known fields of a parameter's object (by offset), and where from
+	dataPtr?(pc: number, e: Expr): boolean         // a load giving an account's data pointer (acc.data.ptr)
+	fieldHints?(pc: number, reg: number): { fields?: Map<number, Field>; name?: (off: number, size: number) => string | undefined; why: string } | undefined // known fields of a parameter's object (by offset) or names of its accesses, and where from
 }
 
 interface Acc { off: number; size: number; n: number }
@@ -30,6 +31,7 @@ interface Cls {
 	acc: Map<string, Acc>          // `${off}:${size}` -> access count
 	ptr: Map<number, number>       // offset -> node the 8-byte field there points to
 	members: { pc: number; v: number }[]
+	data: { pc: number; v: number }[] // account data pointers (acc.data.ptr) it holds
 	opaque: boolean
 }
 
@@ -41,7 +43,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	const synth = new Set<string>() // the views made here
 	const parent: number[] = [], cls: Cls[] = []
 	const find = (x: number): number => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x] } return x }
-	const fresh = (): number => { const id = parent.length; parent.push(id); cls.push({ acc: new Map(), ptr: new Map(), members: [], opaque: false }); return id }
+	const fresh = (): number => { const id = parent.length; parent.push(id); cls.push({ acc: new Map(), ptr: new Map(), members: [], data: [], opaque: false }); return id }
 	const nodeOf = new Map<number, Map<number, number | null>>() // pc -> var -> node
 
 	// the pointee node of a field (created on demand)
@@ -82,7 +84,12 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				if (d?.length === 1 && d[0].k === 'set') {
 					const e = d[0].e
 					busy.add(v)
-					if (e.k === 'load' && e.size === 8) { const b = base(e.addr); const bn = b && node(b.v); if (bn !== undefined) n = pointee(bn, b!.off) }
+					if (e.k === 'load' && e.size === 8) {
+						const b = base(e.addr); const bn = b && node(b.v)
+						if (bn !== undefined) n = pointee(bn, b!.off)
+						// (an account's data pointer, loaded from its typed RefCell box: an object of its own)
+						else if (cfg.dataPtr?.(pc, e)) { n = fresh(); cls[n].data.push({ pc, v }) }
+					}
 					else if (e.k === 'var') n = node(e.id)
 					busy.delete(v)
 				}
@@ -196,13 +203,9 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	}
 	for (const [memo, v] of arithVars) { const n = memo.get(v); if (n != null) cls[find(n)].opaque = true }
 	// ---- phase 2: unify along the edges, when the layouts agree ----
-	const calleeNode = (x: number): number | undefined => {
-		const k = -1 - x, cpc = Math.floor(k / 256), reg = k % 256
-		const f = cfg.built.get(cpc)?.f
-		const pv = f?.vars.find(v => v.param === reg)
-		const n = pv ? nodeOf.get(cpc)?.get(pv.id) : undefined
-		return n ?? undefined
-	}
+	const paramNode = new Map<number, number>() // cpc * 256 + reg -> node
+	for (const [pc, memo] of nodeOf) { const vs = cfg.built.get(pc)!.f.vars; for (const [v, n] of memo) if (n !== null && vs[v].param > 0) paramNode.set(pc * 256 + vs[v].param, n) }
+	const calleeNode = (x: number): number | undefined => paramNode.get(-1 - x)
 	/** do the classes of a and b agree (recursively through their pointer fields)? */
 	const agree = (a: number, b: number, seen: Set<string>): boolean => {
 		a = find(a); b = find(b)
@@ -212,9 +215,12 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		seen.add(k)
 		const A = cls[a], B = cls[b]
 		if (A.opaque !== B.opaque) return false
-		for (const x of A.acc.values()) for (const y of B.acc.values()) {
-			if (x.off === y.off && x.size === y.size) continue
-			if (x.off < y.off + y.size && y.off < x.off + x.size) return false
+		// (accesses of both sorted by offset: a different one overlapping)
+		const xs = [...[...A.acc.values()].map(x => ({ ...x, s: 0 })), ...[...B.acc.values()].map(x => ({ ...x, s: 1 }))].sort((x, y) => x.off - y.off || x.size - y.size)
+		for (let i = 0; i < xs.length; i++) {
+			const x = xs[i]
+			// (the accesses of the other class overlapping x, of another place or size)
+			for (let j = i + 1; j < xs.length && xs[j].off < x.off + x.size; j++) if (xs[j].s !== x.s && (xs[j].off !== x.off || xs[j].size !== x.size)) return false
 		}
 		for (const [o, t] of A.ptr) { const u = B.ptr.get(o); if (u !== undefined && !agree(t, u, seen)) return false }
 		return true
@@ -226,6 +232,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		parent[a] = b
 		for (const [k, x] of A.acc) { const y = B.acc.get(k); if (y) y.n += x.n; else B.acc.set(k, { ...x }) }
 		B.members.push(...A.members)
+		B.data.push(...A.data)
 		B.opaque ||= A.opaque
 		const pend: [number, number][] = []
 		for (const [o, t] of A.ptr) { const u = B.ptr.get(o); if (u === undefined) B.ptr.set(o, t); else pend.push([t, u]) }
@@ -310,7 +317,9 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		// the name: after a parameter it is (the first function's), else after the field pointing to it
 		const m = [...c.members].sort((x, y) => x.pc - y.pc)[0]
 		let name = hint
-		if (m) {
+		const dm = [...c.data].sort((x, y) => x.pc - y.pc)[0]
+		if (dm) name = `Data_${cfg.fnName(dm.pc).replace(/^fn_/, '')}`
+		else if (m) {
 			const info = cfg.built.get(m.pc)!.f.vars[m.v]
 			const pn = info.param === 1 && cfg.outParam(m.pc) ? 'ret' : info.param >= 100 ? `p${5 + info.param - 100}` : PARAM_NAMES[info.param]
 			name = `S_${cfg.fnName(m.pc).replace(/^fn_/, '')}_${pn}`
@@ -323,8 +332,14 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		synth.add(name)
 		// (names known for a member's fields, e.g. the Accounts struct try_accounts returns through its out parameter)
 		const hints = new Map<number, Field>()
-		let hintWhy: string | undefined
-		for (const x of c.members) { const h = cfg.fieldHints?.(x.pc, cfg.built.get(x.pc)!.f.vars[x.v].param); if (h) { hintWhy ??= h.why; for (const [o, f] of h.fields) if (!hints.has(o)) hints.set(o, f) } }
+		let hintWhy: string | undefined, hintName: ((off: number, size: number) => string | undefined) | undefined
+		for (const x of c.members) {
+			const h = cfg.fieldHints?.(x.pc, cfg.built.get(x.pc)!.f.vars[x.v].param)
+			if (!h || (hintWhy && hintWhy !== h.why)) continue
+			hintWhy ??= h.why
+			hintName ??= h.name
+			for (const [o, f] of h.fields ?? []) if (!hints.has(o)) hints.set(o, f)
+		}
 		const names = new Set<string>()
 		let hinted = 0
 		for (const a of chosen) {
@@ -332,10 +347,12 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 			const h = hints.get(a.off)
 			if (h && !names.has(h.name) && ((h.t.k === 'ref' && a.size === 8) || (h.t.k === 'scalar' && h.t.size === a.size))) { fields.push({ ...h, off: a.off }); names.add(h.name); hinted++; continue }
 			const t = a.size === 8 && c.ptr.has(a.off) && !empty(c.ptr.get(a.off)!) ? build(c.ptr.get(a.off)!, `${name}_${hex}`) : undefined
+			const hn = !t ? hintName?.(a.off, a.size) : undefined
+			if (hn && !names.has(hn)) { names.add(hn); hinted++; fields.push({ name: hn, off: a.off, t: { k: 'scalar', size: a.size as 1 | 2 | 4 | 8 } }); continue }
 			fields.push(t ? { name: `f${hex}_ref`, off: a.off, t: { k: 'ref', to: t } } : { name: `f${hex}_u${a.size * 8}`, off: a.off, t: { k: 'scalar', size: a.size as 1 | 2 | 4 | 8 } })
 		}
 		const fns = new Set(c.members.map(x => x.pc))
-		const where = m ? `parameter ${PARAM_NAMES[cfg.built.get(m.pc)!.f.vars[m.v].param] ?? 'p'} of ${cfg.fnName(m.pc)}${fns.size > 1 ? ` and ${fns.size - 1} more function${fns.size > 2 ? 's' : ''}` : ''}` : `the objects the field ${hint.replace(/_0x/, '.0x')} points to`
+		const where = dm ? `an account's data pointer (acc.data.ptr) in ${cfg.fnName(dm.pc)}${c.data.length > 1 || c.members.length ? ' and the functions it is passed to' : ''} (field offsets: in the account data)` : m ? `parameter ${PARAM_NAMES[cfg.built.get(m.pc)!.f.vars[m.v].param] ?? 'p'} of ${cfg.fnName(m.pc)}${fns.size > 1 ? ` and ${fns.size - 1} more function${fns.size > 2 ? 's' : ''}` : ''}` : `the objects the field ${hint.replace(/_0x/, '.0x')} points to`
 		view.doc = (`[heur] layout from the fixed-offset accesses through ${where} (fields: offset and size${hinted ? `; ${hinted} named after ${hintWhy}` : ''}; other bytes not described)`)
 		return name
 	}
@@ -347,6 +364,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		let m = out.get(pc); if (!m) out.set(pc, (m = new Map()))
 		m.set(v, t)
 	}
-	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 } // (locals: typed through their pointer field)
+	// (locals: typed through their pointer field, except account data pointers)
+	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 && !cls[find(nodeOf.get(pc)!.get(v)!)].data.some(x => x.pc === pc && x.v === v) }
 	return { types: out, synth }
 }

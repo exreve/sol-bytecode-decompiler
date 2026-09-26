@@ -233,6 +233,117 @@ function locateIn(p: Program, x: number, smp: Sample, boxAt: number | undefined)
 	return { at, info: infoIn(base) }
 }
 
+/**
+ * The in-memory layout of an account type no IDL describes (its discriminator known from the program's names):
+ * runs of the account-taking callee x on accounts of that type whose data after the discriminator holds bit
+ * patterns (run b: the byte at index i is bit b of i + 1), each output byte that is a copy of one data byte
+ * decoded from the runs it is 1 in, checked by two runs of pseudo-random bits. Leaves: runs of consecutive
+ * bytes copied in order, cut at their natural alignment (8 bytes at most), named after their offset in the
+ * account data (discriminator included): d0x21_u64. Only the fields before the first variable-length one
+ * (Option, Vec, String, enum payload) are found: the layout after it moves with the data.
+ */
+function probeLayout(p: Program, x: number, disc: bigint, owner: Uint8Array): { at: Map<string, SampleLeaf & { mem: number }>; info?: InfoAt; boxAt?: number } | undefined {
+	for (const n of [0x400, 0x2800]) {
+		const make = (f: (i: number) => number) => { const d: number[] = []; for (let j = 0; j < 8; j++) d.push(Number((disc >> BigInt(8 * j)) & 0xffn)); for (let i = 0; i < n; i++) d.push(f(i)); return d }
+		const run = (boxAt: number | undefined, f: (i: number) => number) => runAccountCallee(p, x, make(f), owner, [0, 1, 0], boxAt)
+		const base0 = run(undefined, () => 0)
+		if (!base0) continue
+		for (const boxAt of [undefined, ...heapWords(base0)]) {
+			const map = decodeCopies(f => run(boxAt, f), n)
+			if (!map || map.size < 8) continue
+			const base = run(boxAt, () => 0)!
+			return { at: copyLeaves(map, 8), info: infoIn(base), boxAt }
+		}
+	}
+	return undefined
+}
+
+/**
+ * The bytes of a run's output that copy one byte of its n-byte input each: output offset -> input index. Runs
+ * on zero input, then bit patterns (run b: the byte at index i is bit b of i + 1), each output byte decoded from
+ * the runs it is 1 in (0 in the zero run), checked by two runs of pseudo-random bits.
+ */
+function decodeCopies(run: (f: (i: number) => number) => Uint8Array | undefined, n: number): Map<number, number> | undefined {
+	const hash = (i: number, k: number) => (Math.imul(i + 1, 0x9e3779b1) ^ Math.imul(k, 0x85ebca6b)) >>> 16 & 1
+	const bits = Math.ceil(Math.log2(n + 1))
+	const base = run(() => 0)
+	if (!base) return undefined
+	const rs: Uint8Array[] = []
+	for (let b = 0; b < bits; b++) { const r = run(i => ((i + 1) >> b) & 1); if (!r) return undefined; rs.push(r) }
+	const v1 = run(i => hash(i, 1)), v2 = run(i => hash(i, 2))
+	if (!v1 || !v2) return undefined
+	const map = new Map<number, number>()
+	for (let m = 0; m < base.length; m++) {
+		if (base[m] !== 0) continue
+		let k = 0, ok = true
+		for (let b = 0; b < bits && ok; b++) { const v = rs[b][m]; if (v > 1) ok = false; else k |= v << b }
+		if (!ok || !k || k > n) continue
+		if (v1[m] === hash(k - 1, 1) && v2[m] === hash(k - 1, 2)) map.set(m, k - 1)
+	}
+	return map
+}
+
+/**
+ * Leaves of a copy map (output offset -> input index): runs of consecutive bytes copied in order, cut at their
+ * natural alignment (8 bytes at most), named after their offset in the account data (`shift`: the input's
+ * offset in it): d0x21_u64.
+ */
+function copyLeaves(map: Map<number, number>, shift: number): Map<string, SampleLeaf & { mem: number }> {
+	const at = new Map<string, SampleLeaf & { mem: number }>()
+	const ms = [...map.keys()].sort((a, b) => a - b)
+	for (let q = 0; q < ms.length;) {
+		let e = q + 1
+		while (e < ms.length && ms[e] === ms[e - 1] + 1 && map.get(ms[e]) === map.get(ms[e - 1])! + 1) e++
+		for (let m = ms[q]; m < ms[e - 1] + 1;) {
+			const left = ms[e - 1] + 1 - m
+			const size = [8, 4, 2, 1].find(z => z <= left && m % z === 0)!
+			const d = map.get(m)! + shift, nm = `d0x${d.toString(16)}_u${size * 8}`
+			at.set(nm, { path: nm, off: d - shift, size, kind: 'int', type: `u${size * 8}`, mem: m })
+			m += size
+		}
+		q = e
+	}
+	return at
+}
+
+const deserMemo = new WeakMap<Program, Map<number, Map<number, number> | null>>()
+/**
+ * A native program's deserializer of account data, x(out, data, len) (Borsh try_from_slice, Pack unpack, …): its
+ * output bytes that copy data bytes (output offset -> data offset; see decodeCopies), from runs on data of the
+ * length a run on 10 KiB of zeros reads (try_from_slice wants every byte read), else of 10 KiB.
+ */
+export function probeDeserializer(p: Program, x: number): Map<number, number> | undefined {
+	let memo = deserMemo.get(p)
+	if (!memo) deserMemo.set(p, (memo = new Map()))
+	if (memo.has(x)) return memo.get(x) ?? undefined
+	const DB = BASE + 0x1000n, N = 0x2800
+	let read = 0
+	const runN = (n: number, f: (i: number) => number, track = false) => {
+		const mem = new ExecMem(p, 5)
+		const d = new Uint8Array(n)
+		for (let i = 0; i < n; i++) d[i] = f(i)
+		mem.write(DB, d)
+		if (track) {
+			const note = (a: bigint, k: number) => { if (a >= DB && a < DB + BigInt(n)) read = Math.max(read, Math.min(n, Number(a - DB) + k)) }
+			mem.onLoad = (a, k) => note(a, k)
+			mem.onCopy = (a, b) => note(a, b.length)
+		}
+		const e = new Exec(p, mem, { maxSteps: 60_000 })
+		e.noPanic = true
+		const r = e.run(x, [OUT, DB, BigInt(n), 0n, 0n], 0x2_0000_3000n)
+		if (r.abort !== undefined || r.limit || r.stopped) return undefined
+		return mem.read(OUT, SIZE)
+	}
+	let res: Map<number, number> | undefined
+	if (runN(N, () => 0, true)) for (const n of [...new Set([read, N])]) {
+		if (n < 1) continue
+		const m = decodeCopies(f => runN(n, f), n)
+		if (m && m.size >= 4) { res = m; break }
+	}
+	memo.set(x, res ?? null)
+	return res
+}
+
 /** Views of a located layout: the object, nested structs and arrays of structs as element views. */
 function buildViews(views: Views, top: string, doc: string, at: Map<string, SampleLeaf & { mem: number }>, info: InfoAt | undefined): string | undefined {
 	const taken = (n: string) => views.map.has(n) || views.opaque.has(n)
@@ -388,10 +499,13 @@ export interface AccountObjs { boxes: Map<number, AccountObj>; inline: Map<numbe
  * followed through the frame word by word (stores of loaded words, memcpy/copy) in statement order.
  */
 export function accountObjects(p: Program, idl: IdlInfo | undefined, views: Views, fns: { pc: number; f: VarFunc; body: Node[] }[], nameFn: number,
-	strAt: (ptr: bigint, len: bigint) => string | undefined): Map<number, AccountObjs> {
+	strAt: (ptr: bigint, len: bigint) => string | undefined, named?: { discs: Map<bigint, string>; owner: string }): Map<number, AccountObjs> {
 	const res = new Map<number, AccountObjs>()
 	const discs = new Map<bigint, string>()
 	if (idl?.address) for (const a of idl.accounts) discs.set(a.disc, a.name)
+	// (account types the IDL does not describe, by their discriminators: layouts from probing runs, see probeLayout)
+	// (only as immediates: the rodata search below is for the IDL's few)
+	const namedDisc = (v: bigint) => { const t = named?.discs.get(v); return t && !discs.has(v) ? `disc:${t}` : undefined }
 	const memo = new Map<string, Set<bigint>>()
 	const typeOf = new Map<number, string | null>() // callee -> account type ('spl:…' for SPL Token accounts)
 	const viewOf = new Map<string, string | null>() // `${callee}:${type}` -> view
@@ -431,7 +545,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 	const calleeType = (x: number): string | undefined => {
 		if (typeOf.has(x)) return typeOf.get(x) ?? undefined
 		const hits = new Set<string>()
-		for (const v of immediates(p, x, 4, memo)) { const t = discs.get(v) ?? discAt().get(v); if (t) hits.add(t) }
+		for (const v of immediates(p, x, 4, memo)) { const t = discs.get(v) ?? discAt().get(v) ?? namedDisc(v); if (t) hits.add(t) }
 		if (!hits.size) for (const t of splOf(x, 5)) hits.add(t)
 		const t = hits.size === 1 ? [...hits][0] : undefined
 		typeOf.set(x, t ?? null)
@@ -442,6 +556,16 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		if (viewOf.has(k)) return viewOf.get(k) ?? undefined
 		viewOf.set(k, null)
 		let smp: Sample | undefined, doc: string, name: string
+		if (t.startsWith('disc:')) {
+			const d = [...named!.discs].find(([, u]) => u === t.slice(5))?.[0]
+			const loc = d === undefined ? undefined : probeLayout(p, x, d, unb58(named!.owner))
+			if (!loc) return undefined
+			const nm = t.slice(5)
+			const v = buildViews(views, nm, `Account<${nm}> as deserialized in memory (no IDL: the type from its discriminator, the fields [heur] from runs of ${p.funcs.get(x)?.name ?? 'fn'} on bit-pattern data: dN_uS is the bytes at offset N of the account data (discriminator included) of that size, at the offset a run put them; fields after a variable-length one not found; info = the &AccountInfo)`, loc.at, loc.info)
+			viewOf.set(k, v ?? null)
+			if (loc.boxAt !== undefined) boxAtOf.set(k, loc.boxAt)
+			return v
+		}
 		if (t.startsWith('spl:')) {
 			const kind = t.slice(4) as 'TokenAccount' | 'Mint'
 			smp = splSample(kind)
@@ -656,7 +780,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const bases = new Map<string, number>() // `${obj}:${base}` -> words
 		for (const [k, o] of outWords) { const key = `${o.obj}:${k - o.off}`; bases.set(key, (bases.get(key) ?? 0) + 1) }
 		const infos = new Map<number, { name: string; type?: string; embed: boolean }>()
-		const acc = (ob: { name?: string; view?: string; type?: string }): AccountObj => ({ name: ob.name!, view: ob.view!, rust: ob.type!.replace(/^spl:/, '') })
+		const acc = (ob: { name?: string; view?: string; type?: string }): AccountObj => ({ name: ob.name!, view: ob.view!, rust: ob.type!.replace(/^(spl|disc):/, '') })
 		const boxes = new Map<number, AccountObj>(), refs = new Map<number, AccountObj>()
 		for (const [v, id] of boxVars) if (objs[id].name && objs[id].type) boxes.set(v, acc(objs[id]))
 		for (const [k, o] of outWords) if (o.off === -1 && objs[o.obj].name && objs[o.obj].type) refs.set(k, acc(objs[o.obj]))
@@ -664,12 +788,12 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			const [obj, base] = key.split(':').map(Number)
 			const ob = objs[obj]
 			if (!ob.name || base < 0 || key.endsWith(':-1') || outWords.get(base)?.off === -1) continue
-			if (!ob.view) { if (outWords.get(base)?.off === 0) infos.set(base, { name: ob.name, type: ob.type?.replace(/^spl:/, ''), embed: !!ob.embed }); continue }
+			if (!ob.view) { if (outWords.get(base)?.off === 0) infos.set(base, { name: ob.name, type: ob.type?.replace(/^(spl|disc):/, ''), embed: !!ob.embed }); continue }
 			if (n < 2 || !ob.type) continue
 			// (an account copied to several places of the struct: the most complete copy, then the first)
 			const prev = [...inline].find(([, a]) => a.name === ob.name)
 			if (prev) { const pn = bases.get(`${obj}:${prev[0]}`) ?? 0; if (pn > n || (pn === n && prev[0] < base)) continue; inline.delete(prev[0]) }
-			inline.set(base, { name: ob.name, view: ob.view, rust: ob.type.replace(/^spl:/, '') })
+			inline.set(base, { name: ob.name, view: ob.view, rust: ob.type.replace(/^(spl|disc):/, '') })
 		}
 		const calls = new Map<number, { name?: string; view?: string }>()
 		for (const [at, id] of callObj) { const o = objs[id]; calls.set(at, { name: o.name, view: o.view && !o.boxed ? o.view : undefined }) }

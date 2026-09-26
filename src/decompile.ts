@@ -25,7 +25,7 @@ import { inferStructs } from './structs.ts';
 import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, LEGACY_INFO_VIEW, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
-import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
+import { accountObjects, loaderWord, probeDeserializer, type AccountObjs } from './anchorstate.ts';
 import { frameRegions, innermost, type Region, type Regions } from './frameregions.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
@@ -542,8 +542,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // boxed accounts deserialized by try_accounts (IDL types, SPL Token accounts), with their in-memory layouts (see anchorstate.ts)
   // (an IDL without the program address, e.g. the legacy format: the id the entry code checks program_id against)
   const stateIdl = opts.idl && !opts.idl.address ? { ...opts.idl, address: declaredId([...built.values()].map(b => b.f), a => sem.keyAt(a)) } : opts.idl;
+  // (account types the IDL does not give a layout for, or all without an IDL: their discriminators from the program's names, see anchorstate.ts probeLayout)
+  const namedDiscs = new Map<bigint, string>();
+  for (const [d, n] of sem.disc) if (n.startsWith('account:') && !opts.idl?.accounts.some(a => a.disc === d)) namedDiscs.set(d, n.slice(8));
+  const ownerId = stateIdl?.address ?? (namedDiscs.size && tryOf.size ? declaredId([...built.values()].map(b => b.f), a => sem.keyAt(a)) : undefined);
   const objVars = opts.sugar !== false && nameFn !== undefined && tryOf.size
-    ? accountObjects(p, stateIdl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len))
+    ? accountObjects(p, stateIdl, views, [...new Set(tryOf.values())].map(pc => ({ pc, f: built.get(pc)!.f, body: built.get(pc)!.body })), nameFn, (ptr, len) => sem.strAt(ptr, len), namedDiscs.size && ownerId ? { discs: namedDiscs, owner: ownerId } : undefined)
     : new Map<number, AccountObjs>();
   // Accounts fields holding (the &AccountInfo of) an account of an IDL type without its data deserialized
   // (AccountLoader): `${instruction}:${offset in try_accounts' out object}` -> type; see the loader pass below
@@ -738,6 +742,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // rounds, so types flow down call chains)
   const baseTypes = new Map<number, Map<number, string>>();
   const structTypes = new Map<number, Map<number, string>>(); // inferred struct views of parameters (structs.ts)
+  // the view type of a (user) function's parameter (register reg), when it is never reassigned
+  const paramView = (cpc: number, reg: number): string | undefined => {
+    const cb = built.get(cpc);
+    if (!cb || isLib(cpc)) return undefined;
+    const pv = cb.f.vars.find(v => v.param === reg);
+    const t = pv && defCount(cb.f, pv.id) === 0 ? baseTypes.get(cpc)?.get(pv.id) : undefined;
+    return t && !['AccountRecord', 'UnalignedAccount', 'Input'].includes(t) ? t : undefined;
+  };
   // the type of a set's value: a typed expression, or a load of a frame slot stored exactly once (a spill)
   // with a typed value
   const setType = (f: VarFunc, e: Expr, ty: (id: number) => string | undefined): string | undefined => {
@@ -925,19 +937,55 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const st = inferStructs({
       built, skip: pc => isLib(pc), typed: (pc, v) => baseTypes.get(pc)!.has(v), fnName: pc => p.funcs.get(pc)!.name, outParam: pc => outParams.has(pc),
       paramReg: (cpc, i) => (built.get(cpc)!.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1),
+      dataPtr: (pc, e) => {
+        const a = e.k === 'load' ? e.addr : undefined;
+        if (!a || a.k !== 'bin' || a.op !== 'add' || a.b.k !== 'const' || a.b.v !== 0x18n) return false;
+        return exprType(views, a.a, id => baseTypes.get(pc)!.get(id)) === 'DataCell';
+      },
       fieldHints: (pc, reg) => {
         // (try_accounts' out object: the Accounts struct's account fields)
         const hpc = reg === 1 ? [...tryOf].find(([, t]) => t === pc)?.[0] : undefined;
         const fs = hpc === undefined ? undefined : acctLayouts.get(hpc);
-        return fs && { fields: new Map(fs.map(x => [x.off, x])), why: 'the account fields of the Accounts struct it returns' };
+        if (fs) return { fields: new Map(fs.map(x => [x.off, x])), why: 'the account fields of the Accounts struct it returns' };
+        return undefined;
       },
     }, views);
+    const synthViews = st.synth;
     for (const [pc, m] of st.types) {
       structTypes.set(pc, new Map([...m].filter(([, t]) => st.synth.has(t))));
       for (const [v, t] of m) if (!st.synth.has(t)) { let pt = paramTypes.get(pc); if (!pt) paramTypes.set(pc, (pt = new Map())); pt.set(v, [t, 'its accesses, and those through the pointers it holds, fit the view (flags or RefCell boxes)']); }
       baseTypes.set(pc, computeTypes(pc));
     }
     propagate();
+    // native deserializers of account data: calls fn(out, acc.data.ptr, acc.data.len) (see anchorstate.ts probeDeserializer)
+    {
+      const cellField = (pc: number, f: VarFunc, e: Expr, off: bigint): boolean => {
+        if (e.k === 'var' && defCount(f, e.id) === 1) { const d = f.blocks.flatMap(b => b.stmts).find(st => st.k === 'set' && st.dst === e.id); if (d?.k === 'set') e = d.e; }
+        const a = e.k === 'load' && e.size === 8 ? e.addr : undefined;
+        return !!a && a.k === 'bin' && a.op === 'add' && a.b.k === 'const' && a.b.v === off && exprType(views, a.a, id => baseTypes.get(pc)!.get(id)) === 'DataCell';
+      };
+      const tried = new Set<number>();
+      for (const [pc, bt] of built) for (const b of bt.f.blocks) for (const st of b.stmts) {
+        const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined;
+        if (!c || c.t.k !== 'fn' || isLib(c.t.pc) || tried.has(c.t.pc) || c.args.length < 3 || !outParams.has(c.t.pc)) continue;
+        if (!cellField(pc, bt.f, c.args[1], 0x18n) || !cellField(pc, bt.f, c.args[2], 0x20n)) continue;
+        tried.add(c.t.pc);
+        const m = probeDeserializer(p, c.t.pc);
+        const v = m && paramView(c.t.pc, 1);
+        if (!v || !synthViews.has(v)) continue;
+        // (its out object's inferred view: fields that are data bytes copied in order named after their offset in the data)
+        const view = views.map.get(v)!;
+        let n = 0;
+        for (const fd of view.fields) {
+          const size = fd.t.k === 'scalar' ? fd.t.size : 0, d = m.get(fd.off);
+          if (!size || d === undefined || Array.from({ length: size - 1 }, (_, i) => m.get(fd.off + i + 1) === d + i + 1).includes(false)) continue;
+          const nm = `d0x${d.toString(16)}_u${size * 8}`;
+          if (view.fields.some(x => x.name === nm)) continue;
+          fd.name = nm; n++;
+        }
+        if (n) view.doc += `; ${n} named after the account data bytes a run of ${p.funcs.get(c.t.pc)!.name} (a deserializer) copies there on bit-pattern data (dN_uS: the bytes at offset N of the account data)`;
+      }
+    }
   }
   /**
    * Do all loads and stores through `v + c` in f hit fields of view `ty` exactly (scalars of their size,
@@ -945,30 +993,13 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
    */
   function fitsView(f: VarFunc, v: number, ty: string, min = 3): boolean {
     const hit = new Set<string>();
-    let ok = true;
-    const acc = (addr: Expr, size: number) => {
-      const o = addr.k === 'var' && addr.id === v ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === v && addr.b.k === 'const' ? Number(BigInt.asIntN(64, addr.b.v)) : undefined;
-      if (o === undefined) return;
+    for (const [o, size] of varAccesses(f).get(v) ?? []) {
       const r = o < 0 ? undefined : views.resolve(ty, o);
-      if (!r || (r.last.k === 'scalar' && (r.rest || r.last.size !== size)) || (r.last.k === 'ref' && (r.rest || size !== 8)) || (r.last.k === 'embed' && r.rest + size > views.width(r.last))) ok = false;
-      else hit.add(r.path.join('.'));
-    };
-    for (const b of f.blocks) for (const st of b.stmts) {
-      if (st.k === 'store') acc(st.addr, st.size);
-      else if (st.k === 'stores') st.vals.forEach((_, i) => acc(st.addr.k === 'bin' && st.addr.b.k === 'const' ? { ...st.addr, b: { k: 'const', v: st.addr.b.v + BigInt(i * st.size) } } : { k: 'bin', op: 'add', a: st.addr, b: { k: 'const', v: BigInt(i * st.size) } }, st.size));
-      stmtExprs(st).forEach(e => walkExpr(e, x => { if (x.k === 'load') acc(x.addr, x.size); }));
-      if (!ok) return false;
+      if (!r || (r.last.k === 'scalar' && (r.rest || r.last.size !== size)) || (r.last.k === 'ref' && (r.rest || size !== 8)) || (r.last.k === 'embed' && r.rest + size > views.width(r.last))) return false;
+      hit.add(r.path.join('.'));
     }
-    return ok && hit.size >= min;
+    return hit.size >= min;
   }
-  // the view type of a (user) function's parameter (register reg), when it is never reassigned
-  const paramView = (cpc: number, reg: number): string | undefined => {
-    const cb = built.get(cpc);
-    if (!cb || isLib(cpc)) return undefined;
-    const pv = cb.f.vars.find(v => v.param === reg);
-    const t = pv && defCount(cb.f, pv.id) === 0 ? baseTypes.get(cpc)?.get(pv.id) : undefined;
-    return t && !['AccountRecord', 'UnalignedAccount', 'Input'].includes(t) ? t : undefined;
-  };
   const funcs: FuncOut[] = [];
   const facts = new Map<number, FnFacts>();
   // a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
@@ -1852,6 +1883,26 @@ function onlyReachedBy(f: VarFunc, v: number, defs: Set<Stmt>): boolean {
   return ok && uses > 0;
 }
 
+/** Loads and stores through `v + c` in f, per variable v: [c, size] (memoized). */
+const varAccMemo = new WeakMap<VarFunc, Map<number, [number, number][]>>();
+function varAccesses(f: VarFunc): Map<number, [number, number][]> {
+  let m = varAccMemo.get(f);
+  if (m) return m;
+  const r = new Map<number, [number, number][]>();
+  const acc = (addr: Expr, size: number, extra = 0) => {
+    const b = addr.k === 'var' ? addr.id : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.b.k === 'const' ? addr.a.id : undefined;
+    if (b === undefined) return;
+    const o = (addr.k === 'var' ? 0 : Number(BigInt.asIntN(64, (addr as { b: { v: bigint } }).b.v))) + extra;
+    let l = r.get(b); if (!l) r.set(b, (l = [])); l.push([o, size]);
+  };
+  for (const b of f.blocks) for (const st of b.stmts) {
+    if (st.k === 'store') acc(st.addr, st.size);
+    else if (st.k === 'stores') st.vals.forEach((_, i) => acc(st.addr, st.size, i * st.size));
+    stmtExprs(st).forEach(e => walkExpr(e, x => { if (x.k === 'load') acc(x.addr, x.size); }));
+  }
+  varAccMemo.set(f, (m = r));
+  return m;
+}
 function defCount(f: VarFunc, v: number): number {
   let m = defCounts.get(f);
   if (!m) {
