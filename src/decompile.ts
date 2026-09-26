@@ -26,7 +26,7 @@ import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
-import { accountResolver, type Callee } from './analysis/flow.ts';
+import { accountResolver, cfgOf, decisionBlock, type Callee } from './analysis/flow.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -1106,10 +1106,22 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const bodyAt = lines.length;
     lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
     lines.push('}');
+    let irCfg: ReturnType<typeof cfgOf> | undefined;
     if (opts.sugar !== false) facts.set(pc, functionFacts({
       pc, name: f.name, body, lines, at: bodyAt, spans, sites: siteNotes, anchor: sem.anchor,
       noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
-      irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }, callee).refs(e),
+      // (a condition the structuring rebuilt: the branch deciding it, by its shape and the sides' first statements)
+      irRefs: sem.anchor ? undefined : (e, failPc, passPc) => {
+        const R = accountResolver({ f, names }, callee), x = R.refs(e);
+        if (x.length || failPc === undefined) return x;
+        const b = decisionBlock((irCfg ??= cfgOf({ pc, f } as FuncOut)), e, failPc, passPc);
+        return b === undefined ? x : R.refs(e, b);
+      },
+      irCmp: sem.anchor ? undefined : (e, failPc, passPc) => {
+        const R = accountResolver({ f, names }, callee);
+        const b = failPc === undefined ? undefined : decisionBlock((irCfg ??= cfgOf({ pc, f } as FuncOut)), e, failPc, passPc);
+        return R.cmp32(e, b);
+      },
       irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
       calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
     }));

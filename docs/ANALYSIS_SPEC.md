@@ -129,7 +129,8 @@ divisions per instruction).
 - state machine: fields set to small constants (status-named, or native single bytes that are checked) and fields
   compared with small constants in checks / branch conditions;
 - rules `state-write-ungated`, `share-price-zero-supply`, `mint-burn-authority-from-data`, `cpi-forwarder`,
-  `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound`.
+  `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound` (native: also a transfer's destination no
+  check of the instruction reads at all; not a mint's: the token program requires it to hold the mint).
 Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/README.md):
 - native accounts by an IR account model: `&[AccountInfo]` slices, input records and arrays of pointers to them
   (pinocchio), the RefCell'd lamports / data of an AccountInfo, frame spills and multiply-assigned variables
@@ -137,6 +138,12 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
   key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote);
   the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
+  a condition the structuring rebuilt is located by the branch deciding it (its shape, the sides' first statements);
+  in a function the instruction calls, pointer parameters are bound to the caller's values at the call site of this
+  instruction's call path (a helper's checks on the AccountInfo it is passed, e.g. `config.owner != program_id`);
+  32-byte comparisons of values the function alone does not know as accounts wait for that context; pointers into
+  the function's own frame are values too (a struct a helper filled from an account's data, copied around the frame:
+  `config.admin == admin.key` through Config returned by a helper);
 - Anchor try_accounts when the decompiler names none (the first function the handler calls whose checks name
   accounts) and the Accounts struct's &AccountInfo words its success path stores (one word from the call the check
   right after names; the out object may be spilled to the frame and reloaded; two accounts of one type: the check
@@ -163,6 +170,6 @@ Known gaps: native programs dispatching through processors taking accounts via i
 temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
 account object's neighbouring words are only a guess for the writes), e.g. an AccountInfo try_accounts takes straight
 from the accounts slice (a_escrow take: its close to maker is not attributed); per-instruction context covers Anchor
-helper stores, not native shared invoke sites (n_token payout / mint: recipient-unbound, the Config read via
-Pack::unpack); value identity
+helper stores; values a library function not decompiled fills (n_token's dest via TokenAccount::unpack: the
+config~dest relation) are not followed back to the account; value identity
 follows one call path per function (the first found) and treats memory as unchanged between two reads.

@@ -562,9 +562,11 @@ const RULES: Rule[] = [
 			const dest = o.cpi?.accounts.find(x => x.role && /^(destination|to|account)$/.test(x.role))
 			const d = dest && /^\*?([A-Za-z_]\w*(?:\[\d+\])?)/.exec(dest.text)?.[1]
 			const row = d ? ix.accounts.find(x => x.name === d) : undefined
-			if (!row) return []
+			// (native: an account by index no check of the instruction reads has no row: nothing binds it; not a mint's
+			// destination: the token program requires it to hold the mint minted)
+			if (!row && !(d && !a.program.anchor && /^account\[\d+\]$/.test(d) && !k.includes('MINT'))) return []
 			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
-			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
+			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
 			if (bind.length || rel) return []
 			// (outflows the program signs for are the ones where an unbound destination matters most)

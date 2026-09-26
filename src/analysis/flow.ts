@@ -1012,6 +1012,8 @@ export interface AcctResolver {
 	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
 	valueRef: (e: Expr, s: Stmt) => AcctRef | undefined     // the account field an expression of a statement is (a key: the pointer to it)
 	valueAt: (e: Expr, p: number) => AcctRef | undefined     // the same at a position (block << 16 | index)
+	av: (e: Expr, p: number) => AcctVal | undefined          // the abstract value (to bind a callee's parameters)
+	cmp32: (c: Expr, b?: number) => boolean                  // a condition on a 32-byte comparison (memcmp / memeq)
 }
 
 /**
@@ -1028,7 +1030,10 @@ type AV =
 	| { k: 'val'; i: number; f: string }                          // a field value read
 	| { k: 'base'; v: number; off: number }                       // (first pass) a pointer variable
 	| { k: 'elem'; v: number; e: number; off: number }            // (first pass) a pointer loaded from base v, entry e
+	| { k: 'fr'; off: number }                                    // a pointer into the function's own frame (fp + off)
 
+/** an account-model value (opaque outside this file) */
+export type AcctVal = AV
 const resMemo = new WeakMap<object, AcctResolver>()
 
 /** a function's IR (when decompiled) and name (library code) */
@@ -1192,7 +1197,7 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 			const a = fpOff(s.k === 'stores' ? s.addr : s.dst), n = s.k === 'stores' ? s.vals.length * s.size : s.n
 			if (a === undefined || a >= o + 8 || a + n <= o) return undefined
 			if (s.k === 'stores') return (s.size === 8 || loose) && (o - a) % s.size === 0 ? s.vals[(o - a) / s.size] : null
-			if (!loose || a > o) return null
+			if ((!loose && a + n < o + 8) || a > o) return null
 			const src = fpOff(s.src), k = BigInt.asUintN(64, BigInt(o - a))
 			return { k: 'load', size: 8, addr: src !== undefined ? { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } : k ? { k: 'bin', op: 'add', a: s.src, b: { k: 'const', v: k } } : s.src }
 		}
@@ -1277,7 +1282,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		}))
 		if (!vs.length || vs.length > 8) return undefined
 		const rs = new Map<number, AV>()
-		c.args.forEach((a, k) => { const x = k === j ? undefined : ev(a, p, d + 1); const q = g.vars.find(u => u.param === k + 1)?.id; if (x && q !== undefined) rs.set(q, x) })
+		c.args.forEach((a, k) => { const x = k === j ? undefined : ev(a, p, d + 1); const q = g.vars.find(u => u.param === k + 1)?.id; if (x && x.k !== 'fr' && q !== undefined) rs.set(q, x) })
 		if (!rs.size) return undefined
 		// (the stores whose value is known agree: other paths store error values)
 		const G = avEvaluator(g, GD, rs, undefined, callee, depth - 1, false)
@@ -1296,6 +1301,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		return r
 	}
 	const ev0 = (e: Expr, p: number, d: number): AV | undefined => {
+		if (!pass1) { const o = fpOff(e); if (o !== undefined) return { k: 'fr', off: o } }
 		switch (e.k) {
 			case 'var': {
 				const r = roots.get(e.id)
@@ -1312,7 +1318,9 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 				return a && a.k !== 'val' ? { ...a, off: a.off + Number(BigInt.asIntN(64, e.b.v)) } : undefined
 			}
 			case 'load': {
-				const o = fpOff(e.addr)
+				// (through a pointer into the frame: the word stored there, as at this position)
+				const fa = pass1 || fpOff(e.addr) !== undefined ? undefined : ev(e.addr, p, d + 1)
+				const o = fpOff(e.addr) ?? (fa?.k === 'fr' ? fa.off : undefined)
 				if (o !== undefined) {
 					if (arr !== undefined && e.size === 8 && o >= arr && (o - arr) % 8 === 0 && o - arr < 8 * 64) return { k: 'rec', i: (o - arr) / 8, off: 0 }
 					const y = e.size === 8 ? reaching(SLOT(o), p) : null
@@ -1328,7 +1336,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 					}
 					return c && !pass1 ? outOf(c, o, z![1], d) : undefined
 				}
-				return deref(ev(e.addr, p, d + 1), e.size)
+				return deref(fa ?? ev(e.addr, p, d + 1), e.size)
 			}
 		}
 		return undefined
@@ -1371,8 +1379,9 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
  * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
  * Names are the printed variable names.
  */
-export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee): AcctResolver {
-	let res = resMemo.get(fo.f)
+/** seed: a callee's pointer parameters bound to the caller's values at a call site (not memoized) */
+export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee, seed?: Map<number, AcctVal>): AcctResolver {
+	let res = seed?.size ? undefined : resMemo.get(fo.f)
 	if (res) return res
 	const f = fo.f
 	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
@@ -1383,7 +1392,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
 		if (s.k === 'store' && s.size === 8 && (rec0(s.v) || (s.v.k === 'var' && rec0(defs.get(s.v.id))))) { const o = fpOff(s.addr); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
 	}
-	const roots = new Map<number, AV>()
+	const roots = new Map<number, AV>(seed ?? [])
 	let { ev } = avEvaluator(f, D, roots, arr, callee, 2, true)
 	// first pass: the variables used as a slice / an array of record pointers
 	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
@@ -1449,7 +1458,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		return [e, p]
 	}
-	const at = (e: Expr, b?: number) => pos.get(e) ?? (b !== undefined && f.blocks[b] ? b << 16 | f.blocks[b].stmts.length : undefined)
+	const at = (e: Expr, b?: number): number | undefined => pos.get(e) ?? (b !== undefined && f.blocks[b] ? b << 16 | f.blocks[b].stmts.length : e.k === 'lnot' ? at(e.a) : undefined)
 	const refs = (e: Expr, b?: number): AcctRef[] => {
 		const p0 = at(e, b)
 		if (p0 === undefined) return []
@@ -1551,7 +1560,14 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return cmp(x)
 	}
 	const valueRef = (e: Expr, s: Stmt): AcctRef | undefined => { const p = pos.get(s); return p === undefined ? undefined : asRef(ev(e, p)) }
-	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)) }
-	resMemo.set(fo.f, res)
+	const cmp32 = (c: Expr, b?: number): boolean => {
+		const p0 = at(c, b)
+		if (p0 === undefined) return false
+		let hit = false
+		walkExpr(c, x => { if (!hit && (x.k === 'var' || x.k === 'call' || x.k === 'fn')) hit = !!cmpArgs(x.k === 'var' ? follow(x, p0)[0] : x) })
+		return hit
+	}
+	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32 }
+	if (!seed?.size) resMemo.set(fo.f, res)
 	return res
 }

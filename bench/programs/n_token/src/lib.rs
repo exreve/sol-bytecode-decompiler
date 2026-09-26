@@ -54,8 +54,20 @@ fn payout(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> Program
 	}
 	let pda = Pubkey::create_program_address(&[b"auth", config.key.as_ref(), &[c.bump]], program_id)?;
 	if pda != *authority.key { return Err(ProgramError::InvalidSeeds) }
-	invoke_signed(&spl_token::instruction::transfer(token_program.key, vault.key, dest.key, authority.key, &[], amount)?,
-		&[vault.clone(), dest.clone(), authority.clone(), token_program.clone()], &[&[b"auth", config.key.as_ref(), &[c.bump]]])
+	#[cfg(not(feature = "v_cpi_unchecked"))]
+	let ix = spl_token::instruction::transfer(token_program.key, vault.key, dest.key, authority.key, &[], amount)?;
+	// (spl_token's builders check the token program id themselves: the variant builds the instruction by hand)
+	#[cfg(feature = "v_cpi_unchecked")]
+	let ix = solana_program::instruction::Instruction {
+		program_id: *token_program.key,
+		accounts: vec![
+			solana_program::instruction::AccountMeta::new(*vault.key, false),
+			solana_program::instruction::AccountMeta::new(*dest.key, false),
+			solana_program::instruction::AccountMeta::new_readonly(*authority.key, true),
+		],
+		data: spl_token::instruction::TokenInstruction::Transfer { amount }.pack(),
+	};
+	invoke_signed(&ix, &[vault.clone(), dest.clone(), authority.clone(), token_program.clone()], &[&[b"auth", config.key.as_ref(), &[c.bump]]])
 }
 
 // accounts: admin (signer), config, mint (writable), dest (writable), authority (PDA), token_program

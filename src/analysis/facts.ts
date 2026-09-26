@@ -32,7 +32,8 @@ export interface FnInput {
 	anchor: boolean
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
-	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
+	irRefs?: (e: Expr, failPc?: number, passPc?: number) => { field?: string }[] // native: account fields a condition reads (flow.ts accountResolver; the sides' first statements locate a rebuilt condition)
+	irCmp?: (e: Expr, failPc?: number, passPc?: number) => boolean // native: a condition on a 32-byte comparison (its accounts known in a caller's context only)
 	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 }
@@ -54,6 +55,7 @@ export interface Check {
 	via?: { fn: string; kinds: string[] } // the checks that callee makes (kinds from its Anchor error codes, see calleeChecks)
 	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
 	passPc?: number        // the first statement on the passing side (the deciding block, when the condition's code is duplicated)
+	cmp32?: boolean        // native: a 32-byte comparison whose accounts the function alone does not know (no kinds yet)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -410,7 +412,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 			if (FIELD_KIND[f0]) add(FIELD_KIND[f0])
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
-		for (const x of inp.irRefs?.(n.c) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
+		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
 		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// the error raised: an IDL error, else an Anchor error that reports a constraint, else any Anchor / program error
 		let error = ''
@@ -427,13 +429,16 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const nm = /Error_with_account_name\([^\n]*?"(\w+)"/.exec(ft)
 		if (nm) named = nm[1]
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
-		if (!kinds.length && !named) return
+		// (native: a 32-byte comparison of values the function does not know as accounts (e.g. an AccountInfo parameter):
+		// kept without kinds, for the instruction's context to resolve (report.ts))
+		const cmp32 = !kinds.length && !named && !!inp.irCmp?.(n.c, firstPc(failNodes), firstPc(passNodes))
+		if (!kinds.length && !named && !cmp32) return
 		// (a pointer's alignment asserted (low bits masked, e.g. bytemuck's cast of zero-copy data): not a constraint)
 		let ac = n.c
 		while (ac.k === 'lnot') ac = ac.a
 		if (ac.k === 'cmp' && (ac.op === 'eq' || ac.op === 'ne') && ac.b.k === 'const' && ac.b.v === 0n && ac.a.k === 'bin' && ac.a.op === 'and' && ac.a.b.k === 'const' && [1n, 3n, 7n, 15n].includes(ac.a.b.v) && !error.includes('::')) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes) })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes), ...(cmp32 ? { cmp32 } : {}) })
 	}
 
 	const condLines = (c: Expr, l: number) => {

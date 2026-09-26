@@ -63,7 +63,7 @@ import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 
@@ -288,10 +288,31 @@ function analyze0(r: Result): Analysis {
 			const pf = par && facts.get(par.fn), pl = pf?.calls.find(x => x.callee === ff.pc && (par!.pc !== undefined ? x.pc === par!.pc : x.ret === par!.ret))?.line
 			return best ?? (pf && pl !== undefined ? hintBefore(pf, pl, depth - 1) : undefined)
 		}
+		// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice; in a function the
+		// instruction calls, its pointer parameters bound to the values at the call site of this instruction's call path)
+		const clr = { f: (pc: number) => byPc.get(pc)?.f, name: (pc: number) => p.funcs.get(pc)?.name ?? '' }
+		const resMemo = new Map<number, AcctResolver | undefined>()
+		const resolverFor = (fn: number, d = 0): AcctResolver | undefined => {
+			if (resMemo.has(fn)) return resMemo.get(fn)
+			const fo = byPc.get(fn)
+			if (r.anchor || !fo) return undefined
+			resMemo.set(fn, accountResolver(fo, clr))
+			const par = fn !== h.pc && d < 6 ? parents.get(fn) : undefined
+			const PR = par?.pc !== undefined ? resolverFor(par.fn, d + 1) : undefined
+			const pf = par && byPc.get(par.fn)
+			let pos = -1, c: ReturnType<typeof callOf> | undefined
+			pf?.f.blocks.forEach((b, bi) => b.stmts.forEach((st, i) => { if (st.pc === par!.pc && callOf(st)) { pos = bi << 16 | i; c = callOf(st) } }))
+			const seed = new Map<number, AcctVal>()
+			if (PR && c && c.t.k === 'fn' && c.t.pc === fn) c.args.forEach((a, j) => {
+				const v = PR.av(a, pos), pv = fo.f.vars.find(x => x.param === j + 1)?.id
+				if (v && pv !== undefined && (v.k === 'slice' || v.k === 'recs' || v.k === 'rec' || v.k === 'ptr' || v.k === 'rc')) seed.set(pv, v)
+			})
+			if (seed.size) resMemo.set(fn, accountResolver(fo, clr, seed))
+			return resMemo.get(fn)
+		}
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
-			// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice)
-			const R = !r.anchor && byPc.get(ff.pc) ? accountResolver(byPc.get(ff.pc)!, { f: pc => byPc.get(pc)?.f, name: pc => p.funcs.get(pc)?.name ?? '' }) : undefined
+			const R = resolverFor(ff.pc)
 			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
 			const AC = r.anchor ? anchorCompares(ff) : undefined
 			for (const c of ff.checks) {
@@ -304,6 +325,8 @@ function analyze0(r: Result): Analysis {
 				const acct = cn(c.named) ?? cn(c.refs.find(x => cn(x.acct))?.acct) ?? (irRefs[0] ? idxName(irRefs[0].index) : undefined) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
 				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
 				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
+				// (a 32-byte comparison this instruction's context does not resolve either)
+				if (!kinds.length && c.cmp32) continue
 				// (native: an account key compared with a constant (address), with a derived address in the frame (pda),
 				// or two account fields compared (a relation))
 				const sd = R && c.c ? R.sides(c.c, cb) : undefined
