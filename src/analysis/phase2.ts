@@ -294,8 +294,22 @@ const runtimeAuthorized = (o: OpOut) => !!o.cpi && !!(o.cpi.known || o.cpi.famil
 /** the system CPIs creating an account (create_account, or transfer + allocate + assign of a funded one) in an instruction that creates one */
 const initMechanics = (ix: IxOut, o: OpOut) => o.cpi?.family === 'system' && /^(CreateAccount|Assign|Allocate|Transfer)$/.test(o.cpi.ix ?? '') && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE') || (x.cpi?.family === 'system' && x.cpi.ix === 'Allocate'))
 
+/**
+ * Initialization: a write to an account the instruction creates (no discriminator / type check on it), or one the
+ * program requires to be uninitialized (Anchor `zero`: its discriminator must be zero).
+ */
+const initWrite = (ix: IxOut, o: OpOut) => {
+	const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
+	if (!t) return false
+	const z = t.constraints.zero
+	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found'))
+}
+
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
 const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
+
+/** a source that is the key of an account the instruction checks to be a signer */
+const signerKey = (ix: IxOut, src: string) => { const m = /^(.+)\.key$/.exec(src); const c = m && ix.accounts.find(x => x.name === m[1])?.constraints.signer; return !!c && c.status !== 'not_found' }
 
 const snakeName = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase()
 
@@ -371,9 +385,7 @@ const RULES: Rule[] = [
 			const o = ix.ops[row.op]
 			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 			if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
-			// (initialization: a write to an account the instruction creates (no discriminator / type check on it))
-			const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
-			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
+			if (initWrite(ix, o)) return []
 			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
 			if (((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) || runtimeAuthorized(o)) return []
@@ -401,7 +413,8 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
-		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi)))).slice(0, 2).map(s => ({
+		// (an authority set to the key of an account that signed, or while initializing: the usual assignments)
+		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o)))).slice(0, 2).map(s => ({
 			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
 	},

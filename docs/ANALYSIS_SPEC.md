@@ -135,6 +135,12 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
   key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote);
   the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
+- Anchor try_accounts when the decompiler names none (the first function the handler calls whose checks name
+  accounts) and the Accounts struct's &AccountInfo words its success path stores (one word from the call the check
+  right after names), with the decompiler's layout for the other accounts (analysis only: the printed views keep the
+  decompiler's); a zero-copy account's type by the IDL account type named like it; Anchor `zero` is a discriminator
+  check; alignment asserts (a pointer's low bits masked) are not checks; a success return writing the Ok tag before an
+  error raised first thing is not the failing side;
 - Anchor writes in the functions the handler passes its frame to (Context.accounts: object fields serialized back
   on exit, through the exit wrappers of the Accounts struct), lamports and zero-copy data through the RefCells of the
   &AccountInfo words (traced back to try_accounts' out object and the Accounts layout);

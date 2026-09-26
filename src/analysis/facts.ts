@@ -103,6 +103,7 @@ export const ANCHOR_KIND: Record<string, string> = {
 	ConstraintAssociated: 'associated', ConstraintAssociatedInit: 'associated', ConstraintTokenTokenProgram: 'token_program', AccountNotSystemOwned: 'owner',
 	AccountSysvarMismatch: 'address', ConstraintSpace: 'space', ConstraintDuplicateMutableAccount: 'duplicate',
 }
+const ERROR_RAISE = /anchor::(Constraint|Account|Require)\w*|error::\w|ProgramError::\w/
 const ERROR_MARK = /anchor::\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
 const TEMP = /^([a-z]{1,2}|v\d+|s[0-9a-f]+|p\d+|r\d|fp|u\d+)$/
 const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate/i
@@ -416,7 +417,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const ams = [...ft.matchAll(/anchor::(\w+)/g)].map(x => x[1])
 		const ak = ams.find(x => ANCHOR_KIND[x])
 		if (cm2) { error = cm2[0]; add('custom') }
-		else if (ak) { error = `anchor::${ak}`; add(ANCHOR_KIND[ak]) }
+		// (Anchor `zero`: the account's discriminator must be zero, a discriminator check)
+		else if (ak) { error = `anchor::${ak}`; add(ANCHOR_KIND[ak]); if (ANCHOR_KIND[ak] === 'zero') add('discriminator') }
 		else if (ams.length) error = `anchor::${ams[0]}`
 		else { const em = /\b(Err\([^)]*\)?\))/.exec(ft) ?? /ProgramError::(\w+)/.exec(ft); if (em) error = em[0] }
 		if (!error) error = /\btrap\(|\babort\(|panic/.test(ft) || failNodes[failNodes.length - 1]?.k === 'trap' ? 'abort' : 'return'
@@ -425,6 +427,10 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (nm) named = nm[1]
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
 		if (!kinds.length && !named) return
+		// (a pointer's alignment asserted (low bits masked, e.g. bytemuck's cast of zero-copy data): not a constraint)
+		let ac = n.c
+		while (ac.k === 'lnot') ac = ac.a
+		if (ac.k === 'cmp' && (ac.op === 'eq' || ac.op === 'ne') && ac.b.k === 'const' && ac.b.v === 0n && ac.a.k === 'bin' && ac.a.op === 'and' && ac.a.b.k === 'const' && [1n, 3n, 7n, 15n].includes(ac.a.b.v) && !error.includes('::')) return
 		const pc = firstPc(failNodes)
 		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes) })
 	}
@@ -499,8 +505,13 @@ export function functionFacts(inp: FnInput): FnFacts {
 		}
 	}
 	/** both sides exit: the one that looks like the error path (error markers; else much shorter) */
+	const out0 = sig && /^(?:export )?function \w+\((\w+)/.exec(sig)?.[1]
+	const okOut = out0 ? new RegExp(`^\\s*st64\\(${out0}, 0\\)$`, 'm') : undefined
 	const pickFail = (a: Node[], b: Node[], strict = false): 'then' | 'rest' | undefined => {
 		const la = span(a), lb = span(b)
+		// (a short side storing the Ok tag into the out object (the first parameter) and showing no error, before a rest
+		// raising a constraint / program error first thing: the success return before the error path)
+		if (!strict && okOut && la <= 8 && okOut.test(textOf(a, 80)) && !ERROR_MARK.test(textOf(a, 80)) && firstMark(b) <= 2 && ERROR_RAISE.test(textOf(b, 4))) return 'rest'
 		if (!strict && la * 4 <= lb && la <= 40) return 'then'
 		if (!strict && lb * 4 <= la && lb <= 40) return 'rest'
 		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")

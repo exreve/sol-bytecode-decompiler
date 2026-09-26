@@ -14,7 +14,7 @@ import { walkExpr, NEG_CMP } from '../ir.ts'
 import { computeRpo, dominators } from '../structure.ts'
 import { stmtExprs } from '../simplify.ts'
 import { borshSize, structFields } from '../idl.ts'
-import type { FieldType } from '../views.ts'
+import type { Field, FieldType } from '../views.ts'
 import { knownFamilies } from '../cpi.ts'
 import type { Op, OpKind } from './facts.ts'
 
@@ -368,8 +368,9 @@ export interface AnchorEval {
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
 	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' }
 	const D = defsOf(H.f, cl)
-	const layout = r.acctLayouts?.get(H.pc) ?? []
-	const tryPc = r.tryOf.get(H.pc)
+	const ti = tryInfo(r, H)
+	const layout = ti?.layout ?? []
+	const tryPc = ti?.tryPc
 	const isInfo = (t: FieldType) => t.k === 'ref' && t.to === 'AccountInfo'
 	const discType = new Map((r.idl?.accounts ?? []).map(a => [a.disc, a.name] as [bigint, string]))
 	/** the account whose &AccountInfo the handler's frame word z holds (at position at): copies followed back to try_accounts' out object */
@@ -500,6 +501,66 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 	return { ctxOf, zcField, frameAcct }
 }
 
+const tryMemo = new WeakMap<FuncOut, { tryPc: number; layout: Field[] } | null>()
+/**
+ * An Anchor handler's Accounts::try_accounts and the Accounts struct's layout (offsets in its out object): the
+ * decompiler's try_accounts, else the first function the handler calls whose checks name accounts; the words it stores
+ * into its out object on its success path (the block storing most of them) that come from a call the check right after
+ * names (the account's try / deserialization call; one word per account: an &AccountInfo), then the decompiler's layout
+ * for the other accounts.
+ */
+export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[] } | undefined {
+	const m = tryMemo.get(H)
+	if (m !== undefined) return m ?? undefined
+	let res: { tryPc: number; layout: Field[] } | undefined
+	const known = r.tryOf.get(H.pc), lay = r.acctLayouts?.get(H.pc) ?? []
+	{
+		const calls = [...(r.facts.get(H.pc)?.calls ?? [])].filter(c => !c.errPath).sort((a, b) => a.line - b.line)
+		const tpc = known ?? calls.find(c => r.facts.get(c.callee)?.checks.some(k => k.named))?.callee
+		const T = tpc !== undefined ? byPcOf(r).get(tpc) : undefined
+		const tf = tpc !== undefined ? r.facts.get(tpc) : undefined
+		if (T && tf) {
+			const D = defsOf(T.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
+			const out = T.f.vars.find(v => v.param === 1)?.id
+			// (per block: the words stored into the out object that come from named calls; the block storing the most is the
+			// success path)
+			let layout: Field[] = []
+			const named = tf.checks.filter(k => k.named && k.before !== undefined && k.pc !== undefined)
+			T.f.blocks.forEach((b, bi) => { const bl: Field[] = []; b.stmts.forEach((s, i) => {
+				if (s.k !== 'store' || s.size !== 8 || out === undefined) return
+				const off = s.addr.k === 'var' && s.addr.id === out ? 0 : s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.a.k === 'var' && s.addr.a.id === out && s.addr.b.k === 'const' ? Number(s.addr.b.v) : -1
+				if (off <= 0 || off > 0x1000 || bl.some(x => x.off === off)) return
+				// (the value: a word a call left in the frame, through variables)
+				let e: Expr = s.v, p = bi << 16 | i
+				for (let k = 0; k < 6; k++) {
+					if (e.k === 'var') { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) return; [e, p] = y; continue }
+					const o = e.k === 'load' && e.size === 8 ? D.fpOff(e.addr) : undefined
+					if (o === undefined) break
+					const y = D.reaching(D.SLOT(o), p, true)
+					if (!y) return
+					;[e, p] = y
+				}
+				if (e.k !== 'call' || e.t.k !== 'fn') return
+				const callPc = T.f.blocks[p >> 16]?.stmts[p & 0xffff]?.pc ?? -1
+				const cpc = e.t.pc
+				const c = named.filter(k => k.before === cpc && k.pc! > callPc).sort((x, y) => x.pc! - y.pc!)[0]
+				// (the account's type: the IDL account type named like it, e.g. an AccountLoader's)
+				const ty = r.idl?.accounts?.find(a => a.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() === c?.named)?.name
+				if (c) bl.push({ name: c.named!, off, t: { k: 'ref', to: 'AccountInfo' }, doc: `the analysis: stored by try_accounts after the call its check names${ty ? `; account of type ${ty}` : ''}` })
+			})
+			// (several words from one account's call: its data copied in place, not an &AccountInfo)
+			const one = bl.filter(x => bl.filter(y => y.name === x.name).length === 1)
+			if (one.length > layout.length) layout = one })
+			// (with the decompiler's fields for the other accounts, e.g. accounts deserialized in place)
+			const size = (x: Field) => x.t.k === 'embed' ? r.views.map.get(x.t.type)?.size ?? 8 : 8
+			const all = [...layout, ...lay.filter(x => !layout.some(y => x.name === y.name || (x.off < y.off + 8 && y.off < x.off + size(x))))]
+			if (all.length || known !== undefined) res = { tryPc: tpc!, layout: all }
+		}
+	}
+	tryMemo.set(H, res ?? null)
+	return res
+}
+
 const anchorMemo = new WeakMap<FuncOut, AnchorEval>()
 /** The Anchor account evaluator of a handler (its objects serialized back, its Accounts struct): see calleeWrites. */
 export function anchorEval(r: Result, H: FuncOut): AnchorEval {
@@ -522,7 +583,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 	const A = anchorEval0(r, H, objs, exits)
 	anchorMemo.set(H, A)
 	const { ctxOf, zcField } = A
-	const tryPc = r.tryOf.get(H.pc)
+	const tryPc = tryInfo(r, H)?.tryPc
 	const done = new Set<string>()
 	const visit = (C: FuncOut, roots: Map<number, HVal>, depth: number) => {
 		const ff = r.facts.get(C.pc)
