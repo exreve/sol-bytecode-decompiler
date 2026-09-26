@@ -57,7 +57,7 @@ export function dominates(g: Cfg, a: number, b: number): boolean {
 }
 
 /** a condition's shape up to negation (lnot, the negated comparison) */
-function condKey(e: Expr, d = 0): string {
+export function condKey(e: Expr, d = 0): string {
 	if (d > 8) return '…'
 	switch (e.k) {
 		case 'lnot': return d === 0 ? condKey(e.a, d) : `!${condKey(e.a, d + 1)}`

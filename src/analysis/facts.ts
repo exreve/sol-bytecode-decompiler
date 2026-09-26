@@ -86,6 +86,8 @@ export interface FnFacts {
 	ixHints: IxHint[]                  // instructions of well-known programs built here (see IxHint)
 	lines: string[]; at: number          // the printed text (for the IR-level analyses, src/analysis/flow.ts)
 	pcLine: Map<number, number>        // statement pc -> 1-based line
+	condLine: Map<Expr, number>        // a branch / loop condition (and its && / || / ! leaves) -> the 1-based line of its `if` / loop
+	expr?: (e: Expr) => string         // the printer of the function's expressions (names as printed)
 }
 
 const ACC_FIELDS = new Set(['key', 'owner', 'is_signer', 'is_writable', 'executable', 'lamports', 'data', 'data_len', 'rent_epoch', 'original_data_len', 'dup_marker'])
@@ -159,7 +161,7 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
-	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), ixHints: [] }
+	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), condLine: new Map(), ixHints: [] }
 	// declared types and single-definition aliases (x = path) of the function's names
 	const alias = new Map<string, string | null>()
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
@@ -427,6 +429,11 @@ export function functionFacts(inp: FnInput): FnFacts {
 		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes) })
 	}
 
+	const condLines = (c: Expr, l: number) => {
+		if (!facts.condLine.has(c)) facts.condLine.set(c, l)
+		if (c.k === 'lnot') condLines(c.a, l)
+		else if (c.k === 'land' || c.k === 'lor') { condLines(c.a, l); condLines(c.b, l) }
+	}
 	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
 		let before: number | undefined
 		for (let k = 0; k < ns.length; k++) {
@@ -457,6 +464,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 				}
 				case 'return': if (n.e) for (const c of exprCallees(n.e)) facts.calls.push({ line: lineOf(n) + 1, ret: n.e, callee: c, main, errPath: err }); break
 				case 'if': {
+					condLines(n.c, lineOf(n) + 1)
 					const rest = ns.slice(k + 1)
 					// (the rest of the list ends with the list's last node: its exit is the same for every k)
 					const after = k + 1 < ns.length ? exits(ns, cont) : cont
@@ -485,7 +493,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 					break
 				}
 				case 'block': { const after = k + 1 < ns.length ? exits(ns, cont) : cont; labelCont.set(n.label, after); walk(n.body, main, err, after); before = undefined; break }
-				case 'loop': walk(n.body, n.form === 'do' ? main : false, err, false); before = undefined; break
+				case 'loop': if (n.c) condLines(n.c, lineOf(n) + 1); walk(n.body, n.form === 'do' ? main : false, err, false); before = undefined; break
 				case 'switch': { const after = k + 1 < ns.length ? exits(ns, cont) : cont; for (const c of n.cases) walk(c.body, false, err, after); before = undefined; break }
 			}
 		}

@@ -94,18 +94,28 @@ Phase 3 additions (pattern rules over the facts, each with evidence + confidence
 - unchecked (wrapping) subtraction on value paths with no dominating bound check;
 - recipient/destination with no owner or mint binding.
 
-Status (implemented, src/analysis/phase3.ts; rules in phase2.ts): read off the printed code, whose indentation
-gives the statement tree, with per-operation budgets (40 conditions, 6000 lines scanned, 40 arithmetic sites,
-20 divisions per instruction).
-- path conditions: enclosing branches (polarity from then / else / else-if chains) and earlier sibling ifs whose
-  body exits, in the operation's function and at the call sites up to the handler; plus the relevant checks
-  (signer / owner / key / has_one / pda / custom / state) that do not dominate it, with a path when phase 2 found one;
+Status (implemented, src/analysis/phase3.ts on src/analysis/paths.ts; rules in phase2.ts): conditions, operands and
+divisors on the IR, names from the printed code, with per-operation budgets (80 conditions, 40 arithmetic sites, 20
+divisions per instruction).
+- path conditions: the edges of branching blocks that dominate the operation (the edge's target dominates it and is
+  entered only from the branch or from inside its own region), up the dominator tree of its function and from the call
+  sites up to the handler (labeled-block exits, early returns and loops are plain edges; in a native dispatcher, the
+  part of the CFG the instruction's tags reach); plus the relevant checks (signer / owner / key / has_one / pda /
+  custom / state) that do not dominate it, with a path when phase 2 found one;
+- value identity: a canonical key per expression and position (variables by their reaching definitions, frame slots
+  by the store reaching the load, parameters by the argument at the call site up the call path, sums flattened with
+  constants folded); a condition guards an operand when one of its comparisons contains the operand's key;
 - authorization chains: from the authority rows (phase 2) through the stored field to the instructions writing it
   and their signers;
-- arithmetic: `+` / `-` on value paths (value-named fields, lamports, 8-byte native fields, CPI amounts), locals
-  resolved two levels; `checked` when a comparison of all non-constant operands is on the way (Rust overflow
-  traps, checked_* error returns, bound checks), `saturating` for sat_add / sat_sub, else `unchecked`; divisions
-  (`/`, __udivti3, sdiv) by supply / balance-like values with or without a comparison of the divisor on the way;
+- arithmetic: `+` / `-` stored on value paths (value-named fields, lamports, 8-byte native fields, CPI amounts):
+  `checked` when a comparison on the way (any dominating branch) reads every non-constant operand, or the result and an
+  operand (Rust overflow traps, checked_* error returns, bound checks); `bounded` when each subtracted operand is
+  compared with another value on every path (an invariant between them, e.g. an amount checked against a token balance
+  and then debited from the lamports), or an addition of an amount the instruction subtracts, checked, from another
+  balance (a transfer: the total stays within a supply); `saturating` for sat_sub; else `unchecked`;
+- divisions (`/`, sdiv, __udivti3) by supply / balance-like values (by name along the divisor's provenance) or a 128-bit
+  product divided by a value read from an account's data (native: the account model), with or without a comparison of
+  the divisor on the way (a required edge; not the division-by-zero panic the compiler inserts: a side that aborts);
 - proof trees for token transfers, mints / burns, lamport moves, closes, authority writes, data writes and CPIs to
   account-supplied programs;
 - state machine: fields set to small constants (status-named, or native single bytes that are checked) and fields
@@ -128,6 +138,5 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   seeds), instruction builders and TokenInstruction::pack tags before an undecoded invoke (native: the builder's
   arguments give the accounts); unnamed create / find_program_address by their syscall (analysis only).
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
-temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts; guards are
-still matched by operand text (definitions and slot reloads followed); labeled-block exits (`break Bn`) are not
-followed by the path conditions.
+temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts; value identity
+follows one call path per function (the first found) and treats memory as unchanged between two reads.

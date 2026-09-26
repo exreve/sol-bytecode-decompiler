@@ -1114,6 +1114,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
+    if (facts.has(pc)) facts.get(pc)!.expr = e => pr.u(e, 0);
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
   }
   // Anchor try-call checks: what the callee whose result they test checks (see calleeChecks)
