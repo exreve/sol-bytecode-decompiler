@@ -221,7 +221,8 @@ bench/build.sh                                                # rebuild bench bi
 
 Dev tools (`node --stack-size=65500 scripts/<tool>.ts prog.so …`): `show.ts <fn>` (IR and output of one function),
 `callers.ts <fn>`, `profile.ts` (per-stage timing), `coverage.ts` (function discovery coverage), `libstats.ts`
-(library recognition stats), `match-ref.ts` (library signatures vs a symbolized reference build).
+(library recognition stats), `match-ref.ts` (library signatures vs a symbolized reference build), `readability.ts
+prog.so|out.ts …` (raw `ldN`/`stN` vs named field accesses, lines, density).
 
 ## Source map
 

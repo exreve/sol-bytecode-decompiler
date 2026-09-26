@@ -335,13 +335,13 @@ export function functionFacts(inp: FnInput): FnFacts {
 	// stores: lamports, account data fields (typed), account record fields
 	const store = (n: Node, main: boolean, err: boolean) => {
 		const s = n.k === 'stmt' ? n.s : undefined
-		if (!s || (s.k !== 'store' && s.k !== 'stores' && s.k !== 'call' && s.k !== 'set')) return
+		if (!s || (s.k !== 'store' && s.k !== 'stores' && s.k !== 'call' && s.k !== 'set' && s.k !== 'copy')) return
 		const l = lineOf(n)
 		const t = lines[l]?.trim() ?? ''
 		// (native: an account's lamports / data reached through temporaries, by the IR)
 		const ir = inp.irStore?.(s)
-		if (s.k === 'call' || s.k === 'set') {
-			// (a memset / memcpy into the data: the value written, as its arguments say)
+		if (s.k === 'call' || s.k === 'set' || s.k === 'copy') {
+			// (a memset / memcpy / word copy into the data: the value written, as its arguments say)
 			const a = /\(([^,]+), ([^,]+), ([^)]+)\)/.exec(t)
 			if (ir?.field) facts.ops.push({ line: l + 1, pc: s.pc, kinds: ['ACCOUNT_DATA_WRITE'], text: t, main, errPath: err, target: { acct: `account[${ir.index}]`, field: ir.field }, how: '=', value: /memset/.test(t) ? a?.[2] ?? '?' : a ? `bytes at ${a[2]}` : '?' })
 			return
@@ -493,8 +493,10 @@ export function functionFacts(inp: FnInput): FnFacts {
 	/** both sides exit: the one that looks like the error path (error markers; else much shorter) */
 	const pickFail = (a: Node[], b: Node[], strict = false): 'then' | 'rest' | undefined => {
 		const la = span(a), lb = span(b)
-		if (!strict && la * 4 <= lb && la <= 40) return 'then'
-		if (!strict && lb * 4 <= la && lb <= 40) return 'rest'
+		// (Anchor: a short side without any error marker is not the failing one when the other raises an Anchor error first thing)
+		const quiet = (x: Node[], y: Node[]) => !!inp.anchor && firstMark(y) === 0 && /anchor::\w/.test(topText(y)) && !ERROR_MARK.test(textOf(x))
+		if (!strict && la * 4 <= lb && la <= 40 && !quiet(a, b)) return 'then'
+		if (!strict && lb * 4 <= la && lb <= 40 && !quiet(b, a)) return 'rest'
 		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")
 		if (!strict && inp.anchor && la <= 60 && la * 2 <= lb && inlineString(a)) return 'then'
 		// (Anchor: a callee's error returned with the account's name built inline and no error of its own, while the

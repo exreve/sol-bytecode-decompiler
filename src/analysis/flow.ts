@@ -475,9 +475,9 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				if (g) c.args.forEach((x, j) => { const v = X.ev(x, p); const pv = g.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) rs.set(pv, v) })
 				if (g && rs.size) visit(g, rs, depth - 1)
 			}
-			if (s.k !== 'store' && s.k !== 'stores') return
-			const a = X.ev(s.addr, p)
-			const n = s.k === 'store' ? s.size : s.size * s.vals.length
+			if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return
+			const a = X.ev(s.k === 'copy' ? s.dst : s.addr, p)
+			const n = s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n
 			const line = ff.pcLine.get(s.pc)
 			if (!a || line === undefined) return
 			const text = ff.lines[line - 1]?.trim() ?? ''
@@ -1317,9 +1317,9 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 			const d = a?.k === 'ptr' && a.f === 'data' ? [a.i, a.off] : a?.k === 'rec' && a.off >= 0x58 ? [a.i, a.off - 0x58] : undefined
 			return d && { index: d[0], field: n === undefined ? (d[1] ? `data[${d[1]}..]` : 'data') : `data[${d[1]}..${d[1] + n}]` }
 		}
-		if (s.k !== 'store' && s.k !== 'stores') return undefined
-		const a = ev(s.addr, p)
-		const n = s.k === 'store' ? s.size : s.size * s.vals.length
+		if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return undefined
+		const a = ev(s.k === 'copy' ? s.dst : s.addr, p)
+		const n = s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n
 		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
 		// (the owner pubkey rewritten: AccountInfo::assign)
 		if (a?.k === 'ptr' && a.f === 'owner' || a?.k === 'rec' && a.off >= 0x28 && a.off < 0x48) return { index: a.i, field: 'owner' }

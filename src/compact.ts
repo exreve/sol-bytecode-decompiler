@@ -1,11 +1,14 @@
 // Final exact compaction of statement runs (applied after all optimizations):
 //   stN(p, a); stN(p+N, b); ...            -> stN(p, a, b, ...)   (values pure)
 //   st64(d, ld64(s)); st64(d+8, ld64(s+8)) -> copy(d, s, 16)      (ascending word copies)
+//   st64(d+8, ld64(s+8)); st64(d, ld64(s)) -> copyr(d, s, 16)     (descending word copies)
+// preceded by sinkFrameLoads (loads of the own frame moved to their one use, see below).
 // Runs into the stack frame (fp + const) may appear in any order: frame stores cannot fault and
 // stores to disjoint addresses commute; for copies the source and destination ranges must be
 // disjoint frame ranges (then order is irrelevant too).
 import type { VarFunc } from './dataflow.ts'
-import { type Expr, type Stmt, exprEq, hasSideEffectsOrMem } from './ir.ts'
+import { type Expr, type Stmt, exprEq, hasSideEffectsOrMem, walkExpr, mapExpr, isMemIntrinsic, isDivOp, safeDivisor } from './ir.ts'
+import { stmtExprs, mapStmtExprs, stmtInfo } from './simplify.ts'
 
 function baseOff(e: Expr): [Expr, bigint] {
 	if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') return [e.a, BigInt.asIntN(64, e.b.v)]
@@ -15,6 +18,86 @@ const pure = (e: Expr) => { const f = hasSideEffectsOrMem(e); return !f.load && 
 const mk = (base: Expr, off: bigint): Expr => (off === 0n ? base : { k: 'bin', op: 'add', a: base, b: { k: 'const', v: BigInt.asUintN(64, off) } })
 
 type Store = Extract<Stmt, { k: 'store' }>
+
+/**
+ * Move `v = <loads of the own frame>` down to the one use of v in its block, past stores that cannot
+ * write the loaded bytes (default memory model: the frame is only accessed through frame-pointer-derived
+ * addresses, so stores through a parameter never reach it). A load inside the 4 KiB frame cannot fault and
+ * has no effect, so evaluating it later reads the same value. Only definitions whose value is not needed
+ * after that use (v redefined later in the block, or the block ends the function) move. This turns
+ * `t = ld64(s); st64(a + 0x10, ld64(s + 8)); st64(a + 8, t)` into word copies that compaction joins.
+ */
+export function sinkFrameLoads(f: VarFunc) {
+	const fp = f.vars.find(v => v.param === 10)?.id
+	if (fp === undefined) return
+	const defd = new Set<number>()
+	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) defd.add(s.dst)
+	// parameters never reassigned: addresses the caller passed (never into this function's frame)
+	const param = (e: Expr) => e.k === 'var' && e.id !== fp && (f.vars[e.id]?.param >= 1 && f.vars[e.id].param <= 5 || f.vars[e.id]?.param >= 100) && !defd.has(e.id)
+	/** frame byte ranges read by e, when its only memory reads are 8/4/2/1-byte loads of the own frame and it cannot trap or call */
+	const frameReads = (e: Expr): [bigint, bigint][] | undefined => {
+		const fx = hasSideEffectsOrMem(e)
+		if (fx.call) return undefined
+		const r: [bigint, bigint][] = []
+		let ok = true
+		walkExpr(e, x => {
+			if (x.k === 'fn' && isMemIntrinsic(x.name)) ok = false
+			if (x.k === 'bin' && isDivOp(x.op) && !safeDivisor(x.op, x.b)) ok = false
+			if (x.k !== 'load') return
+			const [lb, lo] = baseOff(x.addr)
+			if (!(lb.k === 'var' && lb.id === fp && lo >= -0x1000n && lo + BigInt(x.size) <= 0n)) ok = false
+			else r.push([lo, lo + BigInt(x.size)])
+		})
+		return ok && r.length ? r : undefined
+	}
+	const uses = (s: Stmt, v: number) => { let n = 0; for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'var' && x.id === v) n++ }); return n }
+	for (const b of f.blocks) {
+		const ends = b.term.k === 'ret' || b.term.k === 'trap'
+		for (let i = 0; i < b.stmts.length; i++) {
+			const s = b.stmts[i]
+			if (s.k !== 'set' || f.vars[s.dst]?.param >= 0) continue
+			const rd = frameReads(s.e)
+			if (!rd) continue
+			const reads = new Set<number>()
+			walkExpr(s.e, x => { if (x.k === 'var') reads.add(x.id) })
+			let at = -1, j = i + 1
+			for (; j < b.stmts.length; j++) {
+				const t = b.stmts[j]
+				const n = uses(t, s.dst)
+				if (n) { at = n === 1 ? j : -1; break }
+				if ((t.k === 'set' || t.k === 'call') && (t.dst === s.dst || reads.has(t.dst))) break
+				if (t.k === 'call' || t.k === 'trap' || stmtInfo(t).call) break
+				if (t.k === 'store' || t.k === 'stores' || t.k === 'copy') {
+					const [db, dof] = baseOff(t.k === 'copy' ? t.dst : t.addr)
+					if (param(db)) continue
+					const w = BigInt(t.k === 'store' ? t.size : t.k === 'stores' ? t.size * t.vals.length : t.n)
+					if (!(db.k === 'var' && db.id === fp) || rd.some(([lo, hi]) => dof < hi && lo < dof + w)) break
+				}
+			}
+			if (at < 0) continue
+			// the value must be dead after its use: redefined later in the block (not read before), or the block ends the function
+			let dead = false
+			const term: Expr | null = b.term.k === 'br' ? b.term.c : b.term.k === 'ret' ? b.term.e : null
+			const u = b.stmts[at]
+			if ((u.k === 'set' || u.k === 'call') && u.dst === s.dst) dead = true
+			for (let k = at + 1; k < b.stmts.length && !dead; k++) {
+				const t = b.stmts[k]
+				if (uses(t, s.dst)) break
+				if ((t.k === 'set' || t.k === 'call') && t.dst === s.dst) dead = true
+			}
+			if (!dead && ends) {
+				dead = true
+				for (let k = at + 1; k < b.stmts.length; k++) if (uses(b.stmts[k], s.dst)) dead = false
+				if (term) walkExpr(term, x => { if (x.k === 'var' && x.id === s.dst) dead = false })
+			}
+			if (!dead) continue
+			const e = s.e
+			b.stmts[at] = mapStmtExprs(u, x => mapExpr(x, y => (y.k === 'var' && y.id === s.dst ? e : y)))
+			b.stmts.splice(i, 1)
+			i--
+		}
+	}
+}
 
 export function compactStores(f: VarFunc) {
 	const fp = f.vars.find(v => v.param === 10)?.id
@@ -74,14 +157,16 @@ function compactWindow(win: Store[], frame: boolean): Stmt[] {
 		let best: { n: number; st: Stmt } | null = null
 		// Necessary conditions for tryRun to succeed on win[k..k+n) (checked cheaply first; tryRun
 		// still decides): pure base, one store size, distinct offsets aligned to that size, spanning
-		// exactly n slots, and strictly ascending as written unless frame. All but the span hold for
+		// exactly n slots, and strictly monotonic as written unless frame. All but the span hold for
 		// a prefix iff they hold for every shorter prefix, which bounds n by `lim`.
 		let lim = basePure ? win.length - k : 0
 		{
 			const size = win[k].size, sz = BigInt(size), o0 = offs[k], seen = new Set<bigint>([o0])
+			// (outside the frame: strictly ascending, or strictly descending for a copyr)
+			const down = !frame && k + 1 < win.length && offs[k + 1] < o0
 			for (let i = k + 1; i < k + lim; i++) {
 				const o = offs[i]
-				if (win[i].size !== size || (o - o0) % sz !== 0n || seen.has(o) || (!frame && o <= offs[i - 1])) { lim = i - k; break }
+				if (win[i].size !== size || (o - o0) % sz !== 0n || seen.has(o) || (!frame && (down ? o >= offs[i - 1] : o <= offs[i - 1]))) { lim = i - k; break }
 				seen.add(o)
 			}
 		}
@@ -114,7 +199,9 @@ function tryRun(ss: Store[], frame: boolean): Stmt | null {
 	// ordering: ascending in program order, or any order for frame stores with distinct offsets
 	const order = ss.map((_, i) => i).sort((a, b) => (offs[a] < offs[b] ? -1 : 1))
 	const ascendingAsWritten = order.every((v, i) => v === i)
-	if (!ascendingAsWritten && !frame) return null
+	// (strictly descending word copies are copyr, whatever the memory: same loads and stores in the same order)
+	const descendingCopy = !ascendingAsWritten && size === 8 && order.every((v, i) => v === order.length - 1 - i) && ss.every(s => s.v.k === 'load' && s.v.size === 8)
+	if (!ascendingAsWritten && !frame && !descendingCopy) return null
 	for (let i = 1; i < order.length; i++) if (offs[order[i]] !== offs[order[i - 1]] + BigInt(size)) return null
 	const lo = offs[order[0]]
 	// copy run
@@ -131,6 +218,6 @@ function tryRun(ss: Store[], frame: boolean): Stmt | null {
 			return { k: 'copy', dst: mk(base, lo), src: mk(sb, slo), n: ss.length * 8, pc: ss[0].pc }
 		}
 	}
-	if (!ss.every(s => pure(s.v))) return null
+	if (!ss.every(s => pure(s.v)) || (!ascendingAsWritten && !frame)) return null
 	return { k: 'stores', size, addr: mk(base, lo), vals: order.map(i => ss[i].v), pc: ss[0].pc }
 }

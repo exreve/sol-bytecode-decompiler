@@ -9,7 +9,7 @@ import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS, unb58 } from './semant
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
 import { promoteStack } from './stack.ts';
-import { compactStores } from './compact.ts';
+import { compactStores, sinkFrameLoads } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
@@ -119,6 +119,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // ---- SBF stack-passed arguments become ordinary parameters ----
   if (!opts.exactMemory) rewriteStackArgs(p, built);
   for (const bt of built.values()) {
+    if (!opts.exactMemory) sinkFrameLoads(bt.f);
     compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
