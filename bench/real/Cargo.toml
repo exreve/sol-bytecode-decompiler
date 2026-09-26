@@ -1,0 +1,15 @@
+# Realistic clean programs (r_*) and open-source programs with single-check-removal variants (o_*): bench/README.md
+[workspace]
+resolver = "2"
+members = ["o_multisig", "o_escrow", "o_record"]
+
+[workspace.dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = { version = "=0.31.1", default-features = false, features = ["token", "token_2022", "associated_token"] }
+solana-program = "=2.2.1"
+spl-token = { version = "=8.0.0", features = ["no-entrypoint"] }
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

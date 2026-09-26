@@ -1,0 +1,115 @@
+{
+	"kind": "anchor",
+	"idl": "o_escrow.json",
+	"set": "oss",
+	"source": "solana-developers/program-examples tokens/escrow/anchor (main, MIT), built with Anchor 0.31.1: bench/real/o_escrow",
+	"about": "Open-source program, unmodified logic: the clean build is expected to have no finding; each variant removes exactly one validation and expects one of its rules at its instruction. Scored for rules only.",
+	"instructions": {
+		"make_offer": {
+			"accounts": {},
+			"why": {
+				"maker": "Signer (pays the offer and vault rent, signs the deposit transfer).",
+				"token_mint_a / token_mint_b": "InterfaceAccount<Mint> owned by token_program (mint::token_program). Any mints: the maker chooses what to trade.",
+				"maker_token_account_a": "associated_token (mint_a, maker, token_program); the TransferChecked CPI needs the maker's signature anyway.",
+				"offer": "init at PDA [offer, maker, id]: fresh, bound to the maker; stores maker, both mints, wanted amount, bump.",
+				"vault": "init as ATA(offer, mint_a, token_program): the offer PDA is its authority.",
+				"associated_token_program / token_program / system_program": "Program<AssociatedToken>, Interface<TokenInterface> (SPL Token or Token-2022 only), Program<System>."
+			}
+		},
+		"take_offer": {
+			"accounts": {},
+			"why": {
+				"taker": "Signer: pays the wanted tokens (TransferChecked with the taker as authority) and the init_if_needed rent. Permissionless by design: anyone may take an open offer.",
+				"maker": "SystemAccount; offer has_one = maker and the offer PDA seeds use maker.key(): the real maker receives the offer rent (close = maker) and the vault rent.",
+				"token_mint_a / token_mint_b": "offer has_one = token_mint_a / token_mint_b: the mints the maker asked for.",
+				"taker_token_account_a": "init_if_needed ATA(taker, mint_a): the taker receives the vault tokens into its own ATA.",
+				"taker_token_account_b": "ATA(taker, mint_b), mut; the token program requires the taker's signature.",
+				"maker_token_account_b": "init_if_needed ATA(maker, mint_b): the payment goes to the maker.",
+				"offer": "PDA [offer, maker, offer.id] with bump offer.bump, has_one maker / token_mint_a / token_mint_b, close = maker (discriminator zeroed by Anchor's close).",
+				"vault": "ATA(offer, mint_a, token_program): the offer's own vault, emptied and closed with the offer PDA's signature.",
+				"programs": "Program<AssociatedToken>, Interface<TokenInterface>, Program<System>."
+			}
+		},
+		"refund_offer": {
+			"accounts": {},
+			"why": {
+				"maker": "Signer, and offer has_one = maker + PDA seeds with maker.key(): only the offer's maker can refund.",
+				"token_mint_a": "offer has_one = token_mint_a.",
+				"maker_token_account_a": "ATA(maker, mint_a): the refund goes back to the maker.",
+				"offer": "PDA [offer, maker, offer.id] / offer.bump, has_one maker / token_mint_a, close = maker.",
+				"vault": "ATA(offer, mint_a, token_program).",
+				"token_program": "Interface<TokenInterface>."
+			}
+		}
+	},
+	"variants": {
+		"take_no_mint_b": {
+			"ix": "take_offer",
+			"rules": ["token-mint-unrelated", "signer-not-related-to-authority", "unverified-account-data"],
+			"removed": "offer: has_one = token_mint_b",
+			"impact": "The taker pays with a worthless mint of its own (token_mint_b, both mint-B ATAs derived from it, init_if_needed creates the maker's) and still receives the whole vault of mint A: theft of every open offer. Nothing else binds token_mint_b to the offer (the ATA constraints only relate the token accounts to whatever mint is passed).",
+			"verified": {
+				"code": "-1 anchor::ConstraintHasOne, -1 memcmp",
+				"analysis": "no check found only in the clean build"
+			}
+		},
+		"take_dest_unbound": {
+			"ix": "take_offer",
+			"rules": ["recipient-unbound", "token-mint-unrelated"],
+			"removed": "maker_token_account_b: associated_token::authority = maker (the ATA binding to the maker; Anchor's ATA init needs it, so the account becomes mut + token::mint = token_mint_b + token::token_program, no init_if_needed)",
+			"impact": "The taker passes a mint-B token account of its own as maker_token_account_b: the payment goes back to the taker and the vault of mint A still goes to the taker: theft of every open offer. The token program only checks the destination's mint, not its owner.",
+			"verified": {
+				"code": "-1 anchor::AccountNotEnoughKeys, -1 anchor::ConstraintAssociatedTokenTokenProgram, -1 anchor::ConstraintTokenOwner, -1 anchor::ConstraintRentExempt, -1 anchor::AccountNotAssociatedTokenAccount, -7 .is_signer read, -3 memcmp, +1 anchor::ConstraintTokenTokenProgram",
+				"analysis": "found in the clean build only: taker_token_account_a.writable, taker_token_account_b.state, maker_token_account_b.token_mint, maker_token_account_b.initialized, maker_token_account_b.token_owner; in the variant only: taker_token_account_b.writable, maker_token_account_b.state, compare maker_token_account_b.owner ~ sd8"
+			}
+		},
+		"refund_no_signer": {
+			"ix": "refund_offer",
+			"rules": ["state-write-ungated", "value-move-no-signer", "signer-not-related-to-authority"],
+			"idl": {
+				"refund_offer": "maker:w token_mint_a maker_token_account_a:w offer:w vault:w token_program"
+			},
+			"removed": "maker: Signer -> SystemAccount",
+			"verified": {
+				"code": "no check-related token differs",
+				"analysis": "found in the clean build only: maker.signer; in the variant only: maker.owner",
+				"note": "the maker's try_accounts call (first of the handler's accounts function, bundle/refund_offer.ts) is try_accounts_4258 = Signer::try_accounts in the clean build (security/refund_offer.md: maker signer found via it) and try_accounts_1d0 in the variant, in which only an owner check (SystemAccount: owned by the system program) is found; the other try calls (338, 280, 43c0, 280, 120) are the same functions."
+			},
+			"impact": "Anyone can cancel any open offer (the vault tokens go back to the maker's ATA, the rent to the maker): unauthorized cancellation of other users' orders (denial of service / forced exit, no theft). has_one = maker and the seeds only bind the key, and the vault transfer is signed by the offer PDA, so no other check requires the maker's signature."
+		}
+	},
+	"discarded": [
+		{
+			"removal": "take_offer offer has_one = maker",
+			"reason": "redundant: the offer PDA seeds [offer, maker.key(), id] with the stored bump already bind the offer to the maker account passed."
+		},
+		{
+			"removal": "take_offer offer has_one = token_mint_a",
+			"reason": "not exploitable for gain: the vault must be ATA(offer, token_mint_a), so with another mint the taker can only pass an ATA of the offer for that mint (which it funded itself); it still pays the maker the full mint-B price, and the real vault stays locked under the closed offer: the maker ends up with exactly the trade it asked for, the taker only loses. Left out as not clearly security-relevant."
+		},
+		{
+			"removal": "refund_offer offer has_one = maker",
+			"reason": "redundant: the PDA seeds bind the offer to maker.key()."
+		},
+		{
+			"removal": "take_offer / refund_offer offer seeds",
+			"reason": "redundant: has_one = maker plus the owner / discriminator of Account<Offer> identify the offer; the vault is derived from the offer key."
+		},
+		{
+			"removal": "make_offer maker_token_account_a associated_token::authority",
+			"reason": "redundant: the deposit is a TransferChecked with the maker as authority, which the token program only accepts from the account's owner (or delegate)."
+		},
+		{
+			"removal": "refund_offer maker_token_account_a associated_token::authority",
+			"reason": "harmless: only the maker (signer, has_one) can refund, so the destination is the maker's own choice."
+		},
+		{
+			"removal": "take_offer taker: Signer",
+			"reason": "redundant: the taker is the authority of the mint-B TransferChecked and the init_if_needed payer, both of which require its signature at the runtime / token program."
+		},
+		{
+			"removal": "take_offer token_program Interface -> UncheckedAccount",
+			"reason": "redundant: the vault must be ATA(offer, mint_a, token_program) and InterfaceAccount<TokenAccount> requires an SPL Token / Token-2022 owner, so a fake token program cannot be paired with the real vault."
+		}
+	]
+}
