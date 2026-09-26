@@ -7,7 +7,34 @@ their expected facts, and single-property variants whose expected finding is kno
 
 It decompiles every `bin/*.so` as the CLI project output does (`-o dir/ [--idl]`), reads `security/analysis.json`
 and prints TP / FP / FN, recall, precision and F1 per category, then one `score` line (mean F1 of the six
-categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. ~7 s.
+categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. Without a filter it
+also scores the eval pairs (`eval/analyze.ts`, below); `node bench/run.ts pairs` runs only those. ~40 s (~7 s with a filter).
+
+## Generated programs (bench/gen)
+
+`node bench/gen/gen.ts` writes 7 programs from instruction templates (`bench/gen/anchor.ts`, `bench/gen/native.ts`):
+`g_a31_vault`, `g_a31_pool` (Anchor 0.31.1), `g_a29_vault`, `g_a29_pool` (the same templates under Anchor 0.29.0 /
+solana-program 1.16.27), `g_n_bank`, `g_n_amm` (solana-program 2.2.1, spl-token), `g_p_jar` (pinocchio 0.8.4). Each
+template instruction is clean as written and names the properties its `v_<id>` features remove (signer, has_one /
+stored key, owner, discriminator / type tag, CPI program id, stored bump, uninitialized check, sysvar address,
+duplicate-account check, remaining-account key, close zeroing, checked arithmetic, zero-supply guard, token mint /
+authority, one of several instructions' validation). The generator writes the crates (`bench/gen/programs`,
+`bench/gen/programs29`: two cargo workspaces), the IDLs (`bench/idl/g_*.json`) and `bench/expected/g_*.json` with
+`"generated": true`; build with `WS=bench/gen/programs sh bench/build.sh g_` and `WS=bench/gen/programs29 sh
+bench/build.sh g_` (binaries in `bench/bin/`).
+
+`bench/run.ts` scores them for rules only, apart from the six categories: a variant is caught when one of its accepted
+rules is reported at its instruction (`~consistency`: a validation_consistency inconsistency there); every finding on a
+generated base is a false finding (inconsistencies on a base are counted as informational noise); findings a variant
+adds besides its expected ones are listed as unexpected (`--verbose`).
+
+## Eval pairs
+
+`eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
+signal at `ground_truth.target` (instruction + account names as the analysis names them): a finding (`finding`), or
+only an informational one (`informational`: a finding of confidence info, a validation_consistency inconsistency, a
+stored-key gap or a program account no stored field of which is compared); `missed` otherwise. `fixed` is `clean` when
+no such signal is left at the target in @fixed. `--verbose` lists the signals.
 
 ## Contents
 
@@ -46,7 +73,17 @@ categories). `--verbose` lists the variants (caught / MISSED), every miss and ev
 To add a program: a crate under `programs/` (add it to the workspace), `v_*` features, `bench/build.sh <crate>`,
 an IDL for Anchor, and `expected/<crate>.json`.
 
-## Corpus noise of the audit rules
+## Corpus noise baseline
+
+    node bench/corpus.ts [corpusDir=corpus] [--budget s=1800] [--timeout s=240] [--jobs n] [--save]
+
+Decompiles every `corpus/*.so` (with `corpus/idl/<id>.json` when present; ~7 min on 6 workers) and prints per rule the
+programs hit, the findings and the findings per 100 programs; informational findings and the validation_consistency /
+stored-key gap signals get their own rows. The corpus programs are presumed clean, so this is the noise floor. The
+table is compared with `bench/corpus-baseline.json` (same programs only; a changed row shows the baseline programs /
+findings); `--save` rewrites the baseline (per rule totals and per-program counts, for diffs).
+
+## Corpus noise of the audit rules (history)
 
 Programs of the 400-program corpus with >= 1 finding (decompile project mode): `sysvar-account-unchecked` 0,
 `pda-bump-from-ix` 5 (7 findings), `duplicate-mutable-accounts` 0, `account-type-unchecked` 3, `cpi-result-ignored` 1,

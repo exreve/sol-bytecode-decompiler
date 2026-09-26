@@ -7,6 +7,9 @@ programs, plus synthetic cases from `bench/`, turned into review packets (decomp
     node eval/packets.ts [prog_NN ...]        # generate eval/packets/prog_NN/{code,full}/ (not committed, ~2 min)
     node eval/score.ts [--verbose] [--min-confidence x] [filter]   # score eval/results/
 
+Deterministic scoring of the analysis itself on the real pairs (no reviewer): `node bench/run.ts pairs [--verbose]`
+(`eval/analyze.ts`, target names in `cases.json` ground_truth.target; see bench/README.md).
+
 **Never give a reviewer anything but one packet directory**: `cases.json`, `bin/`, `build.sh`, this README and the
 results name the programs and the bugs.
 
