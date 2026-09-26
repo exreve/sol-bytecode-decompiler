@@ -20,7 +20,7 @@ if (isMainThread && !process.execArgv.some(a => a.startsWith('--stack-size'))) {
 const { decompile } = await import('./decompile.ts')
 const { renderProject } = await import('./layout.ts')
 const { parseIdl, fetchIdl } = await import('./idl.ts')
-const { isAddress, fetchProgram } = await import('./rpc.ts')
+const { isAddress, fetchProgramAccount } = await import('./rpc.ts')
 
 const USAGE = `usage: sbpf-decompile <program> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
        sbpf-decompile <program A> <program B> [-o report.txt] [--rpc <url>]
@@ -48,15 +48,15 @@ const rpc = opt('--rpc')
 const out = opt('-o')
 
 /** Program bytes, and the IDL (explicit file, or the on-chain one of a fetched program). */
-async function load(input: string, idlFile?: string): Promise<{ bytes: Uint8Array; idl?: ReturnType<typeof parseIdl> }> {
+async function load(input: string, idlFile?: string): Promise<{ bytes: Uint8Array; idl?: ReturnType<typeof parseIdl>; loader?: string }> {
 	let bytes: Uint8Array
-	let programId: string | undefined
+	let programId: string | undefined, loader: string | undefined
 	if (input === '-') bytes = new Uint8Array(readFileSync(0))
 	else if (existsSync(input)) bytes = new Uint8Array(readFileSync(input))
 	else if (isAddress(input)) {
 		if (!rpc) fail(`${input} looks like a program address: pass --rpc <url> to fetch it`)
 		programId = input
-		try { bytes = await fetchProgram(rpc!, input) } catch (e) { fail(String((e as Error).message ?? e)) }
+		try { ({ bytes, loader } = await fetchProgramAccount(rpc!, input)) } catch (e) { fail(String((e as Error).message ?? e)) }
 		console.error(`fetched ${input}: ${bytes!.length} bytes`)
 	} else fail(`${input}: no such file, and not a program address`)
 	let idlJson: any
@@ -65,7 +65,7 @@ async function load(input: string, idlFile?: string): Promise<{ bytes: Uint8Arra
 		try { idlJson = await fetchIdl(programId, rpc) } catch { /* no IDL */ }
 		if (idlJson) console.error(`using on-chain Anchor IDL of ${programId}`)
 	}
-	return { bytes: bytes!, idl: idlJson ? parseIdl(idlJson) : undefined }
+	return { bytes: bytes!, idl: idlJson ? parseIdl(idlJson) : undefined, loader }
 }
 
 if (inputs.length === 2) {
@@ -78,8 +78,14 @@ if (inputs.length === 2) {
 	process.exit(0)
 }
 
-const { bytes, idl } = await load(inputs[0], opt('--idl'))
-const res = decompile(bytes, { full: flag('--full'), idl })
+const { bytes, idl, loader } = await load(inputs[0], opt('--idl'))
+const res = decompile(bytes, { full: flag('--full'), idl, loader })
+{
+	// opcodes the declared sBPF version (e_flags) does not have: probably built for another version
+	const { invalidInstructions } = await import('./program.ts')
+	const bad = invalidInstructions(res.program)
+	if (bad.length) console.error(`warning: ${bad.length} reachable instruction${bad.length > 1 ? 's are' : ' is'} invalid for the declared sBPF v${res.program.version} (first at pc ${bad[0]}, opcode 0x${res.program.insns[bad[0]].opc.toString(16)}): built for another sBPF version? The output follows the declared version.`)
+}
 if (out && (out.endsWith('/') || (existsSync(out) && statSync(out).isDirectory()))) {
 	for (const [path, text] of renderProject(res)) {
 		mkdirSync(dirname(join(out, path)), { recursive: true })

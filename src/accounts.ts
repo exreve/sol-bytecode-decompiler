@@ -15,10 +15,11 @@
 //     right sizes) or its key / owner as a 32-byte value (compared, copied or read word-wise);
 //   - it is an unmodified parameter and some call site passes an account (and none a constant).
 import type { VarFunc } from './dataflow.ts'
+import type { Program } from './program.ts'
 import { type Expr, walkExpr } from './ir.ts'
 import { stmtExprs } from './simplify.ts'
 
-type Kind = 'info' | 'raw'
+type Kind = 'info' | 'raw' | 'raw1'
 interface Layout { loads: Record<number, [number, string]>; flags: number[]; keyPtrs: bigint[]; keyAddrs: bigint[] }
 const LAYOUTS: Record<Kind, Layout> = {
 	info: {
@@ -28,6 +29,11 @@ const LAYOUTS: Record<Kind, Layout> = {
 	raw: {
 		loads: { 1: [1, 'is_signer'], 2: [1, 'is_writable'], 3: [1, 'executable'], 0x48: [8, 'lamports'], 0x50: [8, 'data_len'] },
 		flags: [1, 2, 3], keyPtrs: [], keyAddrs: [8n, 0x28n],
+	},
+	// the deprecated loader's unaligned record (see unalignedInput): the owner follows the data
+	raw1: {
+		loads: { 1: [1, 'is_signer'], 2: [1, 'is_writable'], 0x23: [8, 'lamports'], 0x2b: [8, 'data_len'] },
+		flags: [1, 2], keyPtrs: [], keyAddrs: [3n],
 	},
 }
 const STRIDE = 0x30n
@@ -68,7 +74,8 @@ interface Static {
 interface FnInfo { f: VarFunc; typed: Typed; params: Map<number, number>; addrs?: Map<string, Set<number>>; st?: Static } // params: var id -> register
 
 /** Per function: expressions (variables, loads) that point to an account. */
-export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Typed> {
+export function findAccounts(funcs: Map<number, { f: VarFunc }>, unaligned = false): Map<number, Typed> {
+	const kinds: Kind[] = ['info', unaligned ? 'raw1' : 'raw']
 	const info = new Map<number, FnInfo>()
 	for (const [pc, { f }] of funcs) {
 		const params = new Map<number, number>()
@@ -79,7 +86,7 @@ export function findAccounts(funcs: Map<number, { f: VarFunc }>): Map<number, Ty
 	const blocked = new Map<number, Set<number>>()           // callee pc -> registers some caller passes a constant in
 	for (let round = 0; round < 6; round++) {
 		let changed = false
-		for (const [pc, fi] of info) if (local(fi, paramTyped.get(pc))) changed = true
+		for (const [pc, fi] of info) if (local(fi, paramTyped.get(pc), kinds)) changed = true
 		// call sites vote for callee parameters
 		for (const [, fi] of info) for (const { t, args } of fi.st!.calls) {
 			args.forEach((a, i) => {
@@ -111,7 +118,7 @@ function kindOf(typed: Typed, { bk, o }: Split): Kind | undefined {
  * so every key it would add was added (or already present) in the first call, and `typed` only
  * grows. What can still change is parameter typing (new call-site votes) and the propagation.
  */
-function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean {
+function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined, kinds: Kind[]): boolean {
 	const { f, typed } = fi
 	const n0 = typed.size
 	if (fi.st) {
@@ -166,14 +173,14 @@ function local(fi: FnInfo, typedParams: Map<number, Kind> | undefined): boolean 
 		if (b.term.k === 'br') walkExpr(b.term.c, inBr)
 		else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, inRet)
 	}
-	for (const [bk, m] of loads) for (const kind of ['info', 'raw'] as Kind[]) {
+	for (const [bk, m] of loads) for (const kind of kinds) {
 		const L = LAYOUTS[kind]
 		const fit = [...m].filter(([o, sz]) => L.loads[o]?.[0] === sz)
 		if (!fit.some(([o]) => L.flags.includes(o))) continue
 		const keyed = L.keyPtrs.some(o => wide.has(`L8(${offKey(bk, o)})`)) || L.keyAddrs.some(o => wide.has(offKey(bk, o)))
 		// without a 32-byte key/owner use, demand more layout fields (a Rust clone reads all eight;
 		// a raw record: lamports and data_len)
-		const many = kind === 'info' ? fit.length >= 4 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs().get(bk)?.size ?? 0) >= 2
+		const many = kind === 'info' ? fit.length >= 4 : kind === 'raw1' ? m.get(0x23) === 8 && m.get(0x2b) === 8 : (m.get(0x48) === 8 && m.get(0x50) === 8) || (addrs().get(bk)?.size ?? 0) >= 2
 		if (keyed || many) { if (!typed.has(bk)) typed.set(bk, kind); break }
 	}
 	propagate(typed, prop)
@@ -230,8 +237,8 @@ export function accountField(typed: Typed | undefined, e: Expr): string | undefi
 	// (offset and size first: only a field of one of the layouts can be named, and the key of a
 	// large base expression is costly to build; the printer asks for every load)
 	if (o < 0n) return undefined
-	const inf = LAYOUTS.info.loads[Number(o % STRIDE)], raw = LAYOUTS.raw.loads[Number(o)]
-	if (!(inf && inf[0] === e.size) && !(raw && raw[0] === e.size) && !(o >= 8n && o < 0x48n && e.size === 8)) return undefined
+	const inf = LAYOUTS.info.loads[Number(o % STRIDE)], raw = LAYOUTS.raw.loads[Number(o)], raw1 = LAYOUTS.raw1.loads[Number(o)]
+	if (!(inf && inf[0] === e.size) && !(raw && raw[0] === e.size) && !(raw1 && raw1[0] === e.size) && !(o >= 3n && o < 0x48n && e.size === 8)) return undefined
 	const kind = typed.get(key(b))
 	if (!kind) return undefined
 	const L = LAYOUTS[kind]
@@ -239,6 +246,12 @@ export function accountField(typed: Typed | undefined, e: Expr): string | undefi
 		const fd = L.loads[Number(o)]
 		if (fd && fd[0] === e.size) return fd[1]
 		if (o >= 8n && o < 0x48n && e.size === 8) return `${o < 0x28n ? 'key' : 'owner'}[${(o - (o < 0x28n ? 8n : 0x28n)) / 8n}]`
+		return undefined
+	}
+	if (kind === 'raw1') {
+		const fd = L.loads[Number(o)]
+		if (fd && fd[0] === e.size) return fd[1]
+		if (o >= 3n && o < 0x23n && e.size === 8 && (o - 3n) % 8n === 0n) return `key[${(o - 3n) / 8n}]`
 		return undefined
 	}
 	const idx = o / STRIDE, fd = L.loads[Number(o % STRIDE)]
@@ -251,8 +264,42 @@ export function accountAddr(typed: Typed | undefined, e: Expr): string | undefin
 	if (!typed) return undefined
 	const [b, o] = split(e)
 	const nm = o === 8n ? '&key' : o === 0x28n ? '&owner' : o === 0x58n ? '&data' : undefined
+	const nm1 = o === 3n ? '&key' : o === 0x33n ? '&data' : undefined
 	// (the offset first: the printer asks for every sum it prints, and the key of a large base
 	// expression is costly to build)
-	if (!nm || typed.get(key(b)) !== 'raw') return undefined
-	return nm
+	if (!nm && !nm1) return undefined
+	const k = typed.get(key(b))
+	return k === 'raw' ? nm : k === 'raw1' ? nm1 : undefined
+}
+
+/**
+ * The deprecated loader (BPFLoader1111…) serializes the input unaligned: per account a dup byte, then
+ * is_signer, is_writable, key[32] (+3), lamports (+0x23), data_len (+0x2b), data (+0x33), then after the
+ * data owner[32], executable (+0x20 from owner), rent_epoch (+0x21), no padding or realloc room. Its
+ * entrypoint deserializers (C SDK, solana_program::entrypoint_deprecated) read data_len as an 8-byte load
+ * at record + 0x2b, executable at owner + 0x20 and rent_epoch at owner + 0x21 (an unaligned 8-byte load
+ * the aligned layout never makes), all in one function: the entry function or one it calls. A
+ * single-account program may instead read acc0's data_len byte-wise at input + 0x33..0x3a in its entry
+ * function (and not the neighbouring bytes, as a byte-wise owner comparison of the aligned layout would).
+ */
+export function unalignedInput(p: Program): boolean {
+	if (p.version !== 0 || p.elf.entryPc < 0) return false
+	const entry = p.funcs.get(p.elf.entryPc)
+	if (!entry) return false
+	const offs = (pc: number, size: number, reg?: number) => {
+		const out = new Set<bigint>()
+		for (const b of p.funcs.get(pc)?.blocks ?? []) for (const s of b.stmts) for (const e of stmtExprs(s)) walkExpr(e, x => {
+			if (x.k !== 'load' || x.size !== size || x.addr.k !== 'bin' || x.addr.op !== 'add' || x.addr.b.k !== 'const') return
+			if (reg === undefined || (x.addr.a.k === 'reg' && x.addr.a.r === reg)) out.add(x.addr.b.v)
+		})
+		return out
+	}
+	const callees = new Set([entry.pc])
+	for (const b of entry.blocks) for (const s of b.stmts) if (s.k === 'call' && s.t.k === 'fn') callees.add(s.t.pc)
+	for (const pc of callees) {
+		const o8 = offs(pc, 8), o1 = offs(pc, 1)
+		if (o8.has(0x2bn) && o8.has(0x21n) && o1.has(0x20n)) return true
+	}
+	const b1 = offs(entry.pc, 1, 1)
+	return [0x33n, 0x34n, 0x35n, 0x36n, 0x37n, 0x38n, 0x39n, 0x3an].every(o => b1.has(o)) && !b1.has(0x32n) && !b1.has(0x3bn)
 }

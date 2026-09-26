@@ -39,6 +39,11 @@ export async function getAccount(rpc: string, address: string): Promise<AccountD
  * BPFLoaderUpgradeable (program account -> programdata account, 45-byte header), LoaderV4 (48-byte header).
  */
 export async function fetchProgram(rpc: string, programId: string): Promise<Uint8Array> {
+	return (await fetchProgramAccount(rpc, programId)).bytes
+}
+
+/** fetchProgram, with the loader owning the program account (BPFLoader1111… serializes the input unaligned). */
+export async function fetchProgramAccount(rpc: string, programId: string): Promise<{ bytes: Uint8Array; loader: string }> {
 	const acc = await getAccount(rpc, programId)
 	if (!acc) throw new Error(`account ${programId} not found`)
 	let data = acc.data
@@ -55,5 +60,5 @@ export async function fetchProgram(rpc: string, programId: string): Promise<Uint
 	if (data[0] !== 0x7f || data[1] !== 0x45 || data[2] !== 0x4c || data[3] !== 0x46) throw new Error(`${programId}: account data is not an ELF (closed program?)`)
 	// programdata may be zero-padded up to its allocated size: harmless (the ELF uses offsets), and
 	// trimming zeros could cut the last section header
-	return data
+	return { bytes: data, loader: acc.owner }
 }

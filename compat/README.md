@@ -38,34 +38,49 @@ validated against the agave loader.
 
 ## Results (2026-09-26)
 
-All decompile without crashing (< 2 s each) and pass equivalence in both modes, except `solang_counter.so`.
+All decompile without crashing (< 2 s each) and pass equivalence in both modes (`--strict`: no known issues).
+
+Fixed since the first run (Phase A findings, now handled in src/):
+
+- Solang symbol names (`counter::counter::function::count`) are sanitized into identifiers (`counter__counter__function__count`,
+  the original in a `// symbol:` comment); the output parses and is equivalent.
+- Solang dispatch: the handler of each 8-byte discriminator is found (first function called only on that
+  discriminator's side) and named from the IDL (`solang_counter.so` + IDL: 7 instructions) or from names in
+  the program's strings (stripped, no IDL: 5 of 7).
+- BPFLoader1 input: the deprecated loader's unaligned layout (`UnalignedAccount`: key +3, lamports +0x23,
+  data_len +0x2b, data +0x33) replaces the aligned one, detected by the program account's owner when fetched
+  with `--rpc`, else by the entrypoint deserializer (data_len at record + 0x2b, rent_epoch at owner + 0x21):
+  `bpf1_small`, `bpf1_break`, `bpf1_2voXLbiG`, `bpf1_tokenv1` (corpus of 400 mainnet programs: only Memo v1 matches besides).
+- sBPF v3 rodata at address 0: syscall string arguments, PDA seeds and fmt pieces resolve (`sol_log("asm: counted\u0000", 0xd)`,
+  seeds `["vault", …]`).
+- v2 / v3 CPIs: invoke wrappers outside recognized library code (they pass their own account infos on to
+  `sol_invoke_signed`) are decoded at their call sites: n_vault v2 / v3 `SYSTEM_PROGRAM.Transfer` / `CreateAccount`
+  as on v0, no spurious "CPI not decoded" entry.
+- Library fingerprints: v2 / v3 code is also hashed in its v0 encoding; n_vault library functions v2 18 → 28,
+  v3 5 → 14 (v0: 95), p_counter v2 2 → 3, v3 0 → 1.
+- C SDK / zig SDK accounts (analysis): the entrypoint's cursor-filled frame arrays are account models: C
+  `SolAccountInfo` copies (c_vault v0 / v2 / v3: signer `account[1]` found, lamport / data writes attributed),
+  zig record pointers (owner check and data writes attributed). The entrypoint's `input` is not typed `Input`
+  when the variable is reassigned (the C deserializer's cursor: fields were misnamed).
+- asm: no false-positive signer (the entrypoint's input is not taken as an `&[AccountInfo]` slice).
+- A warning (stderr) when reachable instructions are invalid for the declared sBPF version.
 
 ## Known issues (for src/)
 
-1. **Solang, unstripped (`solang_counter.so`)**: ELF symbol names such as `counter::counter::function::count` and
-   `counter::counter::constructor::872ccdc6190148bc` become function names verbatim, so the output does not parse
-   (equivalence: 1 error, 0 functions checked). Symbol names need sanitizing into identifiers. Some Solang functions
-   also get 10 parameters (`p5`..`p10`).
-2. **Solang dispatch**: only `entrypoint` is found as an instruction, with or without the Solang-emitted IDL
-   (`--idl solang_counter.json`); `solang_dispatch` (8-byte selector) is not recognized, so storage writes, signer
-   checks and the CPI are not attributed to instructions.
-3. **BPFLoader1 input layout**: the deprecated loader serializes the input unaligned (no padding, no 10 KiB realloc
-   area, no alignment). The decompiler applies the aligned layout (`input.acc0…`, `Input` typing), so the account
-   fields are misnamed and no signers / writes / CPIs are recognized (token v1: 9 named instructions, all
-   "signers: none found"). Needs loader detection (the RPC owner, or a heuristic on the entrypoint parser) and an
-   unaligned `Input` model.
-4. **sBPF v3 read-only data**: strings are not resolved (rodata sits at vaddr 0 in v3): `sol_log(0, 0xd)` for
-   `"asm: counted"`, PDA seeds shown as `0x70[..5]` instead of `"vault"` (`asm_counter_v3`, `rust_n_vault_v3`).
-5. **sBPF v2 / v3 CPI classification**: n_vault's system `Transfer` / `CreateAccount` CPIs are recognized on v0
-   (`bench/bin/n_vault.so`) but not on v2 / v3 ("program *(b + 0x30) id not a constant"), and a spurious `entrypoint`
-   instruction is listed on v3.
-6. **Library recognition on v2 / v3**: n_vault has 95 library functions on v0 but 18 on v2 and 5 on v3 (p_counter:
-   10 / 2 / 0); the fingerprints only cover v0 codegen.
-7. **C SDK and Zig account parsing**: the programs copy the input into `SolAccountInfo` / `Account` arrays on the
-   stack (`sol_deserialize`, zig `Context.load`); signer checks and data writes made through those copies are not
-   recognized (`c_vault`: "moves value … but no signer check was found" although `is_signer` is checked; zig: no
-   signers found). The C deserialization loop reuses the `input` name as a cursor (`input = l`, `input.acc0`).
-8. **Signer false positive in asm**: `asm_counter` reports `account[1]` as a signer (likely acc0's `is_writable`
-   read at input + 10) with a single account.
-9. **Version / opcode mismatch goes unnoticed**: a v1.48 "v3" binary decompiles silently although its opcodes are
-   invalid for v3; a warning would help.
+1. **BPFLoader1 Rust (`bpf1_tokenv1`)**: the layout is right, but "signers: none found": solana-program 2020 does not
+   inline `next_account_info`; the accounts come back through an out parameter of the iterator, which the account
+   model does not follow (not loader-specific).
+2. **`bpf1_tiny_BYVBQ71C.so`** reads the input byte-wise at offsets matching neither layout; it is not detected as
+   unaligned from the bytecode (only with `--rpc`, by the owner). Its input fields are no longer misnamed.
+3. **sBPF v3 CPI with more than 5 arguments**: `invoke_signed(ix, infos, seeds)` passes its 6th argument through
+   the stack differently from v0 (`st64(fp, …)`); the call-site decode shows `CreateAccount` without the owner and
+   signer seeds ("PDA-signed" on v0 only). v2 likewise.
+4. **Library recognition on v2 / v3** stays partial (n_vault 28 / 14 of 95): the rest differs by codegen (instruction
+   selection, register allocation, frames), not encoding.
+5. **Zig signer check**: `auth.isSigner()` is read (`l.is_signer`) but not reported: the handler is structured inside
+   the deserialization loop and fails by `break`, which the check detection does not take as an error exit.
+6. **Solang**: `@signer` checks are not recognized (Solang searches the account list); functions taking an `address`
+   by value get 32 byte-sized parameters (`p5`..`p34`): that is Solang's ABI, not a decompiler error.
+7. **C SDK on BPFLoader1 (`bpf1_small`)**: the one-account deserializer writes `SolAccountInfo` at fixed frame
+   offsets (no cursor), not modeled.
+8. **`asm_counter_v0`**: `sol_log(0x100000280, 0xd)` stays an address: the program logs 13 bytes of a 12-byte `.rodata`.

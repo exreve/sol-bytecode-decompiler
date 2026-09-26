@@ -4,7 +4,8 @@ Decompiles deployed Solana programs (sBPF `.so`, SBPF v0–v3) into compact, **s
 TypeScript, made to be read by AI models (and humans) reviewing many programs, plus a derived
 program analysis (privileges, checks, CPIs, PDAs, state writes, ranked findings) from the same run.
 
-* works on stripped mainnet binaries: native, Anchor, pinocchio, hand-written asm
+* works on stripped mainnet binaries: native, Anchor, pinocchio, hand-written asm; also C / Zig SDK, Solang,
+  the deprecated loader's unaligned input and sBPF v2 / v3 builds (compatibility set: [compat/README.md](compat/README.md))
 * fetches programs by address from any RPC endpoint you provide (no built-in endpoint)
 * one file per instruction handler, self-contained per-instruction bundles, an instruction index
 * recognizes generic library code (Rust std, solana-program, anchor-lang, spl, …) and shows it as one-line
@@ -42,7 +43,9 @@ sbpf-decompile <program A> <program B> [-o report.txt] [--rpc <url>]
 
 The program analysis (`security/`) is always produced with the decompilation; there is nothing to enable.
 
-Upgradeable programs are resolved through their programdata account; loader v4 and the legacy loaders work too.
+Upgradeable programs are resolved through their programdata account; loader v4 and the legacy loaders work too
+(a `BPFLoader1111…` program's input is modeled unaligned, as that loader serializes it; without the owner, the
+entrypoint's deserializer tells). A warning goes to stderr when the code has opcodes its declared sBPF version lacks.
 
 Other tools:
 

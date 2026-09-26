@@ -1072,6 +1072,8 @@ const evalCmpN = (op: string, a: bigint, b: bigint): boolean => {
 const INFO_FIELD: Record<number, string> = { 0: 'key', 8: 'lamports', 0x10: 'data', 0x18: 'owner', 0x20: 'rent_epoch', 0x28: 'is_signer', 0x29: 'is_writable', 0x2a: 'executable' }
 /** a serialized input record (the entrypoint's input; pinocchio's AccountInfo points to one): field by offset, size */
 const REC_FIELD: Record<number, [string, number]> = { 1: ['is_signer', 1], 2: ['is_writable', 1], 3: ['executable', 1], 8: ['key', 32], 0x28: ['owner', 32], 0x48: ['lamports', 8], 0x50: ['data_len', 8] }
+/** C SDK SolAccountInfo (0x38 bytes, the entrypoint's copy made by sol_deserialize): field by offset, size */
+const C_INFO_FIELD: Record<number, [string, number]> = { 0: ['key', 8], 8: ['lamports', 8], 0x10: ['data_len', 8], 0x18: ['data', 8], 0x20: ['owner', 8], 0x28: ['rent_epoch', 8], 0x30: ['is_signer', 1], 0x31: ['is_writable', 1], 0x32: ['executable', 1] }
 export interface AcctRef { index: number; field?: string }
 export type Side = AcctRef | 'stack' | 'pda' | 'const' | undefined // 'stack': a frame buffer ('pda': written by a PDA derivation); 'const': a constant (program memory)
 export interface AcctResolver {
@@ -1414,7 +1416,7 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
  * what the callee stores there (its stores through that parameter, evaluated with its parameters bound;
  * `depth` levels), or for AccountInfo::try_borrow_(mut_)data / lamports, the RefCell's value.
  */
-function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, depth: number, pass1: boolean): { ev: (e: Expr, p: number, d?: number) => AV | undefined } {
+function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, depth: number, pass1: boolean, infos?: number): { ev: (e: Expr, p: number, d?: number) => AV | undefined } {
 	const { fp, fpOff, defs, defPos, multi, SLOT, reaching } = D
 	const outOf = (c: Extract<Expr, { k: 'call' }>, o: number, p: number, d: number): AV | undefined => {
 		const g = c.t.k === 'fn' && depth > 0 ? callee?.f(c.t.pc) : undefined
@@ -1476,6 +1478,11 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 				const o = fpOff(e.addr) ?? (fa?.k === 'fr' ? fa.off : undefined)
 				if (o !== undefined) {
 					if (arr !== undefined && e.size === 8 && o >= arr && (o - arr) % 8 === 0 && o - arr < 8 * 64) return { k: 'rec', i: (o - arr) / 8, off: 0 }
+					// (the C SDK's SolAccountInfo array: pointers to the key / lamports / data / owner, values)
+					if (infos !== undefined && o >= infos && o < infos + 0x38 * 64) {
+						const i = Math.floor((o - infos) / 0x38), c = C_INFO_FIELD[(o - infos) % 0x38]
+						if (c && c[1] === e.size) return c[1] === 1 || c[0] === 'data_len' || c[0] === 'rent_epoch' ? { k: 'val', i, f: c[0] } : { k: 'ptr', i, f: c[0], off: 0 }
+					}
 					const y = e.size === 8 ? reaching(SLOT(o), p) : null
 					if (y) return ev(y[0], y[1], d + 1)
 					// (a Ref / RefMut an AccountInfo::try_borrow_(mut_)data / lamports call returned in the frame: its value
@@ -1532,6 +1539,39 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
  * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
  * Names are the printed variable names.
  */
+/**
+ * Account arrays an entrypoint fills in its frame through a cursor (a variable defined as a frame address
+ * and as itself + the stride): zig-sdk Context.load's pointers to the input records (8 bytes, the first
+ * stored being `input + 8`: ptrs), the C SDK sol_deserialize's SolAccountInfo copies (0x38 bytes: the key
+ * stored at +0 and is_signer / is_writable / executable at +0x30..0x32: infos). Frame offsets.
+ */
+function cursorArrays(f: VarFunc, input: number, fpOff: (e: Expr) => number | undefined): { ptrs?: number; infos?: number } {
+	const all = new Map<number, Expr[]>()
+	for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set') { let a = all.get(s.dst); if (!a) all.set(s.dst, (a = [])); a.push(s.e) }
+	const step = (v: number, n: bigint) => !!all.get(v)?.some(e => e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === v && e.b.k === 'const' && e.b.v === n)
+	const start = (v: number) => { for (const e of all.get(v) ?? []) { const o = fpOff(e); if (o !== undefined) return o } return undefined }
+	const rec0 = (e: Expr) => e.k === 'var' && !!all.get(e.id)?.some(d => d.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n)
+	const out: { ptrs?: number; infos?: number } = {}
+	const flags = new Map<number, Set<number>>(), keys = new Map<number, Set<number>>()
+	for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k !== 'store' && s.k !== 'stores') continue
+		const a = s.addr
+		const [base, off] = a.k === 'var' ? [a.id, 0] : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? [a.a.id, Number(BigInt.asIntN(64, a.b.v))] : [-1, 0]
+		if (base < 0 || fpOff(a) !== undefined) continue
+		const vals = s.k === 'store' ? [s.v] : s.vals
+		if (s.size === 8 && off === 0 && rec0(vals[0]) && step(base, 8n) && out.ptrs === undefined) out.ptrs = start(base)
+		if (!step(base, 0x38n)) continue
+		if (s.size === 1) { let x = flags.get(base); if (!x) flags.set(base, (x = new Set())); vals.forEach((_, i) => x!.add(off + i)) }
+		if (s.size === 8) { let x = keys.get(base); if (!x) keys.set(base, (x = new Set())); x.add(off) }
+	}
+	for (const [v, fl] of flags) {
+		const o = start(v)
+		if (o !== undefined) for (const x of fl) if (fl.has(x + 1) && fl.has(x + 2) && keys.get(v)?.has(x - 0x30)) { out.infos = o + x - 0x30; break }
+		if (out.infos !== undefined) break
+	}
+	return out
+}
+
 /** seed: a callee's pointer parameters bound to the caller's values at a call site (memoized by the values) */
 export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee, seed?: Map<number, AcctVal>): AcctResolver {
 	const sk = seed?.size ? JSON.stringify([...seed]) : undefined
@@ -1546,8 +1586,11 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
 		if (s.k === 'store' && s.size === 8 && (rec0(s.v) || (s.v.k === 'var' && rec0(defs.get(s.v.id))))) { const o = fpOff(s.addr); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
 	}
+	// (arrays the entrypoint fills through a cursor: zig-sdk record pointers, C SDK SolAccountInfo copies)
+	let infos: number | undefined
+	if (input !== undefined && arr === undefined) ({ ptrs: arr, infos } = cursorArrays(f, input, fpOff))
 	const roots = new Map<number, AV>(seed ?? [])
-	let { ev } = avEvaluator(f, D, roots, arr, callee, 2, true)
+	let { ev } = avEvaluator(f, D, roots, arr, callee, 2, true, infos)
 	// first pass: the variables used as a slice / an array of record pointers
 	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
 	const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
@@ -1557,7 +1600,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		const note = (x: Expr) => {
 			if (x.k !== 'load') return
 			const a = ev(x.addr, p)
-			if (a?.k === 'base' && a.off >= 0 && a.off < 0x30 * 64) {
+			if (a?.k === 'base' && a.v !== input && a.off >= 0 && a.off < 0x30 * 64) { // (the entrypoint's input is the serialized input, not a slice)
 				const c = a.off
 				if (INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
 				if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
@@ -1577,7 +1620,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	})
 	for (const [v, ks] of hits) if (ks.size >= 2) roots.set(v, { k: 'slice', off: 0 })
 	for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
-	ev = avEvaluator(f, D, roots, arr, callee, 2, false).ev
+	ev = avEvaluator(f, D, roots, arr, callee, 2, false, infos).ev
 	const asRef = (a: AV | undefined): AcctRef | undefined => {
 		if (!a) return undefined
 		if (a.k === 'val') return { index: a.i, field: a.f }

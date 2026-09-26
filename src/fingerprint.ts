@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto'
 import type { Program, Func } from './program.ts'
 import { b58 } from './semantics.ts'
 
-export interface FnPrint { hash: string; insns: number; strings: string[] }
+/** alt (sBPF v2 / v3): the hash of the code in its v0 encoding (see V2_MEM), when it differs */
+export interface FnPrint { hash: string; insns: number; strings: string[]; alt?: string }
 
 /** Instructions of a function in address order (blocks are contiguous in LLVM output). */
 function funcPcs(f: Func): number[] {
@@ -13,7 +14,23 @@ function funcPcs(f: Func): number[] {
 	return pcs
 }
 
+/**
+ * sBPF v2 / v3 encodings of v0 instructions, hashed in their v0 form (the fingerprints are v0-derived):
+ * v2's memory classes and `mov32 lo + hor64 hi` constants (as lddw), v3's `return` (exit), callx register
+ * and unrelocated syscalls. PQR multiply / divide, v2's reversed `sub imm`, jmp32 and codegen differences
+ * (instruction selection, register allocation, frame layout) are not mapped. The raw hash is kept: the
+ * signatures also hold v2-encoded code (mainnet programs built for the early SBFv2 target).
+ */
+const V2_MEM: Record<number, number> = { 0x2c: 0x71, 0x3c: 0x69, 0x8c: 0x61, 0x9c: 0x79, 0x27: 0x72, 0x37: 0x6a, 0x87: 0x62, 0x97: 0x7a, 0x2f: 0x73, 0x3f: 0x6b, 0x8f: 0x63, 0x9f: 0x7b }
+
 export function fingerprint(p: Program, f: Func): FnPrint {
+	const raw = printOf(p, f, false)
+	if (p.version < 2) return raw
+	const alt = printOf(p, f, true).hash
+	return alt === raw.hash ? raw : { ...raw, alt }
+}
+
+function printOf(p: Program, f: Func, norm: boolean): FnPrint {
 	const h = createHash('sha1')
 	const pcs = funcPcs(f)
 	// the hashed byte stream is assembled in one buffer and hashed with a single update (same
@@ -22,31 +39,59 @@ export function fingerprint(p: Program, f: Func): FnPrint {
 	const need = (n: number) => { if (len + n > out.length) { const o = Buffer.allocUnsafe((len + n) * 2); out.copy(o, 0, 0, len); out = o } }
 	const textLo = p.textVaddr, textHi = p.textVaddr + BigInt(p.insns.length * 8)
 	const strings: string[] = []
-	for (const pc of pcs) {
-		const i = p.insns[pc]
-		let imm: string | number = i.imm
-		let hi = 0
-		if (i.opc === 0x85) {
-			const rel = p.elf.callRelocs.get(pc)
-			if (rel?.kind === 'syscall') imm = 'S:' + rel.name
-			else if (p.version < 3 && i.imm === -1 && !rel) imm = 'U'
-			else imm = 'F' // internal call: target varies with layout
-		} else if (i.opc === 0x18 && p.version < 2) {
-			const n = p.insns[pc + 1]
-			const v = n ? (BigInt(n.imm >>> 0) << 32n) | BigInt(i.imm >>> 0) : 0n
-			if (v >= textLo && v < textHi) imm = 'T'
-			else if (p.image.region(v)) {
-				imm = 'A'
-				const s = p.image.bytesAt(v, 1) ? previewString(p, v) : undefined
-				if (s) strings.push(s)
-			} else { imm = i.imm; hi = n?.imm ?? 0 }
-		}
+	const v = p.version
+	const put = (opc: number, regs: number, off: number, imm: string | number, hi: number) => {
 		const tail = typeof imm === 'number' ? undefined : Buffer.from(imm, 'utf8')
 		need(4 + (tail ? tail.length : 8))
-		out.writeUInt8(i.opc, len); out.writeUInt8(i.dst | (i.src << 4), len + 1); out.writeInt16LE(i.opc === 0x85 ? 0 : i.off, len + 2)
+		out.writeUInt8(opc, len); out.writeUInt8(regs, len + 1); out.writeInt16LE(off, len + 2)
 		len += 4
 		if (typeof imm === 'number') { out.writeInt32LE(imm, len); out.writeInt32LE(hi, len + 4); len += 8 }
 		else { tail!.copy(out, len); len += tail!.length }
+	}
+	/** a 64-bit constant (lddw): text / rodata addresses normalized */
+	const constImm = (val: bigint, lo: number, hiImm: number): [string | number, number] => {
+		if (val >= textLo && val < textHi) return ['T', 0]
+		if (p.image.region(val)) {
+			const s = p.image.bytesAt(val, 1) ? previewString(p, val) : undefined
+			if (s) strings.push(s)
+			return ['A', 0]
+		}
+		return [lo, hiImm]
+	}
+	// v3 calls are not relocated: syscalls by the lifted target
+	let sysAt: Map<number, string> | undefined
+	if (norm && v >= 3) { sysAt = new Map(); for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'call' && s.t.k === 'sys') sysAt.set(s.pc, s.t.name) }
+	for (let k = 0; k < pcs.length; k++) {
+		const pc = pcs[k], i = p.insns[pc]
+		let opc = i.opc, regs = i.dst | (i.src << 4)
+		let imm: string | number = i.imm
+		let hi = 0
+		if (!norm) { /* raw encoding */ }
+		else if (v === 2 && V2_MEM[opc] !== undefined) opc = V2_MEM[opc]
+		else if (v >= 3 && opc === 0x9d) opc = 0x95
+		else if (opc === 0x8d) { imm = v === 2 ? i.src : i.dst; regs = 0 }
+		else if (v === 2 && opc === 0xb4 && pcs[k + 1] === pc + 1 && p.insns[pc + 1]?.opc === 0xf7 && p.insns[pc + 1].dst === i.dst) {
+			// mov32 dst, lo; hor64 dst, hi: v0's lddw (hashed as two slots, the second holding hi)
+			const n = p.insns[pc + 1]
+			const [a, b] = constImm((BigInt(n.imm >>> 0) << 32n) | BigInt(i.imm >>> 0), i.imm, n.imm)
+			put(0x18, i.dst, 0, a, b)
+			put(0, 0, 0, n.imm, 0)
+			k++
+			continue
+		}
+		if (opc === 0x85) {
+			const rel = p.elf.callRelocs.get(pc)
+			if (rel?.kind === 'syscall') imm = 'S:' + rel.name
+			else if (sysAt?.has(pc)) imm = 'S:' + sysAt.get(pc)
+			else if (v < 3 && i.imm === -1 && !rel) imm = 'U'
+			else imm = 'F' // internal call: target varies with layout
+		} else if (opc === 0x18 && (norm ? v !== 2 : v < 2)) {
+			const n = p.insns[pc + 1]
+			const c = constImm(n ? (BigInt(n.imm >>> 0) << 32n) | BigInt(i.imm >>> 0) : 0n, i.imm, n?.imm ?? 0)
+			imm = c[0]
+			hi = c[1]
+		}
+		put(opc, regs, opc === 0x85 ? 0 : i.off, imm, hi)
 	}
 	h.update(out.subarray(0, len))
 	return { hash: h.digest('hex').slice(0, 16), insns: pcs.length, strings }

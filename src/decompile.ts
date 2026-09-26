@@ -4,7 +4,7 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
+import { type Expr, type Stmt, type CallTarget, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
 import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS, unb58 } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
@@ -12,7 +12,7 @@ import { promoteStack } from './stack.ts';
 import { compactStores, sinkFrameLoads } from './compact.ts';
 import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
-import { findAccounts, accountField, accountAddr } from './accounts.ts';
+import { findAccounts, accountField, accountAddr, unalignedInput } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
 import { sigShape, shapeSignature, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
@@ -21,7 +21,7 @@ import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
-import { Views, exprType, BUILTIN_VIEWS, type View } from './views.ts';
+import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
@@ -35,6 +35,7 @@ export interface Options {
   full?: boolean;        // decompile library functions too (default: typed stubs only)
   exactMemory?: boolean; // no stack promotion / stack-arg elision (exact even for memory-unsafe executions)
   idl?: IdlInfo;         // Anchor IDL of the program (names, accounts, args, error codes)
+  loader?: string;       // owner of the program account when known (fetched): BPFLoader1111… serializes the input unaligned
 }
 
 export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
@@ -99,6 +100,20 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   nameThunks(p);
   // names of the output language's own helpers stay unambiguous
   for (const f of p.funcs.values()) if (HELPERS.has(f.name) || /^(ld|st)(8|16|32|64)$|^bswap(16|32|64)$/.test(f.name)) f.name += '_';
+  // symbol names that are not identifiers (Solang `counter::counter::function::count`, `.llvm.123` suffixes, keywords)
+  const symNotes = new Map<number, string>() // pc -> original symbol name
+  {
+    const taken = new Set([...p.funcs.values()].map(f => f.name))
+    for (const f of p.funcs.values()) {
+      if (/^[A-Za-z_$][\w$]*$/.test(f.name) && !JS_KEYWORDS.has(f.name)) continue
+      let nm = f.name.replace(/::/g, '__').replace(/[^\w$]+/g, '_').replace(/^(?=\d)|^$/, '_')
+      if (JS_KEYWORDS.has(nm)) nm += '_'
+      if (taken.has(nm)) nm += `_${(p.elf.text.addr + f.pc * 8).toString(16)}`
+      symNotes.set(f.pc, f.name)
+      taken.add(nm)
+      f.name = nm
+    }
+  }
   const isLib = (pc: number) => !!libs.get(pc)?.lib;
   const fnName = (pc: number) => p.funcs.get(pc)?.name ?? `fn_${(p.elf.text.addr + pc * 8).toString(16)}`;
   const fnByAddr = new Map<bigint, string>();
@@ -185,6 +200,52 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     let best: number | undefined, n = 0;
     for (const [pc, c] of count) if (c > n) { best = pc; n = c; }
     if (best !== undefined && n >= 3 && best !== nameFn) rename(best, 'anchor_error_from', 'the callee most often given an anchor_lang ErrorCode as its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from');
+  }
+
+  // ---- selector dispatcher without instruction logs (Solang): the handler of each 8-byte discriminator ----
+  // A function comparing a value with three or more instruction discriminators (IDL, or names in the program's
+  // strings): on the equal side of each comparison (the blocks reached without passing another one), the first
+  // function called there and on no other instruction's side is that instruction's handler.
+  if (opts.sugar !== false && !sem.ixNames.size) for (const [dpc, { f }] of built) {
+    const br = new Map<number, [string, number]>() // block -> instruction, its equal side
+    for (const b of f.blocks) {
+      const c = b.term.k === 'br' ? b.term.c : undefined
+      if (c?.k !== 'cmp' || (c.op !== 'eq' && c.op !== 'ne') || c.b.k !== 'const' || b.term.k !== 'br') continue
+      const d = sem.disc.get(c.b.v)
+      if (d?.startsWith('ix:') && c.b.v >> 32n) br.set(b.id, [d.slice(3), c.op === 'eq' ? b.term.t : b.term.f])
+    }
+    if (new Set([...br.values()].map(x => x[0])).size < 3) continue
+    const order = new Map<string, number[]>(), seen = new Map<number, Set<string>>()
+    for (const [, [ix, start]] of br) {
+      const out: number[] = [], vis = new Set<number>([start]), q = [start]
+      while (q.length && vis.size < 64) {
+        const b = f.blocks[q.shift()!]
+        if (!b || br.has(b.id)) continue
+        const call = (t: CallTarget) => { if (t.k === 'fn' && !isLib(t.pc)) { out.push(t.pc); let s = seen.get(t.pc); if (!s) seen.set(t.pc, (s = new Set())); s.add(ix) } }
+        for (const st of b.stmts) { if (st.k === 'call') call(st.t); else if (st.k === 'set' && st.e.k === 'call') call(st.e.t) }
+        if (b.term.k === 'ret' && b.term.e?.k === 'call') call(b.term.e.t)
+        const next = b.term.k === 'br' ? [b.term.t, b.term.f] : b.term.k === 'jmp' ? [b.term.to] : []
+        for (const n of next) if (!vis.has(n)) { vis.add(n); q.push(n) }
+      }
+      order.set(ix, out)
+    }
+    const taken = new Set(sem.ixNames.values())
+    for (const [ix, pcs] of order) {
+      const hpc = pcs.find(x => seen.get(x)!.size === 1 && built.has(x) && !sem.ixNames.has(x))
+      if (hpc === undefined || taken.has(ix)) continue
+      sem.ixNames.set(hpc, ix)
+      taken.add(ix)
+      const fn = p.funcs.get(hpc)!
+      heurNames.set(hpc, `name [heur]: called on the side where ${fnName(dpc)} matches the discriminator of instruction ${ix}${opts.idl?.instructions.some(i => i.name === ix) ? ' [idl]' : ''} (was ${fn.name})`)
+      fn.name = `ix_${ix}`
+      fnByAddr.set(fnAddr(p, hpc), fn.name)
+    }
+    if (sem.ixNames.size && /^fn_[0-9a-f]+$/.test(p.funcs.get(dpc)!.name) && ![...p.funcs.values()].some(x => x.name === 'selector_dispatch')) {
+      heurNames.set(dpc, `name [heur]: compares a value with ${br.size} instruction discriminators and calls their handlers (was ${p.funcs.get(dpc)!.name})`)
+      p.funcs.get(dpc)!.name = 'selector_dispatch'
+      fnByAddr.set(fnAddr(p, dpc), 'selector_dispatch')
+    }
+    break
   }
 
   // ---- Anchor dispatcher: compares the instruction data's first 8 bytes with each handler's discriminator ----
@@ -277,6 +338,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (uses.size) hint = 'uses ' + [...uses].slice(0, 4).join(', ') + (uses.size > 4 ? ', …' : '');
     }
     if (heurNames.has(pc)) hint = heurNames.get(pc) + (hint ? `; ${hint}` : '');
+    if (symNotes.has(pc)) hint = `symbol ${symNotes.get(pc)}` + (hint ? `; ${hint}` : '')
     stubs.push(`declare function ${f.name}(${params.join(', ')})${f.noreturn ? ': never' : f.returns ? ': u64' : ': void'} // lib${hint ? ' ' + hint : ''}`);
   }
 
@@ -317,6 +379,44 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       return false;
     };
     for (const pc of libs.keys()) { const fn = p.funcs.get(pc); if (fn && (fn.nparams >= 4 || fn.stackArgs) && reaches(pc, 2)) invokeWrappers.add(pc); }
+    // CPI wrappers not recognized as library code (e.g. solana-program built for sBPF v2 / v3, whose code the
+    // library signatures do not cover): functions passing their own account infos and count (parameters 3, 4)
+    // on to the CPI syscall (arguments 2, 3) or to such a wrapper (arguments 3, 4), two levels
+    if (opts.sugar !== false) for (let round = 0; round < 2; round++) for (const [pc, bt] of built) {
+      if (isLib(pc) || invokeWrappers.has(pc) || bt.f.nparams < 4) continue
+      // (a parameter, or a word of the frame stored once, with the parameter: v3 code spills them)
+      const slot = (a: Expr): string | undefined => a.k === 'var' ? `${a.id}:0` : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? `${a.a.id}:${BigInt.asIntN(64, a.b.v)}` : undefined
+      let spills: Map<string, Expr[]> | undefined
+      const spilled = () => {
+        if (spills) return spills
+        spills = new Map()
+        const put = (k: string | undefined, v: Expr) => { if (k) (spills!.get(k) ?? spills!.set(k, []).get(k)!).push(v) }
+        const at = (a: Expr, d: number) => { const k = slot(a); if (!k) return undefined; const i = k.lastIndexOf(':'); return `${k.slice(0, i)}:${BigInt(k.slice(i + 1)) + BigInt(d)}` }
+        for (const b of bt.f.blocks) for (const st of b.stmts) {
+          if (st.k === 'store' && st.size === 8) put(slot(st.addr), st.v)
+          else if (st.k === 'stores' && st.size === 8) st.vals.forEach((v, i) => put(at(st.addr, 8 * i), v))
+        }
+        return spills
+      }
+      const par = (e: Expr | undefined, r: number): boolean => {
+        if (e?.k === 'var') return bt.f.vars[e.id]?.param === r
+        if (e?.k !== 'load' || e.size !== 8) return false
+        const k = slot(e.addr), vs = k ? spilled().get(k) : undefined
+        return vs?.length === 1 && vs[0].k === 'var' && bt.f.vars[vs[0].id]?.param === r
+      }
+      const passes = (t: Extract<Stmt, { k: 'call' }>['t'], args: Expr[]) => t.k === 'sys'
+        ? /^sol_invoke_signed_(c|rust)$/.test(t.name) && par(args[1], 3) && par(args[2], 4)
+        : t.k === 'fn' && invokeWrappers.has(t.pc) && par(args[2], 3) && par(args[3], 4)
+      let hit = false
+      for (const b of bt.f.blocks) {
+        for (const st of b.stmts) {
+          if (st.k === 'call' && passes(st.t, st.args)) hit = true
+          if (st.k === 'set' && st.e.k === 'call' && passes(st.e.t, st.e.args)) hit = true
+        }
+        if (b.term.k === 'ret' && b.term.e?.k === 'call' && passes(b.term.e.t, b.term.e.args)) hit = true
+      }
+      if (hit) invokeWrappers.add(pc)
+    }
   }
   // the call instruction of each (function, target) pair, when there is exactly one (sites in return expressions)
   const callInsns = (fpc: number, target: string): number[] => {
@@ -345,8 +445,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     if (hit && n <= 80 && (bt.f.nparams >= 4 || bt.f.stackArgs)) userInvoke.add(pc);
   }
-  const accountInfos = opts.sugar !== false ? findAccounts(built) : undefined;
+  // input serialization: the deprecated loader's unaligned layout (by the owner when known, else by the entrypoint's deserializer)
+  const unaligned = opts.loader !== undefined ? opts.loader.startsWith('BPFLoader1111') : unalignedInput(p)
+  const accountInfos = opts.sugar !== false ? findAccounts(built, unaligned) : undefined;
   const views = new Views();
+  if (unaligned) for (const v of UNALIGNED_VIEWS) views.add(v)
   // IDL account layouts: pointers whose first 8 bytes are compared with an account discriminator (see state.ts)
   const dataVars = opts.sugar !== false && opts.idl ? accountDataVars(built, accountViews(opts.idl, views), t => views.recordOf(t)) : new Map<number, Map<number, string>>();
   // Anchor: account names from the program's own account-error strings (see anchor.ts)
@@ -563,7 +666,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const sites = findCpiSites(bt.body, fpv, t => (t.k === 'sys' ? cpiOnly(invokeAbi(t.name)) : t.k === 'fn' ? cpiOnly(invokeThunks.get(t.pc)) ?? (invokeWrappers.has(t.pc) ? 'invoke' : null) : null));
       if (sites.size !== 1) continue;
       const [[node, site]] = [...sites];
-      const env: CpiEnv = { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), strAt: (a, n) => sem.strAt(a, n), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) };
+      const env: CpiEnv = { fp: fpv, expr: () => '', keyAt: a => sem.keyAt(a), strAt: (a, n) => sem.strAt(a, n, true), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined) };
       let d = site.abi === 'invoke' ? undefined : cpiDesc(site, env), ran = false;
       if (!d?.ix) {
         // an instruction built on the heap: the CPI a run of the function makes (cpiexec.ts)
@@ -603,7 +706,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   };
   const computeTypes = (pc: number): Map<number, string> => {
     const f = built.get(pc)!.f, t = new Map<number, string>();
-    for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : 'AccountRecord');
+    for (const [k, kind] of accountInfos?.get(pc) ?? []) if (/^v\d+$/.test(k)) t.set(Number(k.slice(1)), kind === 'info' ? 'AccountInfo' : kind === 'raw1' ? 'UnalignedAccount' : 'AccountRecord');
     for (const v of anchorInfo.get(pc)?.accountVars ?? []) if (!t.has(v)) t.set(v, 'AccountInfo');
     for (const [v, o] of objVars.get(pc)?.boxes ?? []) if (!t.has(v)) t.set(v, o.view);
     for (const [v, [ty]] of paramTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
@@ -720,7 +823,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (!r.callers.includes(nm)) r.callers.push(nm);
         }
         for (const [v, { ty, n, of, callers }] of seen) {
-          if (!ty || !views.map.has(ty) || ['AccountRecord', 'Input'].includes(ty)) continue;
+          if (!ty || !views.map.has(ty) || ['AccountRecord', 'UnalignedAccount', 'Input'].includes(ty)) continue;
           let pt = paramTypes.get(cpc); if (!pt) paramTypes.set(cpc, (pt = new Map()));
           if (pt.has(v) || baseTypes.get(cpc)!.has(v)) continue;
           if (n * 2 < of && !fitsView(built.get(cpc)!.f, v, ty)) continue;
@@ -763,7 +866,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (let i = 0n; i < n; i++) {
       const a = p.image.region(ptr + 16n * i, 16)?.exec === false ? p.image.read(ptr + 16n * i, 8) : undefined, l = a === undefined ? undefined : p.image.read(ptr + 16n * i + 8n, 8);
       if (a === undefined || l === undefined || l > 64n) return undefined;
-      const s = sem.strAt(a, l);
+      const s = sem.strAt(a, l, true);
       if (s !== undefined && /^[\x20-\x7e]*$/.test(s)) { out.push(JSON.stringify(s)); continue; }
       const bytes: string[] = [];
       for (let j = 0n; j < l; j++) { const b = p.image.read(a + j, 1); if (b === undefined) return undefined; bytes.push(b.toString(16).padStart(2, '0')); }
@@ -862,8 +965,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const ctx: PrintCtx = {
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n),
       constComment: (v, role) => (opts.sugar === false ? undefined : sem.constComment(v, role)), varName: id => names[id] ?? `u${id}`,
-      strAt: opts.sugar === false ? undefined : (ptr, len) => sem.strLit(ptr, len),
-      strNote: opts.sugar === false ? undefined : (ptr, len) => sem.strAt(ptr, len),
+      strAt: opts.sugar === false ? undefined : (ptr, len, isPtr) => sem.strLit(ptr, len, isPtr),
+      strNote: opts.sugar === false ? undefined : (ptr, len, isPtr) => sem.strAt(ptr, len, isPtr),
       keyAt: opts.sugar === false ? undefined : ptr => sem.keyAt(ptr),
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
@@ -874,14 +977,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const siteNotes = new Map<Node, SiteNote>();
     if (opts.sugar !== false) ctx.nodeLines = (n, a, b) => { spans.set(n, [a, b]); };
     // entrypoint: annotate fields of the serialized input (first account + header)
-    const inputVar = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined;
+    // (not when the variable is reassigned: e.g. the C SDK's deserializer reuses it as its cursor)
+    const inputVar0 = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
+    const inputVar = inputVar0 !== undefined && !f.blocks.some(b => b.stmts.some(s => (s.k === 'set' || s.k === 'call') && s.dst === inputVar0)) ? inputVar0 : undefined
     if (opts.sugar !== false && inputVar !== undefined) {
       const prev = ctx.exprHook;
       ctx.exprHook = (e, pr) => {
         if (e.k === 'load') {
           const a = e.addr;
           const off = a.k === 'var' && a.id === inputVar ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === inputVar && a.b.k === 'const' ? Number(a.b.v) : -1;
-          const fld = off >= 0 ? inputField(off, e.size) : undefined;
+          const fld = off >= 0 ? inputField(off, e.size, unaligned) : undefined;
           if (fld) return `ld${e.size * 8}(${pr(a, 0)} /* ${fld} */)`;
         }
         return prev?.(e, pr);
@@ -905,7 +1010,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const fld = accountField(accTyped, { k: 'load', size: size as 1 | 2 | 4 | 8, addr });
       if (fld || inputVar === undefined) return fld;
       const off = addr.k === 'var' && addr.id === inputVar ? 0 : addr.k === 'bin' && addr.op === 'add' && addr.a.k === 'var' && addr.a.id === inputVar && addr.b.k === 'const' ? Number(addr.b.v) : -1;
-      return off >= 0 ? inputField(off, size) : undefined;
+      return off >= 0 ? inputField(off, size, unaligned) : undefined;
     };
     let inAddr = false; // printing the address of an annotated load
     if (accTyped?.size) {
@@ -1063,7 +1168,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           named,
           programCheck: ptr => keyCompares(f, ptr, a => sem.keyAt(a)),
           tainted: e => exprTainted(taint.get(pc), e, fpVar),
-          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len),
+          fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len, true),
           constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined), // program memory (never written at run time)
         };
         // sites the frame contents do not describe as a well-known instruction: run the function (cpiexec.ts)
@@ -1082,7 +1187,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const s = sites.get(n);
           if (!s) return undefined;
           const d = cpiDesc(s, env);
-          if (s.abi !== 'call') siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
+          // (not the undecoded CPI inside an invoke wrapper, decoded at its call sites: as for library wrappers)
+          const inWrapper = !s.abi.startsWith('pda') && invokeWrappers.has(pc) && !d?.family
+          if (s.abi !== 'call' && !inWrapper) siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
           // (a PDA function recognized by its syscall: for the analysis only, printed as a plain call)
           if (s.t?.k === 'fn' && pdaWrappers.has(s.t.pc)) return cpiDesc({ ...s, abi: 'call' }, env)?.text;
           const kind = execKind(s);
@@ -1106,7 +1213,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     if (opts.sugar !== false && fpVar !== undefined && userInvoke.size && wrapBudget.steps > 0) {
       const env: CpiEnv = {
-        fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len), tainted: e => exprTainted(taint.get(pc), e, fpVar),
+        fp: fpVar, expr: e => pr.u(e, 0), keyAt: ctx.keyAt, strAt: (ptr, len) => sem.strAt(ptr, len, true), tainted: e => exprTainted(taint.get(pc), e, fpVar),
         constName: v => sem.constComment(v, 'value'), fnAt: a => fnByAddr.get(a), read: (a, n) => (p.image.region(a, n)?.exec === false ? p.image.read(a, n) : undefined),
       };
       const visit = (ns: Node[]) => {
@@ -1141,6 +1248,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (hdr) lines.push(`// ${hdr}`);
     for (const n of fnNotes.get(pc) ?? []) lines.push(`// ${n}`);
     if (heurNames.has(pc)) lines.push(`// ${heurNames.get(pc)}`);
+    if (symNotes.has(pc)) lines.push(`// symbol: ${symNotes.get(pc)}`)
     const tp = taint.get(pc);
     if (tp && !sem.ixNames.has(pc)) {
       const ps = f.vars.filter(v => v.param >= 1 && v.param !== 10 && tp.vars.has(v.id) && names[v.id]).map(v => `${names[v.id]} (${tp.vars.get(v.id) === 'ptr' ? 'points to it' : 'value'})`);
@@ -1209,7 +1317,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const hf = { vars: h.vars } as unknown as VarFunc;
     const hpr = new Printer({
       fnName, fnAddrName: a => fnByAddr.get(a), sysName: n => sem.syscallName(n), constComment: (v, role) => sem.constComment(v, role), varName: id => h.names[id],
-      strAt: (ptr, len) => sem.strLit(ptr, len), strNote: (ptr, len) => sem.strAt(ptr, len), keyAt: ptr => sem.keyAt(ptr), dropUndefArgs: true, exprHook: (e, pr) => sem.sugar(e, pr),
+      strAt: (ptr, len, isPtr) => sem.strLit(ptr, len, isPtr), strNote: (ptr, len, isPtr) => sem.strAt(ptr, len, isPtr), keyAt: ptr => sem.keyAt(ptr), dropUndefArgs: true, exprHook: (e, pr) => sem.sugar(e, pr),
     });
     const { decls, hoisted } = declarations(hf, h.body);
     outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });
@@ -1671,6 +1779,11 @@ function childLists(n: Node): Node[][] {
   return n.k === 'if' ? [n.then, n.else] : n.k === 'block' || n.k === 'loop' ? [n.body] : n.k === 'switch' ? n.cases.map(c => c.body) : [];
 }
 
+/** JavaScript / TypeScript reserved words (not usable as function names). */
+const JS_KEYWORDS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
+  'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
+  'typeof', 'var', 'void', 'while', 'with', 'implements', 'interface', 'let', 'package', 'private', 'protected', 'public', 'static', 'yield', 'await'])
+
 const RESERVED_TS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends',
   'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try',
   'typeof', 'var', 'void', 'while', 'with', 'as', 'implements', 'interface', 'let', 'package', 'private', 'protected', 'public', 'static', 'yield',
@@ -1681,7 +1794,7 @@ const RESERVED_TS = new Set(['break', 'case', 'catch', 'class', 'const', 'contin
 let globalCache: { p: Program; ids: Set<string> } | undefined;
 function globalIdents(p: Program): Set<string> {
   if (globalCache?.p === p) return globalCache.ids;
-  const ids = new Set<string>([...HELPERS, 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'at', 'ref', 'sized', 'Pubkey', 'bytes', 'AccountInfo', 'AccountRecord', 'Input']);
+  const ids = new Set<string>([...HELPERS, 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'at', 'ref', 'sized', 'Pubkey', 'bytes', 'AccountInfo', 'AccountRecord', 'UnalignedAccount', 'Input']);
   for (const f of p.funcs.values()) ids.add(f.name);
   for (const sc of p.syscalls.values()) ids.add(sc.alias);
   for (const n of ['ld8', 'ld16', 'ld32', 'ld64', 'st8', 'st16', 'st32', 'st64', 'bswap16', 'bswap32', 'bswap64']) ids.add(n);
@@ -1857,10 +1970,16 @@ function stripUndef(ns: Node[], only: Set<number>): Node[] {
 }
 
 /** Field of the serialized program input at a fixed offset (only the first account has fixed offsets). */
-function inputField(off: number, size: number): string | undefined {
+function inputField(off: number, size: number, unaligned: boolean): string | undefined {
   if (off === 0 && size === 8) return 'num_accounts';
   const o = off - 8;
   if (o < 0) return undefined;
+  if (unaligned) {
+    // the deprecated loader's record (views.ts UnalignedAccount): the owner and later fields follow the data
+    const U: [number, number, string][] = [[0, 1, 'dup_marker(0xff=not dup)'], [1, 1, 'is_signer'], [2, 1, 'is_writable'], [3, 32, 'key'], [0x23, 8, 'lamports'], [0x2b, 8, 'data_len']]
+    for (const [at, len, name] of U) if (o >= at && o + size <= at + len) return `acc0.${name}${len > 8 ? (o === at ? '' : `[${o - at}]`) : ''}`
+    return undefined
+  }
   const F: [number, number, string][] = [[0, 1, 'dup_marker(0xff=not dup)'], [1, 1, 'is_signer'], [2, 1, 'is_writable'], [3, 1, 'executable'], [4, 4, 'original_data_len'],
     [8, 32, 'key'], [40, 32, 'owner'], [72, 8, 'lamports'], [80, 8, 'data_len']];
   if (o === 0 && size === 2) return 'dup_marker|is_signer';

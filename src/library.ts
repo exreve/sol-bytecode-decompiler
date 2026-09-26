@@ -97,14 +97,14 @@ export function classify(p: Program): Map<number, LibInfo> {
 	// crates this program *is* (its own processor/instruction code is recognized): never elided
 	const owned = new Set<string>()
 	for (const [, fp] of prints) {
-		const n = nm?.[fp.hash]
+		const n = nm?.[fp.hash] ?? (fp.alt ? nm?.[fp.alt] : undefined)
 		if (n && /::processor::|process_instruction|::instruction::[A-Z]\w*::unpack/.test(n) && !GENERIC.test(crateOf(n))) owned.add(crateOf(n))
 	}
 	for (const f of p.funcs.values()) {
 		const fp = prints.get(f.pc)!
 		const big = fp.insns >= MIN_LIB_INSNS
-		const hit = d && big ? d.sigs[fp.hash] : undefined
-		const rust = big ? nm?.[fp.hash] : undefined
+		const hit = d && big ? d.sigs[fp.hash] ?? (fp.alt ? d.sigs[fp.alt] : undefined) : undefined
+		const rust = big ? nm?.[fp.hash] ?? (fp.alt ? nm?.[fp.alt] : undefined) : undefined
 		let lib = (!!hit || !!rust) && !f.isEntry
 		if (lib && rust && owned.has(crateOf(rust))) lib = false
 		const info: LibInfo = { lib, families: hit?.[0] ?? 0 }
