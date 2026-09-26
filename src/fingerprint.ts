@@ -116,14 +116,22 @@ function constantAt(p: Program, bytes: Uint8Array, o: number): string {
 /** Instructions that read a source register (ldx, stx, register-operand alu/jmp). */
 const usesSrc = (opc: number) => { const cls = opc & 7; return cls === 1 || cls === 3 || (cls >= 4 && (opc & 8) !== 0 && opc !== 0x85 && opc !== 0x8d && opc !== 0x95) }
 
-export function signature(p: Program, f: Func): FnSig {
-	const pcs = funcPcs(f)
+/** What a signature reads of a function's lifted blocks (a snapshot: later phases reshape the blocks). */
+export interface SigShape { pc: number; pcs: number[]; targets: Map<number, { k: string; name?: string; pc?: number }>; edges: number; blocks: number }
+export function sigShape(f: Func): SigShape {
 	const targets = new Map<number, { k: string; name?: string; pc?: number }>()
 	let edges = 0
 	for (const b of f.blocks) {
 		edges += b.succs.length
-		for (const s of b.stmts) if (s.k === 'call') targets.set(s.pc, s.t)
+		for (const s of b.stmts) if (s.k === 'call') targets.set(s.pc, { k: s.t.k, name: (s.t as { name?: string }).name, pc: (s.t as { pc?: number }).pc })
 	}
+	return { pc: f.pc, pcs: funcPcs(f), targets, edges, blocks: f.blocks.length }
+}
+
+export function signature(p: Program, f: Func): FnSig { return shapeSignature(p, sigShape(f)) }
+
+export function shapeSignature(p: Program, f: SigShape): FnSig {
+	const { pcs, targets, edges } = f
 	const textLo = p.textVaddr, textHi = p.textVaddr + BigInt(p.insns.length * 8)
 	const lddw = p.version !== 2
 	const toks: string[] = [], rf: string[] = [], consts: string[] = []
@@ -163,7 +171,7 @@ export function signature(p: Program, f: Func): FnSig {
 	const h = (a: string[]) => createHash('sha1').update(a.join(';')).digest('hex').slice(0, 16)
 	return {
 		pc: f.pc, insns: n, hash: h(toks), regfree: h(rf), data: consts.length ? h(consts) : '', toks, consts,
-		fuzzy: `${n}i ${f.blocks.length}b ${edges}e ${hist.join('.')}`, hist, blocks: f.blocks.length, edges, calls, sys: [...sys].sort(),
+		fuzzy: `${n}i ${f.blocks}b ${edges}e ${hist.join('.')}`, hist, blocks: f.blocks, edges, calls, sys: [...sys].sort(),
 	}
 }
 

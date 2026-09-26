@@ -14,7 +14,7 @@ import { rewriteStackArgs } from './stackargs.ts';
 import { recognizeIdioms } from './idioms.ts';
 import { findAccounts, accountField, accountAddr } from './accounts.ts';
 import { classify, type LibInfo } from './library.ts';
-import { signatures, type FnSig } from './fingerprint.ts';
+import { sigShape, shapeSignature, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { findOutlines, type Outlines } from './outline.ts';
 import { builtinName } from './builtins.ts';
@@ -79,7 +79,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const sem = new Semantics(p, opts.idl);
   setFoldImage(p.image);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
-  const sigs = signatures(p); // (before the later phases reshape the blocks)
+  // (what they read of the blocks, before the later phases reshape them; computed when used: fingerprints.json)
+  const sigShapes = [...p.funcs.values()].map(sigShape);
+  let sigs: Map<number, FnSig> | undefined;
   // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior, see builtins.ts)
   {
     const taken = new Set([...libs.values()].map(i => i.name).filter(Boolean));
@@ -1211,7 +1213,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const { decls, hoisted } = declarations(hf, h.body);
     outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });
   }
-  const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
+  const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, get sigs() { return (sigs ??= new Map(sigShapes.map(x => [x.pc, shapeSignature(p, x)]))); }, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
 }
