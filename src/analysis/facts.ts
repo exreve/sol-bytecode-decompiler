@@ -53,6 +53,7 @@ export interface Check {
 	before?: number        // the callee of the last call before the check in its statement list (Anchor try-call pattern)
 	via?: { fn: string; kinds: string[] } // the checks that callee makes (kinds from its Anchor error codes, see calleeChecks)
 	c?: Expr               // the condition (IR; flow.ts finds the block deciding it)
+	passPc?: number        // the first statement on the passing side (the deciding block, when the condition's code is duplicated)
 }
 
 export type OpKind = 'CPI' | 'TOKEN_TRANSFER' | 'LAMPORT_TRANSFER' | 'ACCOUNT_CLOSE' | 'ACCOUNT_REALLOC' | 'ACCOUNT_DATA_WRITE' | 'AUTHORITY_WRITE'
@@ -325,7 +326,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: r.acct, field: r.field?.replace(/^lamports\..*/, 'lamports') }, how, value: rhs })
 	}
 
-	const check = (n: Extract<Node, { k: 'if' }>, failNodes: Node[], failsIf: boolean, main: boolean, before: number | undefined) => {
+	const check = (n: Extract<Node, { k: 'if' }>, failNodes: Node[], failsIf: boolean, main: boolean, before: number | undefined, passNodes: Node[]) => {
 		const l = lineOf(n)
 		const hl = lines[l] ?? ''
 		const cm = /^\s*(?:\} else )?if \((.*)\) \{$/.exec(hl) ?? /^\s*(?:\} else )?if \((.*)\) \{$/.exec(lines[l + 1] ?? '')
@@ -361,7 +362,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		else if (inp.anchor && ft.length < 4000) named = inlineString(failNodes)
 		if (!kinds.length && !named) return
 		const pc = firstPc(failNodes)
-		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c })
+		facts.checks.push({ line: l + 1, pc, cond, failsIf, error, kinds, refs, named, main, before, c: n.c, passPc: firstPc(passNodes) })
 	}
 
 	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
@@ -413,7 +414,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 					else if ((tEx && eEx) || (!tEx && !eEx && after)) { const pf = pickFail(n.then, n.else); fail = pf === 'then' ? 'then' : pf === 'rest' ? 'else' : undefined }
 					if (fail) {
 						const failNodes = fail === 'then' ? n.then : fail === 'else' ? n.else : rest
-						check(n, failNodes, fail === 'then', main, before)
+						check(n, failNodes, fail === 'then', main, before, fail === 'then' ? (n.else.length ? n.else : rest) : n.then)
 						walk(n.then, fail === 'then' ? false : main, err || fail === 'then', after)
 						walk(n.else, fail === 'else' ? false : main, err || fail === 'else', after)
 						if (fail === 'rest') { walk(rest, false, true, cont); return }

@@ -82,7 +82,7 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 	}
 	const siteOf = checks.map(c => {
 		const g = cfg(c.fnPc)
-		const b = g && decisionBlock(g, c.c, c.at.pc)
+		const b = g && decisionBlock(g, c.c, c.at.pc, c.passPc)
 		if (b === undefined) return []
 		const own: Site = { fn: c.fnPc, b, pc: Infinity }
 		return c.main && c.fnPc !== ctx.handler ? chainUp(c.fnPc, own) : [own]
@@ -306,7 +306,8 @@ const RULES: Rule[] = [
 			const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 			if (!hasSigner || stored || o.cpi?.seeds) return []
 			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
-			if (o.cpi?.known && o.cpi.accounts.some(x => x.s)) return []
+			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
+			if (o.cpi?.known && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) return []
 			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
 		}),
 	},

@@ -10,7 +10,7 @@
 import type { FuncOut, Result } from '../decompile.ts'
 import type { VarFunc } from '../dataflow.ts'
 import type { CallTarget, Expr, Stmt } from '../ir.ts'
-import { walkExpr } from '../ir.ts'
+import { walkExpr, NEG_CMP } from '../ir.ts'
 import { computeRpo, dominators } from '../structure.ts'
 import { stmtExprs } from '../simplify.ts'
 import { borshSize, structFields } from '../idl.ts'
@@ -25,6 +25,7 @@ export interface Cfg {
 	idom: Int32Array
 	pcBlock: Map<number, number>   // statement / instruction pc -> block
 	condBlock: Map<Expr, number>   // a branch condition (by identity) -> its block
+	condKey?: Map<string, number[]> // (lazily) a branch condition's shape up to negation -> its blocks
 	retBlock: Map<Expr, number>    // a returned expression (by identity) -> its block
 }
 
@@ -54,8 +55,25 @@ export function dominates(g: Cfg, a: number, b: number): boolean {
 	return false
 }
 
+/** a condition's shape up to negation (lnot, the negated comparison) */
+function condKey(e: Expr, d = 0): string {
+	if (d > 8) return '…'
+	switch (e.k) {
+		case 'lnot': return d === 0 ? condKey(e.a, d) : `!${condKey(e.a, d + 1)}`
+		case 'cmp': { const n = NEG_CMP[e.op]; return `(${d === 0 && n ? [e.op, n].sort().join('/') : e.op} ${condKey(e.a, d + 1)} ${condKey(e.b, d + 1)})` }
+		case 'var': return `v${e.id}`
+		case 'const': return `${e.v}`
+		case 'load': return `ld${e.size}(${condKey(e.addr, d + 1)})`
+		case 'bin': return `(${e.op} ${condKey(e.a, d + 1)} ${condKey(e.b, d + 1)})`
+		case 'ext': return `x${e.signed ? 's' : 'u'}${e.bits}(${condKey(e.a, d + 1)})`
+		case 'land': case 'lor': return `(${e.k} ${condKey(e.a, d + 1)} ${condKey(e.b, d + 1)})`
+		case 'fn': case 'call': return `${e.k === 'fn' ? e.name : 'call'}(${e.args.map(a => condKey(a, d + 1)).join(',')})`
+		default: return e.k
+	}
+}
+
 /** The block deciding a check's condition: the branch whose condition is (a leaf of) it, else the fail side's branching predecessor. */
-export function decisionBlock(g: Cfg, c: Expr | undefined, failPc: number | undefined): number | undefined {
+export function decisionBlock(g: Cfg, c: Expr | undefined, failPc: number | undefined, passPc?: number): number | undefined {
 	const leaves: number[] = []
 	const leaf = (e: Expr) => {
 		const b = g.condBlock.get(e)
@@ -64,6 +82,16 @@ export function decisionBlock(g: Cfg, c: Expr | undefined, failPc: number | unde
 		else if (e.k === 'land' || e.k === 'lor') { leaf(e.a); leaf(e.b) }
 	}
 	if (c) leaf(c)
+	// (a condition the structuring rebuilt, e.g. negated: the one branch with the same condition up to negation)
+	// (several such branches, e.g. duplicated tails: the ones leading to the failing side within a few jumps)
+	if (!leaves.length && c) {
+		if (!g.condKey) { g.condKey = new Map(); for (const [e, b] of g.condBlock) { const k = condKey(e); const l = g.condKey.get(k); if (l) l.push(b); else g.condKey.set(k, [b]) } }
+		let bs = g.condKey.get(condKey(c)) ?? []
+		// (statements are duplicated with their pc: each side by its first statement's pc, in the block or a jump or two after it)
+		const leads = (s: number, pc: number) => { for (let k = 0; k < 4; k++) { const x = g.fo.f.blocks[s]; if (x.stmts.some(st => st.pc === pc)) return true; if (x.succs.length !== 1) return false; s = x.succs[0] } return false }
+		for (const pc of [failPc, passPc]) if (bs.length > 1 && pc !== undefined) bs = bs.filter(b => g.fo.f.blocks[b].succs.some(s => leads(s, pc)))
+		if (bs.length === 1) leaves.push(bs[0])
+	}
 	if (leaves.length) return leaves.reduce((a, b) => (g.rpo[a] <= g.rpo[b] ? a : b))
 	if (failPc === undefined) return undefined
 	let b = g.pcBlock.get(failPc)
@@ -633,9 +661,9 @@ export interface AcctRef { index: number; field?: string }
 export type Side = AcctRef | 'stack' | 'pda' | 'const' | undefined // 'stack': a frame buffer ('pda': written by a PDA derivation); 'const': a constant (program memory)
 export interface AcctResolver {
 	byName: Map<string, AcctRef>
-	refs: (e: Expr) => AcctRef[]                          // account fields an expression reads
+	refs: (e: Expr, b?: number) => AcctRef[]              // account fields an expression (a branch condition, else evaluated at the end of block b) reads
 	store: (s: Stmt) => AcctRef | undefined                // the account field a store writes (lamports, data[a..b])
-	sides: (c: Expr) => [Side, Side] | undefined           // the two sides of an equality (key / field compares; 'stack': a frame buffer)
+	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
 }
 
 /**
@@ -908,6 +936,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		else if (a.k === 'slice' && a.off % 0x30 === 0) byName.set(nm, { index: a.off / 0x30 })
 		else if (a.k === 'ptr' && a.f === 'key' && a.off === 0) byName.set(nm, { index: a.i })
 	}
+	for (const [v, a] of roots) if (a.k === 'slice' && fo.names[v]) byName.set(fo.names[v], { index: 0 })
 	/** the two pointers of a 32-byte comparison: a call (memcmp / sol_memcmp) or a memeq */
 	const cmpArgs = (x: Expr): [Expr, Expr] | undefined =>
 		(x.k === 'call' || (x.k === 'fn' && x.name === 'memeq')) && x.args.length >= 3 && x.args[2].k === 'const' && x.args[2].v === 0x20n ? [x.args[0], x.args[1]] : undefined
@@ -923,8 +952,9 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		return [e, p]
 	}
-	const refs = (e: Expr): AcctRef[] => {
-		const p0 = pos.get(e)
+	const at = (e: Expr, b?: number) => pos.get(e) ?? (b !== undefined && f.blocks[b] ? b << 16 | f.blocks[b].stmts.length : undefined)
+	const refs = (e: Expr, b?: number): AcctRef[] => {
+		const p0 = at(e, b)
 		if (p0 === undefined) return []
 		const out: AcctRef[] = []
 		const push = (r: AcctRef | undefined) => { if (r && !out.some(y => y.index === r.index && y.field === r.field)) out.push(r) }
@@ -986,8 +1016,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (st) { const c = origin(e, p); return c && pdaCall(c.t) ? 'pda' : 'stack' }
 		return e.k === 'const' || (e.k === 'var' && defs.get(e.id)?.k === 'const') ? 'const' : undefined
 	}
-	const sides = (c: Expr): [Side, Side] | undefined => {
-		const p0 = pos.get(c)
+	const sides = (c: Expr, b?: number): [Side, Side] | undefined => {
+		const p0 = at(c, b)
 		if (p0 === undefined) return undefined
 		let x = c
 		while (x.k === 'lnot') x = x.a
