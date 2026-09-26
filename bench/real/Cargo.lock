@@ -1133,6 +1133,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "r_n_vesting"
+version = "0.1.0"
+dependencies = [
+ "solana-program",
+]
+
+[[package]]
 name = "rand"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

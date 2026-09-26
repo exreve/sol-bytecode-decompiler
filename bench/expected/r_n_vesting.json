@@ -1,0 +1,93 @@
+{
+	"kind": "native",
+	"set": "realistic",
+	"source": "bench/real/r_n_vesting (solana-program 2.2.1, written for the bench)",
+	"about": "Realistic clean program: every finding on it is false. Scored for rules only. Instructions by tag (first data byte), accounts in index order. load_registry / load_vesting check owner == program id, exact length, type tag and the address re-derived from the stored bump (create_program_address); every lamport debit is from a program-owned vesting PDA.",
+	"instructions": {
+		"init_registry": {
+			"tag": 0,
+			"accounts": {},
+			"why": {
+				"admin": "Signer and key == ADMIN (hard-coded): only the deployer's admin creates the registry.",
+				"registry": "Key == find_program_address([registry]); created by system create_account signed with the PDA seeds (fails if it exists).",
+				"system_program": "Key == system program id."
+			}
+		},
+		"set_fee": {
+			"tag": 1,
+			"accounts": {},
+			"why": { "admin": "Signer and key == registry.admin (admin_registry helper).", "registry": "load_registry (owner, length, tag, PDA) and writable; fee_bps <= 500." }
+		},
+		"propose_admin": {
+			"tag": 2,
+			"accounts": {},
+			"why": { "admin": "Signer, == registry.admin.", "registry": "load_registry, writable." }
+		},
+		"accept_admin": {
+			"tag": 3,
+			"accounts": {},
+			"why": { "new_admin": "Signer and key == registry.pending_admin (reset to the default key afterwards, which nobody can sign for).", "registry": "load_registry." }
+		},
+		"set_fee_collector": {
+			"tag": 4,
+			"accounts": {},
+			"why": { "admin": "Signer, == registry.admin.", "registry": "load_registry, writable." }
+		},
+		"create_vesting": {
+			"tag": 5,
+			"accounts": {},
+			"why": {
+				"funder": "Signer; pays rent + total from its own lamports (create_account from the funder). Permissionless by design: anyone locks its own SOL for any beneficiary.",
+				"beneficiary": "Any key, the funder's choice (only stored).",
+				"vesting": "Key == find_program_address([vesting, funder, seed]); created by create_account signed with those seeds.",
+				"system_program": "Key == system program id."
+			}
+		},
+		"release": {
+			"tag": 6,
+			"accounts": {},
+			"why": {
+				"vesting": "load_vesting (owner, length, tag, PDA [vesting, funder, seed] with the stored bump), writable. Only vested - released moves (u128 linear vesting, checked).",
+				"beneficiary": "Key == vesting.beneficiary: the payout can only go to the stored beneficiary, so the crank is permissionless by design.",
+				"registry": "load_registry (fee_bps, fee_collector).",
+				"fee_collector": "Key == registry.fee_collector."
+			}
+		},
+		"revoke": {
+			"tag": 7,
+			"accounts": {},
+			"why": {
+				"funder": "Signer and key == vesting.funder; the schedule must be revocable and not yet revoked. Only the unvested part returns to the funder; the vested part stays for the beneficiary (total := vested).",
+				"vesting": "load_vesting, writable.",
+				"clock": "Key == the Clock sysvar id (and Clock::from_account_info checks it again)."
+			}
+		},
+		"transfer_beneficiary": {
+			"tag": 8,
+			"accounts": {},
+			"why": {
+				"beneficiary": "Signer and key == vesting.beneficiary.",
+				"vesting": "load_vesting, writable. The PDA seeds do not include the beneficiary, so the address check still holds after the change.",
+				"new_beneficiary": "Any key, the current beneficiary's choice."
+			}
+		},
+		"close_vesting": {
+			"tag": 9,
+			"accounts": {},
+			"why": {
+				"beneficiary": "Signer and key == vesting.beneficiary; only once released == total.",
+				"vesting": "load_vesting, writable; data zeroed, all lamports moved out.",
+				"funder": "Key == vesting.funder: the rent returns to whoever paid it."
+			}
+		},
+		"batch_release": {
+			"tag": 10,
+			"accounts": {},
+			"why": {
+				"registry": "load_registry.",
+				"fee_collector": "Key == registry.fee_collector.",
+				"remaining pairs (vesting, beneficiary)": "each pair through release_one: vesting load_vesting + writable, beneficiary key == vesting.beneficiary. The same vesting twice releases 0 the second time (released stored before the lamports move). Permissionless like release."
+			}
+		}
+	}
+}
