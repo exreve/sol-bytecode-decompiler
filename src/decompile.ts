@@ -1774,6 +1774,13 @@ function fitsAccess(V: Views, type: string, d: number, size: number, copy: boole
   if (!array && d >= v.size) return false;
   const r = V.resolve(type, d % v.size);
   if (!r) return false;
+  if (r.last.k === 'scalar' && !r.rest && r.last.size < size) {
+    // (several consecutive scalar fields written or read at once, e.g. the two flag bytes of an account meta)
+    let o = d % v.size;
+    const end = o + size;
+    while (o < end) { const g = V.resolve(type, o); if (!g || g.rest || g.last.k !== 'scalar') return false; o += g.last.size; }
+    return o === end;
+  }
   if (r.last.k === 'scalar') return !r.rest && r.last.size === size;
   if (r.last.k === 'ref') return !r.rest && size === 8;
   return r.rest + size <= V.width(r.last);
