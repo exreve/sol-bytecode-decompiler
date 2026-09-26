@@ -44,7 +44,7 @@ build() {
 	fetch "$d" "$3" "$4" "${5%%/*}"
 	[ -z "$9" ] || [ -f "$d/.patched" ] || { (cd "$d" && $9) && touch "$d/.patched"; }
 	so=$7.so
-	run "$8" "$d" "$5" "$LOCK cargo build --release --target sbf-solana-solana -p $6 2>&1 | grep -E '^error' -A8 | head -60" || true
+	run "$8" "$d" "$5" "$LOCK $PRE cargo build --release --target sbf-solana-solana -p $6 2>&1 | grep -E '^error' -A8 | head -60" || true
 	f="$d/target/sbf-solana-solana/release/$so"
 	[ -f "$f" ] || { echo "FAILED $1@$2"; return; }
 	run "$8" "$d" . "llvm-objcopy --strip-all target/sbf-solana-solana/release/$so /tmp/o.so && cat /tmp/o.so" > "$out" # as deployed (cargo build-sbf)
@@ -85,3 +85,15 @@ build solend_lending fixed solendprotocol/solana-program-library 132d74cf17 . sp
 RUSTFLAGS_SBF=$BPF IDL_SRC=rust/nft-candy-machine-v2/src/lib.rs
 build candy_machine_v2 vuln metaplex-foundation/metaplex 4f835f73e632ccaf4eb913d8fb64518ff52eb237 rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
 build candy_machine_v2 fixed metaplex-foundation/metaplex e9ef376443c3c8fd2f5b151dd0b09f757b1bf35c rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
+
+# proc-macro2 < 1.0.60 does not build on newer rustc (proc_macro::LineColumn)
+PM2='cargo update -p proc-macro2 --precise 1.0.66;'
+RUSTFLAGS_SBF=$BPF IDL_SRC=programs/brrr/src/lib.rs PRE=$PM2
+build cashio_brrr vuln cashioapp/cashio a51c3c59d544a5763b64abb4a8d82c49b0abd6d0 . brrr brrr v1.41
+build cashio_brrr fixed cashioapp/cashio 7df658184c . brrr brrr v1.41
+
+RUSTFLAGS_SBF=$BPF IDL_SRC= PRE=
+build spl_lending_flashloan vuln solana-labs/solana-program-library e8861b275d4d00561e11a9268407329e64bf3af3 . spl-token-lending spl_token_lending v1.41
+build spl_lending_flashloan fixed solana-labs/solana-program-library 23c487dd9c . spl-token-lending spl_token_lending v1.41
+build spl_lending_rounding vuln solana-labs/solana-program-library c24bc966f133fbac5c789f7fb2841e47764ee0f2 . spl-token-lending spl_token_lending v1.41
+build spl_lending_rounding fixed solana-labs/solana-program-library c2b287788b . spl-token-lending spl_token_lending v1.41
