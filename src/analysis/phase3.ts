@@ -218,7 +218,16 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		const alias = (v: string): string[] => { const out = [v]; for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) } return out }
 		const al = vars.map(alias)
 		const hit = (c: string, vs: string[]) => vs.some(v => mentions(c, v))
-		const g = conds.find(c => CMP.test(c.cond) && (al.every(vs => hit(c.cond, vs)) || (hit(c.cond, results) && al.some(vs => hit(c.cond, vs)))))
+		// (a condition on locals: their definitions too, e.g. an overflow flag `z = y > y + c`, a reload of the operand)
+		const ex = (c: PathCond): string => {
+			const cf = T.get(c.at.fn)?.ff
+			if (!cf) return c.cond
+			const ds: string[] = [c.cond]
+			for (const m of new Set(c.cond.match(/(?<![\w.])[A-Za-z_]\w*(?![\w(])/g) ?? [])) { const d = defOf(cf, m, c.at.line); if (d && d.expr.length < 100) ds.push(d.expr) }
+			return ds.join(' ; ')
+		}
+		const opText = al.map(vs => { const d = defOf(ff, vs[vs.length - 1], l); return d && d.expr.length < 100 && !/^[A-Za-z_][\w.]*$/.test(d.expr.trim()) ? [...vs, d.expr.trim()] : vs })
+		const g = conds.find(c => { if (!CMP.test(c.cond)) return false; const t = ex(c); return opText.every(vs => hit(t, vs)) || (hit(t, results) && opText.some(vs => hit(t, vs))) })
 		arith.push({ at: loc(fn, l), op, target, expr: e.slice(0, 120), kind, status: g ? 'checked' : 'unchecked', guard: g && { at: g.at, cond: g.cond.slice(0, 120) }, caller: callerCtl(e) || undefined, unnamed: unnamed || undefined })
 	}
 	ix.ops.forEach((o, oi) => {
