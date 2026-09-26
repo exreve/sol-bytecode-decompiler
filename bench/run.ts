@@ -31,9 +31,9 @@ const gen = new Map<string, { rule: string; n: number; caught: number; missed: s
 const genFalse: string[] = [], genInfo: string[] = [], genExtra: string[] = []
 // labelled sets (expected.set, bench/real): 'realistic' clean programs (r_*), 'oss' open-source programs (o_*) whose
 // variants each remove one validation; rules only, tallied apart from the six categories and the generated programs
-interface SetTally { progs: number; falses: string[]; info: string[]; n: number; caught: number; lines: string[]; extra: string[] }
+interface SetTally { progs: number; falses: string[]; info: string[]; notFound: string[]; n: number; caught: number; lines: string[]; extra: string[] }
 const sets = new Map<string, SetTally>()
-const setOf = (s: string) => sets.get(s) ?? sets.set(s, { progs: 0, falses: [], info: [], n: 0, caught: 0, lines: [], extra: [] }).get(s)!
+const setOf = (s: string) => sets.get(s) ?? sets.set(s, { progs: 0, falses: [], info: [], notFound: [], n: 0, caught: 0, lines: [], extra: [] }).get(s)!
 // informational expectations (expected.fund_movers): an authority-only instruction that can move user funds, expected
 // listed in analysis.json fund_movers ({ instruction, authority, ... }), not as a finding
 const movers: { where: string; listed: boolean }[] = []
@@ -183,7 +183,7 @@ function scoreFacts(prog: string, exp: Expected, a: any): Set<string> {
 		const where = `${prog} ${name}`
 		const names = Object.keys(e.accounts)
 		const ix = findIx(a, name, e)
-		if (!ix) misses.push(`${where}: instruction not found`)
+		if (!ix && !exp.set) misses.push(`${where}: instruction not found`)
 		const checks = new Set<string>(), rels = new Set<string>(), cpis = new Set<string>(), writes = new Set<string>(), pdas = new Set<string>()
 		if (ix) {
 			const alias = new Map<string, number>(ix.accounts.filter((x: any) => x.index !== undefined && !names.includes(x.name)).map((x: any) => [x.name, x.index]))
@@ -209,7 +209,7 @@ function scoreFacts(prog: string, exp: Expected, a: any): Set<string> {
 		}
 		if (exp.generated || exp.set) {
 			if (ix) for (const k of consistencyAt(a, ix.name)) (exp.set ? setOf(exp.set).info : genInfo).push(`${prog} (base) ${name}: ${k}`)
-			if (!ix && exp.set) setOf(exp.set).info.push(`${where}: instruction not found`)
+			if (!ix && exp.set) setOf(exp.set).notFound.push(where)
 			continue
 		}
 		const expChecks = Object.entries(e.accounts).flatMap(([n, ks]) => ks.map(k => `${n}.${k}`))
@@ -304,10 +304,11 @@ function printSets(verbose: boolean) {
 			for (const l of t.lines) console.log(`  ${l}`)
 			for (const f of t.falses) console.log(`  FALSE ${f}`)
 			for (const f of t.info) console.log(`  info on a clean base: ${f}`)
+			if (t.notFound.length) console.log(`  instructions not found (not scored on the base): ${t.notFound.join(', ')}`)
 			for (const f of t.extra) console.log(`  extra ${f}`)
 		}
 		const label = name === 'realistic' ? 'realistic clean programs (bench/real*, r_*)' : 'open-source programs (bench/real o_*)'
-		console.log(`${label}: ${t.progs} clean programs, ${t.falses.length} false findings (+${t.info.length} inconsistencies)${t.n ? `; ${t.caught}/${t.n} variants caught (recall ${(100 * t.caught / t.n).toFixed(1)}%), ${t.extra.length} unexpected findings in variants` : ''}`)
+		console.log(`${label}: ${t.progs} clean programs, ${t.falses.length} false findings (+${t.info.length} inconsistencies${t.notFound.length ? `, ${t.notFound.length} instructions not found` : ''})${t.n ? `; ${t.caught}/${t.n} variants caught (recall ${(100 * t.caught / t.n).toFixed(1)}%), ${t.extra.length} unexpected findings in variants` : ''}`)
 	}
 	console.log()
 }

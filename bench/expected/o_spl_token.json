@@ -1,0 +1,255 @@
+{
+	"kind": "native",
+	"set": "oss",
+	"source": "spl-token 8.0.0 (solana-program-library token program, crates.io spl-token-8.0.0, Apache-2.0): bench/real/o_spl_token",
+	"about": "Open-source program, unmodified logic: the clean build is expected to have no finding; each variant removes exactly one validation and expects one of its rules at its instruction. Scored for rules only. Instructions by TokenInstruction tag. Common to all: token accounts, mints and multisigs are unpacked with their exact length and an is_initialized check; every instruction that changes an account writes its data, which the runtime only allows for accounts owned by the token program (check_account_owner covers the paths that write nothing: amount 0, self transfers, get_account_data_size); validate_owner = key == the stored authority and (the authority is a token multisig: m of its n signers signed, else it signed).",
+	"instructions": {
+		"initialize_mint": {
+			"tag": 0,
+			"accounts": {},
+			"why": {
+				"mint": "Uninitialized (AlreadyInUse otherwise) and rent-exempt (Rent sysvar account, from_account_info checks its id). Permissionless by design: the authorities are parameters; mints are created and initialized in one transaction."
+			}
+		},
+		"initialize_account": {
+			"tag": 1,
+			"accounts": {},
+			"why": {
+				"account": "Uninitialized, rent-exempt; permissionless by design (the owner is an account key, no signature needed).",
+				"mint": "Unpacked Mint (initialized) unless it is the native mint; token-program owned (check_account_owner)."
+			}
+		},
+		"initialize_multisig": {
+			"tag": 2,
+			"accounts": {},
+			"why": {
+				"multisig": "Uninitialized, rent-exempt; 1 <= m <= n <= 11. Permissionless by design."
+			}
+		},
+		"transfer": {
+			"tag": 3,
+			"accounts": {},
+			"why": {
+				"source / destination": "Unpacked token accounts, not frozen, same mint, balance >= amount.",
+				"authority": "The delegate (validate_owner against source.delegate, delegated_amount >= amount) or validate_owner against source.owner."
+			}
+		},
+		"approve": {
+			"tag": 4,
+			"accounts": {},
+			"why": {
+				"source": "Unpacked, not frozen.",
+				"owner": "validate_owner against source.owner."
+			}
+		},
+		"revoke": {
+			"tag": 5,
+			"accounts": {},
+			"why": {
+				"source": "Unpacked, not frozen.",
+				"owner": "validate_owner against source.owner or the delegate."
+			}
+		},
+		"set_authority": {
+			"tag": 6,
+			"accounts": {},
+			"why": {
+				"account_or_mint": "Token account (by length): validate_owner against owner / close authority; mint: against the mint / freeze authority; a missing authority fails (FixedSupply / MintCannotFreeze)."
+			}
+		},
+		"mint_to": {
+			"tag": 7,
+			"accounts": {},
+			"why": {
+				"mint": "Key == destination.mint; mint_authority set.",
+				"destination": "Not frozen, not native.",
+				"owner": "validate_owner against mint.mint_authority."
+			}
+		},
+		"burn": {
+			"tag": 8,
+			"accounts": {},
+			"why": {
+				"source": "Not frozen, not native, key relation mint == source.mint, balance >= amount.",
+				"authority": "Delegate or owner through validate_owner (skipped only for the incinerator / system-owned case the program allows)."
+			}
+		},
+		"close_account": {
+			"tag": 9,
+			"accounts": {},
+			"why": {
+				"account": "Zero balance unless native; destination != account.",
+				"authority": "validate_owner against the close authority (or owner); lamports moved, data cleared."
+			}
+		},
+		"freeze_account": {
+			"tag": 10,
+			"accounts": {},
+			"why": {
+				"account": "Key relation mint == account.mint; not native; state changes.",
+				"authority": "validate_owner against mint.freeze_authority."
+			}
+		},
+		"thaw_account": {
+			"tag": 11,
+			"accounts": {},
+			"why": {
+				"account": "as freeze_account.",
+				"authority": "validate_owner against mint.freeze_authority."
+			}
+		},
+		"transfer_checked": {
+			"tag": 12,
+			"accounts": {},
+			"why": {
+				"mint": "Key == source.mint, decimals match.",
+				"source / destination / authority": "as transfer."
+			}
+		},
+		"approve_checked": {
+			"tag": 13,
+			"accounts": {},
+			"why": {
+				"mint": "Key == source.mint, decimals match.",
+				"owner": "validate_owner against source.owner."
+			}
+		},
+		"mint_to_checked": {
+			"tag": 14,
+			"accounts": {},
+			"why": {
+				"mint / destination / owner": "as mint_to, plus decimals."
+			}
+		},
+		"burn_checked": {
+			"tag": 15,
+			"accounts": {},
+			"why": {
+				"source / mint / authority": "as burn, plus decimals."
+			}
+		},
+		"initialize_account2": {
+			"tag": 16,
+			"accounts": {},
+			"why": {
+				"account": "as initialize_account (owner as instruction data)."
+			}
+		},
+		"sync_native": {
+			"tag": 17,
+			"accounts": {},
+			"why": {
+				"account": "Native token account owned by the token program (check_account_owner); only recomputes amount from lamports: permissionless by design."
+			}
+		},
+		"initialize_account3": {
+			"tag": 18,
+			"accounts": {},
+			"why": {
+				"account": "as initialize_account2 (Rent from the sysvar cache)."
+			}
+		},
+		"initialize_multisig2": {
+			"tag": 19,
+			"accounts": {},
+			"why": {
+				"multisig": "as initialize_multisig (Rent from the sysvar cache)."
+			}
+		},
+		"initialize_mint2": {
+			"tag": 20,
+			"accounts": {},
+			"why": {
+				"mint": "as initialize_mint (Rent from the sysvar cache)."
+			}
+		},
+		"get_account_data_size": {
+			"tag": 21,
+			"accounts": {},
+			"why": {
+				"mint": "check_account_owner + Mint unpack; read-only (return data)."
+			}
+		},
+		"initialize_immutable_owner": {
+			"tag": 22,
+			"accounts": {},
+			"why": {
+				"account": "Uninitialized token account: a no-op (logs); permissionless."
+			}
+		},
+		"amount_to_ui_amount": {
+			"tag": 23,
+			"accounts": {},
+			"why": {
+				"mint": "check_account_owner + Mint unpack; read-only."
+			}
+		},
+		"ui_amount_to_amount": {
+			"tag": 24,
+			"accounts": {},
+			"why": {
+				"mint": "check_account_owner + Mint unpack; read-only."
+			}
+		}
+	},
+	"variants": {
+		"transfer_no_signer": {
+			"ix": "transfer",
+			"rules": ["value-move-no-signer", "signer-not-related-to-authority"],
+			"removed": "process_transfer, owner branch: validate_owner -> key equality only (no signature / multisig check); the delegate branch and the other instructions keep validate_owner",
+			"impact": "Anyone moves tokens out of any account by naming its owner, unsigned (transfer and transfer_checked share process_transfer): theft of every balance. The key equality with source.owner is the only remaining check.",
+			"verified": {
+				"program": "+1 sol_memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "+1 sol_memcmp, -1 call of a function returning MissingRequiredSignature",
+				"analysis": "no check found only in the clean build",
+				"note": "the processor handles most instructions inline in one function (fn_cf38), so the per-instruction bundle is not specific; the whole-program diff is the evidence: one call of validate_owner (the function returning MissingRequiredSignature) less, and one more sol_memcmp (the key-only comparison of the variant helper)."
+			}
+		},
+		"transfer_no_mint_check": {
+			"ix": "transfer",
+			"rules": ["token-mint-unrelated"],
+			"removed": "process_transfer: source.mint == destination.mint (MintMismatch)",
+			"impact": "Tokens of a worthless mint the attacker controls are debited from its own account and credited to its account of a valuable mint (e.g. USDC): unlimited creation of any token without touching its supply. transfer_checked is affected too (its mint is only compared with the source's).",
+			"verified": {
+				"program": "+1 Err(ProgramError::InvalidAccountData), -1 sol_memcmp",
+				"code": "instruction not found (clean build found, variant not found)",
+				"analysis": "no check found only in the clean build",
+				"note": "the analysis does not dispatch tag 3 in the variant; the whole-program diff shows the one sol_memcmp (cmp_pubkeys source.mint / destination.mint) less."
+			}
+		},
+		"mint_to_no_signer": {
+			"ix": "mint_to_checked",
+			"rules": ["value-move-no-signer", "state-write-ungated", "signer-not-related-to-authority"],
+			"removed": "process_mint_to: validate_owner against mint.mint_authority -> key equality only (mint_to, tag 7, shares the function)",
+			"impact": "Anyone mints any amount of any mint whose authority key it names unsigned. Labelled at mint_to_checked (tag 14), which the analysis dispatches; mint_to is equally affected.",
+			"verified": {
+				"program": "+1 sol_memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "instruction not found (clean build found, variant not found)",
+				"analysis": "found in the clean build only: account[2].signer, account[0].signer",
+				"note": "as transfer_no_signer: one validate_owner call less, one key-only sol_memcmp more (process_mint_to is shared by tags 7 and 14)."
+			}
+		},
+		"mint_to_no_mint_check": {
+			"ix": "mint_to_checked",
+			"rules": ["token-mint-unrelated"],
+			"removed": "process_mint_to: mint.key == destination.mint (MintMismatch)",
+			"impact": "The authority of any mint (e.g. one the attacker creates) mints into a token account of another mint (e.g. USDC): the destination's balance of the valuable token grows, the attacker's mint's supply absorbs the amount. Unlimited creation of any token.",
+			"verified": {
+				"program": "+1 Err(ProgramError::InvalidAccountData), -1 sol_memcmp",
+				"code": "+1 Err(ProgramError::InvalidAccountData), -1 sol_memcmp",
+				"analysis": "found in the clean build only: account[2].signer, account[0].signer; in the variant only: account[1].data_len",
+				"note": "the whole-program diff and the tag 14 bundle show the one sol_memcmp (cmp_pubkeys mint / destination.mint) less."
+			}
+		}
+	},
+	"discarded": [
+		{
+			"removal": "check_account_owner on the amount 0 / self-transfer paths",
+			"reason": "those paths write nothing, so the removal only turns a failure into a no-op success for fake accounts; no token moves. Left out as not clearly security-relevant for the program itself."
+		},
+		{
+			"removal": "owner checks of written accounts",
+			"reason": "none in the source to remove: every written token account / mint must be owned by the token program for the runtime to accept the write."
+		}
+	]
+}

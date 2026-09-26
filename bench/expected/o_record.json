@@ -54,7 +54,8 @@
 			"removed": "write: check_authority's is_signer check (key equality kept; the other instructions keep the full check)",
 			"impact": "Anyone overwrites any record's data by passing the authority's public key unsigned. Nothing else in Write involves a signature (no CPI).",
 			"verified": {
-				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\"",
+				"program": "+1 log \"Incorrect record authority provided\", +1 memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\", -1 call of a function returning MissingRequiredSignature",
 				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key"
 			}
 		},
@@ -64,7 +65,8 @@
 			"removed": "set_authority: check_authority's is_signer check (key equality kept)",
 			"impact": "Anyone sets itself as the authority of any record (passing the current authority's key unsigned), then writes, reallocates or closes it and takes its lamports.",
 			"verified": {
-				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\", +1 Err(ProgramError::InvalidAccountData), +1 Err(ProgramError::UninitializedAccount), +1 log \"Record account not initialized\"",
+				"program": "+1 log \"Incorrect record authority provided\", +1 memcmp, -1 call of a function returning MissingRequiredSignature",
+				"code": "-1 Err(ProgramError::NotEnoughAccountKeys), -1 Err(ProgramError::MissingRequiredSignature), -1 log \"Record authority signature missing\", -1 call of a function returning MissingRequiredSignature, +1 Err(ProgramError::InvalidAccountData), +1 Err(ProgramError::UninitializedAccount), +1 log \"Record account not initialized\"",
 				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key"
 			}
 		},
@@ -74,6 +76,7 @@
 			"removed": "close_account: check_authority's key == record.authority (signer check kept)",
 			"impact": "Any signer closes any record and sends its lamports to a destination of its choice: theft of the rent and destruction of the data. The signer is not related to the record by anything else.",
 			"verified": {
+				"program": "+1 Err(ProgramError::MissingRequiredSignature), +2 Err(ProgramError::NotEnoughAccountKeys), +1 log \"Record authority signature missing\"",
 				"code": "-1 log \"Incorrect record authority provided\", -2 memcmp",
 				"analysis": "found in the clean build only: account[1].key, field_eq account[0].data ~ account[1].key; in the variant only: account[1].signer"
 			}

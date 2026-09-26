@@ -49,6 +49,7 @@
 			"removed": "offer: has_one = token_mint_b",
 			"impact": "The taker pays with a worthless mint of its own (token_mint_b, both mint-B ATAs derived from it, init_if_needed creates the maker's) and still receives the whole vault of mint A: theft of every open offer. Nothing else binds token_mint_b to the offer (the ATA constraints only relate the token accounts to whatever mint is passed).",
 			"verified": {
+				"program": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"code": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"analysis": "no check found only in the clean build"
 			}
@@ -59,6 +60,7 @@
 			"removed": "maker_token_account_b: associated_token::authority = maker (the ATA binding to the maker; Anchor's ATA init needs it, so the account becomes mut + token::mint = token_mint_b + token::token_program, no init_if_needed)",
 			"impact": "The taker passes a mint-B token account of its own as maker_token_account_b: the payment goes back to the taker and the vault of mint A still goes to the taker: theft of every open offer. The token program only checks the destination's mint, not its owner.",
 			"verified": {
+				"program": "-1 anchor::AccountNotEnoughKeys, -1 anchor::ConstraintRentExempt, -1 anchor::ConstraintTokenOwner, -1 anchor::ConstraintAssociatedTokenTokenProgram, -1 anchor::AccountNotAssociatedTokenAccount, -7 .is_signer read, -3 memcmp, +1 anchor::ConstraintTokenTokenProgram",
 				"code": "-1 anchor::AccountNotEnoughKeys, -1 anchor::ConstraintAssociatedTokenTokenProgram, -1 anchor::ConstraintTokenOwner, -1 anchor::ConstraintRentExempt, -1 anchor::AccountNotAssociatedTokenAccount, -7 .is_signer read, -3 memcmp, +1 anchor::ConstraintTokenTokenProgram",
 				"analysis": "found in the clean build only: taker_token_account_a.writable, taker_token_account_b.state, maker_token_account_b.token_mint, maker_token_account_b.initialized, maker_token_account_b.token_owner; in the variant only: taker_token_account_b.writable, maker_token_account_b.state, compare maker_token_account_b.owner ~ sd8"
 			}
@@ -71,6 +73,7 @@
 			},
 			"removed": "maker: Signer -> SystemAccount",
 			"verified": {
+				"program": "no check-related token differs",
 				"code": "no check-related token differs",
 				"analysis": "found in the clean build only: maker.signer; in the variant only: maker.owner",
 				"note": "the maker's try_accounts call (first of the handler's accounts function, bundle/refund_offer.ts) is try_accounts_4258 = Signer::try_accounts in the clean build (security/refund_offer.md: maker signer found via it) and try_accounts_1d0 in the variant, in which only an owner check (SystemAccount: owned by the system program) is found; the other try calls (338, 280, 43c0, 280, 120) are the same functions."

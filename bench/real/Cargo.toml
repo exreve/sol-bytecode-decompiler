@@ -1,7 +1,7 @@
 # Realistic clean programs (r_*) and open-source programs with single-check-removal variants (o_*): bench/README.md
 [workspace]
 resolver = "2"
-members = ["o_multisig", "o_escrow", "o_record", "r_a31_staking", "r_n_vesting", "r_p_crowdfund"]
+members = ["o_multisig", "o_escrow", "o_record", "o_spl_token", "r_a31_staking", "r_n_vesting", "r_p_crowdfund"]
 
 [workspace.dependencies]
 anchor-lang = "=0.31.1"

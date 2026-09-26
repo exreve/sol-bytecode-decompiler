@@ -67,6 +67,7 @@
 			"removed": "proposer: Signer -> UncheckedAccount",
 			"impact": "Anyone can create a transaction pre-approved by any owner (the handler only checks that the key is in owners): each such transaction counts one approval its owner never gave, so a threshold-1 multisig executes anything anyone proposes and a threshold-2 one needs a single real approval. Nothing else requires the proposer's signature (no CPI, no other constraint on it).",
 			"verified": {
+				"program": "+1 anchor::AccountNotEnoughKeys",
 				"code": "+1 anchor::AccountNotEnoughKeys, -1 Signer::try_accounts",
 				"analysis": "found in the clean build only: proposer.signer; in the variant only: proposer.count"
 			}
@@ -80,6 +81,7 @@
 			"removed": "owner: Signer -> UncheckedAccount",
 			"impact": "Anyone can set the approval bit of every owner (passing their keys unsigned), reach the threshold alone and then run execute_transaction: full control of the multisig PDA. The owner-list lookup is the only other check and does not involve a signature.",
 			"verified": {
+				"program": "+1 anchor::AccountNotEnoughKeys",
 				"code": "-1 Signer::try_accounts, +1 anchor::AccountNotEnoughKeys",
 				"analysis": "found in the clean build only: owner.signer; in the variant only: owner.count"
 			}
@@ -90,6 +92,7 @@
 			"removed": "transaction: has_one = multisig",
 			"impact": "An owner of any multisig (e.g. one the attacker creates with owners [A1..An] he controls, same seqno) passes it with a victim multisig's transaction: the owner index is looked up in the attacker's multisig and the victim transaction's approval bits get set, reaching its threshold. The seqno constraint only compares two counters the attacker can match (new multisigs start at 0).",
 			"verified": {
+				"program": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"code": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"analysis": "found in the clean build only: multisig.raw, transaction.has_one, has_one multisig.key ~ transaction.multisig"
 			}
@@ -105,6 +108,7 @@
 			"removed": "Auth.multisig_signer: Signer -> UncheckedAccount (seeds / bump kept)",
 			"impact": "The PDA's address is public: anyone passes it unsigned and replaces the owners of any multisig (set_owners; also change_threshold / set_owners_and_change_threshold, same Auth struct): takeover. The seeds constraint only checks the address, not a signature.",
 			"verified": {
+				"program": "+1 anchor::AccountNotEnoughKeys",
 				"code": "-1 Signer::try_accounts, +1 anchor::AccountNotEnoughKeys",
 				"analysis": "found in the clean build only: multisig_signer.signer; in the variant only: multisig_signer.count"
 			}
@@ -115,6 +119,7 @@
 			"removed": "Auth.multisig_signer: seeds = [multisig.key()], bump = multisig.nonce (Signer kept)",
 			"impact": "Any signer (e.g. the attacker's wallet) is accepted as multisig_signer: anyone replaces the owners / threshold of any multisig. Nothing else relates the signer to the multisig.",
 			"verified": {
+				"program": "-2 anchor::ConstraintSeeds, -1 memcmp, -1 create_program_address, -1 Pubkey_create_program_address",
 				"code": "-2 anchor::ConstraintSeeds, -1 memcmp, -2 Pubkey_create_program_address, -1 create_program_address",
 				"analysis": "found in the clean build only: multisig_signer.signer, multisig_signer.pda"
 			}
@@ -125,6 +130,7 @@
 			"removed": "ExecuteTransaction.transaction: has_one = multisig",
 			"impact": "A transaction fully approved in the attacker's own multisig (owners he controls, seqno matched) is executed with a victim multisig: invoke_signed signs with the victim's PDA (seeds from the multisig account passed), so the attacker's instruction drains whatever the victim PDA controls. did_execute and the threshold are read from accounts the attacker controls.",
 			"verified": {
+				"program": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"code": "-1 anchor::ConstraintHasOne, -1 memcmp",
 				"analysis": "found in the clean build only: multisig_signer.key, transaction.has_one, has_one multisig.key ~ transaction.multisig"
 			}

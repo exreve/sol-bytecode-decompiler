@@ -10,7 +10,7 @@ use solana_program::{
 	entrypoint,
 	entrypoint::ProgramResult,
 	msg,
-	program::invoke_signed,
+	program::{invoke, invoke_signed},
 	program_error::ProgramError,
 	pubkey,
 	pubkey::Pubkey,
@@ -209,6 +209,22 @@ fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u64) -> ProgramRe
 	Ok(())
 }
 
+/// Creates the program account `target` (address checked by the caller) with `space` bytes, rent paid by `payer`
+/// plus `extra` lamports, signed with the PDA `seeds`. An address someone pre-funded is topped up, allocated and
+/// assigned instead, so nobody can block the creation by sending lamports to it.
+fn create_pda<'a>(program_id: &Pubkey, payer: &AccountInfo<'a>, target: &AccountInfo<'a>, system: &AccountInfo<'a>, space: usize, extra: u64, seeds: &[&[u8]]) -> ProgramResult {
+	let needed = Rent::get()?.minimum_balance(space).checked_add(extra).ok_or(VestError::MathOverflow)?;
+	if target.lamports() == 0 {
+		return invoke_signed(&system_instruction::create_account(payer.key, target.key, needed, space as u64, program_id), &[payer.clone(), target.clone(), system.clone()], &[seeds]);
+	}
+	let missing = needed.saturating_sub(target.lamports());
+	if missing > 0 {
+		invoke(&system_instruction::transfer(payer.key, target.key, missing), &[payer.clone(), target.clone(), system.clone()])?;
+	}
+	invoke_signed(&system_instruction::allocate(target.key, space as u64), &[target.clone(), system.clone()], &[seeds])?;
+	invoke_signed(&system_instruction::assign(target.key, program_id), &[target.clone(), system.clone()], &[seeds])
+}
+
 fn args<const N: usize>(data: &[u8], at: usize) -> Result<[u8; N], ProgramError> {
 	data.get(at..at + N).and_then(|s| s.try_into().ok()).ok_or(ProgramError::InvalidInstructionData)
 }
@@ -255,12 +271,7 @@ fn init_registry(program_id: &Pubkey, accounts: &[AccountInfo], fee_bps: u16, fe
 	}
 	let (expected, bump) = Pubkey::find_program_address(&[REGISTRY_SEED], program_id);
 	assert_key(registry, &expected)?;
-	let lamports = Rent::get()?.minimum_balance(REGISTRY_LEN);
-	invoke_signed(
-		&system_instruction::create_account(admin.key, registry.key, lamports, REGISTRY_LEN as u64, program_id),
-		&[admin.clone(), registry.clone(), system.clone()],
-		&[&[REGISTRY_SEED, &[bump]]],
-	)?;
+	create_pda(program_id, admin, registry, system, REGISTRY_LEN, 0, &[REGISTRY_SEED, &[bump]])?;
 	store_registry(registry, &Registry { admin: *admin.key, pending_admin: Pubkey::default(), fee_collector, fee_bps, bump })
 }
 
@@ -332,12 +343,7 @@ fn create_vesting(program_id: &Pubkey, accounts: &[AccountInfo], seed: u64, tota
 	}
 	let (expected, bump) = Pubkey::find_program_address(&[VESTING_SEED, funder.key.as_ref(), &seed.to_le_bytes()], program_id);
 	assert_key(vesting, &expected)?;
-	let lamports = Rent::get()?.minimum_balance(VESTING_LEN).checked_add(total).ok_or(VestError::MathOverflow)?;
-	invoke_signed(
-		&system_instruction::create_account(funder.key, vesting.key, lamports, VESTING_LEN as u64, program_id),
-		&[funder.clone(), vesting.clone(), system.clone()],
-		&[&[VESTING_SEED, funder.key.as_ref(), &seed.to_le_bytes(), &[bump]]],
-	)?;
+	create_pda(program_id, funder, vesting, system, VESTING_LEN, total, &[VESTING_SEED, funder.key.as_ref(), &seed.to_le_bytes(), &[bump]])?;
 	let v = Vesting { funder: *funder.key, beneficiary: *beneficiary.key, total, released: 0, start, cliff, end, revocable, revoked: false, bump, seed };
 	store_vesting(vesting, &v)
 }

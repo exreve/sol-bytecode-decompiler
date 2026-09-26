@@ -9,7 +9,7 @@
 			"accounts": {},
 			"why": {
 				"admin": "Signer and key == ADMIN (hard-coded): only the deployer's admin creates the registry.",
-				"registry": "Key == find_program_address([registry]); created by system create_account signed with the PDA seeds (fails if it exists).",
+				"registry": "Key == find_program_address([registry]); created by create_pda signed with the PDA seeds (create_account, or top-up + allocate + assign when someone pre-funded the address; allocate / assign fail on an existing account).",
 				"system_program": "Key == system program id."
 			}
 		},
@@ -39,7 +39,7 @@
 			"why": {
 				"funder": "Signer; pays rent + total from its own lamports (create_account from the funder). Permissionless by design: anyone locks its own SOL for any beneficiary.",
 				"beneficiary": "Any key, the funder's choice (only stored).",
-				"vesting": "Key == find_program_address([vesting, funder, seed]); created by create_account signed with those seeds.",
+				"vesting": "Key == find_program_address([vesting, funder, seed]); created by create_pda (as the registry) signed with those seeds, holding rent + total.",
 				"system_program": "Key == system program id."
 			}
 		},
