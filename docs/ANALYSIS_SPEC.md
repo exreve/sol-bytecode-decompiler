@@ -136,7 +136,12 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   (pinocchio), the RefCell'd lamports / data of an AccountInfo, frame spills and multiply-assigned variables
   (reaching definitions), values calls leave in out objects (the callee's stores with its parameters bound;
   memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
-  key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote);
+  key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote,
+  also word by word: all 4 words of the output compared, the key's account possibly unresolved, e.g. taken from an
+  accounts iterator; a PDA is `compared` when such a check is in the deriving function or a caller of it);
+  a lamport write is a store into the u64 itself (LamportsCell.value.amount, an input record's lamports), never a
+  pointer stored into an AccountInfo (struct copy / clone) nor an Rc box's counts / flag; a DataCell's slice pointer /
+  length moved by `Write for &mut [u8]` is neither a data write nor a realloc (the u64 before the data is);
   the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
   a condition the structuring rebuilt is located by the branch deciding it (its shape, the sides' first statements);
   in a function the instruction calls, pointer parameters are bound to the caller's values at the call site of this

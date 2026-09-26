@@ -388,11 +388,16 @@ function analyze0(r: Result): Analysis {
 				const acct = cn(c.named) ?? cn(c.refs.find(x => cn(x.acct))?.acct) ?? (irRefs[0] ? idxName(irRefs[0].index) : undefined) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
 				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
 				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
-				// (a 32-byte comparison this instruction's context does not resolve either)
-				if (!kinds.length && c.cmp32) continue
 				// (native: an account key compared with a constant (address), with a derived address in the frame (pda),
 				// or two account fields compared (a relation))
 				const sd = R && c.c ? R.sides(c.c, cb) : undefined
+				// (a 32-byte comparison this instruction's context does not resolve either; but a PDA compared with a value
+				// it does not resolve, e.g. the key of an AccountInfo a helper takes from an accounts iterator: the
+				// comparison, on no named account)
+				if (!kinds.length && c.cmp32) {
+					if (!sd?.includes('pda') || sd.every(x => x === 'pda')) continue
+					if (!sd.some(x => typeof x === 'object' && x.field === 'key')) kinds.push('pda')
+				}
 				const keyed = sd?.find((x): x is AcctRef => typeof x === 'object' && x.field === 'key')
 				const other = keyed && sd!.find(x => x !== keyed)
 				const sk = other === 'const' ? 'address' : other === 'pda' ? 'pda' : undefined
@@ -547,11 +552,14 @@ function analyze0(r: Result): Analysis {
 	const reads = new Map<string, Set<string>>()
 	for (const ix of ixs) {
 		const pdaAccts = ix.accounts.filter(x => x.constraints.pda?.status === 'found' || x.constraints.pda?.status === 'partial')
+		// (PDA comparisons on no named account: those of the deriving function or of a function calling it)
+		const pdaChecks = ix.checks.filter(c => c.kinds.includes('pda') && !ix.accounts.some(a => a.name === c.account))
 		for (const o of ix.ops) {
 			if (o.pda) {
 				const x = pda(o.pda.seeds, o.pda.program)
 				add(x.derivedIn, ix.name)
 				for (const a of pdaAccts) { add(x.accounts, `${ix.name}.${a.name}`); if (RANK[a.constraints.pda.status] > RANK[x.compared]) x.compared = a.constraints.pda.status }
+				for (const c of pdaChecks) if ((c.fnPc === o.fnPc || facts.get(c.fnPc)?.calls.some(y => y.callee === o.fnPc)) && RANK[c.status] > RANK[x.compared]) x.compared = c.status
 			}
 			if (o.cpi?.seeds) add(pda(o.cpi.seeds, '(caller: this program)').signsIn, ix.name)
 			if (o.target && o.kinds.some(k => k === 'ACCOUNT_DATA_WRITE' || k === 'LAMPORT_WRITE')) {

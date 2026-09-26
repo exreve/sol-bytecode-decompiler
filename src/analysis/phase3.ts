@@ -379,18 +379,21 @@ function proofs(ix: IxOut): Proof[] {
 export function closeZeroing(ix: IxOut, oi: number): { zeroed?: string; revived?: string } {
 	const o = ix.ops[oi], t = o.target?.split('.')[0]
 	const res: { zeroed?: string; revived?: string } = {}
+	const cf = ixText.get(ix)?.get(o.at.fn)?.ff
 	ix.ops.forEach((x, i) => {
 		if (i === oi) return
 		const same = !t || !x.target || x.target.split('.')[0] === t
 		if (!same) return
 		if (x.kinds.includes('OWNER_ASSIGN')) res.zeroed ??= `owner reassigned ${x.at.fn}:${x.at.line}`
-		if (x.kinds.includes('ACCOUNT_REALLOC') && /realloc\([^,]+, [^,]+, 0\b|space: 0\b/.test(x.text)) res.zeroed ??= `realloc to 0 ${x.at.fn}:${x.at.line}`
+		// (a realloc helper the closing function calls with a literal 0 argument (the new length), e.g.
+		// anchor_lang::common::close's realloc(0, false))
+		const to0 = x.at.fn !== o.at.fn && cf?.lines.some(l => new RegExp(`\\b${x.at.fn}\\((?:[^,()]+, )*0[,)]`).test(l))
+		if (x.kinds.includes('ACCOUNT_REALLOC') && (to0 || /realloc\([^,]+, [^,]+, 0\b|space: 0\b/.test(x.text))) res.zeroed ??= `realloc to 0 ${x.at.fn}:${x.at.line}`
 		else if (x.kinds.includes('ACCOUNT_REALLOC') && (x.at.fn !== o.at.fn || x.at.line > o.at.line)) res.revived ??= `${x.text.slice(0, 80)} (${x.at.fn}:${x.at.line})`
 		if (x.kinds.includes('ACCOUNT_DATA_WRITE') && x.target && /discriminator|data\[0\.\.|\.data$/.test(x.target)) res.zeroed ??= `discriminator written ${x.at.fn}:${x.at.line}`
 	})
 	if (!res.zeroed && /memset|fill\(/.test(o.text)) res.zeroed = 'memset in the close'
 	// (the closing function reassigns / resizes the account: AccountInfo::assign / realloc, e.g. anchor_lang::common::close)
-	const cf = ixText.get(ix)?.get(o.at.fn)?.ff
 	if (!res.zeroed && cf?.lines.some(l => /\bAccountInfo_(assign|realloc|resize)\w*\(/.test(l))) res.zeroed = `AccountInfo::assign / realloc in ${o.at.fn}`
 	return res
 }

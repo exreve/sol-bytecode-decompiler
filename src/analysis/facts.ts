@@ -34,6 +34,7 @@ export interface FnInput {
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
 	irRefs?: (e: Expr, failPc?: number, passPc?: number) => { field?: string }[] // native: account fields a condition reads (flow.ts accountResolver; the sides' first statements locate a rebuilt condition)
 	irCmp?: (e: Expr, failPc?: number, passPc?: number) => boolean // native: a condition on a 32-byte comparison (its accounts known in a caller's context only)
+	irPda?: (e: Expr, failPc?: number, passPc?: number) => number | undefined // native: a word equality of a PDA compared word by word with a value (e.g. a key): the word's offset
 	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 	strAt?: (ptr: bigint, len: bigint) => string | undefined // a string in program memory
@@ -174,6 +175,10 @@ export function refOf(path: string, types: Map<string, string>): Ref | undefined
 	return { acct, field: rest.length ? rest.join('.') : undefined }
 }
 
+/** an input account record (the serialized account: its lamports field is the u64 itself), not an AccountInfo */
+const isRecord = (path: string, types: Map<string, string>) =>
+	/^input\.acc\d+$/.test(path) || !path.includes('.') && types.get(path) === 'AccountRecord'
+
 export function functionFacts(inp: FnInput): FnFacts {
 	const { lines, at, spans } = inp
 	const facts: FnFacts = { pc: inp.pc, name: inp.name, checks: [], ops: [], calls: [], types: new Map(), lines: inp.lines, at: inp.at, pcLine: new Map(), condLine: new Map(), ixHints: [] }
@@ -192,6 +197,9 @@ export function functionFacts(inp: FnInput): FnFacts {
 			const dot = path.indexOf('.'), head = dot < 0 ? path : path.slice(0, dot)
 			const a = alias.get(head)
 			if (!a) break
+			// (an AccountInfo / record loaded from a field of an object that is not an account (a typed view's word,
+			// e.g. `const f: AccountInfo = b.f0x0_u64`): the name, not the path)
+			if (/^(AccountInfo|AccountRecord)$/.test(facts.types.get(head) ?? '') && !refOf(a, facts.types)) break
 			path = a + (dot < 0 ? '' : path.slice(dot))
 		}
 		return path
@@ -385,6 +393,21 @@ export function functionFacts(inp: FnInput): FnFacts {
 	}
 
 	// stores: lamports, account data fields (typed), account record fields
+	/** a DataCell length store next to a store of a moved slice pointer (the borrowed slice advanced; realloc
+	 * stores the pointer it loaded back) */
+	const sliceAdvance = (l: number, lhs: string) => {
+		const b = lhs.replace(/\.(len|f0x20_u64)$/, '')
+		if (b === lhs) return false
+		const e = b.replace(/[.[\]]/g, '\\$&'), ptr = `(?:${e}\\.(?:ptr|f0x18_u64)|ld64\\(${e} \\+ 0x18\\))`
+		for (let k = l - 2; k <= l + 2; k++) {
+			const t = lines[k]?.trim() ?? ''
+			const m = k === l ? null : new RegExp(`^(?:${e}\\.(?:ptr|f0x18_u64) = (?:(\\w+)$)?|st64\\(${e} \\+ 0x18, (?:(\\w+)\\)$)?)`).exec(t)
+			if (!m) continue
+			const v = m[1] ?? m[2]
+			if (!v || !lines.slice(Math.max(0, k - 12), k).some(x => new RegExp(`^\\s*(?:const |let )?${v}(?:: \\w+)? = ${ptr}$`).test(x))) return true
+		}
+		return false
+	}
 	const store = (n: Node, main: boolean, err: boolean) => {
 		const s = n.k === 'stmt' ? n.s : undefined
 		if (!s || (s.k !== 'store' && s.k !== 'stores' && s.k !== 'call' && s.k !== 'set' && s.k !== 'copy')) return
@@ -399,8 +422,9 @@ export function functionFacts(inp: FnInput): FnFacts {
 			return
 		}
 		if (ir?.field) {
-			const v = /^st(?:8|16|32|64)\((.*)\)$/.exec(t)?.[1]?.split(', ').slice(1).join(', ') ?? t
-			const kinds: OpKind[] = ir.field === 'lamports' ? ['LAMPORT_WRITE'] : ir.field === 'owner' ? ['OWNER_ASSIGN'] : ['ACCOUNT_DATA_WRITE']
+			// (stN(addr, v), or a typed field store `x.f = v`)
+			const v = /^st(?:8|16|32|64)\((.*)\)$/.exec(t)?.[1]?.split(', ').slice(1).join(', ') ?? /^[\w.[\]]+ = (.*?)(?: \/\/.*)?$/.exec(t)?.[1] ?? t
+			const kinds: OpKind[] = ir.field === 'lamports' ? ['LAMPORT_WRITE'] : ir.field === 'owner' ? ['OWNER_ASSIGN'] : ir.field === 'data_len' ? ['ACCOUNT_REALLOC'] : ['ACCOUNT_DATA_WRITE']
 			if (ir.field === 'lamports' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
 			// (a copy in 8-byte words, e.g. a key: one write of the whole range)
 			const prev = facts.ops[facts.ops.length - 1], r = /^data\[(\d+)\.\.(\d+)\]$/.exec(ir.field)
@@ -427,14 +451,26 @@ export function functionFacts(inp: FnInput): FnFacts {
 		}
 		const lv = resolve(m[1]), rhs = m[2]
 		if (/\.(borrow|strong|weak|dup_marker)$/.test(lv)) return
+		// (an Rc box's words by offset (LamportsCell / DataCell counts, flag, pointer): not the lamports / data)
+		if (/\.(lamports|data)\.f0x[0-9a-f]+_\w+$/.test(lv)) return
 		const r = refOf(lv, facts.types)
 		if (!r) return
 		const how: Op['how'] = rhs.startsWith(m[1] + ' - ') || rhs.startsWith(lv + ' - ') ? '-=' : rhs.startsWith(m[1] + ' + ') || rhs.startsWith(lv + ' + ') ? '+=' : '='
 		const kinds: OpKind[] = []
 		const f = r.field ?? ''
-		if (/^lamports\b/.test(f) || /\.lamports(\.|$)/.test(lv)) kinds.push('LAMPORT_WRITE')
-		else if (f === 'data_len' || f === 'data.len') kinds.push('ACCOUNT_REALLOC')
+		if (/^lamports\b/.test(f) || /\.lamports(\.|$)/.test(lv)) {
+			// (the u64 itself: through the RefCell (LamportsCell.value → Lamports.amount) or an input record's field;
+			// not a pointer copied into an AccountInfo (a struct copy / clone) nor the Rc box's counts / borrow flag)
+			if (!/\.lamports\.value(\.amount)?$/.test(lv) && !(/\.lamports$/.test(lv) && isRecord(lv.slice(0, -'.lamports'.length), facts.types))) return
+			kinds.push('LAMPORT_WRITE')
+		}
+		// (the DataCell's slice pointer / length moved by a `Write for &mut [u8]` on the borrowed data: not the account's
+		// data nor its length; AccountInfo::realloc only sets the length)
+		else if (f === 'data.ptr' || f === 'data.f0x18_u64') return
+		else if (f === 'data_len' || f === 'data.len') { if (sliceAdvance(l, m[1])) return; kinds.push('ACCOUNT_REALLOC') }
 		else if (/^(key|owner|is_signer|is_writable|executable|rent_epoch|data|original_data_len)$/.test(f)) return
+		// (an Anchor Account<T>'s AccountInfo (a pointer or a copy in place): not the account's data)
+		else if (/^info(\.|$)/.test(f)) return
 		else { kinds.push('ACCOUNT_DATA_WRITE'); if (AUTHORITY.test(f.split('.').pop() ?? '')) kinds.push('AUTHORITY_WRITE') }
 		if (kinds[0] === 'LAMPORT_WRITE' && how === '=' && /^0x0*0?$|^0$/.test(rhs)) kinds.push('ACCOUNT_CLOSE')
 		facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: r.acct, field: r.field?.replace(/^lamports\..*/, 'lamports') }, how, value: rhs })
@@ -561,7 +597,12 @@ export function functionFacts(inp: FnInput): FnFacts {
 					// further condition of that check (e.g. the next word of a 32-byte key comparison), its then side on every
 					// non-failing path)
 					else if (contFail && !n.else.length && !rest.length) walk(n.then, main, err, after, true)
-					else { walk(n.then, false, err, after); walk(n.else, false, err, after) }
+					else {
+						// (the first word of a PDA compared word by word, e.g. with an account key, its sides not telling the
+						// failing one: the comparison (unequal: the failing side), the walk unchanged)
+						if (!n.else.length && inp.irPda?.(n.c, firstPc(rest), firstPc(n.then)) === 0) check(n, rest, false, main, before, n.then)
+						walk(n.then, false, err, after); walk(n.else, false, err, after)
+					}
 					before = undefined
 					break
 				}

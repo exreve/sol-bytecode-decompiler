@@ -1537,6 +1537,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         const b = failPc === undefined ? undefined : decisionBlock((irCfg ??= cfgOf({ pc, f } as FuncOut)), e, failPc, passPc);
         return R.cmp32(e, b);
       },
+      irPda: sem.anchor ? undefined : (e, failPc, passPc) => {
+        const R = accountResolver({ f, names }, callee);
+        const b = failPc === undefined ? undefined : decisionBlock((irCfg ??= cfgOf({ pc, f } as FuncOut)), e, failPc, passPc);
+        return R.pdaEq(e, b);
+      },
       irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
       calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
       strAt: (a, n) => sem.strAt(a, n),

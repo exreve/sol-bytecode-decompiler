@@ -1036,7 +1036,8 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: s.k === 'store' ? arithHow(X.D, s.v, p) : '=', value: v, exit: note, handler: C === H ? undefined : H.pc })
 			}
 			if (a.k === 'lam' && a.off === 0 && n === 8) push(a.acct, 'lamports', ['LAMPORT_WRITE'], `through the RefCell'd lamports of ${a.acct}'s AccountInfo (handler ${H.name})`)
-			if (a.k === 'data') push(a.acct, zcField(a.ty, a.off, n) ?? `data[${a.off}..${a.off + n}]`, ['ACCOUNT_DATA_WRITE'], `through the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
+			if (a.k === 'data' && a.off === -8 && n === 8) push(a.acct, 'data_len', ['ACCOUNT_REALLOC'], `the length before the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
+			else if (a.k === 'data') push(a.acct, zcField(a.ty, a.off, n) ?? `data[${a.off}..${a.off + n}]`, ['ACCOUNT_DATA_WRITE'], `through the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
 			// (the handler's own stores to its objects: see addExitWrites)
 			if (a.k !== 'fr' || a.ctx.fo !== H || C === H) return
 			for (const o of objs) for (const x of o.ex.fields) if (a.z < o.X + x.off + x.size && o.X + x.off < a.z + n)
@@ -1431,6 +1432,7 @@ export interface AcctResolver {
 	valueAt: (e: Expr, p: number) => AcctRef | undefined     // the same at a position (block << 16 | index)
 	av: (e: Expr, p: number) => AcctVal | undefined          // the abstract value (to bind a callee's parameters)
 	cmp32: (c: Expr, b?: number) => boolean                  // a condition on a 32-byte comparison (memcmp / memeq)
+	pdaEq: (c: Expr, b?: number) => number | undefined       // a word equality of a PDA compared word by word (all 4 words): the word's offset
 }
 
 /**
@@ -2094,6 +2096,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return undefined
 		const a = ev(s.k === 'copy' ? s.dst : s.addr, p)
 		const n = s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n
+		// (the u64 before the data: its length, AccountInfo::realloc)
+		if (a?.k === 'ptr' && a.f === 'data' && a.off === -8 && n === 8 && s.k === 'store') return { index: a.i, field: 'data_len' }
 		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
 		// (the owner pubkey rewritten: AccountInfo::assign)
 		// (only the 32 owner bytes: not a neighbouring Rc / RefCell word)
@@ -2131,7 +2135,10 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (t.k !== 'fn' || !callee) return false
 		if (/program_address/.test(callee.name(t.pc))) return true
 		const g = d < 2 ? callee.f(t.pc) : undefined
-		return !!g && g.blocks.some(b => b.stmts.some(s => { const c = callOf(s); return !!c && c.t.k !== 'ind' && pdaCall(c.t, d + 1) }))
+		// (a statement's call, or one in a branch condition: `if (sol_try_find_program_address(..) != 0)`)
+		let inCond = false
+		return !!g && g.blocks.some(b => b.stmts.some(s => { const c = callOf(s); return !!c && c.t.k !== 'ind' && pdaCall(c.t, d + 1) }) ||
+			(b.term.k === 'br' && (walkExpr(b.term.c, x => { if (!inCond && x.k === 'call' && x.t.k !== 'ind') inCond = pdaCall(x.t, d + 1) }), inCond)))
 	}
 	const side = (e: Expr, p: number): Side => {
 		const r = asRef(ev(e, p))
@@ -2149,9 +2156,55 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		return e.k === 'const' || (e.k === 'var' && defs.get(e.id)?.k === 'const') ? 'const' : undefined
 	}
+	/** a word of a PDA derivation's output (in the frame) a value is loaded from: the output buffer and the word's offset */
+	const pdaWord = (e: Expr, p: number): [number, number] | undefined => {
+		let x = e, q = p
+		for (let k = 0; k < 6 && (x.k === 'ext' || x.k === 'var'); k++) {
+			if (x.k === 'ext') { x = x.a; continue }
+			const y: [Expr, number] | null = defs.has(x.id) ? [defs.get(x.id)!, defPos.get(x.id)!] : multi.has(x.id) ? reaching(x.id, q) : null
+			if (!y) return undefined
+			;[x, q] = y
+		}
+		if (x.k !== 'load' || x.size !== 8) return undefined
+		const o = fpOff(x.addr)
+		const c = o === undefined ? undefined : origin(x.addr, q)
+		if (o === undefined || !c || !pdaCall(c.t)) return undefined
+		// (the output: the frame buffer argument the word is in (its first 32 bytes))
+		const bs = c.args.map(a => fpOff(a.k === 'var' && defs.get(a.id) ? defs.get(a.id)! : a)).filter((b): b is number => b !== undefined && o - b >= 0 && o - b < 0x20 && (o - b) % 8 === 0)
+		return bs.length ? [Math.max(...bs), o - Math.max(...bs)] : undefined
+	}
+	/** the word equalities of a condition between a PDA's output and another value (not another PDA word) */
+	const pdaEqs = (c: Expr, p: number): [number, number, Expr][] => {
+		const out: [number, number, Expr][] = []
+		walkExpr(c, x => {
+			if (x.k !== 'cmp' || (x.op !== 'eq' && x.op !== 'ne')) return
+			const a = pdaWord(x.a, p), b = pdaWord(x.b, p)
+			if (a && !b) out.push([...a, x.b]); else if (b && !a) out.push([...b, x.a])
+		})
+		return out
+	}
+	/** the PDA outputs (frame buffers) whose 4 words are all compared: a 32-byte comparison split in words, e.g. with
+	 * an account key read word by word */
+	let pdaFull: Set<number> | undefined
+	const pdaChain = (c: Expr, p: number): Expr | undefined => {
+		if (!pdaFull) {
+			const seen = new Map<number, Set<number>>()
+			f.blocks.forEach((b, bi) => {
+				if (b.term.k === 'br') for (const [o, w] of pdaEqs(b.term.c, bi << 16 | b.stmts.length)) { let m = seen.get(o); if (!m) seen.set(o, (m = new Set())); m.add(w) }
+			})
+			pdaFull = new Set([...seen].filter(([, m]) => m.size === 4).map(([o]) => o))
+		}
+		return pdaFull.size ? pdaEqs(c, p).find(([o]) => pdaFull!.has(o))?.[2] : undefined
+	}
 	const sides = (c: Expr, b?: number): [Side, Side] | undefined => {
 		const p0 = at(c, b)
 		if (p0 === undefined) return undefined
+		// (a word of a 32-byte comparison of a PDA with a key, split in words: the other side's key, if known)
+		const pw = pdaChain(c, p0)
+		if (pw) {
+			const r = asRef(ev(pw, p0))
+			return [r?.field === 'key' ? r : undefined, 'pda']
+		}
 		let x = c
 		while (x.k === 'lnot') x = x.a
 		const cmp = (e: Expr): [Side, Side] | undefined => { const [y, p] = follow(e, p0); const ca = cmpArgs(y); return ca && [side(ca[0], p), side(ca[1], p)] }
@@ -2169,9 +2222,14 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (p0 === undefined) return false
 		let hit = false
 		walkExpr(c, x => { if (!hit && (x.k === 'var' || x.k === 'call' || x.k === 'fn')) hit = !!cmpArgs(x.k === 'var' ? follow(x, p0)[0] : x) })
-		return hit
+		return hit || !!pdaChain(c, p0)
 	}
-	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32 }
+	const pdaEq = (c: Expr, b?: number): number | undefined => {
+		const p0 = at(c, b)
+		const x = p0 === undefined ? undefined : pdaChain(c, p0)
+		return x && pdaEqs(c, p0!).find(([, , y]) => y === x)?.[1]
+	}
+	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32, pdaEq }
 	let m = seedMemo.get(fo.f)
 	if (!m) seedMemo.set(fo.f, (m = new Map()))
 	m.set(sk, res)
