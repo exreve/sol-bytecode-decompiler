@@ -112,8 +112,22 @@ gives the statement tree, with per-operation budgets (40 conditions, 6000 lines 
   compared with small constants in checks / branch conditions;
 - rules `state-write-ungated`, `share-price-zero-supply`, `mint-burn-authority-from-data`, `cpi-forwarder`,
   `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound`.
-Known gaps: sees only what phase 1 recognizes (Anchor account structs written back through serialization copies,
-direct lamport moves through raw pointers and many MintTo / Burn CPIs through wrappers are often missed, so the
-state machine and the close / mint rules fire rarely); guards are matched by operand text (a check made on a copy
-under another name is missed, an unrelated comparison mentioning the operands counts); labeled-block exits
-(`break Bn`) are not followed by the path conditions.
+Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/README.md):
+- native accounts by an IR account model: `&[AccountInfo]` slices, input records and arrays of pointers to them
+  (pinocchio), the RefCell'd lamports / data of an AccountInfo, frame spills and multiply-assigned variables
+  (reaching definitions), values calls leave in out objects (the callee's stores with its parameters bound;
+  memcpy as a copy; AccountInfo::try_borrow_(mut_)data / lamports by name): lamport / data writes (+= / -=),
+  key / field relations, address checks (a key vs a constant) and PDA checks (a key vs bytes a PDA derivation wrote);
+  the dispatch is looked for past functions whose matching splits into no instruction (the entrypoint's error map);
+- Anchor writes in the functions the handler passes its frame to (Context.accounts: object fields serialized back
+  on exit, through the exit wrappers of the Accounts struct), lamports and zero-copy data through the RefCells of the
+  &AccountInfo words (traced back to try_accounts' out object and the Accounts layout);
+- Anchor key comparisons (has_one, token::mint / token::authority) by the provenance of the compared bytes: the
+  account whose try-call produced them (the check right after it names it), data vs key;
+- CPIs by library helper (anchor_lang::system_program, anchor_spl::token*: name, CpiContext accounts, signer
+  seeds), instruction builders and TokenInstruction::pack tags before an undecoded invoke (native: the builder's
+  arguments give the accounts); unnamed create / find_program_address by their syscall (analysis only).
+Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
+temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts; guards are
+still matched by operand text (definitions and slot reloads followed); labeled-block exits (`break Bn`) are not
+followed by the path conditions.
