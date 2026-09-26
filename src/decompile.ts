@@ -1324,7 +1324,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
       visit(body);
     }
-    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags));
+    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags, pc => isLib(pc) || outParams.has(pc)));
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
@@ -1453,7 +1453,7 @@ function outRole(name: string): { name: string; type?: string; inout?: boolean }
  * passed as the out parameter (first argument) of calls whose result role is known: u128 builtins (U128),
  * Anchor error constructors (`err`).
  */
-function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>): Map<number, FrameClaim[]> {
+function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>, outCallee: (pc: number) => boolean): Map<number, FrameClaim[]> {
   const claims = new Map<number, FrameClaim[]>();
   const fp = f.vars.find(v => v.param === 10)?.id;
   if (fp === undefined) return claims;
@@ -1463,7 +1463,7 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   for (const s of sites) for (const o of siteObjects(s, fp, read)) { let l = sited.get(o.off); if (!l) sited.set(o.off, (l = [])); l.push({ name: o.name, type: o.type, why: 'the CPI / PDA / fmt calls they are built for' }); }
   // out parameters: every use of the object's address is as the first argument of such calls
   const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
-  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
+  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), generic = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
   const keyUse = (o: number) => keyUses.set(o, (keyUses.get(o) ?? 0) + 1);
   const visit = (e: Expr, addr: boolean) => {
     const o = fo(e);
@@ -1477,6 +1477,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
         const cn = e.t.k === 'fn' ? fnName(e.t.pc) : e.t.k === 'sys' ? e.t.name : '';
         if (/^(sol_)?memcmp_?$/.test(cn) && e.args[2]?.k === 'const' && e.args[2].v === 32n) for (const a of e.args.slice(0, 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
         if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ name: r.name, type: r.type, why: r.inout ? 'the object the calls they are passed to work on' : 'out parameter of the calls they are passed to', out: !r.inout }); }
+        // (another library function or one only writing through its first parameter: a result, as words)
+        else if (o0 !== undefined && e.t.k === 'fn' && outCallee(e.t.pc) && e.args.length > 1) { let l = generic.get(o0); if (!l) generic.set(o0, (l = [])); l.push({ name: 'res', type: 'Result64', why: 'out parameter of the call they are passed to', out: true }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
         if (e.t.k === 'ind') visit(e.t.e, false);
         e.args.forEach(a => visit(a, false));
@@ -1505,6 +1507,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   // (a site object passed to other calls too is a slot reused for something else)
   for (const [o, cs] of sited) if ((argEsc.get(o) ?? 0) <= cs.length) cs.forEach(c => add(o, c));
   for (const [o, cs] of outs) if (cs.length === escapes.get(o) && !claims.has(o)) cs.forEach(c => add(o, c));
+  // (a single call's result; slots reused for several results: frameregions.ts)
+  for (const [o, cs] of generic) if (cs.length === 1 && escapes.get(o) === 1 && !outs.has(o) && !claims.has(o)) add(o, cs[0]);
   // (a key: its address only ever an operand of 32-byte comparisons; its accesses inside its 32 bytes, see setupFrame)
   for (const [o, n] of keyUses) if (n === escapes.get(o) && !claims.has(o)) add(o, { name: 'key', why: 'operands of 32-byte comparisons (public keys)', extent: 32 });
   return claims;

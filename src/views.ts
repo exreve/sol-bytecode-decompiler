@@ -175,6 +175,15 @@ export const BUILTIN_VIEWS: View[] = [
 		fields: [{ name: 'tag', off: 0, t: S(n) }],
 	})),
 	{
+		name: 'Result64', size: 0x20, doc: 'result a call writes through its first parameter, as 8-byte words (tag: the first word, a Result / Option variant or a niche-encoded value; val…: the payload)',
+		fields: [
+			{ name: 'tag', off: 0x00, t: S(8) },
+			{ name: 'val', off: 0x08, t: S(8) },
+			{ name: 'val2', off: 0x10, t: S(8) },
+			{ name: 'val3', off: 0x18, t: S(8) },
+		],
+	},
+	{
 		name: 'Input', doc: 'program input (entrypoint parameter): account count, then the first serialized account',
 		fields: [
 			{ name: 'num_accounts', off: 0, t: S(8) },

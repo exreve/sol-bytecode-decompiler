@@ -43,6 +43,9 @@ named after its role, and typed when its layout is fixed by that role, when the 
   `prod.lo`, `prod.hi`), Anchor error constructors (`err`), `AccountInfo::clone` (`info: AccountInfo`),
   `try_borrow_data` (`data_ref`), sysvar getters (`rent`, `clock`), `try_accounts` (`accts`), RawVec growth
   (`vec`), and user functions whose out parameter holds an enum with a clear tag (`res: Tagged64`, below);
+  otherwise the one call of a library function (or of a user function only writing through its first parameter)
+  the object is passed to: `res: Result64`, its 8-byte words `res.tag`, `res.val`, `res.val2`, `res.val3` (every
+  access one of these words; a slot receiving several results: frame regions, below);
 * objects whose address is only ever an operand of 32-byte comparisons (`memcmp(…, 0x20)`, `memeq`, `keyeq`) and
   that are only accessed within their 32 bytes: `key` (a public key: `memcmp(key_2, key, 0x20)`).
 
