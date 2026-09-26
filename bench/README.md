@@ -15,7 +15,7 @@ categories). `--verbose` lists the variants (caught / MISSED), every miss and ev
   transfer, raw lamport moves, close), `a_staking` (share-price pool, PDA-signed token transfer), `a_escrow`
   (token escrow, close_account, close = maker), `a_counter` (admin rotation, realloc), `a_oracle` (zero-copy
   AccountLoader), `a_mint` (PDA mint authority, mint_to / burn), `a_audit` (one instruction per audit rule,
-  init-if-needed). solana-program 2.2.1: `n_vault`, `n_token` (spl-token CPIs with invoke_signed), `n_pool`.
+  init-if-needed, manual initialization: register). solana-program 2.2.1: `n_vault`, `n_token` (spl-token CPIs with invoke_signed), `n_pool`.
   pinocchio 0.8.4: `p_counter`.
 - Variants are cargo features `v_<name>` removing exactly one property (a_audit: seeding the bug its rule looks for);
   `bin/<prog>@<name>.so`.
@@ -50,8 +50,11 @@ an IDL for Anchor, and `expected/<crate>.json`.
 
 Programs of the 400-program corpus with >= 1 finding (decompile project mode): `sysvar-account-unchecked` 0,
 `pda-bump-from-ix` 5 (7 findings), `duplicate-mutable-accounts` 0, `account-type-unchecked` 3, `cpi-result-ignored` 1,
-`truncating-cast` 0, `remaining-account-unchecked` 1, `init-if-needed-reinit` 0; `cpi-unchecked-program` high
-(PDA-signed) in 19 of its 92 programs. Rules are kept under ~5% of the programs.
+`truncating-cast` 0, `remaining-account-unchecked` 1, `init-if-needed-reinit` 0, `reinit-unchecked` 0 (also 0 informational
+native authority writes; eval candy_machine_v2 initialize_candy_machine: @vuln fires, @fixed does not); `cpi-unchecked-program`
+high (PDA-signed) in 19 of its 92 programs. Rules are kept under ~5% of the programs. The token init helpers (InitializeAccount3 /
+InitializeMint2 from library bytecode) and the by-value try_accounts of Anchor 0.1x leave every other rule's corpus counts
+unchanged.
 
 Phase-2/3 rules after the eval precision pass (findings / programs; before → after, same corpus and instruction split):
 `check-bypassable` 1458 / 34 → 0 (17 / 6 informational), `signer-not-related-to-authority` 658 / 64 → 184 / 53,

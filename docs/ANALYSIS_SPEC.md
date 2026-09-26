@@ -192,7 +192,27 @@ Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/prog
   credited (+=) or passed as a CPI destination / authority with no check reading its key, owner or data;
 - `init-if-needed-reinit` (medium; Anchor): an authority field written on an account the instruction may create or
   find initialized (a create CPI, and the owner check of the existing account's path), with no condition on the way
-  reading the account's state.
+  reading the account's state;
+- `reinit-unchecked` (medium): an account type's discriminator (an IDL account type's, or a printed `account:T`
+  constant) written at offset 0 of an account's data, directly or as the start of a buffer copied there (bytes / memcpy),
+  by an instruction that does not create the account (no ACCOUNT_CREATE, system or undecoded CPI), compares nothing
+  with that discriminator (an Account<T> load: its exit serialization) and has no condition on the way reading the
+  account's data (dominating branches, try_accounts' branches: discriminator == 0 / `zero`, an is_initialized flag) nor a
+  discriminator / zero / state check on it (candy machine v2 initialize_candy_machine: vuln fires, fixed does not); native
+  (info): an authority field written into an account not created there with no condition on the way reading its data.
+Anchor before &AccountInfo fields (≈ 0.1x, e.g. candy machine v2: errors name no account, the program has no "AnchorError"
+string): try_accounts is the call the handler passes its accounts slice to; its consumptions of the slice (calls taking
+it, loads of its pointer, the pointer stored back past a loaded one, the slice spilled to the frame) give the IDL's
+accounts in order (flow.ts sliceEvents); the Accounts struct holds AccountInfos by value (the words its success block
+copies from a consumption's out object or from a clone of a loaded &AccountInfo: TryInfo.words), a loaded &AccountInfo
+names its variable (TryInfo.ptrs, also for later Anchor: evaluation roots in try_accounts, `ptr + 0x30·k` the k-th next
+account).
+Token init helpers (src/analysis/libcpi.ts): a library function the database does not name, reaching sol_invoke_signed
+(3 calls deep) through a builder that compares a program id with the SPL Token (2022) id and stores tag 18 / 20 into its
+frame, is anchor_spl's initialize_account3 / initialize_mint2 (`init` of a token account / mint): its CPI op with the
+CpiContext's accounts by their key words (the program's slot recognized by name, else by position) and InitializeMint2's
+authority argument; the relations they establish (account.mint / account.owner / mint.mint_authority) are `token` relations.
+Constant seed lists at PDA sites the printed text leaves unknown are read from read-only memory (relocated pointers).
 Precision guards (eval/ blind review):
 - AccountInfo field order: solana_program before AccountInfo became #[repr(C)] (≈ 1.9, e.g. Solend, Anchor ≤ 0.2x
   builds) laid it out { rent_epoch, key, lamports, data, owner, flags }; told by the entrypoint's deserializer (the
@@ -241,10 +261,9 @@ Corpus noise (400 programs, programs with >= 1 finding): see bench/README.md.
 
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
 temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
-account object's neighbouring words are only a guess for the writes); Anchor `init` of token accounts / mints: the
-anchor_spl helper (initialize_account3 / initialize_mint2) compiled into an unnamed library function is not decoded,
-so its CPI and the relations it establishes (vault~mint, vault~authority) are missing; a seed list in read-only memory
-that needs relocation is not read (a_audit deposit's vault PDA); values a library function not decompiled fills
+account object's neighbouring words are only a guess for the writes); in try_accounts an account deserialized by its
+own try call (Account<Mint>, Program<T>) is not named inside init helpers' CpiContexts (vault~mint of a token account
+`init`), nor a mint authority reached through the bumps / PDA structs (a_mint config~mint); values a library function not decompiled fills
 (n_token's dest via TokenAccount::unpack: the config~dest relation) are not followed back to the account; value
 identity follows one call path per function (the first found) and treats memory as unchanged between two reads; the
 audit rules are Anchor-first (native programs: bumps, CPI results, casts only).
