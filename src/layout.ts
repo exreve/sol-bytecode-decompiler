@@ -20,6 +20,7 @@ export const PRELUDE = `// sBPF runtime model: every value is a u64 (+ - * << wr
 // a variable read before any assignment, and call arguments omitted at the end of the list, are undef
 // "text" as a call argument = address of the first occurrence of its UTF-8 bytes in program memory (next argument: length);
 //   other rodata text is shown as a comment after the address: 0x100001234 /* "text" */
+// ret_tail_N(…) / tail_N(…): outlined tails, functions defined in the output: a call runs exactly the statements it replaced
 // memory map: 0x1_0000_0000 program/rodata, 0x2_0000_0000 stack, 0x3_0000_0000 heap, 0x4_0000_0000 input (serialized accounts + ix data)`
 
 const TYPES = `type u64 = number
