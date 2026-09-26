@@ -71,7 +71,8 @@ export function consistency(a: Analysis, r: Result): RoleView[] {
 	const validations = (ix: IxOut, x: IxOut['accounts'][number], by: RoleView['by']): Map<string, Loc | undefined> => {
 		const out = new Map<string, Loc | undefined>()
 		const c = (k: string) => x.constraints[k]
-		if (has(x, 'owner')) out.set('owner', c('owner').at)
+		// (the program's own owner check: not the runtime's rule for an account it writes)
+		if (has(x, 'owner') && c('owner').status !== 'runtime') out.set('owner', c('owner').at)
 		if (by !== 'data_len' && (has(x, 'discriminator') || has(x, 'data_len'))) out.set('type', (c('discriminator') ?? c('data_len')).at)
 		if (has(x, 'signer')) out.set('signer', c('signer').at)
 		if (has(x, 'writable')) out.set('writable', c('writable').at)

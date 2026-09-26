@@ -2238,6 +2238,34 @@ export function seedFrom(PR: AcctResolver | undefined, pf: FuncOut | undefined, 
 	return seed
 }
 
+const wtMemo = new WeakMap<VarFunc, Map<string, boolean>>()
+/** whether a function stores through its parameter n (plus constants), itself or through the calls it passes it to (depth
+ * levels): memory it writes (not a pointer it keeps, nor bytes it only reads) */
+function writesThrough(g: VarFunc, n: number, callee: Callee, depth: number): boolean {
+	let m = wtMemo.get(g)
+	if (!m) wtMemo.set(g, (m = new Map()))
+	const k = `${n}|${depth}`
+	const x = m.get(k)
+	if (x !== undefined) return x
+	m.set(k, false)
+	const pv = g.vars.find(v => v.param === n)?.id
+	if (pv === undefined || g.blocks.length > 2000) return false
+	const D = defsOf(g, callee)
+	const of = (e: Expr, d = 0): boolean => d < 6 && (e.k === 'var' ? e.id === pv || (D.defs.has(e.id) && of(D.defs.get(e.id)!, d + 1)) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' && of(e.a, d + 1))
+	let r = false
+	for (const b of g.blocks) { for (const s of b.stmts) {
+		if ((s.k === 'store' || s.k === 'stores') && of(s.addr)) { r = true; break }
+		if (s.k === 'copy' && of(s.dst)) { r = true; break }
+		const c = callOf(s)
+		if (!c) continue
+		const mc = memcpyOf(c, callee)
+		if (mc) { if (of(mc[0])) { r = true; break } continue }
+		const h = c.t.k === 'fn' && depth > 0 ? callee.f(c.t.pc) : undefined
+		if (h && h !== g && c.args.some((a, j) => of(a) && writesThrough(h, j + 1, callee, depth - 1))) { r = true; break }
+	} if (r) break }
+	m.set(k, r)
+	return r
+}
 const sliceMemo = new WeakMap<VarFunc, Map<string, Set<number>>>()
 /** the parameters (numbers) a function uses as an &[AccountInfo] by its own evidence (and its callees', depth levels) */
 function sliceParams(g: VarFunc, callee: Callee, depth: number): Set<number> {
@@ -2435,6 +2463,12 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 			const d = a?.k === 'ptr' && a.f === 'data' ? [a.i, a.off] : a?.k === 'rec' && a.off >= 0x58 ? [a.i, a.off - 0x58] : undefined
 			if (a?.k === 'ptr' && a.vo) return { index: a.i, field: 'data' }
 			return d && { index: d[0], field: n === undefined ? (d[1] ? `data[${d[1]}..]` : 'data') : `data[${d[1]}..${d[1] + n}]` }
+		}
+		// (a function given an account's data that stores through that parameter, e.g. a state packed / serialized into it)
+		const g = c?.t.k === 'fn' && callee ? callee.f(c.t.pc) : undefined
+		if (c && g && g !== f) for (let j = 0; j < c.args.length; j++) {
+			const a = ev(c.args[j], p)
+			if (a?.k === 'ptr' && a.f === 'data' && writesThrough(g, j + 1, callee!, 2)) return { index: a.i, field: 'data' }
 		}
 		if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return undefined
 		const a = ev(s.k === 'copy' ? s.dst : s.addr, p)

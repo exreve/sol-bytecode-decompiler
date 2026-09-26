@@ -129,11 +129,16 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 	// discriminator instead)
 	if (ctx && !r.anchor) {
 		const gated = new Set<string>()
+		// (or any write into the account's data behind a rent exemption test (Rent::is_exempt) and a condition reading its
+		// data: an account being initialized, e.g. a state built, checked uninitialized and packed into it)
+		const rentTest = (k: { fn: number; c: Expr }) => { let hit = false; walkExpr(k.c, x => { if (!hit && x.k === 'call' && x.t.k === 'fn' && /is_exempt/.test(r.program.funcs.get(x.t.pc)?.name ?? '')) hit = true }); return hit }
 		for (const o of ix.ops) {
-			if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || !/\.data\[\d+\.\.\d+\]$/.test(o.target ?? '') || o.fnPc === undefined || o.at.pc === undefined || !/^(0x0*)?1$/.test(o.value ?? '')) continue
+			if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || !/\.data\b/.test(o.target ?? '') || o.fnPc === undefined || o.at.pc === undefined) continue
+			const flag = /\.data\[\d+\.\.\d+\]$/.test(o.target!) && /^(0x0*)?1$/.test(o.value ?? '')
 			const acct = o.target!.split('.')[0]
 			if (gated.has(acct)) continue
 			const conds = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc))
+			if (!flag && !conds.some(rentTest)) continue
 			if (conds.some(k => k.how !== 'before' && src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data'))) gated.add(acct)
 		}
 		if (gated.size) out.initGated = [...gated]
