@@ -72,6 +72,7 @@ export interface Op {
 	value?: string
 	pda?: { fn: string; seeds: string; program: string }
 	via?: string                  // the CPI is made through this (small) user function wrapping invoke
+	ret?: Expr                    // the returned expression making it (a site in a return statement: no pc)
 	exit?: string                 // a field of an account object stored before it is serialized back (flow.ts)
 }
 
@@ -272,8 +273,9 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const known = d?.parts?.known ?? ''
 		const kinds = cpiKinds(d?.family ?? '', d?.ix ?? '')
 		if (/UPGRADEABLE/.test(known)) kinds.push('PROGRAM_UPGRADE')
-		if (d ? d.parts?.seeds : /signer seeds (?!\[\])/.test(text) && !/no signer seeds/.test(text)) kinds.push('PDA_SIGNATURE')
-		facts.ops.push({ line: l + 1, pc, kinds, text: text || `CPI (instruction not decoded): ${lines[l]?.trim()}`, main, errPath: err, cpi: d?.parts ? { ...d.parts, family: d.family, ix: d.ix } : undefined, via: s.via })
+		// (not decoded: a call of invoke_signed itself (invoke passes no seeds))
+		if (d ? d.parts?.seeds : (/signer seeds (?!\[\])/.test(text) && !/no signer seeds/.test(text)) || /\binvoke_signed(_unchecked)?(_[0-9a-f]+)?\(/.test(lines[l] ?? '')) kinds.push('PDA_SIGNATURE')
+		facts.ops.push({ line: l + 1, pc, ret: n.k === 'return' && n.e ? n.e : undefined, kinds, text: text || `CPI (instruction not decoded): ${lines[l]?.trim()}`, main, errPath: err, cpi: d?.parts ? { ...d.parts, family: d.family, ix: d.ix } : undefined, via: s.via })
 	}
 
 	// stores: lamports, account data fields (typed), account record fields

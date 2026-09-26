@@ -90,7 +90,7 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 	})
 	const pointsOf = ops.map(o => {
 		if (o.fnPc === undefined) return []
-		const b = blockOf(o.fnPc, o.at.pc)
+		const b = blockOf(o.fnPc, o.at.pc, o.ret)
 		return chainUp(o.fnPc, b === undefined ? undefined : { fn: o.fnPc, b, pc: o.at.pc ?? Infinity })
 	})
 	const doms = (ci: number, oi: number) => siteOf[ci].some(s => pointsOf[oi].some(p => p.fn === s.fn && dom(s.fn, s, p)))
@@ -259,6 +259,9 @@ export function phase2(a: Analysis, r: Result) {
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 }
 
+/** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
+const authorized = (ix: IxOut, oi: number) => (ix.authority ?? []).some(r => r.op === oi && r.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda'))
+
 /** the fields of an account's IDL type (its type in the Accounts struct's layout, else any account type's; undefined without an IDL) */
 function idlFields(r: Result, handler: string, acct: string): Set<string> | undefined {
 	const idl = r.idl
@@ -304,7 +307,9 @@ const RULES: Rule[] = [
 	{
 		id: 'cpi-unchecked-program', title: 'CPI to an account-supplied program id with no dominating check against a known id',
 		run: ix => ix.ops.filter(o => o.cpi && !o.cpi.known && o.cpi.program !== '?' && !/\(id compared with/.test(o.cpi.checked ?? '')).flatMap(o => {
-			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && (!c.account || /program/.test(c.account) || o.cpi!.program.includes(c.account.replace(/\?$/, ''))))
+			// (the program account not identified, e.g. an instruction built by a library builder: a key compared with a constant)
+			const unid = !o.cpi!.accounts.length && /^[A-Z_0-9|]+$/.test(o.cpi!.program)
+			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && (!c.account || /program/.test(c.account) || o.cpi!.program.includes(c.account.replace(/\?$/, '')) || (unid && c.kinds.includes('address'))))
 			if (g.length) return []
 			const progAcct = ix.accounts.find(x => /program/.test(x.name) && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
 			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, progAcct ? `a program account (${progAcct.name}) is checked, but no check dominating this CPI compares its id` : 'no address / executable check on a program account found'], confidence: progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + 2 }]
@@ -329,7 +334,7 @@ const RULES: Rule[] = [
 			if (t && ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found')) return []
 			// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 			// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
-			if (o.cpi?.known && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) return []
+			if ((o.cpi?.known || o.cpi?.family) && (o.cpi.accounts.some(x => x.s) || !o.cpi.accounts.length)) return []
 			return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
 		}),
 	},
@@ -353,7 +358,7 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
-		run: ix => ix.ops.flatMap(o => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target))).slice(0, 2).map(s => ({
+		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi)))).slice(0, 2).map(s => ({
 			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
 	},

@@ -83,7 +83,7 @@ export interface CheckOut {
 }
 export interface OpOut {
 	at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda']
-	fnPc?: number                                   // (internal)
+	fnPc?: number; ret?: Expr                       // (internal)
 	guards?: number[]                               // indices of the instruction's checks that dominate it (phase2.ts)
 	bypass?: { check: number; path: Loc[] }[]       // relevant checks that do not: a path reaching it without them
 	sources?: { param: string; source: string; trust: string }[] // taint: where its parameters come from (phase2.ts)
@@ -263,7 +263,7 @@ function analyze0(r: Result): Analysis {
 			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls) }
 		}
 		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
-		const hintBefore = (ff: FnFacts, line: number): IxHint | undefined => {
+		const hintBefore = (ff: FnFacts, line: number, depth = 2): IxHint | undefined => {
 			let best: IxHint | undefined
 			const take = (x: IxHint) => { if (x.line < line && (!best || x.line > best.line)) best = x }
 			ff.ixHints.forEach(take)
@@ -271,7 +271,10 @@ function analyze0(r: Result): Analysis {
 				const hs = facts.get(c.callee)?.ixHints ?? []
 				if (hs.length && hs.every(x => x.ix === hs[0].ix) && keep(ff.pc, c.pc)) take({ ...hs[0], line: c.line, how: `${facts.get(c.callee)!.name} (${hs[0].how})` })
 			}
-			return best
+			// (none: a wrapper of invoke called after the instruction was built, in its caller)
+			const par = !best && depth > 0 ? parents.get(ff.pc) : undefined
+			const pf = par && facts.get(par.fn), pl = pf?.calls.find(x => x.callee === ff.pc && (par!.pc !== undefined ? x.pc === par!.pc : x.ret === par!.ret))?.line
+			return best ?? (pf && pl !== undefined ? hintBefore(pf, pl, depth - 1) : undefined)
 		}
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
@@ -326,7 +329,7 @@ function analyze0(r: Result): Analysis {
 				}
 			}
 			for (const o of ff.ops) {
-				if ((o.errPath && !isDisp(ff.pc)) || !keep(ff.pc, o.pc)) continue
+				if ((o.errPath && !isDisp(ff.pc)) || !(o.pc === undefined && o.ret ? keepCall(ff.pc, { ret: o.ret }) : keep(ff.pc, o.pc))) continue
 				// (a wrapper's own CPI site, when its calls in this instruction are decoded)
 				if (ff.wrapper && !o.cpi && fns.some(g => g.ops.some(x => x.via === ff.name))) continue
 				const at = loc(ff, o.line, o.pc)
@@ -340,7 +343,7 @@ function analyze0(r: Result): Analysis {
 					kinds = [...new Set([...cpiKinds(h.family, h.ix), ...o.kinds])]
 					text = `CPI ${cpi.program}.${h.ix} [heur: the instruction built before it: ${h.how}]${o.cpi ? ` — ${o.text}` : ''}`
 				}
-				ops.push({ at, kinds, text: text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi, pda: o.pda, fnPc: ff.pc })
+				ops.push({ at, kinds, text: text + (o.via ? ` [through ${o.via}, decoded by a run of ${ff.name}]` : ''), main: fm && o.main, target: tgt, how: o.how, value: o.value, cpi, pda: o.pda, fnPc: ff.pc, ret: o.ret })
 			}
 		}
 		// check statuses from real dominators (across calls), then the per-account constraints
