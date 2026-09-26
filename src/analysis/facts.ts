@@ -109,6 +109,13 @@ const AUTHORITY = /authority|admin|owner|manager|operator|governor|guardian|upgr
 const CPI_HELPER = /^(anchor_lang::system_program|anchor_spl::(?:token|token_2022|token_interface))::(\w+)$/
 /** instruction builders (by library path) */
 const BUILDER = /^(solana_program::system_instruction|solana_system_interface::instruction|spl_token(?:_2022)?::instruction)::(\w+)$/
+/** the accounts struct of an Anchor CPI helper's context, in field order (anchor_spl::token / anchor_lang::system_program) */
+const HELPER_ROLES: Record<string, string[]> = {
+	Transfer: ['from', 'to', 'authority'], TransferChecked: ['from', 'mint', 'to', 'authority'], MintTo: ['mint', 'to', 'authority'], MintToChecked: ['mint', 'to', 'authority'],
+	Burn: ['mint', 'from', 'authority'], BurnChecked: ['mint', 'from', 'authority'], CloseAccount: ['account', 'destination', 'authority'], Approve: ['to', 'delegate', 'authority'],
+	Revoke: ['source', 'authority'], SetAuthority: ['current_authority', 'account_or_mint'], InitializeAccount3: ['account', 'mint', 'authority'], InitializeMint2: ['mint'],
+	FreezeAccount: ['account', 'mint', 'authority'], ThawAccount: ['account', 'mint', 'authority'], CreateAccount: ['from', 'to'], Assign: ['account_to_assign'], Allocate: ['account_to_allocate'],
+}
 const pascal = (s: string) => s.replace(/(^|_)([a-z0-9])/g, (_, _u, c: string) => c.toUpperCase())
 /** a library path's program: [program, family] */
 const helperProgram = (p: string): [string, string] => /system/.test(p) ? ['SYSTEM_PROGRAM', 'system'] : /token_2022/.test(p) ? ['TOKEN_2022_PROGRAM', 'token2022'] : /token_interface/.test(p) ? ['TOKEN_PROGRAM|TOKEN_2022_PROGRAM', 'token'] : ['TOKEN_PROGRAM', 'token']
@@ -229,17 +236,63 @@ export function functionFacts(inp: FnInput): FnFacts {
 	 * an instruction builder (system_instruction::transfer, spl_token::instruction::burn, ...) or a
 	 * TokenInstruction packed: a hint for the CPI that follows (see IxHint).
 	 */
+	/**
+	 * The accounts of an anchor CpiContext built in the frame at `ctx` before line l (printed text): its
+	 * AccountInfo copies (0x30 bytes, after the remaining-accounts Vec: the program's, then the accounts
+	 * struct's in field order), each named by its key word (`x.key` of an AccountInfo the code names), and
+	 * whether signer seeds follow (new_with_signer).
+	 */
+	const cpiContext = (ctx: string, l: number, roles: string[]): { accounts: CpiParts['accounts']; seeds?: string } | undefined => {
+		const fo = (s: string) => { const m = /^s([0-9a-f]+)(?: \+ (0x[0-9a-f]+|\d+))?$/.exec(s.trim()); return m ? -parseInt(m[1], 16) + Number(m[2] ?? 0) : undefined }
+		const Y = fo(ctx)
+		if (Y === undefined) return undefined
+		const words = new Map<number, string>()
+		for (let k = Math.max(at, l - 120); k < l; k++) {
+			const m = /^\s*st64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?), (.*)\)$/.exec(lines[k])
+			const o = m && fo(m[1])
+			if (o === undefined || o === null || o < Y || o >= Y + 0x200) continue
+			m![2].split(', ').forEach((v, i) => words.set(o + 8 * i, v.trim()))
+		}
+		// (a key word: `v` defined as `x.key`, x an AccountInfo loaded from the Accounts struct's field or named after the account)
+		const defIn = (v: string): string | undefined => { const re = new RegExp(`^\\s*(?:const |let )?${v}(?:: \\w+)? = (.+)$`); for (let k = l - 1; k >= at && k > l - 400; k--) { const m = re.exec(lines[k]); if (m) return m[1].trim() } return undefined }
+		const keyAcct = (v: string | undefined): string | undefined => {
+			for (let k = 0; v && k < 4 && /^\w+$/.test(v); k++) {
+				const d = defIn(v)
+				const km = d && /^([A-Za-z_]\w*)\.key$/.exec(d)
+				if (km) {
+					const x = km[1], xd = defIn(x)
+					const am = xd && /^(?:ld64\()?(?:accounts|\w+)\.([a-z_][a-z0-9_]*)\)?$/.exec(xd)
+					return am ? am[1] : TEMP.test(x) ? undefined : ref(x)?.acct ?? x
+				}
+				v = d
+			}
+			return undefined
+		}
+		const infos: (string | undefined)[] = []
+		for (let o = Y + 0x18; words.has(o) && infos.length < 1 + (roles.length || 11); o += 0x30) infos.push(keyAcct(words.get(o)))
+		if (infos.length < 2) return undefined
+		const accts = infos.slice(1)
+		const seedLen = words.get(Y + 0x18 + 0x30 * infos.length + 8)
+		// (the accounts the callee requires to sign: the authority, the system transfer's source)
+		return {
+			accounts: accts.map((a, i) => ({ role: roles[i] ?? `account${i}`, text: a ?? '?', s: /^(authority|from|current_authority)$/.test(roles[i] ?? '') ? 1 : undefined })),
+			seeds: seedLen !== undefined && !/^(0x)?0$/.test(seedLen) ? `? (${seedLen} seeds)` : undefined,
+		}
+	}
 	const helperCall = (n: Node, callee: number, main: boolean, err: boolean) => {
 		const path = inp.calleePath?.(callee) ?? '', l = lineOf(n), t = lines[l]?.trim() ?? ''
 		const h = CPI_HELPER.exec(path)
 		if (h) {
 			const [program, family] = helperProgram(h[1]), ix = pascal(h[2])
 			const amount = /^(?:(?:const |let )?\w+ = )?\w+\(([^,]*), ([^,]*), (.*)\)$/.exec(t)?.[3]
-			const cpi = { program, known: program.includes('|') ? undefined : program, accounts: [], fields: amount ? [[/^system/.test(family) ? 'lamports' : 'amount', amount] as [string, string]] : [], family, ix }
-			const text = `CPI ${program}.${ix} [lib: ${path}]`
+			const ctx = cpiContext(/\w+\(([^,]*), ([^,]*)[,)]/.exec(t)?.[2] ?? '', l, HELPER_ROLES[ix] ?? [])
+			const cpi = { program, known: program.includes('|') ? undefined : program, accounts: ctx?.accounts ?? [], fields: amount ? [[/^system/.test(family) ? 'lamports' : 'amount', amount] as [string, string]] : [], family, ix, seeds: ctx?.seeds }
+			const text = `CPI ${program}.${ix}${cpi.accounts.length ? ` { ${cpi.accounts.map(x => `${x.role}: ${x.text}`).join(', ')} }` : ''}${ctx?.seeds ? ' (PDA-signed)' : ''} [lib: ${path}]`
+			const kinds = cpiKinds(family, ix)
+			if (ctx?.seeds) kinds.push('PDA_SIGNATURE')
 			const prev = facts.ops.find(o => o.line === l + 1 && o.kinds.includes('CPI') && !o.cpi?.ix)
-			if (prev) { prev.cpi = { ...prev.cpi, ...cpi, accounts: prev.cpi?.accounts ?? [] }; prev.kinds = [...new Set([...cpiKinds(family, ix), ...prev.kinds])]; prev.text = text }
-			else facts.ops.push({ line: l + 1, pc: n.k === 'stmt' ? n.s.pc : undefined, kinds: cpiKinds(family, ix), text, main, errPath: err, cpi })
+			if (prev) { prev.cpi = { ...prev.cpi, ...cpi, accounts: cpi.accounts.length ? cpi.accounts : prev.cpi?.accounts ?? [] }; prev.kinds = [...new Set([...kinds, ...prev.kinds])]; prev.text = text }
+			else facts.ops.push({ line: l + 1, pc: n.k === 'stmt' ? n.s.pc : undefined, kinds, text, main, errPath: err, cpi })
 			return
 		}
 		const b = BUILDER.exec(path)
