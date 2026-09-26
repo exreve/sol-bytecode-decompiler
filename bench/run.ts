@@ -1,16 +1,18 @@
 // Ground-truth benchmark of the analysis layer (bench/README.md): decompiles bench/bin/*.so as the CLI project
 // output does, compares security/analysis.json with bench/expected/<prog>.json and prints recall / precision.
+// Then the eval pairs (eval/analyze.ts): skipped with a filter, filter "pairs" (or the eval dir name) runs only them.
 // usage: node bench/run.ts [--verbose] [filter]
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Worker, isMainThread, parentPort } from 'node:worker_threads'
 import { availableParallelism } from 'node:os'
+import { evalJobs, scoreEval } from '../eval/analyze.ts'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 
 
-interface Job { id: number; prog: string; variant?: string; so: string; idl?: any }
+interface Job { id: number; prog: string; variant?: string; so: string; idl?: any; evalKey?: string }
 interface ExpIx { tag?: number; accounts: Record<string, string[]>; relations?: [string, string][]; cpis?: string[]; writes?: string[]; pdas?: string[] }
 interface ExpVariant { ix: string; rules: string[]; idl?: Record<string, string> }
 interface Expected { kind: 'anchor' | 'native'; idl?: string; instructions: Record<string, ExpIx>; variants?: Record<string, ExpVariant> }
@@ -29,6 +31,7 @@ async function main() {
 	const filter = process.argv.slice(2).find(a => !a.startsWith('-'))
 	const t0 = Date.now()
 	const progs = readdirSync(join(ROOT, 'expected')).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5)).filter(p => !filter || p.includes(filter)).sort()
+	const withEval = !filter || filter === 'eval' || filter === 'pairs'
 	const exps = new Map(progs.map(p => [p, JSON.parse(readFileSync(join(ROOT, 'expected', p + '.json'), 'utf8')) as Expected]))
 	const jobs: Job[] = []
 	for (const [prog, exp] of exps) {
@@ -41,9 +44,10 @@ async function main() {
 		}
 		for (const f of readdirSync(join(ROOT, 'bin'))) if (f.startsWith(prog + '@') && !exp.variants?.[f.slice(prog.length + 1, -3)]) console.error(`no expectation for ${f}`)
 	}
+	if (withEval) for (const e of evalJobs()) jobs.push({ id: jobs.length, prog: '', so: e.so, idl: e.idl, evalKey: e.key })
 	const out = await runAll(jobs)
 	for (const [prog, exp] of exps) {
-		const base = out.get(jobs.find(j => j.prog === prog && !j.variant)!.id)!
+		const base = out.get(jobs.find(j => j.prog === prog && !j.variant && !j.evalKey)!.id)!
 		const baseFindings = scoreFacts(prog, exp, base)
 		for (const j of jobs) if (j.prog === prog && j.variant) scoreVariant(prog, j.variant, exp, out.get(j.id)!, baseFindings)
 	}
@@ -53,6 +57,11 @@ async function main() {
 		console.log(`false reports (${falses.length}):`); for (const l of falses) console.log('  ' + l)
 		console.log()
 	}
+	if (withEval) {
+		for (const l of scoreEval(new Map(jobs.filter(j => j.evalKey).map(j => [j.evalKey!, out.get(j.id)])), verbose)) console.log(l)
+		console.log()
+	}
+	if (!progs.length) return
 	const pct = (n: number, d: number) => d ? (100 * n / d).toFixed(1).padStart(6) : '     -'
 	console.log('category      TP    FP    FN  recall  precision     F1')
 	const f1s: number[] = []
@@ -77,7 +86,8 @@ function patchIdl(idl: any, patch: Record<string, string>): any {
 
 async function runAll(jobs: Job[]): Promise<Map<number, any>> {
 	const out = new Map<number, any>()
-	const queue = [...jobs].sort((a, b) => Number(b.so.includes('/a_')) - Number(a.so.includes('/a_'))) // big ones first
+	const size = (j: Job) => (j.evalKey ? 2 : 0) + Number(j.so.includes('/a_'))
+	const queue = [...jobs].sort((a, b) => size(b) - size(a)) // big ones first
 	const n = Math.min(queue.length, Math.max(1, availableParallelism() - 1))
 	await Promise.all(Array.from({ length: n }, () => new Promise<void>((resolve, reject) => {
 		const w = new Worker(fileURLToPath(import.meta.url), { resourceLimits: { stackSizeMb: 256, maxOldGenerationSizeMb: 8192 } })

@@ -1,5 +1,5 @@
 {
-	"about": "Ground truth for the reviewer eval (see eval/README.md). Never hand this file, eval/bin/ or eval/build.sh to a reviewer: a reviewer gets one eval/packets/<prog_NN>/<code|full>/ directory only. 'packets' maps each neutral packet id to its binary; a finding on a 'fixed' packet at the ground-truth location is a false positive.",
+	"about": "Ground truth for the reviewer eval (see eval/README.md). Never hand this file, eval/bin/ or eval/build.sh to a reviewer: a reviewer gets one eval/packets/<prog_NN>/<code|full>/ directory only. 'packets' maps each neutral packet id to its binary; a finding on a 'fixed' packet at the ground-truth location is a false positive. ground_truth.target (real cases): the instruction / account names as the analysis output names them (native: tag_N / account[i]; Anchor: IDL names; '*': any account; rules: only these rule ids count), for eval/analyze.ts.",
 	"categories": {
 		"missing-signer": "a privileged action does not require the authority to sign",
 		"missing-owner-check": "account data is trusted without checking the account's owner program",
@@ -34,6 +34,7 @@
 				"instruction": "verify_signatures",
 				"aliases": ["verify_signatures", "VerifySignatures", "verify_signature", "tag_7", "tag 7", "instruction 7", "ix 7"],
 				"accounts": ["instruction_acc", "instructions sysvar", "instruction sysvar", "sysvar", "accounts[3]", "account 3", "account #3", "4th account"],
+				"target": { "instructions": ["verify_signatures", "tag_7"], "accounts": ["account[3]"] },
 				"keywords": ["sysvar", "instructions sysvar", "load_instruction_at", "secp256k1", "address", "spoof", "fake", "not checked", "unchecked", "Sysvar1nstructions"],
 				"description": "verify_signatures reads the secp256k1 signature-verification instruction through the instructions sysvar (solana_program::sysvar::instructions::load_instruction_at) from account 3 (instruction_acc) without checking that its key is the Instructions sysvar id. An attacker passes a fake account holding a forged instruction list, so guardian signatures are marked verified without any secp256k1 verification; the forged signature set then posts a VAA that mints 120k wETH."
 			},
@@ -59,6 +60,7 @@
 				"instruction": "update_reserve_config",
 				"aliases": ["update_reserve_config", "UpdateReserveConfig", "process_update_reserve_config", "tag_16", "tag 16", "instruction 16", "ix 16"],
 				"accounts": ["reserve", "lending_market", "lending market", "accounts[0]", "accounts[1]", "account 0", "account 1"],
+				"target": { "instructions": ["update_reserve_config", "tag_16"], "accounts": ["account[0]", "account[1]"] },
 				"keywords": ["reserve.lending_market", "lending market", "lending_market", "belongs", "bound", "not tied", "match", "owner of", "attacker-created", "fake", "any lending market", "has_one"],
 				"description": "UpdateReserveConfig checks that the signer is the owner of the lending market passed in (account 1), but never checks that the reserve (account 0) belongs to that lending market (reserve.lending_market == lending_market key). An attacker creates their own lending market, signs as its owner and rewrites the config (liquidation threshold / bonus) of any real reserve."
 			},
@@ -80,6 +82,7 @@
 				"instruction": "flash_loan",
 				"aliases": ["flash_loan", "FlashLoan", "process_flash_loan", "tag_13", "tag 13", "instruction 13", "ix 13"],
 				"accounts": ["reserve", "accounts[2]", "account 2", "3rd account"],
+				"target": { "instructions": ["flash_loan", "tag_13"], "accounts": ["account[2]"] },
 				"keywords": ["owner", "owned by", "program_id", "fake reserve", "forged", "spoof", "reserve data"],
 				"description": "FlashLoan unpacks the reserve (account 2) and trusts its fields (lending_market, liquidity supply, fee receiver, fees) without checking that the reserve account is owned by the lending program. A forged reserve naming the real lending market and a real liquidity supply lets the caller borrow from the supply with the market authority's signature under attacker-chosen parameters."
 			},
@@ -105,6 +108,7 @@
 				"instruction": "deposit_reserve_liquidity",
 				"aliases": ["deposit_reserve_liquidity", "DepositReserveLiquidity", "tag_4", "tag 4", "instruction 4", "ix 4", "redeem_reserve_collateral", "RedeemReserveCollateral", "tag_5", "tag 5", "instruction 5", "ix 5"],
 				"accounts": ["reserve", "collateral", "liquidity", "ctoken", "exchange rate"],
+				"target": { "instructions": ["deposit_reserve_liquidity", "redeem_reserve_collateral", "tag_4", "tag_5"], "accounts": ["*"], "rules": ["unchecked-arithmetic", "share-price-zero-supply", "truncating-cast"] },
 				"keywords": ["round", "rounding", "precision", "exchange rate", "floor", "ceil", "truncat", "dust"],
 				"description": "The collateral exchange rate conversions (liquidity -> collateral on DepositReserveLiquidity, collateral -> liquidity on RedeemReserveCollateral) round to nearest instead of in the protocol's favour, so a deposit and a redeem of tiny amounts can each round up; repeated, this drains reserve liquidity (Neodyme: ~$2.6B TVL at risk across forks)."
 			},
@@ -129,6 +133,7 @@
 				"instruction": "initialize_candy_machine",
 				"aliases": ["initialize_candy_machine", "initializeCandyMachine", "InitializeCandyMachine"],
 				"accounts": ["candy_machine", "candyMachine", "candy machine"],
+				"target": { "instructions": ["initialize_candy_machine"], "accounts": ["candy_machine"] },
 				"keywords": ["reinit", "re-init", "already initialized", "initialized", "discriminator", "zero", "overwrite", "hijack", "wallet", "authority"],
 				"description": "initialize_candy_machine takes candy_machine as a mutable UncheckedAccount only constrained to be owned by the program and large enough; it does not require the account to be uninitialized (#[account(zero)]). Anyone can re-initialize a live candy machine with their own authority and wallet and redirect the mint proceeds."
 			},
@@ -155,6 +160,7 @@
 				"instruction": "print_cash",
 				"aliases": ["print_cash", "printCash", "PrintCash", "burn_cash", "burnCash"],
 				"accounts": ["bank", "collateral", "crate_mint", "crateMint", "crate_collateral_tokens", "saber_swap", "arrow", "lp mint", "mint"],
+				"target": { "instructions": ["print_cash", "burn_cash"], "accounts": ["bank", "collateral", "crate_mint", "crate_collateral_tokens", "saber_swap", "arrow"] },
 				"keywords": ["bank", "crate_mint", "fake", "forged", "collateral", "mint", "not bound", "not validated", "has_one", "chain", "infinite mint", "arrow"],
 				"description": "print_cash validates a chain of accounts (collateral -> bank, crate_collateral_tokens -> collateral mint, saber swap / arrow LP accounts) but never binds the bank to the real $CASH crate mint (bank.crate_mint == crate_mint), and the saber_swap.arrow mint is not tied to the real LP. An attacker supplies a fake bank / collateral / arrow chain backed by worthless tokens and mints unbacked $CASH."
 			},
@@ -179,6 +185,7 @@
 				"instruction": "increase_liquidity",
 				"aliases": ["increase_liquidity", "increaseLiquidity", "increase_liquidity_v2", "increaseLiquidityV2"],
 				"accounts": ["remaining_accounts[0]", "remaining account", "remaining_accounts", "tickarray_bitmap_extension", "tick_array_bitmap_extension", "TickArrayBitmapExtension", "bitmap extension", "bitmap"],
+				"target": { "instructions": ["increase_liquidity", "increase_liquidity_v2"], "accounts": ["remaining_accounts[0]", "tick_array_bitmap_extension"] },
 				"keywords": ["bitmap", "remaining", "extension", "PDA", "address", "key", "not verified", "flip", "tick"],
 				"description": "increase_liquidity (and increase_liquidity_v2) uses remaining_accounts[0] as the pool's TickArrayBitmapExtension when the position's tick arrays are outside the default bitmap, without checking it is the pool's bitmap-extension PDA. An attacker passes another account, so the pool's bitmap is not flipped for the newly initialized tick array; the liquidity is then mis-accounted during swaps, draining the pool (Immunefi, $505k bounty)."
 			},
@@ -203,6 +210,7 @@
 				"instruction": "deposit",
 				"aliases": ["deposit", "withdraw", "swap_base_output", "swapBaseOutput"],
 				"accounts": ["lp_token_amount", "lpTokenAmount", "token_0_amount", "token_1_amount", "token0Vault", "token1Vault", "lp_mint", "lpMint", "owner_lp_token", "ownerLpToken"],
+				"target": { "instructions": ["deposit", "withdraw", "swap_base_output"], "accounts": ["*"], "rules": ["unchecked-arithmetic", "share-price-zero-supply", "truncating-cast"] },
 				"keywords": ["zero", "rounding", "round", "one token", "single", "ceiling", "amount", "not checked", "lp token"],
 				"description": "deposit computes the token_0 / token_1 amounts for the requested lp_token_amount (rounded up) but does not reject a result where one side is zero (nor lp_token_amount == 0); with a skewed pool a depositor gets LP tokens while paying only one token, and repeated deposit / withdraw drains the pool. The fix adds require_gt!(lp_token_amount, 0) and zero checks on the computed amounts (also in withdraw and swap_base_output)."
 			},

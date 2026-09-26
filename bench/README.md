@@ -7,7 +7,16 @@ their expected facts, and single-property variants whose expected finding is kno
 
 It decompiles every `bin/*.so` as the CLI project output does (`-o dir/ [--idl]`), reads `security/analysis.json`
 and prints TP / FP / FN, recall, precision and F1 per category, then one `score` line (mean F1 of the six
-categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. ~7 s.
+categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. Without a filter it
+also scores the eval pairs (`eval/analyze.ts`, below); `node bench/run.ts pairs` runs only those. ~40 s (~7 s with a filter).
+
+## Eval pairs
+
+`eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
+signal at `ground_truth.target` (instruction + account names as the analysis names them): a finding (`finding`), or
+only an informational one (`informational`: a finding of confidence info, a validation_consistency inconsistency, a
+stored-key gap or a program account no stored field of which is compared); `missed` otherwise. `fixed` is `clean` when
+no such signal is left at the target in @fixed. `--verbose` lists the signals.
 
 ## Contents
 
