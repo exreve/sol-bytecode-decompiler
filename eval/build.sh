@@ -44,7 +44,7 @@ build() {
 	fetch "$d" "$3" "$4" "${5%%/*}"
 	[ -z "$9" ] || [ -f "$d/.patched" ] || { (cd "$d" && $9) && touch "$d/.patched"; }
 	so=$7.so
-	run "$8" "$d" "$5" "cargo build --release --target sbf-solana-solana -p $6 2>&1 | grep -E '^error' -A8 | head -60" || true
+	run "$8" "$d" "$5" "$LOCK cargo build --release --target sbf-solana-solana -p $6 2>&1 | grep -E '^error' -A8 | head -60" || true
 	f="$d/target/sbf-solana-solana/release/$so"
 	[ -f "$f" ] || { echo "FAILED $1@$2"; return; }
 	run "$8" "$d" . "llvm-objcopy --strip-all target/sbf-solana-solana/release/$so /tmp/o.so && cat /tmp/o.so" > "$out" # as deployed (cargo build-sbf)
@@ -54,6 +54,8 @@ build() {
 }
 
 FILTER=$1 VARIANT=$2
+# no committed Cargo.lock: resolve with the toolchain's rust version, keeping edition-2024 crates out (as scripts/refbuild.ts)
+LOCK='[ -f Cargo.lock ] || { cargo generate-lockfile && for p in blake3@1.5.5 cc@1.1.31 jobserver@0.1.32; do cargo update -p ${p%@*} --precise ${p#*@} 2>/dev/null; done; true; };'
 BPF='--cfg target_arch="bpf"'
 
 # solitaire (2021) used the removed const_generics feature; adt_const_params is its successor in rustc 1.75
@@ -71,3 +73,15 @@ build wormhole_bridge fixed wormhole-foundation/wormhole e8b91810a9bb35c3c139f86
 RUSTFLAGS_SBF= DOCKER_ENV= IDL_SRC=programs/cp-swap/src/lib.rs
 build raydium_cp_swap vuln raydium-io/raydium-cp-swap cfdb70a8ca . raydium-cp-swap raydium_cp_swap v1.41
 build raydium_cp_swap fixed raydium-io/raydium-cp-swap 183ddbb115 . raydium-cp-swap raydium_cp_swap v1.41
+
+IDL_SRC=programs/amm/src/lib.rs
+build raydium_clmm vuln raydium-io/raydium-clmm d0cb69cc95 . raydium-amm-v3 raydium_amm_v3 v1.48
+build raydium_clmm fixed raydium-io/raydium-clmm e6dd1d5673 . raydium-amm-v3 raydium_amm_v3 v1.48
+
+RUSTFLAGS_SBF=$BPF IDL_SRC=
+build solend_lending vuln solendprotocol/solana-program-library 871935cafc . spl-token-lending spl_token_lending v1.41
+build solend_lending fixed solendprotocol/solana-program-library 132d74cf17 . spl-token-lending spl_token_lending v1.41
+
+RUSTFLAGS_SBF=$BPF IDL_SRC=rust/nft-candy-machine-v2/src/lib.rs
+build candy_machine_v2 vuln metaplex-foundation/metaplex 4f835f73e632ccaf4eb913d8fb64518ff52eb237 rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
+build candy_machine_v2 fixed metaplex-foundation/metaplex e9ef376443c3c8fd2f5b151dd0b09f757b1bf35c rust nft-candy-machine-v2 nft_candy_machine_v2 v1.41
