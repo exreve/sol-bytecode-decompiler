@@ -4,7 +4,7 @@ import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
 import { optimizeFunc, stmtExprs, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
-import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
+import { type Expr, type Stmt, type CallTarget, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
 import { Semantics, constsIn, NICHE, OK_TAGS, KNOWN_KEYS, unb58 } from './semantics.ts';
 import { renderSingle } from './layout.ts';
 import type { IdlInfo } from './idl.ts';
@@ -200,6 +200,52 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     let best: number | undefined, n = 0;
     for (const [pc, c] of count) if (c > n) { best = pc; n = c; }
     if (best !== undefined && n >= 3 && best !== nameFn) rename(best, 'anchor_error_from', 'the callee most often given an anchor_lang ErrorCode as its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from');
+  }
+
+  // ---- selector dispatcher without instruction logs (Solang): the handler of each 8-byte discriminator ----
+  // A function comparing a value with three or more instruction discriminators (IDL, or names in the program's
+  // strings): on the equal side of each comparison (the blocks reached without passing another one), the first
+  // function called there and on no other instruction's side is that instruction's handler.
+  if (opts.sugar !== false && !sem.ixNames.size) for (const [dpc, { f }] of built) {
+    const br = new Map<number, [string, number]>() // block -> instruction, its equal side
+    for (const b of f.blocks) {
+      const c = b.term.k === 'br' ? b.term.c : undefined
+      if (c?.k !== 'cmp' || (c.op !== 'eq' && c.op !== 'ne') || c.b.k !== 'const' || b.term.k !== 'br') continue
+      const d = sem.disc.get(c.b.v)
+      if (d?.startsWith('ix:') && c.b.v >> 32n) br.set(b.id, [d.slice(3), c.op === 'eq' ? b.term.t : b.term.f])
+    }
+    if (new Set([...br.values()].map(x => x[0])).size < 3) continue
+    const order = new Map<string, number[]>(), seen = new Map<number, Set<string>>()
+    for (const [, [ix, start]] of br) {
+      const out: number[] = [], vis = new Set<number>([start]), q = [start]
+      while (q.length && vis.size < 64) {
+        const b = f.blocks[q.shift()!]
+        if (!b || br.has(b.id)) continue
+        const call = (t: CallTarget) => { if (t.k === 'fn' && !isLib(t.pc)) { out.push(t.pc); let s = seen.get(t.pc); if (!s) seen.set(t.pc, (s = new Set())); s.add(ix) } }
+        for (const st of b.stmts) { if (st.k === 'call') call(st.t); else if (st.k === 'set' && st.e.k === 'call') call(st.e.t) }
+        if (b.term.k === 'ret' && b.term.e?.k === 'call') call(b.term.e.t)
+        const next = b.term.k === 'br' ? [b.term.t, b.term.f] : b.term.k === 'jmp' ? [b.term.to] : []
+        for (const n of next) if (!vis.has(n)) { vis.add(n); q.push(n) }
+      }
+      order.set(ix, out)
+    }
+    const taken = new Set(sem.ixNames.values())
+    for (const [ix, pcs] of order) {
+      const hpc = pcs.find(x => seen.get(x)!.size === 1 && built.has(x) && !sem.ixNames.has(x))
+      if (hpc === undefined || taken.has(ix)) continue
+      sem.ixNames.set(hpc, ix)
+      taken.add(ix)
+      const fn = p.funcs.get(hpc)!
+      heurNames.set(hpc, `name [heur]: called on the side where ${fnName(dpc)} matches the discriminator of instruction ${ix}${opts.idl?.instructions.some(i => i.name === ix) ? ' [idl]' : ''} (was ${fn.name})`)
+      fn.name = `ix_${ix}`
+      fnByAddr.set(fnAddr(p, hpc), fn.name)
+    }
+    if (sem.ixNames.size && /^fn_[0-9a-f]+$/.test(p.funcs.get(dpc)!.name) && ![...p.funcs.values()].some(x => x.name === 'selector_dispatch')) {
+      heurNames.set(dpc, `name [heur]: compares a value with ${br.size} instruction discriminators and calls their handlers (was ${p.funcs.get(dpc)!.name})`)
+      p.funcs.get(dpc)!.name = 'selector_dispatch'
+      fnByAddr.set(fnAddr(p, dpc), 'selector_dispatch')
+    }
+    break
   }
 
   // ---- Anchor dispatcher: compares the instruction data's first 8 bytes with each handler's discriminator ----
