@@ -133,9 +133,11 @@ export const blockPc = (g: Cfg, b: number) => g.fo.f.blocks[b].stmts[0]?.pc ?? g
 export const callOf = (s: Stmt): { t: Extract<Stmt, { k: 'call' }>['t']; args: Expr[] } | undefined =>
 	s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : s.k === 'eval' && s.e.k === 'call' ? s.e : undefined
 
+/** Number(BigInt.asIntN(64, v)), without the BigInt conversion for the usual small non-negative v */
+const sNum = (v: bigint): number => (v >= 0n && v <= 0x1f_ffff_ffff_ffffn ? Number(v) : Number(BigInt.asIntN(64, v)))
 const fpOf = (fo: FuncOut) => fo.f.vars.find(v => v.param === 10)?.id ?? -1
 const offOf = (e: Expr, base: number): number | undefined =>
-	e.k === 'var' && e.id === base ? 0 : e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === base && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined
+	e.k === 'var' && e.id === base ? 0 : e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === base && e.b.k === 'const' ? sNum(e.b.v) : undefined
 
 /** statements of a function in block (address) order */
 function* stmtsOf(fo: FuncOut): Generator<Stmt> {
@@ -367,6 +369,19 @@ export interface AnchorEval {
  * layout), the RcBoxes of its lamports / data, pointers to its key / owner / lamports / data; values a call
  * returns in an object the caller passes are the callee's single store there.
  */
+const paramMemo = new WeakMap<VarFunc, { n: number; m: Map<number, number> }>()
+/** the (first) variable of a function holding parameter n (f.vars.find(v => v.param === n)?.id) */
+function paramVar(f: VarFunc, n: number): number | undefined {
+	let c = paramMemo.get(f)
+	if (!c || c.n !== f.vars.length) {
+		c = { n: f.vars.length, m: new Map() }
+		for (const v of f.vars) if (!c.m.has(v.param)) c.m.set(v.param, v.id)
+		paramMemo.set(f, c)
+	}
+	return c.m.get(n)
+}
+/** an evaluator's memo of an expression: its value at the first position evaluated, at the others */
+interface EvMemo<T> { p: number; x: T | undefined; more?: Map<number, T | undefined> }
 /** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
 const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
@@ -421,14 +436,14 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 			const g = c.t.k === 'fn' && depth > 0 ? byPcOf(r).get(c.t.pc) : undefined
 			if (!g || exits.has(g.pc)) return undefined
 			const j = c.args.findIndex(a => { const o = CD.fpOff(a); return o !== undefined && o <= z && z < o + 0x80 })
-			const pv = g.f.vars.find(q => q.param === j + 1)?.id
+			const pv = paramVar(g.f, j + 1)
 			if (j < 0 || pv === undefined) return undefined
 			const off = z - CD.fpOff(c.args[j])!
 			const GD = defsOf(g.f, cl)
 			const vk = `${pv}|${off}`
 			let vm = outStores.get(g.f), vs = vm?.get(vk)
 			if (!vs) {
-				const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
+				const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + sNum(e.b.v))(at(e.a, k + 1))) : undefined
 				const l: [Expr, number][] = vs = []
 				for (let bi = 0; bi < g.f.blocks.length; bi++) g.f.blocks[bi].stmts.forEach((s, i) => { if (s.k === 'store' && s.size === 8 && at(s.addr) === off) l.push([s.v, bi << 16 | i]) })
 				if (!vm) outStores.set(g.f, (vm = new Map()))
@@ -436,7 +451,7 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 			}
 			if (!vs.length || vs.length > 8) return undefined
 			const rs = new Map<number, HVal>()
-			c.args.forEach((a, k) => { const x = ev(a, p, d + 1); const q = g.f.vars.find(u => u.param === k + 1)?.id; if (x && q !== undefined && k !== j) rs.set(q, x) })
+			c.args.forEach((a, k) => { const x = ev(a, p, d + 1); const q = paramVar(g.f, k + 1); if (x && q !== undefined && k !== j) rs.set(q, x) })
 			// (the stores whose value is known agree: other paths store error values)
 			const G = ctxOf(g, rs, depth - 1)
 			const xs = vs.map(([e, q]) => G.ev(e, q, d + 1)).filter((x): x is HVal => !!x && x.k !== 'fr')
@@ -446,13 +461,13 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 			if (x.k === 'data' && !x.ty) for (const b of g.f.blocks) if (b.term.k === 'br') walkExpr(b.term.c, y => { if (y.k === 'const' && !x.ty) x.ty = discType.get(y.v) })
 			return x
 		}
-		const memo = new Map<Expr, Map<number, HVal | undefined>>()
+		const memo = new Map<Expr, EvMemo<HVal>>()
 		const ev = (e: Expr, p: number, d = 0): HVal | undefined => {
 			if (d > 16) return undefined
 			const m = memo.get(e)
-			if (m?.has(p)) return m.get(p)
+			if (m) { if (m.p === p) return m.x; if (m.more?.has(p)) return m.more.get(p) }
 			const x = ev0(e, p, d)
-			if (d === 0) { if (m) m.set(p, x); else memo.set(e, new Map([[p, x]])) }
+			if (d === 0) { if (m) (m.more ??= new Map()).set(p, x); else memo.set(e, { p, x }) }
 			return x
 		}
 		const ev0 = (e: Expr, p: number, d: number): HVal | undefined => {
@@ -468,7 +483,7 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 				case 'ext': return ev(e.a, p, d + 1)
 				case 'bin': {
 					if (e.op !== 'add' || e.b.k !== 'const') return undefined
-					const a = ev(e.a, p, d + 1), c = Number(BigInt.asIntN(64, e.b.v))
+					const a = ev(e.a, p, d + 1), c = sNum(e.b.v)
 					return a?.k === 'fr' ? { ...a, z: a.z + c } : a ? { ...a, off: a.off + c } : undefined
 				}
 				case 'load': {
@@ -644,7 +659,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			if (c?.t.k === 'fn' && depth > 0 && !exits.has(c.t.pc)) {
 				const g = byPcOf(r).get(c.t.pc)
 				const rs = new Map<number, HVal>()
-				if (g) c.args.forEach((x, j) => { const v = X.ev(x, p); const pv = g.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) rs.set(pv, v) })
+				if (g) c.args.forEach((x, j) => { const v = X.ev(x, p); const pv = paramVar(g.f, j + 1); if (v && pv !== undefined) rs.set(pv, v) })
 				if (g && rs.size) visit(g, rs, depth - 1)
 			}
 			if (s.k !== 'store' && s.k !== 'stores' && s.k !== 'copy') return
@@ -1067,7 +1082,7 @@ export type AcctVal = AV
 const resMemo = new WeakMap<object, AcctResolver>()
 
 /** a function's IR (when decompiled) and name (library code) */
-export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<string, number> }
+export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number> }
 /** writes through a pointer argument, by the callee's name (library code not decompiled) */
 const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_program_address/, 33], [/^(sol_)?(memcpy|memmove|memset)/, -1]]
 /**
@@ -1080,7 +1095,7 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 	for (const [re, n] of LIB_WRITES) if (re.test(nm)) return n < 0 ? (j === 0 ? 0x80 : 0) : n
 	if (t.k === 'sys') return /log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80
 	if (t.k !== 'fn' || depth <= 0) return 0x80
-	const key = `${t.pc}:${j}`
+	const key = t.pc * 0x10000 + j
 	const memo = cl.memo ??= new Map()
 	const m = memo.get(key)
 	if (m !== undefined) return m
@@ -1098,7 +1113,7 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 			if (d > 8) return undefined
 			if (e.k === 'var') return e.id === pv ? 0 : defs.has(e.id) ? off(defs.get(e.id)!, d + 1) : undefined
 			if (e.k === 'load' && e.size === 8) { const z = offOf(e.addr, fpv); return z !== undefined && spill.get(z) ? 0 : undefined }
-			if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const x = off(e.a, d + 1); return x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)) }
+			if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const x = off(e.a, d + 1); return x === undefined ? undefined : x + sNum(e.b.v) }
 			return undefined
 		}
 		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) {
@@ -1357,7 +1372,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		if (j < 0 || pv === undefined) return undefined
 		const off = o - fpOff(c.args[j])!
 		const GD = defsOf(g, callee)
-		const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
+		const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + sNum(e.b.v))(at(e.a, k + 1))) : undefined
 		const vs: [Expr, number][] = []
 		g.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => {
 			if (s.k === 'store' && s.size === 8 && at(s.addr) === off) vs.push([s.v, bi << 16 | i])
@@ -1375,15 +1390,15 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 		const xs = vs.map(([e, q]) => G.ev(e, q, d + 1)).filter((x): x is AV => !!x)
 		return xs.length && xs.every(x => JSON.stringify(x) === JSON.stringify(xs[0])) ? xs[0] : undefined
 	}
-	const memo = new Map<Expr, Map<number, AV | undefined>>()
+	const memo = new Map<Expr, EvMemo<AV>>()
 	/** the value of e evaluated at position p */
 	const ev = (e: Expr, p: number, d = 0): AV | undefined => {
 		if (d > 24) return undefined
-		let m = memo.get(e)
-		if (m?.has(p)) return m.get(p)
+		const m = memo.get(e)
+		if (m) { if (m.p === p) return m.x; if (m.more?.has(p)) return m.more.get(p) }
 		const r = ev0(e, p, d)
-		if (!m) memo.set(e, (m = new Map()))
-		m.set(p, r)
+		if (m) (m.more ??= new Map()).set(p, r)
+		else memo.set(e, { p, x: r })
 		return r
 	}
 	const ev0 = (e: Expr, p: number, d: number): AV | undefined => {
@@ -1401,7 +1416,7 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 			case 'bin': {
 				if (e.op !== 'add' || e.b.k !== 'const') return undefined
 				const a = ev(e.a, p, d + 1)
-				return a && a.k !== 'val' ? { ...a, off: a.off + Number(BigInt.asIntN(64, e.b.v)) } : undefined
+				return a && a.k !== 'val' ? { ...a, off: a.off + sNum(e.b.v) } : undefined
 			}
 			case 'load': {
 				// (through a pointer into the frame: the word stored there, as at this position)

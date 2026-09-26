@@ -166,6 +166,17 @@ function analyze0(r: Result): Analysis {
 	const splits = new Map<number, DispatchGroup[]>()
 	if (!r.anchor) for (const h of roots) if (!h.name.startsWith('ix_')) { const g = splitDispatch(r, h, rootPcs); if (g) splits.set(h.pc, g) }
 	const ixs: IxOut[] = []
+	// (the functions a library function calls, in order)
+	const libCallsMemo = new Map<number, number[]>()
+	const libCalls = (pc: number): number[] => {
+		let l = libCallsMemo.get(pc)
+		if (!l) {
+			l = []
+			for (const b of p.funcs.get(pc)!.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn') l.push(st.t.pc)
+			libCallsMemo.set(pc, l)
+		}
+		return l
+	}
 	for (const h of roots) for (const grp of splits.get(h.pc) ?? [undefined]) {
 		const name = grp ? grp.name : h.name.startsWith('ix_') ? h.name.slice(3) : h.name
 		const hpc = h.pc
@@ -192,7 +203,7 @@ function analyze0(r: Result): Analysis {
 			if (!facts.has(callee)) {
 				if (lib.has(callee) || !p.funcs.has(callee)) return
 				lib.add(callee)
-				for (const b of p.funcs.get(callee)!.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn') reach(st.t.pc, false)
+				for (const t of libCalls(callee)) reach(t, false)
 				return
 			}
 			const prev = main.get(callee)
