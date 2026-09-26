@@ -25,6 +25,7 @@ import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, type View } from './vi
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
+import { frameRegions, innermost, type Region, type Regions } from './frameregions.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
 import { accountResolver, cfgOf, decisionBlock, type Callee } from './analysis/flow.ts';
@@ -180,6 +181,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // ---- Anchor error helpers (named before anything is printed) ----
   const heurNames = new Map<number, string>(); // pc -> provenance note of a heuristic function name
   let nameFn: number | undefined;
+  const errorFrom = new Set<number>(); // the program's error constructors (argument 2: an #[error_code] variant)
   if (opts.sugar !== false && sem.anchor) {
     nameFn = findNameFn([...built.values()].map(b => b.f), (ptr, len) => sem.strAt(ptr, len));
     const rename = (pc: number, nm: string, why: string) => {
@@ -200,6 +202,29 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     let best: number | undefined, n = 0;
     for (const [pc, c] of count) if (c > n) { best = pc; n = c; }
     if (best !== undefined && n >= 3 && best !== nameFn) rename(best, 'anchor_error_from', 'the callee most often given an anchor_lang ErrorCode as its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from');
+    // the program's own error constructor(s): small functions storing 6000 + their second parameter (an
+    // #[error_code] variant: Anchor's custom error codes start at 6000)
+    // (library functions: those user code calls with a small constant second argument, built here)
+    const cands = new Map<number, VarFunc>([...built].map(([pc, x]) => [pc, x.f]));
+    for (const { f } of built.values()) for (const x of f.blocks) for (const st of x.stmts) {
+      const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined;
+      if (c?.t.k !== 'fn' || cands.has(c.t.pc) || !isLib(c.t.pc) || c.args[1]?.k !== 'const' || c.args[1].v >= 0x400n || !/^fn_[0-9a-f]+$/.test(fnName(c.t.pc))) continue;
+      const g = recoverVars(p, p.funcs.get(c.t.pc)!);
+      optimizeFunc(g);
+      cands.set(c.t.pc, g);
+    }
+    for (const [pc, f] of cands) {
+      const b = f.vars.find(v => v.param === 2)?.id;
+      if (b === undefined || f.isEntry || f.blocks.reduce((n, x) => n + x.stmts.length, 0) > 80) continue;
+      let hit = false;
+      const is = (e: Expr) => walkExpr(e, x => { if (x.k === 'bin' && x.op === 'add' && x.a.k === 'var' && x.a.id === b && x.b.k === 'const' && x.b.v === 6000n) hit = true; });
+      for (const x of f.blocks) for (const st of x.stmts) if (st.k === 'store' || st.k === 'stores') (st.k === 'store' ? [st.v] : st.vals).forEach(is);
+      if (!hit) continue;
+      let nm = 'program_error_from', k = 2;
+      while ([...p.funcs.values()].some(x => x.name === nm)) nm = `program_error_from_${k++}`;
+      rename(pc, nm, 'stores 6000 + its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from for the program\'s #[error_code] enum (the argument: the variant, error code 6000 + it)');
+      if (p.funcs.get(pc)!.name === nm) errorFrom.add(pc);
+    }
   }
 
   // ---- selector dispatcher without instruction logs (Solang): the handler of each 8-byte discriminator ----
@@ -515,6 +540,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // (AccountLoader): `${instruction}:${offset in try_accounts' out object}` -> type; see the loader pass below
   const acctFieldType = new Map<string, { ty: string; embed: boolean }>();
   const acctFieldView = new Map<string, { ty: string; embed: boolean }>(); // `${Accounts view}:${offset}` -> type
+  const acctShift = new Map<number, number>(); // handler pc -> where the Accounts struct starts in try_accounts' out object
   // Anchor Accounts structs (layout from try_accounts' stores) and the Context the handler passes to its logic
   for (const [hpc, tpc] of tryOf) {
     const ix = sem.ixNames.get(hpc)!;
@@ -545,14 +571,19 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // the Accounts and Context views, once the Context's layout is known from a call site (see below);
     // shift: where the Accounts struct starts in try_accounts' out object (after a Result tag word)
     let ctxLayout: string | undefined;
-    const ctxView = (op: number, oa: number, or: number | undefined, shift: number) => {
-      const key = `${op}:${oa}:${or}:${shift}`;
-      if (ctxLayout) return ctxLayout === key;
+    const accountsView = (shift: number) => {
       const afs = fields.filter(x => x.off >= shift).map(x => ({ ...x, off: x.off - shift }));
       if (!afs.length) return false;
       for (const x of afs) { const a = acctFieldType.get(`${ix}:${x.off + shift}`); if (a) acctFieldView.set(`${P}Accounts:${x.off}`, a); }
-      ctxLayout = key;
       views.add({ name: `${P}Accounts`, doc: `Accounts struct of instruction ${ix} as accounts_${ix} returns it${shift ? ` (at +0x${shift.toString(16)} of its out object)` : ''}: account fields (&AccountInfo, the boxed deserialized account, or the deserialized account in place) at the offsets it stores them [str names; offsets inferred]`, fields: afs.sort((x, y) => x.off - y.off) });
+      acctShift.set(hpc, shift);
+      return true;
+    };
+    const ctxView = (op: number, oa: number, or: number | undefined, shift: number) => {
+      const key = `${op}:${oa}:${or}:${shift}`;
+      if (ctxLayout) return ctxLayout === key;
+      if (!accountsView(shift)) return false;
+      ctxLayout = key;
       const fs: import('./views.ts').Field[] = [{ name: 'program_id', off: op, t: { k: 'ref', to: 'Pubkey' } }, { name: 'accounts', off: oa, t: { k: 'ref', to: `${P}Accounts` } }];
       if (or !== undefined) fs.push({ name: 'remaining_accounts', off: or, t: { k: 'ref', to: 'AccountInfo' }, doc: '&[AccountInfo]: the accounts after the instruction\'s own' }, { name: 'remaining_accounts_len', off: or + 8, t: { k: 'scalar', size: 8 } });
       views.add({ name: `${P}Context`, doc: `anchor_lang Context of instruction ${ix} (program_id, accounts${or !== undefined ? ', remaining_accounts' : ''}${op === 0 && oa === 8 ? '' : '; other fields not shown'}), as the handler builds it [layout from the handler's stores]`, fields: fs.sort((x, y) => x.off - y.off) });
@@ -647,6 +678,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         m.set(pv.id, [`${P}Context`, `the handler ix_${ix} passes a frame object holding (program_id, address of a copy of the Accounts result)`]);
       });
     }
+    // (no Context passed on: the Accounts view alone, at the start of the out object unless no field is
+    // there, i.e. a Result tag word comes first)
+    if (!ctxLayout) accountsView(fields.some(x => x.off === 0) ? 0 : 8);
   }
 
   // functions that make exactly one CPI, of a decoded well-known instruction: cpi_<program>_<instruction>
@@ -971,6 +1005,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       dropUndefArgs: opts.sugar !== false,
       exprHook: opts.sugar !== false ? (e, pr) => sem.sugar(e, pr) : undefined,
       outline: outl.helpers.length ? (ns, i) => { const u = outl.at.get(ns)?.get(i); return u && { name: u.helper.name, args: u.args, value: u.helper.value }; } : undefined,
+      argNote: errorFrom.size ? (t, i, v) => { if (t.k !== 'fn' || i !== 1 || !errorFrom.has(t.pc) || v >= 0x10000n) return undefined; const nm = opts.idl?.errors.get(6000 + Number(v)); return nm ? `error::${nm} = ${6000n + v}` : `error ${6000n + v}`; } : undefined,
     };
     // node -> printed lines, CPI / PDA sites (for the analysis: src/analysis/facts.ts)
     const spans = new Map<Node, [number, number]>();
@@ -1026,7 +1061,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // stack objects: frame addresses that escape (or are bases of copies) name an object; other
     // frame accesses are shown relative to the nearest object below them. Objects whose role is known
     // (see frameRoles) are named after it, with a view type when their layout is known
-    let frameDecl = '';
+    let frameDecl = (): string => '';
     const setupFrame = (claims: Map<number, FrameClaim[]>) => {
       const fpv = f.vars.find(v => v.param === 10);
       if (!fpv) return;
@@ -1036,7 +1071,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       for (const [o, cs] of [...claims].sort((x, y) => y[0] - x[0])) {
         if (o >= 0 || o < -0x2000 || cs.some(c => c.name !== cs[0].name)) continue;
         bases.add(o);
-        objName.set(o, unique(cs[0].name));
+        objName.set(o, cs[0].why === GENERIC_RESULT ? cs[0].name : unique(cs[0].name)); // (generic results: after the regions, below)
         objWhy.set(o, cs[0].why);
         if (cs[0].out) outObj.add(o);
         if (cs[0].extent) extentOf.set(o, cs[0].extent);
@@ -1044,7 +1079,6 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (t && cs.every(c => c.type === t) && views.map.get(t) === BUILTIN_VIEW[t]) objType.set(o, t);
       }
       const sorted = [...bases].sort((a, b) => a - b);
-      const usedBases = new Set<number>();
       const pick = (o: number): [number, number] => {
         let b = o;
         for (const x of sorted) { if (x <= o && o - x < 0x200) b = x; if (x > o) break; }
@@ -1057,26 +1091,89 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         const t = objType.get(b), x = extentOf.get(b);
         if ((t && !fitsAccess(views, t, d, a.size, a.copy)) || (a.write && outObj.has(b)) || (x !== undefined && d + a.size > x)) { objType.delete(b); objName.delete(b); }
       }
-      for (const o of all) if (o < 0 && o >= -0x2000) usedBases.add(pick(o)[0]); // (frameRef names these only)
+      // regions (see frameregions.ts): call results of a known layout in a frame slot, and copies of them
+      // (a generic single-call result yields to a region: its layout is known there)
+      const generic = (b: number) => objWhy.get(b) === GENERIC_RESULT;
+      const rg = frameRegionsOf(fpv.id, sorted, [...objName.keys()].filter(b => !generic(b)));
+      if (rg) for (const b of [...objName.keys()]) if (generic(b) && rg.list.some(r => !r.dropped && b >= r.lo && b < r.hi)) { objName.delete(b); objType.delete(b); }
+      for (const [b, n] of objName) if (generic(b)) objName.set(b, unique(n));
+      let cur: number[] = [];
+      if (rg) ctx.atNode = n => { cur = rg.at.get(n) ?? []; };
+      const region = (o: number) => (rg && cur.length ? innermost(rg.list, cur, o) : undefined);
+      const usedNames = new Map<string, [number, string | undefined, string | undefined]>(); // name -> base, type, provenance
       const nm = (b: number) => objName.get(b) ?? `s${(-b).toString(16)}`;
+      const use = (b: number) => { const n = nm(b); if (!usedNames.has(n)) usedNames.set(n, [b, objType.get(b), objWhy.get(b)]); return n; };
+      const useR = (r: Region) => { if (!usedNames.has(r.name)) usedNames.set(r.name, [r.base, r.type && !r.bad ? r.type : undefined, r.why]); return r.name; };
+      const rel = (n: string, d: number) => (d ? `${n} + ${d < 10 ? d : '0x' + d.toString(16)}` : n);
       ctx.frameRef = off => {
         const o = Number(off);
         if (o >= 0 || o < -0x2000) return undefined;
+        const r = region(o);
+        if (r) return rel(useR(r), o - r.base);
         const [b, d] = pick(o);
-        return d ? `${nm(b)} + ${d < 10 ? d : '0x' + d.toString(16)}` : nm(b);
+        return rel(use(b), d);
       };
-      if (objType.size) ctx.frameTyped = off => {
+      if (objType.size || rg?.list.some(r => r.type && !r.bad && !r.dropped)) ctx.frameTyped = off => {
         const o = Number(off);
         if (o >= 0 || o < -0x2000) return undefined;
+        const r = region(o);
+        if (r) return r.type && !r.bad ? { t: useR(r), type: r.type, rel: o - r.base, exact: true } : undefined;
         const [b, d] = pick(o);
         const type = objType.get(b);
-        return type ? { t: nm(b), type, rel: d } : undefined;
+        return type ? { t: use(b), type, rel: d } : undefined;
       };
-      const list = [...usedBases].sort((a, b) => b - a);
-      if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)}${objType.has(b) ? `: ${objType.get(b)}` : ''} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
-      const named = list.filter(b => objName.has(b));
-      // (the names' provenance ends the declaration line)
-      if (named.length) frameDecl += ` // named [heur: ${[...new Set(named.map(b => objWhy.get(b)!))].join('; ')}]`;
+      void all;
+      frameDecl = () => {
+        const list = [...usedNames].sort((a, b) => b[1][0] - a[1][0]);
+        if (!list.length) return '';
+        const why = [...new Set(list.map(x => x[1][2]).filter(x => x !== undefined))];
+        return `\tconst ${list.map(([n, [b, t]]) => `${n}${t ? `: ${t}` : ''} = fp - 0x${(-b).toString(16)}`).join(', ')}${why.length ? ` // named [heur: ${why.join('; ')}]` : ''}`;
+      };
+    };
+    // frame regions of this function: the Accounts result of try_accounts (a handler), the accounts
+    // try_accounts takes (their objects), results of callees with a known out layout where a slot is
+    // reused; and copies of them. None when a region would hold a claimed object.
+    const frameRegionsOf = (fp: number, sorted: number[], claimed: number[]): Regions | undefined => {
+      const tpc = tryOf.get(pc), ix = sem.ixNames.get(pc);
+      const P = ix?.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('');
+      const accounts = tpc !== undefined && P && views.map.has(`${P}Accounts`) ? `${P}Accounts` : undefined;
+      const aobjs = objVars.get(pc)?.calls;
+      const sizeOf = (t: string) => {
+        const v = views.map.get(t);
+        if (!v) return undefined;
+        if (v.size) return v.size;
+        let n = 0;
+        for (const x of v.fields) n = Math.max(n, x.off + views.width(x.t) * (x.count ?? 1));
+        return Number.isFinite(n) && n > 0 ? (n + 7) & ~7 : undefined;
+      };
+      const rg = frameRegions(body, {
+        fp, bases: sorted, sizeOf,
+        isCopy: t => (t.k === 'sys' ? /^sol_mem(cpy|move)_$/.test(t.name) : t.k === 'fn' && /^(memcpy|memmove)\d*_?$/.test(p.funcs.get(t.pc)?.name ?? '')),
+        typedSrc: e => { if (e.k !== 'var' || !names[e.id]) return undefined; const t = varTypes.get(e.id); return t && !BUILTIN_VIEW[t] ? { type: t, name: names[e.id] } : undefined; },
+        fits: (t, d, n) => fitsLoose(views, t, d, n),
+        embedded: (t, off) => { const r = views.resolve(t, off); return r && !r.rest && r.last.k === 'embed' && views.map.has(r.last.type) ? { type: r.last.type, name: r.path[r.path.length - 1].replace(/\[(\d+)\]$/, '_$1') } : undefined; },
+        rootOf: (t, _args, at) => {
+          if (t.k !== 'fn') return undefined;
+          if (accounts && t.pc === tpc) return { name: 'accounts_res', copyName: 'ctx_accounts', type: accounts, shift: acctShift.get(pc) ?? 0, why: `the Accounts struct try_accounts returns (the result of accounts_${ix}), and copies of it` };
+          const a = aobjs?.get(at);
+          if (a?.name) return { name: `${a.name}_res`, copyName: `${a.name}_acc`, type: a.view, why: 'the result of the call taking the account (per call where the slot is reused), and copies of it' };
+          const role = outRole(fnName(t.pc));
+          const tag = outTags.get(t.pc);
+          if (role && !role.inout) return { name: role.name, copyName: `${role.name}_copy`, type: role.type, why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
+          const cn = fnName(t.pc).replace(/_[0-9a-f]{3,}$/, '');
+          const rn = /^fn$|^fn_/.test(cn) || cn.length > 20 ? 'res' : `${cn}_res`;
+          if (tag !== undefined || outParams.has(t.pc)) return { name: rn, copyName: `${rn}_copy`, type: tag !== undefined ? `Tagged${tag * 8}` : undefined, why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
+          return undefined;
+        },
+      });
+      let any = false;
+      for (const r of rg.list) {
+        if (r.dropped) continue;
+        if (claimed.some(c => c >= r.lo && c < r.hi)) { r.dropped = true; continue; }
+        r.name = unique(r.name);
+        any = true;
+      }
+      return any ? rg : undefined;
     };
     // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
     const varTypes = new Map<number, string>();
@@ -1231,7 +1328,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
       visit(body);
     }
-    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags));
+    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags, pc => isLib(pc) || outParams.has(pc)));
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
@@ -1269,10 +1366,12 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
-    if (frameDecl) lines.push(frameDecl);
+    const bodyLines = printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v)));
+    const fdecl = frameDecl();
+    if (fdecl) lines.push(fdecl);
     if (zeroInit.length) lines.push(`\tlet ${zeroInit.map(v => `${names[v.id]}${varTypes.has(v.id) ? `: ${varTypes.get(v.id)}` : ''} = 0`).join(', ')}`);
     const bodyAt = lines.length;
-    lines.push(...printBody(pr, f, body, '\t', decls, hoisted.filter(v => used.has(v))));
+    lines.push(...bodyLines);
     lines.push('}');
     let irCfg: ReturnType<typeof cfgOf> | undefined;
     if (opts.sugar !== false) facts.set(pc, functionFacts({
@@ -1329,6 +1428,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
 
 const BUILTIN_VIEW: Record<string, View> = Object.fromEntries(BUILTIN_VIEWS.map(v => [v.name, v]));
 
+const GENERIC_RESULT = 'the result of the one (library / out-parameter) call they are passed to';
 /** A role of a stack object: a name for it, its view type when the layout is known, and where the role comes from. */
 interface FrameClaim { name: string; type?: string; why: string; out?: boolean; extent?: number }
 
@@ -1340,7 +1440,7 @@ function outRole(name: string): { name: string; type?: string; inout?: boolean }
   const n = name.replace(/_[0-9a-f]+$/, '');
   const m = /^__(multi3|udivti3|umodti3|divti3|modti3)$/.exec(n);
   if (m) return { name: m[1] === 'multi3' ? 'prod' : /div/.test(m[1]) ? 'quot' : 'rem', type: 'U128' };
-  if (/^Error_with_|^anchor_error_from$/.test(n)) return { name: 'err' };
+  if (/^Error_with_|^anchor_error_from$|^program_error_from(_\d+)?$/.test(n)) return { name: 'err' };
   if (n === 'AccountInfo_clone') return { name: 'info', type: 'AccountInfo' };
   if (/^AccountInfo_try_borrow_(mut_)?data$/.test(n)) return { name: 'data_ref' };
   if (/^AccountInfo_try_borrow_(mut_)?lamports$/.test(n)) return { name: 'lamports_ref' };
@@ -1359,7 +1459,7 @@ function outRole(name: string): { name: string; type?: string; inout?: boolean }
  * passed as the out parameter (first argument) of calls whose result role is known: u128 builtins (U128),
  * Anchor error constructors (`err`).
  */
-function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>): Map<number, FrameClaim[]> {
+function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>, outCallee: (pc: number) => boolean): Map<number, FrameClaim[]> {
   const claims = new Map<number, FrameClaim[]>();
   const fp = f.vars.find(v => v.param === 10)?.id;
   if (fp === undefined) return claims;
@@ -1369,7 +1469,7 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   for (const s of sites) for (const o of siteObjects(s, fp, read)) { let l = sited.get(o.off); if (!l) sited.set(o.off, (l = [])); l.push({ name: o.name, type: o.type, why: 'the CPI / PDA / fmt calls they are built for' }); }
   // out parameters: every use of the object's address is as the first argument of such calls
   const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
-  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
+  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), generic = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
   const keyUse = (o: number) => keyUses.set(o, (keyUses.get(o) ?? 0) + 1);
   const visit = (e: Expr, addr: boolean) => {
     const o = fo(e);
@@ -1383,6 +1483,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
         const cn = e.t.k === 'fn' ? fnName(e.t.pc) : e.t.k === 'sys' ? e.t.name : '';
         if (/^(sol_)?memcmp_?$/.test(cn) && e.args[2]?.k === 'const' && e.args[2].v === 32n) for (const a of e.args.slice(0, 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
         if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ name: r.name, type: r.type, why: r.inout ? 'the object the calls they are passed to work on' : 'out parameter of the calls they are passed to', out: !r.inout }); }
+        // (another library function or one only writing through its first parameter: a result, as words)
+        else if (o0 !== undefined && e.t.k === 'fn' && outCallee(e.t.pc) && e.args.length > 1) { let l = generic.get(o0); if (!l) generic.set(o0, (l = [])); l.push({ name: 'res', type: 'Result64', why: GENERIC_RESULT, out: true }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
         if (e.t.k === 'ind') visit(e.t.e, false);
         e.args.forEach(a => visit(a, false));
@@ -1411,6 +1513,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   // (a site object passed to other calls too is a slot reused for something else)
   for (const [o, cs] of sited) if ((argEsc.get(o) ?? 0) <= cs.length) cs.forEach(c => add(o, c));
   for (const [o, cs] of outs) if (cs.length === escapes.get(o) && !claims.has(o)) cs.forEach(c => add(o, c));
+  // (a single call's result; slots reused for several results: frameregions.ts)
+  for (const [o, cs] of generic) if (cs.length === 1 && escapes.get(o) === 1 && !outs.has(o) && !claims.has(o)) add(o, cs[0]);
   // (a key: its address only ever an operand of 32-byte comparisons; its accesses inside its 32 bytes, see setupFrame)
   for (const [o, n] of keyUses) if (n === escapes.get(o) && !claims.has(o)) add(o, { name: 'key', why: 'operands of 32-byte comparisons (public keys)', extent: 32 });
   return claims;
@@ -1898,6 +2002,23 @@ function fitsAccess(V: Views, type: string, d: number, size: number, copy: boole
     return o === end;
   }
   if (r.last.k === 'scalar') return !r.rest && r.last.size === size;
+  if (r.last.k === 'ref') return !r.rest && size === 8;
+  return r.rest + size <= V.width(r.last);
+}
+/** An access of `size` bytes at offset d of an object of view `type` (a frame region): outside every field, or hitting one exactly. */
+function fitsLoose(V: Views, type: string, d: number, size: number): boolean {
+  if (d < 0) return false;
+  let hit = false;
+  for (let i = 0; i < size && !hit; i++) hit = !!V.fieldAt(type, d + i);
+  if (!hit) return true;
+  const r = V.resolve(type, d);
+  if (!r) return false;
+  if (r.last.k === 'scalar') {
+    if (r.rest) return false;
+    let o = d;
+    while (o < d + size) { const g = V.resolve(type, o); if (!g || g.rest || g.last.k !== 'scalar') return false; o += g.last.size; }
+    return o === d + size;
+  }
   if (r.last.k === 'ref') return !r.rest && size === 8;
   return r.rest + size <= V.width(r.last);
 }

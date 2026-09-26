@@ -43,6 +43,9 @@ named after its role, and typed when its layout is fixed by that role, when the 
   `prod.lo`, `prod.hi`), Anchor error constructors (`err`), `AccountInfo::clone` (`info: AccountInfo`),
   `try_borrow_data` (`data_ref`), sysvar getters (`rent`, `clock`), `try_accounts` (`accts`), RawVec growth
   (`vec`), and user functions whose out parameter holds an enum with a clear tag (`res: Tagged64`, below);
+  otherwise the one call of a library function (or of a user function only writing through its first parameter)
+  the object is passed to: `res: Result64`, its 8-byte words `res.tag`, `res.val`, `res.val2`, `res.val3` (every
+  access one of these words; a slot receiving several results: frame regions, below);
 * objects whose address is only ever an operand of 32-byte comparisons (`memcmp(…, 0x20)`, `memeq`, `keyeq`) and
   that are only accessed within their 32 bytes: `key` (a public key: `memcmp(key_2, key, 0x20)`).
 
@@ -186,6 +189,34 @@ interface ChangeWhitelistAccounts {
 
 Temporaries defined once as an account of an Accounts struct (or of a Context's `accounts`) are named after it:
 `const whirlpool: Whirlpool = accounts.whirlpool`.
+
+**Frame regions** (`[heur]`, `src/frameregions.ts`): a stack object is named (and typed) after what its bytes
+hold, per stretch of statements. A region starts where a call writes a result of a known layout through its first
+argument — the handler's call of try_accounts (`accounts_res: <Ix>Accounts`; the view built from try_accounts'
+stores even when no Context is passed on, after the `Result` tag word when no field is at offset 0), an account
+try_accounts takes (`<account>_res`, typed by its in-memory view), or, where one slot receives several results,
+any callee with an out parameter (`res`, `<callee>_res`, `err`, `Tagged…`) — and where such an object's bytes
+are copied elsewhere in the frame (memcpy / copy / 8-byte words stored at one constant distance, at least half
+of the object; a copy of an embedded view field starts a region of that view): `ctx_accounts`, `<account>_acc`.
+It ends at the next result written to the slot, a write of other data over the slot's start, a syscall given
+its address, and at joins whose sides disagree (loops: at their head). The name is a `const` declared as the
+object's address (`const accounts_res: SetFeeRateAccounts = fp - 0x308, ctx_accounts: SetFeeRateAccounts =
+fp - 0x610`; a slot reused for several results gets one alias per result, all the same address); accesses print
+as fields when every access to the region fits its view (else untyped, `name + 0x10`), addresses inside a field
+relative to the object:
+
+```ts
+k = accounts_set_fee_rate(accounts_res, undef, s620, undef, fp)
+const f = accounts_res.whirlpools_config.info
+memcpy(ctx_accounts + 0x18, accounts_res + 0x18, 0x2f0)
+st64(ctx_accounts, f, h, g)
+…
+ctx_accounts.whirlpool.fee_rate = fee_rate
+```
+
+**Program errors** (`[heur]`): a function storing 6000 + its second parameter (Anchor's `#[error_code]` enum as an
+`anchor_lang::error::Error`) is `program_error_from`; its constant argument shows the code, and the IDL error
+name when given: `program_error_from(err, 0x1c /* error::FeeRateMaxExceeded = 6028 */)`.
 
 **Parameter types** (`[heur]`): a parameter (never reassigned) gets a view type when at least half of the direct
 calls pass an object of that view type and none one of another — or, with fewer, when every load and store through

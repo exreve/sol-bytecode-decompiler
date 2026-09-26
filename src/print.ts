@@ -30,7 +30,9 @@ export interface PrintCtx {
   keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
-  frameTyped?: (off: bigint) => { t: string; type: string; rel: number } | undefined; // typed stack object holding fp + off: its name, view type, offset in it
+  frameTyped?: (off: bigint) => { t: string; type: string; rel: number; exact?: boolean } | undefined; // typed stack object holding fp + off: its name, view type, offset in it (exact: an address inside a field is shown relative to the object, not the field)
+  atNode?: (n: Node) => void;
+  argNote?: (t: CallTarget, i: number, v: bigint) => string | undefined; // comment after a constant call argument (e.g. an error code's name) // the node whose statement / condition / return is printed next
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
   nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
@@ -100,7 +102,7 @@ export class Printer {
 
   /** `obj.path` for an address expression obj + c (c inside a declared field), with the byte offset left over. */
   /** A frame address fp + c inside a typed stack object. */
-  frameObj(e: Expr): { t: string; type: string; rel: number } | undefined {
+  frameObj(e: Expr): { t: string; type: string; rel: number; exact?: boolean } | undefined {
     if (!this.ctx.frameTyped || e.k !== 'bin' || e.op !== 'add' || e.a.k !== 'var' || e.b.k !== 'const' || this.ctx.varName(e.a.id) !== 'fp') return undefined;
     return this.ctx.frameTyped(BigInt.asIntN(64, e.b.v));
   }
@@ -129,12 +131,20 @@ export class Printer {
       const f = this.viewField(e.addr);
       if (!f) return undefined;
       if (!f.rest && ((f.last.k === 'scalar' && f.last.size === e.size) || (f.last.k === 'ref' && e.size === 8))) return { t: f.t, prec: P.prim };
+      if (f.last.k === 'embed' && !f.rest && this.frameObj(e.addr)?.exact) {
+        // (the first field of an embedded object: x.a.b for a load at x.a)
+        const V = this.ctx.views;
+        let t = f.t, last: import('./views.ts').FieldType = f.last;
+        for (let r; last.k === 'embed' && V.map.has(last.type) && (r = V.resolve(last.type, 0)) && !r.rest;) { t += '.' + r.path.join('.'); last = r.last; }
+        if ((last.k === 'scalar' && last.size === e.size) || (last.k === 'ref' && e.size === 8)) return { t, prec: P.prim };
+      }
       if (f.last.k === 'embed') return { t: `ld${e.size * 8}(${f.rest ? `${f.t} + ${fmtConst(BigInt(f.rest))}` : f.t})`, prec: P.call };
       return undefined;
     }
     if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') {
       const f = this.viewField(e);
-      if (!f || f.last.k !== 'embed') return undefined;
+      const fo = this.frameObj(e);
+      if (!f || f.last.k !== 'embed' || (fo?.exact && (f.rest || !fo.rel))) return undefined;
       return f.rest ? { t: `${f.t} + ${fmtConst(BigInt(f.rest))}`, prec: P.add } : { t: f.t, prec: P.prim };
     }
     return undefined;
@@ -277,6 +287,7 @@ export class Printer {
       }
     }
     this.keyArgs(args, a);
+    if (this.ctx.argNote) args.forEach((x, i) => { if (x.k !== 'const' || a[i].includes('/*')) return; const n = this.ctx.argNote!(t, i, x.v); if (n) a[i] = `${a[i]} /* ${n} */`; });
     if (t.k === 'fn') return `${this.ctx.fnName(t.pc)}(${joinArgs(a)})`;
     if (t.k === 'sys') return `${this.ctx.sysName(t.name)}(${joinArgs(a)})`;
     return `callx(${joinArgs([this.u(t.e, P.assign), ...a])})`;
@@ -353,6 +364,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
   const rec = (ns: Node[], d: number) => {
     for (let i = 0; i < ns.length; i++) {
       const n = ns[i];
+      pr.ctx.atNode?.(n);
       const o = pr.ctx.outline?.(ns, i);
       if (o) {
         // the rest of the list (it ends in a return on every path) as one call of the helper
@@ -386,6 +398,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
           while (el.length === 1 && el[0].k === 'if') {
             const e = el[0];
             chain.push([e, out.length]);
+            pr.ctx.atNode?.(e);
             out.push(`${I(d)}} else if (${pr.expr(e.c, 0)}) {`);
             rec(e.then, d + 1);
             el = e.else;
@@ -406,6 +419,7 @@ export function printBody(pr: Printer, f: VarFunc, body: Node[], indent: string,
           else if (n.form === 'while') out.push(`${I(d)}${lbl}while (${pr.expr(n.c!, 0)}) {`);
           else out.push(`${I(d)}${lbl}do {`);
           rec(n.body, d + 1);
+          pr.ctx.atNode?.(n);
           out.push(n.form === 'do' ? `${I(d)}} while (${pr.expr(n.c!, 0)})` : `${I(d)}}`);
           break;
         }

@@ -378,7 +378,9 @@ function u128(views: Views): string {
  * returns, the struct's words holding a boxed account, and those holding the &AccountInfo other account
  * kinds start with (Signer, AccountLoader, Program, UncheckedAccount, …), by account name.
  */
-export interface AccountObjs { boxes: Map<number, AccountObj>; inline: Map<number, AccountObj>; refs: Map<number, AccountObj>; infos: Map<number, { name: string; type?: string; embed: boolean }> }
+export interface AccountObjs { boxes: Map<number, AccountObj>; inline: Map<number, AccountObj>; refs: Map<number, AccountObj>; infos: Map<number, { name: string; type?: string; embed: boolean }>
+	/** per account-taking call (its pc): the account's name, the view of the object written at its out parameter (unless boxed) */
+	calls: Map<number, { name?: string; view?: string }> }
 
 /**
  * Per try_accounts function (see the file comment): variables holding a boxed deserialized account, and
@@ -521,12 +523,13 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 				if (b.term.k === 'br') scan(b.term.c)
 			}
 		}
-		interface Obj { type?: string; callee: number; view?: string; name?: string; embed?: boolean }
+		interface Obj { type?: string; callee: number; view?: string; name?: string; embed?: boolean; boxed?: boolean }
 		// the accounts slice (&mut &[AccountInfo], the third parameter): calls given it take the next account
 		const accountsP = f.vars.find(v => v.param === 3)?.id
 		const takesAccounts = (args: Expr[]) => accountsP !== undefined && !defs.has(accountsP) && args.some(a => a.k === 'var' && a.id === accountsP)
 		interface Org { obj: number; off: number }
 		const objs: Obj[] = []
+		const callObj = new Map<number, number>() // call pc -> object
 		const org = new UndoMap<number, Org>()     // frame word -> which object word it holds
 		const varOrg = new UndoMap<number, Org>()  // variable -> which object word it holds
 		const outWords = new Map<number, Org>()
@@ -590,7 +593,9 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 				const view = t && layout(tpc, t)
 				if (t && view) {
 					const id = objs.push({ type: t, callee: tpc, view }) - 1
+					callObj.set(s.pc, id)
 					const box = boxAtOf.get(`${tpc}:${t}`)
+					if (box !== undefined) objs[id].boxed = true // (no object in place)
 					if (box !== undefined) { clobber(out, 0x40); org.set(out + box, { obj: id, off: -1 }) }
 					else {
 						const n = sizeOf(view)
@@ -603,6 +608,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 					if (w !== undefined) {
 						// (the other words of the out object: the Err payload an account-name error is given)
 						const id = objs.push({ callee: tpc, type: t ?? w.type, embed: w.embed }) - 1
+						callObj.set(s.pc, id)
 						const n = Math.max(0x40, w.off + 0x30)
 						clobber(out, n)
 						for (let w2 = 0; w2 < n; w2 += 8) org.set(out + w2, { obj: id, off: w2 - w.off })
@@ -665,7 +671,9 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 			if (prev) { const pn = bases.get(`${obj}:${prev[0]}`) ?? 0; if (pn > n || (pn === n && prev[0] < base)) continue; inline.delete(prev[0]) }
 			inline.set(base, { name: ob.name, view: ob.view, rust: ob.type.replace(/^spl:/, '') })
 		}
-		if (boxes.size || inline.size || infos.size || refs.size) res.set(pc, { boxes, inline, refs, infos })
+		const calls = new Map<number, { name?: string; view?: string }>()
+		for (const [at, id] of callObj) { const o = objs[id]; calls.set(at, { name: o.name, view: o.view && !o.boxed ? o.view : undefined }) }
+		if (boxes.size || inline.size || infos.size || refs.size || calls.size) res.set(pc, { boxes, inline, refs, infos, calls })
 	}
 	return res
 }
