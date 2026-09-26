@@ -121,7 +121,7 @@ const ANCHOR_ERRORS: Record<number, string> = {
 }
 
 const sha8 = (s: string) => createHash('sha256').update(s).digest().readBigUInt64LE(0)
-const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').toLowerCase()
+const snake = (s: string) => s.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2').replace(/\s+/g, '_').toLowerCase()
 
 interface SelDb { names: Record<string, string>; verbs: string[]; nouns: string[] }
 let selDb: SelDb | null | undefined
@@ -214,7 +214,7 @@ export class Semantics {
 				}
 				if (ptr === undefined || len === undefined || len > 200n) continue
 				const bytes = this.p.image.bytesAt(ptr, Number(len))
-				const m = bytes && /^Instruction: ([A-Za-z0-9_]+)$/.exec(Buffer.from(bytes).toString('latin1'))
+				const m = bytes && /^Instruction: ([A-Za-z0-9_]+(?: [A-Za-z0-9_]+)*)$/.exec(Buffer.from(bytes).toString('latin1'))
 				if (m) {
 					let l = this.ixLogs.get(f.pc); if (!l) this.ixLogs.set(f.pc, (l = []))
 					if (!l.includes(snake(m[1]))) l.push(snake(m[1]))
