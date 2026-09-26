@@ -263,8 +263,8 @@ export function exitFns(r: Result): Map<number, ExitFn> {
  * frame: the handler's inlined business logic).
  */
 export function addExitWrites(r: Result) {
-	const exits = exitFns(r)
 	if (!r.anchor) return
+	const exits = exitFns(r)
 	for (const fo of r.funcs) {
 		const ff = r.facts.get(fo.pc)
 		if (!ff) continue
@@ -1245,8 +1245,10 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 		if (c) for (let j = 0; j < c.args.length; j++) { const p = fpOff(c.args[j]); if (p !== undefined && p <= o && o < p + (callee ? callWrites(c.t, j, callee) : 0x80)) return loose ? { k: 'call', t: c.t, args: c.args } : null }
 		return undefined
 	}
-	// (per (key, loose): block -> the definition reaching its end)
-	const endMemo = new Map<number, Map<number, [Expr, number] | null>>()
+	// (per (key, loose): block -> the definition reaching its end; n: the number of entries)
+	const endMemo = new Map<number, { v: ([Expr, number] | null | undefined)[]; n: number }>()
+	// (the blocks on the search's path)
+	const onPath = new Uint8Array(f.blocks.length)
 	// (per block, lazily: the statements a frame slot / a variable may be affected by (where effect is not
 	// undefined for some key), ascending; the others are skipped)
 	const slotAt: (number[] | undefined)[] = [], varAt: (Map<number, number[]> | undefined)[] = []
@@ -1279,12 +1281,11 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 	const memoed = new WeakSet<object>()
 	/** the definition of key reaching position p (the same one on every path), with its position */
 	const reaching = (key: number, p: number, loose = false): [Expr, number] | null => {
-		const path = new Set<number>()
 		let steps = 0, cyc = false, over = false
 		const mkey = key * 2 + (loose ? 1 : 0)
 		let em = endMemo.get(mkey)
-		if (!em) endMemo.set(mkey, (em = new Map()))
-		const memo = em
+		if (!em) endMemo.set(mkey, (em = { v: [], n: 0 }))
+		const memo = em, mv = em.v
 		// (undefined: only paths around a loop back to a block being searched)
 		const go = (b: number, from: number): [Expr, number] | null | undefined => {
 			const ss = f.blocks[b].stmts
@@ -1299,23 +1300,23 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 			if (!preds.length) return null
 			if (++steps > 400) { over = true; return null }
 			let r: [Expr, number] | undefined
-			path.add(b)
+			onPath[b] = 1
 			for (const q of preds) {
-				let x = memo.get(q)
+				let x = mv[q]
 				if (x === undefined) {
-					if (path.has(q)) { cyc = true; continue }
+					if (onPath[q]) { cyc = true; continue }
 					const c0 = cyc
 					cyc = false
 					const y = go(q, f.blocks[q].stmts.length)
-					if (!cyc && y !== undefined) { memo.set(q, y); if (y) memoed.add(y) }
+					if (!cyc && y !== undefined) { mv[q] = y; memo.n++; if (y) memoed.add(y) }
 					cyc ||= c0
 					if (y === undefined) continue
 					x = y
 				}
-				if (!x || (r && r[0] !== x[0])) { path.delete(b); return null }
+				if (!x || (r && r[0] !== x[0])) { onPath[b] = 0; return null }
 				r = x
 			}
-			path.delete(b)
+			onPath[b] = 0
 			return r
 		}
 		const b0 = p >> 16, ss = f.blocks[b0].stmts, from = p & 0xffff
@@ -1328,10 +1329,10 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 		}
 		let pm = predMemo.get(mkey)
 		if (!pm) predMemo.set(mkey, (pm = new Map()))
-		const n = memo.size, c = pm.get(b0)
+		const n = memo.n, c = pm.get(b0)
 		if (c && c.n === n) { const r = c.r; return !r || memoed.has(r) ? r : [effect(f.blocks[r[1] >> 16].stmts[r[1] & 0xffff], key, loose)!, r[1]] }
 		const r = go(b0, 0) ?? null
-		if (!over && memo.size === n) pm.set(b0, { r, n })
+		if (!over && memo.n === n) pm.set(b0, { r, n })
 		return r
 	}
 	d0 = { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching }
