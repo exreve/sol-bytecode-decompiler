@@ -8,9 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // known issues (compat/README.md): binary -> reason
-const KNOWN: Record<string, string> = {
-	'solang_counter.so': 'ELF symbol names like counter::counter::function::count are emitted as-is (invalid identifiers)',
-}
+const KNOWN: Record<string, string> = {}
 
 const root = join(import.meta.dirname, '..')
 const argv = process.argv.slice(2)
