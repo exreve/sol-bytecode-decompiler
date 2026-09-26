@@ -325,7 +325,7 @@ export function probeDeserializer(p: Program, x: number): Map<number, number> | 
 		mem.write(DB, d)
 		if (track) {
 			const note = (a: bigint, k: number) => { if (a >= DB && a < DB + BigInt(n)) read = Math.max(read, Math.min(n, Number(a - DB) + k)) }
-			mem.onLoad = (a, k) => note(a, k)
+			mem.onLoad = (ah, al, k) => note((BigInt(ah >>> 0) << 32n) | BigInt(al >>> 0), k)
 			mem.onCopy = (a, b) => note(a, b.length)
 		}
 		const e = new Exec(p, mem, { maxSteps: 60_000 })

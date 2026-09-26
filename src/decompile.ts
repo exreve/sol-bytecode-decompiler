@@ -960,7 +960,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     // native deserializers of account data: calls fn(out, acc.data.ptr, acc.data.len) (see anchorstate.ts probeDeserializer)
     {
       const cellField = (pc: number, f: VarFunc, e: Expr, off: bigint): boolean => {
-        if (e.k === 'var' && defCount(f, e.id) === 1) { const d = f.blocks.flatMap(b => b.stmts).find(st => st.k === 'set' && st.dst === e.id); if (d?.k === 'set') e = d.e; }
+        if (e.k === 'var' && defCount(f, e.id) === 1) { const id = e.id, d = f.blocks.flatMap(b => b.stmts).find(st => st.k === 'set' && st.dst === id); if (d?.k === 'set') e = d.e; }
         const a = e.k === 'load' && e.size === 8 ? e.addr : undefined;
         return !!a && a.k === 'bin' && a.op === 'add' && a.b.k === 'const' && a.b.v === off && exprType(views, a.a, id => baseTypes.get(pc)!.get(id)) === 'DataCell';
       };
