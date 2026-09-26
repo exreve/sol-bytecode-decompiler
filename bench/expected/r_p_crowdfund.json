@@ -1,0 +1,84 @@
+{
+	"kind": "native",
+	"set": "realistic",
+	"source": "bench/real/r_p_crowdfund (pinocchio 0.8.4 + pinocchio-system 0.2.3, written for the bench)",
+	"about": "Realistic clean program: every finding on it is false. Scored for rules only. Instructions by tag, accounts in index order. load_campaign checks owner (is_owned_by program id), exact length, tag and the address [campaign, creator, id] from the stored bump; load_receipt the same for [receipt, campaign, contributor] plus receipt.campaign == the campaign passed. Lamports only leave program-owned campaign / receipt accounts; sum(receipt.amount) == campaign.raised is kept by every instruction.",
+	"instructions": {
+		"create_campaign": {
+			"tag": 0,
+			"accounts": {},
+			"why": {
+				"creator": "Signer, pays the rent; stored as the campaign's creator. Permissionless by design (anyone runs a campaign).",
+				"campaign": "Key == find_program_address([campaign, creator, id]); created through create_pda (CreateAccount, or top-up + Allocate + Assign for a pre-funded address) signed with the PDA seeds. goal > 0, deadline in (now, now + 90 days].",
+				"system_program": "Key == system program id."
+			}
+		},
+		"contribute": {
+			"tag": 1,
+			"accounts": {},
+			"why": {
+				"contributor": "Signer; pays the contribution with a system Transfer (its own signature) and the receipt rent.",
+				"campaign": "load_campaign; active and before the deadline.",
+				"receipt": "Not yet a program account: key == find_program_address([receipt, campaign, contributor]) and created with those seeds; otherwise load_receipt (this campaign) and receipt.contributor == contributor.",
+				"system_program": "Key == system program id."
+			}
+		},
+		"reduce_contribution": {
+			"tag": 2,
+			"accounts": {},
+			"why": {
+				"contributor": "Signer and key == receipt.contributor; amount <= receipt.amount.",
+				"campaign": "load_campaign; active and before the deadline.",
+				"receipt": "load_receipt (of this campaign)."
+			}
+		},
+		"finalize": {
+			"tag": 3,
+			"accounts": {},
+			"why": { "campaign": "load_campaign; still active and past the deadline. Permissionless crank by design: the outcome (raised >= goal) is fixed by the stored values." }
+		},
+		"withdraw": {
+			"tag": 4,
+			"accounts": {},
+			"why": {
+				"creator": "Signer and key == campaign.creator.",
+				"campaign": "load_campaign; state succeeded, set to withdrawn before the lamports (raised) move: one withdrawal only."
+			}
+		},
+		"refund": {
+			"tag": 5,
+			"accounts": {},
+			"why": {
+				"contributor": "Signer and key == receipt.contributor.",
+				"campaign": "load_campaign; failed (contribution + receipt rent back) or withdrawn (receipt rent only).",
+				"receipt": "load_receipt (of this campaign); zeroed and closed, so it cannot be refunded twice."
+			}
+		},
+		"batch_refund": {
+			"tag": 6,
+			"accounts": {},
+			"why": {
+				"campaign": "load_campaign; failed.",
+				"remaining pairs (receipt, contributor)": "each: load_receipt (of this campaign) and contributor key == receipt.contributor; the receipt is closed, so a repeated pair fails its second load. Permissionless by design: a refund can only reach the receipt's own contributor."
+			}
+		},
+		"cancel": {
+			"tag": 7,
+			"accounts": {},
+			"why": { "creator": "Signer and key == campaign.creator.", "campaign": "load_campaign; active -> failed (contributors can then refund)." }
+		},
+		"update_campaign": {
+			"tag": 8,
+			"accounts": {},
+			"why": { "creator": "Signer and key == campaign.creator.", "campaign": "load_campaign; active with nothing raised and no contributor yet; new goal / deadline checked like at creation." }
+		},
+		"close_campaign": {
+			"tag": 9,
+			"accounts": {},
+			"why": {
+				"creator": "Signer and key == campaign.creator; receives the remaining (rent) lamports.",
+				"campaign": "load_campaign; withdrawn, or failed with refunded == raised (no contribution left in it); data zeroed and closed."
+			}
+		}
+	}
+}
