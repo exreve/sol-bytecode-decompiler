@@ -48,6 +48,7 @@ function immediates(p: Program, pc: number, depth: number, memo: Map<string, Set
 	if (r) return r
 	r = new Set()
 	memo.set(k, r)
+	if (!(pc >= 0 && pc < p.insns.length)) return r // (a bogus call target)
 	const end = extentOf(p, pc), v2 = p.version === 2
 	for (let i = pc; i < end; i++) {
 		const ins = p.insns[i]
@@ -403,7 +404,7 @@ export function accountObjects(p: Program, idl: IdlInfo | undefined, views: View
 		const nm = p.funcs.get(pc)?.name ?? ''
 		const m = /^(Account|Mint)_unpack(_from_slice|_unchecked)?(_[0-9a-f]+)?$/.exec(nm)
 		if (m) { r.add(m[1] === 'Account' ? 'spl:TokenAccount' : 'spl:Mint'); return r }
-		if (depth === 0) return r
+		if (depth === 0 || !(pc >= 0 && pc < p.insns.length)) return r
 		const end = extentOf(p, pc)
 		for (let i = pc; i < end; i++) if (p.insns[i].opc === 0x85) {
 			const t = callTargetName(p, i, p.insns[i].imm)
