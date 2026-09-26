@@ -51,8 +51,9 @@
 //     proof:      [ { operation, kind, properties: [ { prop, status, evidence } ] } ]   (per-operation property checklist)
 //   } ]
 //   state_machine [ { field (account.field), set_by: [ { ix, value, at } ], checked_by: [ { ix, cond, at } ] } ]: status-like fields
-//   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low' | 'info': informational, not in the Findings lists), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
+//   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low' | 'info': informational, not in the Findings lists), title, accounts, path, evidence } ] (phase2.ts RULES, incidents.ts), ranked
 //   authority_fields [ { field, writtenBy: [ix] } ]: stored fields written by an AUTHORITY_WRITE
+//   fund_movers  [ { instruction, authority, kind, from?, at } ]: instructions moving program-controlled funds and who gates them (incidents.ts; informational)
 //   validation_consistency [ { role (IDL account type | 'data_len <n>' | account name), by ('type' | 'data_len' | 'name'),
 //                              instructions: [ { ix, account, validations: [owner | type | signer | writable | address | '<field> == <role>.key' | 'key == <role>.<field>'], uses } ],
 //                              inconsistencies: [ { instruction, account, validation, applied_in: [ { instruction, account, at } ], others, uses } ] } ]

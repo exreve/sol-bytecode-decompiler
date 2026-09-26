@@ -40,6 +40,39 @@ export const INCIDENT_RULES: Record<string, string> = {
 
 const M64 = (1n << 64n) - 1n
 const SYSVAR_IX_W0 = 0x66d17b1817d5a706n // Sysvar1nstructions1111111111111111111111111, first word
+const SYSVAR_IX_WORDS = [SYSVAR_IX_W0, 0xc0c2fd5504d4da35n, 0xa57556218fc624c1n, 0x85fcbbadbn]
+const libSysvarMemo = new WeakMap<Result, Map<number, boolean>>()
+/**
+ * A library function (no printed body; e.g. sysvar::instructions::check_id inside load_current_index_checked) holding the
+ * Instructions sysvar id in its bytecode (a 64-bit immediate: one of the id's words, or the address of the 32 id bytes in
+ * read-only memory), itself or a function it calls
+ */
+function libHasSysvarId(r: Result, pc: number, depth = 1): boolean {
+	let m = libSysvarMemo.get(r)
+	if (!m) libSysvarMemo.set(r, (m = new Map()))
+	const k = pc * 4 + depth
+	if (m.has(k)) return m.get(k)!
+	m.set(k, false)
+	const p = r.program, starts = [...p.funcs.keys()].sort((a, b) => a - b)
+	const end = starts.find(x => x > pc) ?? p.insns.length
+	let hit = false
+	for (let i = pc; i < Math.min(end, pc + 3000) && !hit; i++) {
+		const x = p.insns[i]
+		if (x.opc === 0x18 && i + 1 < end) {
+			const v = BigInt.asUintN(32, BigInt(x.imm)) | BigInt.asUintN(32, BigInt(p.insns[i + 1].imm)) << 32n
+			if (SYSVAR_IX_WORDS.includes(v)) hit = true
+			else if (v > 0xffffffffn && v < 0x200000000n) {
+				const b = p.image.bytesAt(v, 32)
+				if (b && SYSVAR_IX_WORDS.every((w, j) => b.slice(8 * j, 8 * j + 8).reduce((a, y, q) => a | BigInt(y) << BigInt(8 * q), 0n) === w)) hit = true
+			}
+		} else if (x.opc === 0x85 && depth > 0 && x.src === 1) {
+			const t = i + 1 + x.imm
+			if (p.funcs.has(t) && t !== pc && libHasSysvarId(r, t, depth - 1)) hit = true
+		}
+	}
+	m.set(k, hit)
+	return hit
+}
 
 // ---- the instruction's code: reachable functions and their allowed blocks ----
 
@@ -72,17 +105,17 @@ function eachExpr(sc: Fn[], f: (fn: Fn, e: Expr, p: number, top: Expr) => void) 
 	}
 }
 /** the calls of the scope (statements and calls nested in expressions), with their position */
-function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number) => void, r: Result) {
+function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number, target?: number) => void, r: Result) {
 	const nameOf = (t: Extract<Expr, { k: 'call' }>['t']) => t.k === 'sys' ? t.name : t.k === 'fn' ? r.program.funcs.get(t.pc)?.name ?? '' : ''
 	for (const fn of sc) for (const b of fn.blocks) {
 		const bl = fn.fo.f.blocks[b]
 		bl.stmts.forEach((s, i) => {
 			const c = callOf(s)
-			if (s.k === 'call') f(fn, nameOf(s.t), s.args, b << 16 | i, s.pc)
-			for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x !== (c as unknown)) f(fn, nameOf(x.t), x.args, b << 16 | i, s.pc) })
+			if (s.k === 'call') f(fn, nameOf(s.t), s.args, b << 16 | i, s.pc, s.t.k === 'fn' ? s.t.pc : undefined)
+			for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x !== (c as unknown)) f(fn, nameOf(x.t), x.args, b << 16 | i, s.pc, x.t.k === 'fn' ? x.t.pc : undefined) })
 		})
 		const t = bl.term.k === 'ret' ? bl.term.e : bl.term.k === 'br' ? bl.term.c : null
-		if (t) walkExpr(t, x => { if (x.k === 'call') f(fn, nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1) })
+		if (t) walkExpr(t, x => { if (x.k === 'call') f(fn, nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined) })
 	}
 }
 
@@ -148,7 +181,10 @@ function introSites(r: Result, ix: IxOut, sc: Fn[]): Intro[] {
 		const s = sumOf(x.addr)
 		if (s.terms.length !== 2) return
 		let kind: Intro['kind'] | undefined, base: Expr[] = s.terms, index: Expr | undefined
-		if (s.c === M64 - 1n) kind = 'current'
+		// (the current index: data + len - 2, neither term scaled (an element of an array) nor a frame address)
+		const Df = defsIn(irOf(r), fn.pc)
+		const scaled = (t: Expr) => { const x = t.k === 'var' && Df?.defs.has(t.id) ? Df.defs.get(t.id)! : t; return x.k === 'bin' && (x.op === 'shl' || x.op === 'mul') }
+		if (s.c === M64 - 1n && s.terms.every(t => !scaled(t) && Df?.fpOff(t) === undefined)) kind = 'current'
 		else if (s.c === 2n) {
 			// (2·i: a shift or product, possibly masked to 17 bits, possibly in a variable)
 			const D = defsIn(irOf(r), fn.pc)
@@ -193,15 +229,22 @@ function introSites(r: Result, ix: IxOut, sc: Fn[]): Intro[] {
 /** a comparison with the Instructions sysvar id (its first word, or the 32 bytes a pointer points to) in the scope */
 const isSysvarCmp = (k: Cmp) => {
 	let hit = false
-	for (const e of [k.a, k.b]) walkExpr(e, x => { if (x.k === 'const' && x.v === SYSVAR_IX_W0) hit = true })
+	for (const e of [k.a, k.b]) walkExpr(e, x => { if (x.k === 'const' && SYSVAR_IX_WORDS.slice(0, 3).includes(x.v)) hit = true })
 	return hit || (k.n === 32 && /SYSVAR_INSTRUCTIONS/.test(lineText(k.fn, k.p)))
 }
-function sysvarKeyChecked(ix: IxOut, cmps: Cmp[], acct?: string): Loc | undefined {
+function sysvarKeyChecked(r: Result, ix: IxOut, sc: Fn[], cmps: Cmp[], acct?: string): Loc | undefined {
 	const row = acct ? ix.accounts.find(x => x.name === acct) : undefined
 	const c = row?.constraints.address
 	if (c && c.status !== 'not_found' && c.at) return c.at
 	const k = cmps.find(isSysvarCmp)
 	if (k) return locOf(k.fn, k.p)
+	// (a library function holding the id: check_id / the *_checked helpers)
+	let lib: Loc | undefined
+	eachCall(sc, (fn, _name, _args, p, _pc, t) => {
+		if (lib) return
+		if (t !== undefined && !r.facts.has(t) && libHasSysvarId(r, t)) { lib = locOf(fn, p); }
+	}, r)
+	if (lib) return lib
 	// (a check the facts name: its printed condition names the id)
 	return ix.checks.find(x => /SYSVAR_INSTRUCTIONS|Sysvar1nstructions/.test(x.cond))?.at
 }
@@ -255,7 +298,7 @@ function introspection(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	const accts = acct ? [acct] : []
 	const first = sites.find(s => s.kind === 'current') ?? sites[0]
 	const at = L(first.at)
-	const keyAt = sysvarKeyChecked(ix, cmps, acct)
+	const keyAt = sysvarKeyChecked(r, ix, sc, cmps, acct)
 	const what = `${sites.some(s => s.kind === 'current') ? 'the executing instruction\'s index (the last two bytes)' : ''}${sites.length > 1 && sites.some(s => s.kind === 'current') && sites.some(s => s.kind === 'table') ? ' and ' : ''}${sites.some(s => s.kind === 'table') ? 'an instruction by its index (the offset table)' : ''}`
 	if (!keyAt) out.push({ rule: 'introspection-unchecked', ix: ix.name, accounts: accts, path: [at], evidence: [`the Instructions sysvar is parsed: ${what}${acct ? `, from ${acct}'s data` : ''} (${at})`, `no comparison of ${acct ?? 'the account'}'s key with the Instructions sysvar id (Sysvar1nstructions1111111111111111111111111) found: a caller can pass an account holding a forged instruction list`], confidence: 'high', weight: 6 })
 	// (the index of the instruction loaded: from instruction data, the executing one's not read)
@@ -277,12 +320,13 @@ function introspection(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		if (other.some(y => y.kind === 'key' || y.kind === 'ix')) bind ??= locOf(k.fn, k.p)
 		else if (k.n === 32 && (isConstKey(oe) || !other.length)) prog ??= locOf(k.fn, k.p)
 	}
-	const moves = ix.ops.filter(VALUE_MOVE)
+	// (value moves of the program's funds: not a system transfer (a fee the caller pays))
+	const moves = ix.ops.filter(o => VALUE_MOVE(o) && (signs(r, ix, o) || (o.cpi?.family !== 'system' && !/SYSTEM_PROGRAM/.test(o.cpi?.known ?? ''))))
 	// (the loaded instruction's fields: only with the sysvar account known)
 	if (!prog && moves.length && acct) out.push({ rule: 'introspection-unchecked', ix: ix.name, accounts: accts, path: [at], evidence: [`an instruction is loaded from the Instructions sysvar before a value move (${moves[0].text.slice(0, 80)}), but no 32-byte comparison of its program id with a known id / this program's id was found: its data is trusted whatever program it targets`], confidence: 'medium', weight: 5 })
+	// (flash loans: the program's funds out, not a system transfer (a fee the caller pays))
 	const pda = moves.find(o => signs(r, ix, o)) ?? moves[0]
 	if (!bind && pda && acct) out.push({ rule: 'flash-repay-unbound', ix: ix.name, accounts: accts, path: [at, L(pda.at)], evidence: ['flash-loan style introspection: no field of the found instruction (its accounts, its amount) is compared with an account key or an argument of this instruction', `value move: ${pda.text.slice(0, 120)}`], confidence: 'medium', weight: 5 })
-	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('intro', ix.name, JSON.stringify(sites.map(s => [s.kind, s.sysvar, L(s.at), s.index?.map(y => y.source)])), 'key', keyAt && L(keyAt), 'prog', prog && L(prog), 'bind', bind && L(bind))
 	return out
 }
 
@@ -321,7 +365,6 @@ function pythLoads(r: Result, ix: IxOut, sc: Fn[]): Access[] {
 		const off = Number(s.c > 0xffffn ? -1n : s.c)
 		if (!PYTH_FIELDS.has(off) || !s.terms.length || s.terms.length > 2) return
 		const base = s.terms.map(t => valueKey(I, ix.ctx, fn.pc, t, p)).sort().join(' ')
-		if ((globalThis as { __incDebug?: boolean }).__incDebug && off === 0xd0) console.error('d0', ix.name, base)
 		if (base.startsWith('fp') || base === '?' || /^#/.test(base)) return
 		out.push({ fn, p, size: x.size, off, base, e: x })
 	})
@@ -344,8 +387,7 @@ function oracle(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		const y = o.k === 'ext' ? o.a : o
 		if (y.k === 'load') { const s = sumOf(y.addr); if (s.c === 0n) magicAt.add(s.terms.map(t => valueKey(I, ix.ctx, k.fn.pc, t, k.p)).sort().join(' ')) }
 	}
-	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('oracle', ix.name, [...by].filter(([, xs]) => xs.some(x => x.off === 0xd0)).map(([b, xs]) => `${b.slice(0, 60)}: ${xs.map(x => `${x.off.toString(16)}/${x.size}`).join(',')}`).join(' || '), [...magicAt])
-	const objs = [...by].filter(([b, xs]) => xs.some(x => x.off === 0xd0 && x.size === 8) && (magicAt.has(b) || xs.some(x => (x.off === 0x14 || x.off === 0x10) && x.size === 4)))
+	const objs = [...by].filter(([b, xs]) => xs.some(x => x.off === 0xd0 && x.size === 8) && (magicAt.has(b) || [0x10, 0x14].every(o => xs.some(x => x.off === o && x.size === 4))))
 	if (!objs.length) return []
 	const all = objs.flatMap(([, xs]) => xs)
 	const has = (offs: number[]) => all.some(x => offs.includes(x.off) && (x.off !== 0xe0 || x.size <= 4))
@@ -418,7 +460,6 @@ function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
 			if (x.k !== 'load') return undefined
 			const g = C.ev(x.addr, q)
 			const w = g?.k === 'fr' && g.ctx.fo === H ? A?.frameAcct(g.z, 8, g.at) : undefined
-			if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('  info', JSON.stringify(g, (k, v) => k === 'ctx' ? undefined : v), g?.k === 'fr' && g.ctx.fo === H, g?.k === 'fr' && g.ctx.fo.name, H?.name, JSON.stringify(w))
 			return w?.info ? w.acct : undefined
 		}
 		const key = (x: Expr, q: number, d: number): string | undefined => {
@@ -430,26 +471,26 @@ function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		}
 		return key(e, p, 0)
 	}
-	const report = (prog: string, at: string, pda: boolean, fwd: string[], text: string, raw: boolean) => {
+	const report = (prog: string, at: string, pda: boolean, fwd: string[], text: string, raw: boolean, byName = false) => {
 		if (!pda && !fwd.length) return
-		out.push({ rule: 'signer-to-untrusted-program', ix: ix.name, accounts: [prog, ...fwd], path: [at], evidence: [text.slice(0, 140), `the program id is ${prog}'s key, and no check pins it (no address / key constraint, no comparison with a known id): the caller picks the program`, pda ? 'the program signs the CPI with its PDA seeds: the callee gets the PDA\'s authority (e.g. over its token accounts)' : `the caller's signature is forwarded (${fwd.join(', ')} signs the CPI)${raw ? '; CPI not decoded: the instruction has a signer check' : ''}`, 'see also cpi-unchecked-program'], confidence: pda ? 'high' : raw ? 'low' : 'medium', weight: pda ? 6 : 4 })
+		out.push({ rule: 'signer-to-untrusted-program', ix: ix.name, accounts: [prog, ...fwd], path: [at], evidence: [text.slice(0, 140), `the program id is ${prog}'s key, and no check pins it (no address / key constraint, no comparison with a known id): the caller picks the program`, pda ? 'the program signs the CPI with its PDA seeds: the callee gets the PDA\'s authority (e.g. over its token accounts)' : `the caller's signature is forwarded (${fwd.join(', ')} signs the CPI)${raw ? '; CPI not decoded: the instruction has a signer check' : ''}`, 'see also cpi-unchecked-program'], confidence: pda ? (byName ? 'medium' : 'high') : 'info', weight: pda ? 6 : 4 })
 	}
 	const seen = new Set(ix.ops.filter(o => o.cpi && o.fnPc !== undefined).map(o => `${o.fnPc}:${o.at.pc}`))
 	for (const o of ix.ops) {
-		if (!o.cpi || o.cpi.known || o.fnPc === undefined || o.at.pc === undefined || !o.cpi.src?.program) continue
+		if (!o.cpi || o.cpi.known || o.fnPc === undefined || o.at.pc === undefined || !o.cpi.src?.program || /\(id compared with/.test(o.cpi.checked ?? '')) continue
 		const st = stmtAt(I, o.fnPc, o.at.pc)
 		if (!st) continue
 		let prog = keyAcct(o.fnPc, o.cpi.src.program, st[1])
 		// (Anchor, the program account not resolved: the one account named like a program other than the well-known ones; an
 		// address constraint no account was attributed to pins it)
-		const cands = r.anchor && !prog ? ix.accounts.filter(x => /program/i.test(x.name) && !/^(system|token|token_2022|associated_token|rent|metadata|memo|compute_budget)_program$/.test(x.name)) : []
-		if (cands.length === 1 && !ix.checks.some(c => !c.account && /ConstraintAddress|ConstraintExecutable/.test(c.error))) prog = cands[0].name
-		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('fwd', ix.name, o.text.slice(0, 60), prog, JSON.stringify(src(o.fnPc, o.cpi.src.program, st[1])), JSON.stringify(src(o.fnPc, ld8(o.cpi.src.program), st[1])), prog && pinned(ix, cmps, src, prog), E && !!E(o.fnPc), JSON.stringify(E?.(o.fnPc)?.ev(o.cpi.src.program, st[1]), (k, v) => k === 'ctx' ? undefined : typeof v === 'bigint' ? String(v) : v), JSON.stringify(o.cpi.src.program, (k, v) => typeof v === 'bigint' ? String(v) : v).slice(0, 200), ix.ctx?.parents.get(o.fnPc))
+		const cands = r.anchor && !prog ? ix.accounts.filter(x => /program/i.test(x.name) && !/system|token|associated|rent|metadata|memo|compute_budget|sysvar/i.test(x.name)) : []
+		const byName = cands.length === 1 && !prog
+		if (cands.length === 1 && !ix.checks.some(c => !c.account && /ConstraintAddress|ConstraintExecutable|InvalidProgramId|AccountNotProgram|AccountNotExecutable/.test(c.error))) prog = cands[0].name
 		if (!prog || pinned(ix, cmps, src, prog)) continue
 		let fwd = o.cpi.accounts.flatMap((x, i) => { const e = o.cpi!.src?.accounts[i]; const a = x.s && e ? keyAcct(o.fnPc!, e, st[1]) : undefined; return a && isSigner(ix, a) ? [a] : [] })
 		// (a signer meta whose account is not resolved, no signer seeds: the instruction's signers)
 		if (!fwd.length && !signs(r, ix, o) && o.cpi.accounts.some((x, i) => x.s && !keyAcct(o.fnPc!, o.cpi!.src?.accounts[i] ?? { k: 'undef' }, st[1]))) fwd = ix.accounts.filter(x => isSigner(ix, x.name)).map(x => x.name)
-		report(prog, L(o.at), signs(r, ix, o), [...new Set(fwd)], o.text, false)
+		report(prog, L(o.at), signs(r, ix, o), [...new Set(fwd)], o.text + (byName ? ' (program account by name: a Program<T> check in library code is not seen)' : ''), false, byName)
 	}
 	// (invoke / invoke_signed calls the facts did not decode (e.g. nested in an expression): the Instruction's program id
 	// (@0x30: accounts Vec, data Vec, program_id), the signer seeds' length (the stack argument after the slice pointer))
@@ -465,7 +506,6 @@ function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
 			;[f0, e0, p0] = [par!.fn, at[0][v!.param - 1], at[1]]
 		}
 		const prog = keyAcct(f0, { k: 'bin', op: 'add', a: e0, b: { k: 'const', v: 0x30n } }, p0)
-		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('raw', ix.name, name, fn.ff?.name, prog, prog && pinned(ix, cmps, src, prog), JSON.stringify(src(fn.pc, ld8({ k: 'bin', op: 'add', a: ixp, b: { k: 'const', v: 0x30n } }), p)))
 		if (!prog || pinned(ix, cmps, src, prog)) return
 		const D = defsIn(I, fn.pc)
 		let pda = false
@@ -483,6 +523,8 @@ function signerForward(r: Result, ix: IxOut, sc: Fn[]): F[] {
  */
 // ---- stale account data after a CPI ----
 
+const analysisOf = new WeakMap<Result, Analysis>()
+
 /** position a is before position b in function fn: b reachable from a and not a from b (same block: by index) */
 function before(fo: FuncOut, a: number, b: number): boolean {
 	if (a >> 16 === b >> 16) return (a & 0xffff) < (b & 0xffff)
@@ -499,9 +541,12 @@ function before(fo: FuncOut, a: number, b: number): boolean {
  */
 function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	const I = irOf(r), src = srcOf(r, ix), out: F[] = []
-	const cpis = ix.ops.filter(o => o.kinds.includes('CPI') && o.fnPc !== undefined && !o.kinds.includes('ACCOUNT_CREATE') && !/^(CreateAccount|Assign|Allocate|Transfer|InitializeAccount\d?|InitializeMint\d?|SyncNative)$/.test(o.cpi?.ix ?? ''))
+	// (token CPIs moving balances: the accounts a callee may change are the ones it owns, a token program's token accounts / mints)
+	const cpis = ix.ops.filter(o => o.fnPc !== undefined && o.kinds.some(k => k === 'TOKEN_TRANSFER' || k === 'MINT' || k === 'BURN'))
 	if (!cpis.length) return []
-	const own = new Set(ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')).map(o => o.target?.split('.')[0] ?? ''))
+	// (the program's own accounts: written by this instruction, or (by name) data another instruction writes; a CPI to another
+	// program cannot change them)
+	const own = new Set([...ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')).map(o => o.target?.split('.')[0] ?? ''), ...(r.anchor ? (analysisOf.get(r)?.stateWrites ?? []).map(w => w.target.split('.')[0]) : [])])
 	const H = r.anchor ? I.byPc.get(ix.ctx!.handler) : undefined, A = H && anchorEval(r, H), E = r.anchor ? evaluatorsFor(r, ix.ctx!) : undefined
 	const allowed = (fn: number, b: number) => !ix.ctx!.allowed || ix.ctx!.allowed(fn, b)
 	const seen = new Set<string>()
@@ -513,13 +558,11 @@ function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		const metas = (o.cpi?.accounts ?? []).flatMap((x, i) => { const e = o.cpi!.src?.accounts[i]; return x.w && e ? [...src(o.fnPc!, e, st[1]), ...src(o.fnPc!, ld8(e), st[1])].filter(y => y.kind === 'key').map(y => y.acct!) : [] })
 		// (not resolved: the accounts the program does not write itself (the IDL's writable ones))
 		const W = new Set(metas.length ? metas : ix.accounts.filter(x => (r.anchor ? x.expected.writable || x.constraints.writable : true) && !own.has(x.name) && !x.expected.signer).map(x => x.name))
-		if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('stale op', ix.name, o.text.slice(0, 50), JSON.stringify(o.cpi?.accounts), [...W], metas)
 		if (!W.size) continue
 		// (the call site at each level up to the handler)
 		let lv: [number, number] | undefined = [o.fnPc!, st[1]]
 		for (let d = 0; lv && d < 6; d++) {
 			const [fn, cp]: [number, number] = lv
-			if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('stale lv', ix.name, o.text.slice(0, 40), r.facts.get(fn)?.name, cp, [...W])
 			const fo = I.byPc.get(fn), D = defsIn(I, fn)
 			if (!fo || !D) break
 			const g = cfgOf(fo)
@@ -529,6 +572,9 @@ function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 				const q = b << 16 | bl.stmts.length
 				if (!before(fo, cp, q) && b !== cp >> 16) continue
 				const stale: [string, string][] = [], fresh = new Set<string>()
+				// (the direct operands of the condition's comparisons, through extensions)
+				const operands = new Set<Expr>()
+				walkExpr(bl.term.c, x => { if (x.k === 'cmp') for (const y of [x.a, x.b]) operands.add(y.k === 'ext' ? y.a : y) })
 				// (the condition's reads: variables through their definitions, loads)
 				const visit = (e: Expr, p: number, depth: number) => walkExpr(e, x => {
 					if (x.k === 'var' && depth < 4) {
@@ -537,7 +583,7 @@ function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 						// (a value a call left in the frame (a helper reading the account, e.g. its token amount): the accounts passed to
 						// the call writing that slot, the last one before the read in its block)
 						const o8 = y[0].k === 'load' ? D.fpOff(y[0].addr) : undefined
-						const cs = o8 !== undefined ? callOut(fo, D, o8, y[1]) : undefined
+						const cs = o8 !== undefined && !r.anchor ? callOut(fo, D, o8, y[1]) : undefined
 						const ss = [...src(fn, y[0], y[1]).filter(s => s.kind === 'data'), ...(cs ? cs.args.flatMap(e => [...src(fn, e, cs.p), ...src(fn, ld8(e), cs.p)]).filter(s => s.kind === 'key' || s.kind === 'data') : [])].filter(s => W.has(s.acct!))
 						if (before(fo, y[1], cp)) { for (const s of ss) stale.push([s.acct!, s.kind === 'key' ? `a value a call reads from ${s.acct}` : s.source]) }
 						else { for (const s of ss) fresh.add(s.acct!); visit(y[0], y[1], depth + 1) }
@@ -547,7 +593,7 @@ function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 						const h = E?.(fn)?.ev(x.addr, p)
 						const copy = !!h && h.k === 'fr' && h.ctx.fo === H && !!A?.frameAcct(h.z, x.size, h.at)
 						// (Anchor: a word of an account's deserialized copy the sources do not name, e.g. an InterfaceAccount's amount)
-						const cc = r.anchor && !ss.length ? copyAcct(r, ix, fn, x.addr, p) : undefined
+						const cc = r.anchor && !ss.length && x.size === 8 && operands.has(x) && !/\.(info|owner|key|data|lamports|mint|delegate|state)\b|rc_|ref/.test(r.facts.get(fn)?.expr?.(x) ?? '') ? copyAcct(r, ix, fn, x.addr, p) : undefined
 						if (cc && !cc.info && W.has(cc.acct)) { if (reloaded(r, ix, fn, fo, cp, p, cc.acct)) fresh.add(cc.acct); else stale.push([cc.acct, `${cc.acct} (its deserialized copy: ${r.facts.get(fn)?.expr?.(x) ?? 'a load'})`]); return }
 						for (const s of ss) {
 							if (!copy) { fresh.add(s.acct!); continue }
@@ -557,7 +603,6 @@ function staleAfterCpi(r: Result, ix: IxOut, sc: Fn[]): F[] {
 					}
 				})
 				visit(bl.term.c, q, 0)
-				if ((globalThis as { __incDebug?: boolean }).__incDebug && (stale.length || fresh.size)) console.error('  cond', lineText({ pc: fn, fo, ff: r.facts.get(fn), blocks: [] }, q).slice(0, 80), JSON.stringify(stale), [...fresh])
 				for (const [acct, what] of stale) {
 					if (fresh.has(acct) || seen.has(acct)) continue
 					seen.add(acct)
@@ -708,14 +753,12 @@ function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		const o = defsIn(I, fn.pc)?.fpOff(args[0])
 		divs.push({ fn, p, q: [`call${fn.pc}@${p}`, ...(o !== undefined ? [`fs${fn.pc}@${o}:8`] : [])], ceil: isCeil(nk, dk), text: lineText(fn, p) })
 	}, r)
-	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('divs', ix.name, JSON.stringify(divs.map(d => [d.q, d.ceil, d.text.slice(0, 60)])))
 	if (!divs.length) return []
 	// (the writes of the instruction: target, how, the stored value's key)
 	const writes = ix.ops.filter(o => o.kinds.includes('ACCOUNT_DATA_WRITE') && (o.how === '+=' || o.how === '-=') && o.fnPc !== undefined && o.at.pc !== undefined).flatMap(o => {
 		const v = storedAt(I, o.fnPc!, o.at.pc!)
 		return v ? [{ o, k: valueKey(I, ix.ctx, o.fnPc!, v[0], v[1]) }] : []
 	})
-	if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error('writes', ix.name, JSON.stringify(writes.map(w => [w.o.target, w.o.how, w.k.slice(0, 150)])))
 	const field = (t?: string) => t?.split('.').slice(1).join('.') ?? ''
 	const outflowArg = ix.ops.filter(o => (o.kinds.includes('TOKEN_TRANSFER') || o.kinds.includes('LAMPORT_TRANSFER')) && o.sources?.length).every(o => o.sources!.filter(y => y.param === 'amount' || y.param === 'lamports').every(y => /instruction data|^ix\./.test(y.source)))
 	for (const d of divs) {
@@ -752,6 +795,7 @@ function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
 }
 
 export function incidentFindings(a: Analysis, r: Result, prior: Finding[] = []): Finding[] {
+	analysisOf.set(r, a)
 	const out: Finding[] = []
 	for (const ix of a.ixs) {
 		if (!ix.ctx) continue
@@ -760,14 +804,16 @@ export function incidentFindings(a: Analysis, r: Result, prior: Finding[] = []):
 			// (a rule failing on an unexpected shape reports nothing, the analysis goes on)
 			try {
 				for (const f of rule(r, ix, sc)) {
-					const same = f.rule === 'signer-to-untrusted-program' ? (prior.find(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix && x.path[0] === f.path[0]) ?? prior.find(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix)) : undefined
+					const same = f.rule === 'signer-to-untrusted-program' ? prior.find(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix && x.path[0] === f.path[0]) : undefined
+					// (another CPI of the instruction cpi-unchecked-program reports, this one not decoded there: that report stands)
+					if (!same && f.rule === 'signer-to-untrusted-program' && prior.some(x => x.rule === 'cpi-unchecked-program' && x.ix === f.ix)) continue
 					if (same) {
 						if (f.confidence === 'high') same.confidence = 'high'
 						same.evidence.push(`signer-to-untrusted-program: ${f.evidence[2] ?? ''}`)
 						same.accounts = [...new Set([...same.accounts, ...f.accounts])]
 					} else out.push({ ...f, title: INCIDENT_RULES[f.rule] })
 				}
-			} catch (e) { if ((globalThis as { __incDebug?: boolean }).__incDebug) console.error(e) }
+			} catch { /* a shape the rule does not expect: no finding */ }
 		}
 	}
 	return out

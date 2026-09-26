@@ -218,6 +218,60 @@ frame, is anchor_spl's initialize_account3 / initialize_mint2 (`init` of a token
 CpiContext's accounts by their key words (the program's slot recognized by name, else by position) and InitializeMint2's
 authority argument; the relations they establish (account.mint / account.owner / mint.mint_authority) are `token` relations.
 Constant seed lists at PDA sites the printed text leaves unknown are read from read-only memory (relocated pointers).
+Incident-class rules (src/analysis/incidents.ts, after the rule engine; bench/gen/risk.ts seeds one property per variant):
+on the IR of the instruction's reachable functions (the blocks its dispatch allows), each rule failing on an unexpected
+shape reports nothing.
+- `introspection-unchecked` (high: key; medium: program id / index): the Instructions sysvar parsed, recognized by its
+  layout: the executing index (a u16 at data + len - 2: load_current_index and the checked helpers) and the offset table
+  (a u16 at data + 2 + 2·i next to the count read at data + 0: load_instruction_at); its account by the sources of the
+  data pointer, else the account compared with the sysvar id, a try_borrow_data of the parsing function, an account named
+  like the sysvar (the current-index read: neither term scaled nor a frame address). Reported when no comparison with
+  Sysvar1nstructions… (one of its words, a 32-byte compare with the id, an address constraint, a library function holding
+  the id in its bytecode: check_id of the *_checked helpers) is in the instruction; when an instruction is loaded before a value move and no 32-byte comparison
+  of the loaded bytes (by their sources; Anchor: the comparisons of the parsing functions and their callees) with a
+  constant / a non-account value (its program id) is found; when the table's index comes from instruction data and the
+  executing index is not read;
+- `flash-repay-unbound` (medium): the same parse before a value move of the program's funds (a PDA-signed one first; not a
+  system transfer, a fee the caller pays), no comparison of the loaded bytes with an account key or an instruction
+  argument (the repay instruction's reserve / amount);
+- `stale-after-cpi` (medium): a branch after a token CPI (transfer / mint / burn; at each level of the call path up to the handler) reads a value taken
+  before the call from the data of an account the CPI may write (its writable metas; not resolved: an account the
+  program does not write itself (its own accounts only it can change), IDL-writable for Anchor): native, a variable
+  defined before the call (also a value a helper left in its out object, e.g. a token amount); Anchor, an 8-byte word of
+  the account's deserialized copy in the Accounts struct (try_accounts' layout; the base printed as the struct), a direct
+  operand of the comparison, not an AccountInfo / key / mint / owner field, with no call between the CPI and the read
+  taking that copy (reload()); an account another instruction writes by name is the program's own (a CPI cannot change it). Not when the branch also reads the account afresh (a balance delta);
+- `token2022-amount-assumed` (medium): an inbound token transfer (the program does not sign it: no seeds, a seeds slice
+  of length 0 on the call path; Anchor helpers with undecoded seeds: no PDA derived in the instruction) through a program
+  that may be Token-2022 (a CPI to it, a comparison with its id: the either-or check, a check naming it), and a `+=`
+  state write whose value comes from instruction data with no account balance contributing (not the destination's
+  balance read after the transfer). Not when a length is compared for equality with 82 / 165 (extensions rejected);
+- `oracle-unvalidated` (medium; low when only the confidence is missing): a Pyth price account (aggregate price @208
+  read through a pointer whose magic 0xa1b2c3d4 is compared, or whose expo @20 and price type @16 are read, in a program
+  comparing the magic somewhere; the 2021 SPL token-lending layout keeps the aggregate at the same offsets) with no read
+  of its aggregate status (@224), no read of its publish time / slot (timestamp @96, valid slot @40, last slot @32,
+  aggregate pub slot @232), or, when the price gates a value move of the instruction, of its confidence (@216). Field
+  reads, not their comparisons: a field read and ignored counts as checked. Switchboard not recognized;
+- `signer-to-untrusted-program` (high when PDA-signed, medium when the program account is known only by its name; info when
+  only a signer of the instruction is forwarded: the caller's own signature to a program it picks): a CPI whose program id is an account key (sources; Anchor: the Accounts struct word evaluated, else
+  the one account named like a program other than token / system / sysvar ones) that no check pins (address / key / PDA / has_one
+  constraint, a check naming it, a 32-byte comparison with a constant / stored bytes; Anchor: an address constraint no
+  account was attributed to, InvalidProgramId / AccountNotProgram), a CPI the facts say is compared with a known id, signed with the program's seeds or with a signer meta of an instruction signer. The
+  invoke / invoke_signed calls the facts did not decode (nested in an expression) are read directly: the Instruction's
+  program id @0x30, the seeds' length (the stack argument). A CPI cpi-unchecked-program already reports in the same
+  instruction at the same site is merged into that finding (escalated to high when PDA-signed, the evidence appended);
+  an undecoded one in an instruction cpi-unchecked-program already reports is dropped;
+- `rounding-favors-user` (low, experimental): share conversions (a product divided by a non-constant: `udiv`, or
+  __udivti3 of a __multi3 result) rounded up ((n + d - 1) / d, the divisor's key in the sum with -1) and credited (+=) next
+  to another credit of the instruction (not a debt / fee field), or rounded down and debited (-=) from a share-like field
+  (named so; native: another debit pairs it and the outflow's amount is the caller's argument) when the quotient is not
+  itself paid out (a lamport debit or a transfer amount).
+Fund movers (informational, analysis.json `fund_movers: [{ instruction, authority, kind, from?, at }]`, summary.md "Who
+can move funds", <= 8 lines): per instruction, the first operation moving program-controlled funds (a token transfer /
+burn the program signs for: seeds, or a PDA the instruction derives when an Anchor helper's seeds are not decoded; a
+lamport debit) and the authority gating it: the signers of its authority row (else the instruction's signer checks),
+each with the stored field it is compared with (`admin (signer; == reserve.admin)`) or `constant key`, else
+`none (no signer check found)`.
 Precision guards (eval/ blind review):
 - AccountInfo field order: solana_program before AccountInfo became #[repr(C)] (≈ 1.9, e.g. Solend, Anchor ≤ 0.2x
   builds) laid it out { rent_epoch, key, lamports, data, owner, flags }; told by the entrypoint's deserializer (the

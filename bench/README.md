@@ -35,17 +35,17 @@ adds besides its expected ones are listed as unexpected (`--verbose`).
 interface, so SPL Token and Token-2022 mints) under Anchor 0.31 (`g_a31_risk`) and solana-program 2.2.1 (`g_n_risk`,
 token CPIs built by hand, tags 0-7). The Instructions sysvar is read by a hand-written parser (both programs, so the
 key check is the only difference) and the Pyth v2 price account by a hand-written layout (magic @0, type @8, expo @20,
-timestamp @96, price @208, conf @216, status @224). Rule ids marked * do not exist yet (pseudo ids: misses until a
-rule reports them):
+timestamp @96, price @208, conf @216, status @224). The incident rules are src/analysis/incidents.ts
+(docs/ANALYSIS_SPEC.md, Incident-class rules):
 
 | class | instruction | variants (both programs unless noted) | accepted rules |
 |---|---|---|---|
-| introspection | flash_borrow | `ix_sysvar_unchecked` (sysvar key), `ix_program_unchecked` (repay's program id), `ix_absolute_index` (caller's absolute index instead of current + 1), `ix_repay_unbound` (repay's reserve / amount not compared) | `introspection-unchecked`*, `flash-repay-unbound`* (repay), `sysvar-account-unchecked` (sysvar) |
-| stale after CPI | withdraw | `no_reload` (Anchor: vault.amount after the transfer without reload()), `stale_copy` (native: balance read before the CPI) | `stale-after-cpi`* |
-| Token-2022 amount | deposit | `nominal_amount` (credits the argument, not the vault balance delta) | `token2022-amount-assumed`* |
-| oracle | borrow | `oracle_no_status`, `oracle_no_conf` (conf <= 2 %), `oracle_no_staleness` (Clock - timestamp <= 60 s) | `oracle-unvalidated`* |
-| signer forwarding | route / swap_user | `signer_untrusted_pda` (vault PDA signs for an unchecked program), `user_signer_untrusted` (the caller's signature forwarded) | `signer-to-untrusted-program`*, `cpi-unchecked-program` |
-| rounding | deposit / withdraw | `round_mint_ceil` (shares minted rounded up), `round_burn_floor` (shares burned rounded down) | `rounding-favors-user`* |
+| introspection | flash_borrow | `ix_sysvar_unchecked` (sysvar key), `ix_program_unchecked` (repay's program id), `ix_absolute_index` (caller's absolute index instead of current + 1), `ix_repay_unbound` (repay's reserve / amount not compared) | `introspection-unchecked`, `flash-repay-unbound` (repay), `sysvar-account-unchecked` (sysvar) |
+| stale after CPI | withdraw | `no_reload` (Anchor: vault.amount after the transfer without reload()), `stale_copy` (native: balance read before the CPI) | `stale-after-cpi` |
+| Token-2022 amount | deposit | `nominal_amount` (credits the argument, not the vault balance delta) | `token2022-amount-assumed` |
+| oracle | borrow | `oracle_no_status`, `oracle_no_conf` (conf <= 2 %), `oracle_no_staleness` (Clock - timestamp <= 60 s) | `oracle-unvalidated` |
+| signer forwarding | route / swap_user | `signer_untrusted_pda` (vault PDA signs for an unchecked program), `user_signer_untrusted` (the caller's signature forwarded) | `signer-to-untrusted-program`, `cpi-unchecked-program` |
+| rounding | deposit / withdraw | `round_mint_ceil` (shares minted rounded up), `round_burn_floor` (shares burned rounded down) | `rounding-favors-user` |
 | admin drain | admin_sweep | none: informational | `fund_movers` |
 
 `fund_movers` (expected file): `[{ ix, authority, from, index? }]`, an authority-only instruction that can move user
@@ -174,3 +174,17 @@ flash_loan (reserve: no owner check, 6/6 others) and solend update_reserve_confi
 the lending market, 4/4 others) show in @vuln only; bench clean bases: none. Stored keys in summary.md: 25 programs
 (<= 5 lines each). Other rules unchanged by the pass except `cpi-unchecked-program` 1611 → 1606 findings (a check made
 word by word now counted on every non-failing path).
+
+Incident-class rules (src/analysis/incidents.ts; generated variants caught / false findings on the clean bases (generated,
+realistic r_*, open-source o_*) / 400-program corpus: programs, findings, per 100 programs):
+`introspection-unchecked` 6/6, 0, 4 / 4 / 1.0 (current-index parses with no key check found; marginfi's sorted-array
+`ld16(a + 2i - 2)` and Token-2022's check_id in library code were false hits, fixed); `flash-repay-unbound` 2/2, 0,
+2 / 2 / 0.5 (signature-verification programs with a token outflow); `stale-after-cpi` 2/2, 0, 0 / 0 (first version: 36 /
+119, Anchor AccountInfo words and non-token CPIs; now token CPIs only, value words compared directly);
+`token2022-amount-assumed` 2/2, 0, 1 / 1; `oracle-unvalidated` 6/6, 0, 1 / 1 (first version 2 / 11: Drift structs with
+fields at the Pyth offsets; now magic compared on the object, or expo and price type both read); `signer-to-untrusted-program`
+3/4 (+ merged into cpi-unchecked-program at the same site; native user_signer_untrusted: the account model of that build
+resolves no account), 0, 4 / 6 (+ 8 informational: the caller's own signature forwarded, a swap router);
+`rounding-favors-user` (experimental, low) 4/4, 0, 0 / 0. Eval: spl_lending_oracle_status and solend_oracle_conf vuln
+finding / fixed clean; wormhole_bridge tag_7 finding without the account (Solitaire's account struct: the parse's
+account is not resolved, so account[3] is not named). Fund movers: 2/2 admin_sweep listed.
