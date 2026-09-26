@@ -33,7 +33,7 @@ export interface FnInput {
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
 	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
-	irStore?: (s: Stmt) => { index: number; field?: string } | undefined // native: the account field a store writes (flow.ts accountResolver)
+	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 }
 
@@ -304,7 +304,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 				prev.line = l + 1
 				return
 			}
-			facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: `account[${ir.index}]`, field: ir.field }, how: '=', value: v })
+			facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: `account[${ir.index}]`, field: ir.field }, how: ir.how ?? '=', value: v })
 			return
 		}
 		const m = /^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: \/\/.*)?$/.exec(t)

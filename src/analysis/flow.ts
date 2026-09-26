@@ -488,7 +488,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 				const v = storeValue(text)
 				if (kinds[0] === 'LAMPORT_WRITE' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
 				if (kinds[0] === 'ACCOUNT_DATA_WRITE' && AUTHORITY.test(field)) kinds.push('AUTHORITY_WRITE')
-				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: '=', value: v, exit: note })
+				ff.ops.push({ line, pc: s.pc, kinds, text, main: false, errPath: false, target: { acct, field }, how: s.k === 'store' ? arithHow(X.D, s.v, p) : '=', value: v, exit: note })
 			}
 			if (a.k === 'lam' && a.off === 0 && n === 8) push(a.acct, 'lamports', ['LAMPORT_WRITE'], `through the RefCell'd lamports of ${a.acct}'s AccountInfo (handler ${H.name})`)
 			if (a.k === 'data') push(a.acct, zcField(a.ty, a.off, n) ?? `data[${a.off}..${a.off + n}]`, ['ACCOUNT_DATA_WRITE'], `through the RefCell'd data of ${a.acct}'s AccountInfo (handler ${H.name})`)
@@ -855,7 +855,7 @@ export type Side = AcctRef | 'stack' | 'pda' | 'const' | undefined // 'stack': a
 export interface AcctResolver {
 	byName: Map<string, AcctRef>
 	refs: (e: Expr, b?: number) => AcctRef[]              // account fields an expression (a branch condition, else evaluated at the end of block b) reads
-	store: (s: Stmt) => AcctRef | undefined                // the account field a store writes (lamports, data[a..b])
+	store: (s: Stmt) => (AcctRef & { how?: '=' | '+=' | '-=' }) | undefined // the account field a store writes (lamports, data[a..b]), how (a sum / difference stored)
 	sides: (c: Expr, b?: number) => [Side, Side] | undefined // the two sides of an equality (key / field compares)
 }
 
@@ -967,6 +967,19 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 	return ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
 }
 
+/** a stored value that is a sum / difference (through its variables' definitions): += / -=, else = */
+export function arithHow(D: Defs, e: Expr, p: number): '=' | '+=' | '-=' {
+	for (let k = 0; k < 6; k++) {
+		if (e.k === 'ext') { e = e.a; continue }
+		if (e.k === 'bin' && (e.op === 'add' || e.op === 'sub') && e.b.k !== 'const') return e.op === 'add' ? '+=' : '-='
+		if (e.k !== 'var') break
+		const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null
+		if (!y) break
+		;[e, p] = y
+	}
+	return '='
+}
+
 /** Definitions in a function: single ones (a `set` or a call result), and the others and frame slots by position (reaching definitions). */
 export interface Defs {
 	fp: number
@@ -1072,7 +1085,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	if (res) return res
 	const f = fo.f
 	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
-	const { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching } = defsOf(f, callee)
+	const D = defsOf(f, callee)
+	const { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching } = D
 	const rec0 = (d: Expr | undefined) => input !== undefined && d?.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
 	let arr: number | undefined
 	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
@@ -1233,7 +1247,11 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		})
 		return out
 	}
-	const store = (s: Stmt): AcctRef | undefined => {
+	const store = (s: Stmt): (AcctRef & { how?: '=' | '+=' | '-=' }) | undefined => {
+		const r = store0(s), p = pos.get(s)
+		return r && (s.k === 'store' && p !== undefined ? { ...r, how: arithHow(D, s.v, p) } : r)
+	}
+	const store0 = (s: Stmt): AcctRef | undefined => {
 		const p = pos.get(s)
 		if (p === undefined) return undefined
 		// (memset / memcpy into an account's data, e.g. zeroing it on close)
