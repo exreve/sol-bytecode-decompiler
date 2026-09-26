@@ -50,7 +50,7 @@
 //     proof:      [ { operation, kind, properties: [ { prop, status, evidence } ] } ]   (per-operation property checklist)
 //   } ]
 //   state_machine [ { field (account.field), set_by: [ { ix, value, at } ], checked_by: [ { ix, cond, at } ] } ]: status-like fields
-//   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low'), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
+//   findings     [ { rule, instruction, confidence ('high' | 'medium' | 'low' | 'info': informational, not in the Findings lists), title, accounts, path, evidence } ] (phase2.ts RULES), ranked
 //   authority_fields [ { field, writtenBy: [ix] } ]: stored fields written by an AUTHORITY_WRITE
 //   pdas         [ { seeds, program, derived_in: [ix], signs_in: [ix], accounts: [ix.account with a seeds constraint], compared: status } ]
 //   state_writes [ { target (account.field), writes: [ { ix, how, at } ] } ]
@@ -90,7 +90,7 @@ export interface OpOut {
 	fnPc?: number; ret?: Expr                       // (internal)
 	anchorClose?: boolean                           // Anchor's `close` constraint (anchor_lang::common::close in the exit: lamports to the target, assign / realloc)
 	guards?: number[]                               // indices of the instruction's checks that dominate it (phase2.ts)
-	bypass?: { check: number; path: Loc[] }[]       // relevant checks that do not: a path reaching it without them
+	bypass?: { check: number; path: Loc[]; strong?: boolean }[] // strong: the path avoids every check of that kind (on that account)       // relevant checks that do not: a path reaching it without them
 	sources?: { param: string; source: string; trust: string }[] // taint: where its parameters come from (phase2.ts)
 }
 export interface IxOut {
@@ -631,9 +631,16 @@ function flags(ix: IxOut): string[] {
 	return [...new Set(out)]
 }
 
+/** informational rule results (not findings): counts per rule */
+function infoLine(fs: Finding[]): string | undefined {
+	const n = new Map<string, number>()
+	for (const f of fs) if (f.confidence === 'info') n.set(f.rule, (n.get(f.rule) ?? 0) + 1)
+	return n.size ? `- informational (not findings, see analysis.json): ${[...n].map(([k, c]) => `${k} ${c}`).join(', ')}` : undefined
+}
+
 /** The ranked findings of the rule engine (phase2.ts), top ones. */
 function renderFindings(a: Analysis, where: Where): string[] {
-	const fs = a.findings ?? []
+	const fs = (a.findings ?? []).filter(f => f.confidence !== 'info')
 	const out = ['## Findings (ranked; rule engine over the facts: leads to review, not verdicts)', '']
 	if (!fs.length) out.push('- none of the rules matched')
 	for (const f of fs.slice(0, 15)) {
@@ -644,6 +651,8 @@ function renderFindings(a: Analysis, where: Where): string[] {
 	const byRule = new Map<string, number>()
 	for (const f of fs) byRule.set(f.rule, (byRule.get(f.rule) ?? 0) + 1)
 	if (fs.length) out.push(`- by rule: ${[...byRule].map(([k, n]) => `${k} ${n}`).join(', ')}`)
+	const info = infoLine(a.findings ?? [])
+	if (info) out.push(info)
 	out.push('')
 	return out
 }
@@ -718,8 +727,9 @@ export function renderIx(ix: IxOut, where: Where, a?: Analysis): string {
 	if (ix.indirect.length) out.push(`Reached through function pointers / tables (conditional): ${ix.indirect.slice(0, 8).join(', ')}${ix.indirect.length > 8 ? ', …' : ''}.`, '')
 	const fl = flags(ix)
 	if (fl.length) out.push('## Look first', '', ...fl.map(f => `- ⚠ ${f}`), '')
-	const fs = (a?.findings ?? []).filter(f => f.ix === ix.name)
-	if (fs.length) out.push('## Findings (rule engine)', '', ...fs.slice(0, 10).map(f => `- [${f.confidence}] ${f.rule}: ${f.title}. ${f.evidence.join(' · ').slice(0, 220)}${f.path.length > 1 ? ` (path ${f.path.join(' → ')})` : f.path[0] ? ` (${f.path[0]})` : ''}`), '')
+	const all = (a?.findings ?? []).filter(f => f.ix === ix.name), fs = all.filter(f => f.confidence !== 'info'), info = infoLine(all)
+	if (info && !fs.length) out.push('## Findings (rule engine)', '', '- none', info, '')
+	if (fs.length) out.push('## Findings (rule engine)', '', ...fs.slice(0, 10).map(f => `- [${f.confidence}] ${f.rule}: ${f.title}. ${f.evidence.join(' · ').slice(0, 220)}${f.path.length > 1 ? ` (path ${f.path.join(' → ')})` : f.path[0] ? ` (${f.path[0]})` : ''}`), ...(info ? [info] : []), '')
 	out.push('## Account privileges (expected by the IDL · verified by the code)', '', '| # | account | signer | writable | owner | executable | address |', '|---|---|---|---|---|---|---|')
 	for (const x of ix.accounts) out.push(`| ${x.index ?? ''} | ${x.name}${x.source !== 'idl' ? ` [${x.source}]` : ''} | ${cell(x, 'signer')} | ${cell(x, 'writable')} | ${cell(x, 'owner')}${x.constraints.discriminator ? ` (+discriminator ${ST[x.constraints.discriminator.status]})` : ''} | ${cell(x, 'executable')} | ${x.expected.address ? `= ${x.expected.address.slice(0, 8)}… · ` : ''}${cell(x, 'address')} |`)
 	out.push('', '## Constraints per account', '')

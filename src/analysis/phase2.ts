@@ -31,7 +31,7 @@ export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 
 export interface StoredKeys { account: string; type?: string; compared: string[]; referencedBy: string[]; never: string[]; gaps: string[] }
 export interface Enabler { kind: 'signer' | 'stored' | 'pda' | 'none'; what: string; status?: string; writtenBy?: string[] }
 export interface AuthorityRow { op: number; kind: string; enabledBy: Enabler[] }
-export interface Finding { rule: string; title: string; ix: string; accounts: string[]; path: string[]; evidence: string[]; confidence: 'high' | 'medium' | 'low'; weight: number }
+export interface Finding { rule: string; title: string; ix: string; accounts: string[]; path: string[]; evidence: string[]; confidence: 'high' | 'medium' | 'low' | 'info'; weight: number } // info: informational, kept out of the Findings lists (analysis.json only)
 
 const VALUE: OpKind[] = ['TOKEN_TRANSFER', 'LAMPORT_TRANSFER', 'MINT', 'BURN', 'ACCOUNT_CLOSE', 'OWNER_ASSIGN', 'PROGRAM_UPGRADE']
 const isSensitive = (o: OpOut) => o.kinds.some(k => k !== 'PDA_DERIVE')
@@ -116,7 +116,7 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 		const o = ops[oi]
 		if (!isValueOrAuth(o)) continue
 		const accts = opAccounts(o)
-		const cand = checks.map((c, ci) => ci).filter(ci => !o.guards!.includes(ci) && checks[ci].kinds.some(k => GUARD_KINDS.includes(k)) && (checks[ci].kinds.includes('signer') || (checks[ci].account && accts.has(checks[ci].account!.replace(/\?$/, ''))))
+		const cand = checks.map((c, ci) => ci).filter(ci => !o.guards!.includes(ci) && checks[ci].kinds.some(k => GUARD_KINDS.includes(k)) && bindingShaped(checks[ci]) && (checks[ci].kinds.includes('signer') || (checks[ci].account && accts.has(checks[ci].account!.replace(/\?$/, ''))))
 			// (a check made after the operation on every path, e.g. in the exit code, is not one it could bypass)
 			&& !pointsOf[oi].some(p => siteOf[ci].some(s => s.fn === p.fn && s.b !== p.b && dom(s.fn, p, s))))
 		for (const ci of cand.slice(0, 3)) {
@@ -133,7 +133,12 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 				const locs: Loc[] = []
 				for (const b of path) { const pc = blockPc(g, b); const line = ff?.pcLine.get(pc); if (line !== undefined && (!locs.length || locs[locs.length - 1].line !== line)) locs.push({ fn: ff!.name, line, pc }) }
 				const short = locs.length > 6 ? [...locs.slice(0, 3), ...locs.slice(-3)] : locs
-				;(o.bypass ??= []).push({ check: ci, path: short })
+				// (strong: a path around every check of the same kind (signer) / on the same account, not only this one: an
+				// alternative check on the other path (e.g. multisig vs single signer) makes it a lead, not a finding)
+				const c0 = checks[ci], same = (c: CheckOut) => c0.kinds.includes('signer') ? c.kinds.includes('signer') : !!c.account && c.account === c0.account && c.kinds.some(k => GUARD_KINDS.includes(k))
+				const others = new Set(checks.flatMap((c, cj) => same(c) ? siteOf[cj].filter(x => x.fn === s.fn).map(x => x.b) : []))
+				const strong = !others.has(p.b) && !!bypass(g, s.b, p.b, b => !others.has(b) && (!al || al(b)))
+				;(o.bypass ??= []).push({ check: ci, path: short, ...(strong ? { strong } : {}) })
 				break
 			}
 		}
@@ -142,6 +147,18 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 
 const idx = new WeakMap<Result, Map<number, Result['funcs'][number]>>()
 function fnIndex(r: Result) { let m = idx.get(r); if (!m) idx.set(r, (m = new Map(r.funcs.map(f => [f.pc, f])))); return m }
+
+/**
+ * A check that reads like a signer / owner / key binding (for check-bypassable): its condition reads the flag or
+ * compares keys, or its error names the constraint; not a distinctness check (failing when two keys are equal).
+ */
+function bindingShaped(c: CheckOut): boolean {
+	if (/Signer|Owner|HasOne|Address|Seeds|KeyMismatch|IncorrectProgramId|MissingRequiredSignature|IllegalOwner/.test(c.error)) return true
+	const t = c.cond
+	const eqFail = c.failsIf ? /^(memeq|keyeq)\(|^[^!=<>&|]+ == [^=&|]+$/.test(t) : /^!(memeq|keyeq)\(|^[^!=<>&|]+ != [^=&|]+$/.test(t)
+	if (eqFail) return false
+	return (c.kinds.includes('signer') && /is_signer/.test(t)) || (c.kinds.some(k => k === 'owner' || k === 'key' || k === 'address' || k === 'has_one' || k === 'pda') && /memeq|keyeq|memcmp|\.key\b|\.owner\b|owner\[|key\[/.test(t)) || (!!c.sides && !c.kinds.includes('signer'))
+}
 
 /** the accounts an operation names (target, CPI accounts) */
 function opAccounts(o: OpOut): Set<string> {
@@ -321,7 +338,7 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
-	const rank = { high: 3, medium: 2, low: 1 }
+	const rank = { high: 3, medium: 2, low: 1, info: 0 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
 }
@@ -387,8 +404,13 @@ function storedKeys(r: Result, ix: IxOut): StoredKeys[] {
 		const compared = mine.map(y => fieldOf(y.a, a) ? `${y.a} == ${y.b}` : `${y.b} == ${y.a}`)
 		const referencedBy = rel.filter(y => y.a === `${a}.key` && !fieldOf(y.b, a) && !y.b.startsWith('(') || y.b === `${a}.key` && !fieldOf(y.a, a)).map(y => y.a === `${a}.key` ? y.b : y.a)
 		const cmpF = new Set(mine.map(y => (fieldOf(y.a, a) ?? fieldOf(y.b, a))!.split('.')[0]))
-		const never = (fields ?? []).filter(f => !cmpF.has(f))
-		const gaps = never.flatMap(f => ix.accounts.filter(y => y.name !== a && snakeName(y.name) === f).map(y => `${a}.${f} is never compared with ${y.name}.key`))
+		// (a field this instruction writes (e.g. initializes) is not one it should compare)
+		const written = new Set(ix.ops.filter(o => o.target?.startsWith(`${a}.`)).map(o => snakeName(o.target!.slice(a.length + 1).split(/[.[]/)[0])))
+		const never = (fields ?? []).filter(f => !cmpF.has(f) && !written.has(f))
+		// (a gap: the account the field names is bound by nothing else either (a check of its key / address / PDA / a
+		// has_one, or any relation), so a constraint the analysis did not match to the field is not taken for missing)
+		const bound = (y: IxOut['accounts'][number]) => ['address', 'pda', 'has_one', 'key', 'token_owner', 'token_mint', 'associated'].some(c => y.constraints[c] && y.constraints[c].status !== 'not_found') || rel.some(z => z.a.startsWith(`${y.name}.`) || z.b.startsWith(`${y.name}.`))
+		const gaps = never.flatMap(f => ix.accounts.filter(y => y.name !== a && snakeName(y.name) === f && !bound(y)).map(y => `${a}.${f} is never compared with ${y.name}.key`))
 		out.push({ account: a, type: ty, compared, referencedBy, never, gaps })
 	}
 	return out
@@ -500,17 +522,12 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'check-bypassable', title: 'A signer / owner / key check exists but does not dominate a value movement or authority change',
+		// (informational: on the corpus most such paths are by design (alternative authorities, other branches of a
+		// processor), spot-checked below 70% plausible even with the guards above)
 		// (Anchor: a branch raising no error (e.g. the exit's `owner == program_id && !is_closed` before serializing back) is control flow)
 		run: (ix, a) => ix.ops.filter(o => !runtimeAuthorized(o) && !initMechanics(ix, o)).flatMap(o => (o.bypass ?? []).filter(b => !(a.program.anchor && ix.checks[b.check].error === 'return')).map(b => {
 			const c = ix.checks[b.check]
-			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`], confidence: 'medium' as const, weight: wOf(o) + 1 }
-		})),
-	},
-	{
-		id: 'stored-key-unbound', title: 'A stored key of an account the instruction uses is never compared with the provided account it names',
-		run: ix => (ix.storedKeys ?? []).flatMap(k => k.gaps.map(g => {
-			const [f, other] = /^(\S+) is never compared with (\w+)\.key$/.exec(g)!.slice(1)
-			return { accounts: [k.account, other], path: [], evidence: [`${f} (${k.type}) is stored, and ${other} is an account of this instruction, but no check compares them`, k.compared.length ? `compared: ${k.compared.slice(0, 4).join('; ')}` : `no stored field of ${k.account} is compared${k.referencedBy.length ? `; bound only through ${k.referencedBy.join(', ')}` : ''}`], confidence: 'low' as const, weight: 2 }
+			return { accounts: c.account ? [c.account] : [], path: b.path.map(L), evidence: [`check ${L(c.at)} (${c.kinds.join(', ')}): fails if ${c.cond.slice(0, 80)}`, `operation ${L(o.at)}: ${o.text.slice(0, 100)}`, b.strong ? 'no other check of this kind on the path' : 'another check of this kind is on the path'], confidence: 'info' as const, weight: wOf(o) + 1 }
 		})),
 	},
 	{
@@ -697,8 +714,17 @@ const RULES: Rule[] = [
 			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
 			if (bind.length || rel) return []
+			// (a finding when anyone may call it (no signer check) or the destination is named after another party of the
+			// instruction that does not sign it (maker_ata_b while the taker signs); a destination the signer picks for
+			// itself is informational: the token program keeps the mints consistent)
+			const seg = (n: string) => snakeName(n).split('_')[0]
+			// (an account the IDL declares a signer counts: a Signer<'info> check the analysis missed is not taken for none)
+			const signers = ix.accounts.filter(x => x.expected.signer || x.constraints.signer && x.constraints.signer.status !== 'not_found')
+			const who = /^account\[/.test(d!) ? undefined : seg(d!)
+			const third = !!who && !signers.some(x => seg(x.name) === who) && ix.accounts.some(x => x.name !== d && seg(x.name) === who)
+			const conf = !signers.length || third ? (o.cpi?.seeds ? 'medium' as const : 'low' as const) : 'info' as const
 			// (outflows the program signs for are the ones where an unbound destination matters most)
-			return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: no owner / mint / key / PDA / relation check found${o.cpi?.seeds ? '; the program signs this outflow (PDA)' : ''}`], confidence: o.cpi?.seeds ? 'medium' as const : 'low' as const, weight: wOf(o) }]
+			return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: no owner / mint / key / PDA / relation check found${o.cpi?.seeds ? '; the program signs this outflow (PDA)' : ''}${!signers.length ? '; no signer check in the instruction' : third ? `; named after ${who}, who does not sign` : ''}`], confidence: conf, weight: wOf(o) }]
 		}),
 	},
 ]

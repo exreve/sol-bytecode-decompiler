@@ -52,3 +52,8 @@ Programs of the 400-program corpus with >= 1 finding (decompile project mode): `
 `pda-bump-from-ix` 5 (7 findings), `duplicate-mutable-accounts` 0, `account-type-unchecked` 3, `cpi-result-ignored` 1,
 `truncating-cast` 0, `remaining-account-unchecked` 1, `init-if-needed-reinit` 0; `cpi-unchecked-program` high
 (PDA-signed) in 19 of its 92 programs. Rules are kept under ~5% of the programs.
+
+Phase-2/3 rules after the eval precision pass (findings / programs; before → after, same corpus and instruction split):
+`check-bypassable` 1458 / 34 → 0 (17 / 6 informational), `signer-not-related-to-authority` 658 / 64 → 184 / 53,
+`recipient-unbound` 34 / 14 → 22 / 9 (+55 informational: a destination the signer picks for itself),
+`value-move-no-signer` 262 / 53 → 188 / 53, `unverified-account-data` 91 / 15 → 79 / 18.

@@ -193,6 +193,31 @@ Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/prog
 - `init-if-needed-reinit` (medium; Anchor): an authority field written on an account the instruction may create or
   find initialized (a create CPI, and the owner check of the existing account's path), with no condition on the way
   reading the account's state.
+Precision guards (eval/ blind review):
+- AccountInfo field order: solana_program before AccountInfo became #[repr(C)] (≈ 1.9, e.g. Solend, Anchor ≤ 0.2x
+  builds) laid it out { rent_epoch, key, lamports, data, owner, flags }; told by the entrypoint's deserializer (the
+  record's key address stored at +8 of the AccountInfo it builds; accounts.ts legacyAccountInfo) and used by the
+  printed views (AccountInfo view, field names), the native account model and the Anchor account words;
+- a variable is an `&[AccountInfo]` slice only with AccountInfo evidence (a flag byte read, a key / owner pointer
+  compared as 32 bytes or read word-wise, a data Rc's pointer / length read) and no load no field explains (other
+  sizes / offsets, a pointer word dereferenced past its target: 32 key bytes, an Rc box); flags are 1-byte reads, a
+  key / owner / lamports pointer is read within its bytes: an Rc / RefCell counter (+8 weak, +0x10 borrow flag) is
+  never an owner assignment, a WAD / u64 field never a signer flag;
+- vipers `assert_keys_eq!` (the failing side logs "self.a != self.b.c" first thing): a key relation between the IDL
+  accounts the paths name (nested Accounts structs by the IDL's flattened paths), or an address check against a
+  named constant; code (snake_case) names are merged with the IDL's camelCase ones;
+- stored keys (`## Stored keys`, analysis.json `stored_keys`): per account whose data is used (type checked, or a
+  stored field compared) the key equalities with provided accounts, the accounts binding it (its key compared with
+  their fields), its stored Pubkey fields (IDL type) never compared or written, and GAP lines (such a field named
+  like an instruction account bound by nothing else); no rule (too imprecise on the corpus: Anchor constraints the
+  analysis does not match to fields);
+- check-bypassable (informational): only checks shaped like a binding (the flag read / keys compared / the
+  constraint's error; not a distinctness check failing when two keys are equal) on some path to the operation (the
+  check reaches it); the evidence says whether the path avoids every check of that kind (on that account) too;
+- confidence `info`: kept in analysis.json, left out of the Findings lists (counted on one line). recipient-unbound is
+  a finding when the instruction has no signer check or the destination is named after a party that does not sign
+  (maker_ata_b, the taker signing), else info.
+
 Corpus noise (400 programs, programs with >= 1 finding): see bench/README.md.
 
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in

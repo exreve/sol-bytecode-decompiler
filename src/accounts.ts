@@ -4,6 +4,7 @@
 //  - solana_program AccountInfo (Rust struct, 0x30 bytes; `&[AccountInfo]` has stride 0x30):
 //      +0 key: &Pubkey  +8 lamports: Rc<RefCell<&mut u64>>  +0x10 data: Rc<RefCell<&mut [u8]>>
 //      +0x18 owner: &Pubkey  +0x20 rent_epoch  +0x28 is_signer  +0x29 is_writable  +0x2a executable
+//    (before it became #[repr(C)]: +0 rent_epoch, +8 key, +0x10 lamports, +0x18 data, +0x20 owner; see legacyAccountInfo)
 //  - the serialized input record itself (what pinocchio-style AccountInfo points to):
 //      +0 borrow state / dup marker  +1 is_signer  +2 is_writable  +3 executable  +8 key[32]
 //      +0x28 owner[32]  +0x48 lamports  +0x50 data_len  +0x58 data
