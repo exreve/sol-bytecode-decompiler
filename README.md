@@ -144,7 +144,11 @@ with its `security/<ix>.md`. The single-file output (`-o out.ts`) carries a shor
 Computed from the same IR in the same run (a few % of the run time); spec and known gaps in
 [docs/ANALYSIS_SPEC.md](docs/ANALYSIS_SPEC.md).
 
-* `summary.md`: ranked findings of a rule engine (leads for review, not verdicts), instructions ranked by
+* `summary.md`: ranked findings of a rule engine (leads for review, not verdicts: unchecked CPI programs (high when
+  PDA-signed), missing signers / authority relations, bypassable checks, unbound recipients, unchecked arithmetic,
+  share-price divisions, closes, sysvar accounts read without an id check, PDA bumps from instruction data, the same
+  account passed twice, account types not checked, ignored CPI results, truncating casts, unchecked remaining
+  accounts, init_if_needed reinitialization), instructions ranked by
   sensitivity (value movement, PDA signing, CPIs, authority / state writes, closes) with their effects, state
   writes per field, authority fields, a state-machine table.
 * `<ix>.md`: account privilege matrix (what the IDL expects vs what the code checks), constraints per account,

@@ -729,7 +729,8 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			const p = bi << 16 | i
 			const c = callOf(s)
 			// (the handler's logic borrowing an account's data itself (not a deserialization of try_accounts): a data read)
-			if (c?.t.k === 'fn' && /try_borrow_(mut_)?data/.test(r.program.funcs.get(c.t.pc)?.name ?? '')) for (const x of c.args) {
+			// (not a borrow followed by a discriminator check of its own: an AccountLoader's load)
+			if (c?.t.k === 'fn' && /try_borrow_(mut_)?data/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && !ff.checks.some(k => k.kinds.includes('discriminator'))) for (const x of c.args) {
 				// (an &AccountInfo, or a clone of one in a frame (to_account_info): its data RcBox at +0x10)
 				let v = X.ev(x, p)
 				if (v?.k === 'fr') { const w = X.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: x, b: { k: 'const', v: 0x10n } } }, p); v = w?.k === 'drc' ? { ...w, k: 'info' } : undefined }

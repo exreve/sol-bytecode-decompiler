@@ -530,12 +530,14 @@ const RULES: Rule[] = [
 	{
 		id: 'account-type-unchecked', title: 'Account data trusted in an authorization / value decision without a discriminator (type) check',
 		// (Anchor: data the logic reads itself from an account try_accounts did not deserialize as Account<T> (no discriminator check))
+		// (the owner verified, the type not: the program's other accounts of the same layout pass; an owner not verified
+		// at all is unverified-account-data's)
 		run: ix => {
 			if (!ix.ops.some(o => isValueOrAuth(o) && !runtimeAuthorized(o))) return []
-			return (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator')).slice(0, 2).map(a => {
-				const own = found(ix, a, 'owner')
-				return { accounts: [a], path: [], evidence: [`the logic reads ${a}'s data itself; no discriminator check on ${a} found${own ? '' : ', nor an owner check'}`, 'an account of another type (or program) with the same layout passes the checks made on this data'], confidence: own ? 'low' as const : 'medium' as const, weight: 3 }
-			})
+			const own = (a: string) => found(ix, a, 'owner') || !!ix.audit?.ownerCmp?.includes(a)
+			return (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator') && own(a)).slice(0, 2).map(a => ({
+				accounts: [a], path: [], evidence: [`the logic reads ${a}'s data itself; its owner is checked, no discriminator check on it found`, 'another account type of the same program with a matching layout passes the checks made on this data'], confidence: 'medium' as const, weight: 3,
+			}))
 		},
 	},
 	{

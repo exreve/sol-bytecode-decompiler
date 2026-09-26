@@ -166,10 +166,41 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   syscall (analysis only);
 - Anchor stores in a function several handlers call (e.g. a close helper) named with one handler's accounts count
   only for that handler's instruction.
+Reaching definitions (flow.ts defsOf): the definition of a variable / frame slot reaching a position is the meet over
+the paths to it, solved once per key as a fixpoint over the blocks the position depends on (optimistic start, loops
+included), so an answer does not depend on the queries asked before; evaluator memos keep only values whose evaluation
+hit no depth limit, callWrites is memoized per depth, seeded account resolvers by their seed.
+
+Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/programs/a_audit seeds one bug per rule):
+- `sysvar-account-unchecked` (medium): an account named like a sysvar (clock, rent, instructions, slot_hashes, …) whose
+  data the logic borrows itself (AccountInfo::try_borrow_data; not Sysvar<T> / from_account_info / get()), with no
+  address check on it;
+- `pda-bump-from-ix` (medium): create_program_address whose last seed (one byte, the bump) is loaded straight from
+  instruction data (not through a call's results, e.g. a deserialized stored bump);
+- `duplicate-mutable-accounts` (medium with a += / -= write, else low; Anchor): try_accounts deserializes one account
+  type (the try call checking a discriminator) for several accounts, all writable, the instruction writes data of that
+  type, and no check compares two account keys;
+- `account-type-unchecked` (medium; Anchor): the logic borrows an account's data itself, its owner is checked (a
+  constraint, or a check comparing its owner) but no discriminator check is found (type confusion; an owner not
+  checked at all is `unverified-account-data`'s); not an AccountLoader load (a discriminator check after the borrow);
+- `cpi-unchecked-program`: high when the CPI is PDA-signed;
+- `cpi-result-ignored` (medium): a CPI through a function returning its Result in an out object (invoke, the Anchor
+  helpers, a wrapper) that no statement after the call reads (not the syscall itself: a failed CPI aborts);
+- `truncating-cast` (medium from instruction data, else low): a value-path amount (lamports stored, a CPI helper's
+  amount) with an `ext` narrowing a wider value from instruction data / account data / lamports;
+- `remaining-account-unchecked` (medium; Anchor): ctx.remaining_accounts[i] (the accounts slice after try_accounts)
+  credited (+=) or passed as a CPI destination / authority with no check reading its key, owner or data;
+- `init-if-needed-reinit` (medium; Anchor): an authority field written on an account the instruction may create or
+  find initialized (a create CPI, and the owner check of the existing account's path), with no condition on the way
+  reading the account's state.
+Corpus noise (400 programs, programs with >= 1 finding): see bench/README.md.
+
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in
 temporaries; Anchor accounts missing from the inferred Accounts layout stay unnamed in CPI contexts and as sources (an
-account object's neighbouring words are only a guess for the writes), e.g. an AccountInfo try_accounts takes straight
-from the accounts slice (a_escrow take: its close to maker is not attributed); per-instruction context covers Anchor
-helper stores; values a library function not decompiled fills (n_token's dest via TokenAccount::unpack: the
-config~dest relation) are not followed back to the account; value identity
-follows one call path per function (the first found) and treats memory as unchanged between two reads.
+account object's neighbouring words are only a guess for the writes); Anchor `init` of token accounts / mints: the
+anchor_spl helper (initialize_account3 / initialize_mint2) compiled into an unnamed library function is not decoded,
+so its CPI and the relations it establishes (vault~mint, vault~authority) are missing; a seed list in read-only memory
+that needs relocation is not read (a_audit deposit's vault PDA); values a library function not decompiled fills
+(n_token's dest via TokenAccount::unpack: the config~dest relation) are not followed back to the account; value
+identity follows one call path per function (the first found) and treats memory as unchanged between two reads; the
+audit rules are Anchor-first (native programs: bumps, CPI results, casts only).

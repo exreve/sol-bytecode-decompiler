@@ -14,9 +14,11 @@ categories). `--verbose` lists the variants (caught / MISSED), every miss and ev
 - `programs/`: sources (a cargo workspace; tabs for indentation). Anchor 0.31.1: `a_vault` (SOL vault PDA, system
   transfer, raw lamport moves, close), `a_staking` (share-price pool, PDA-signed token transfer), `a_escrow`
   (token escrow, close_account, close = maker), `a_counter` (admin rotation, realloc), `a_oracle` (zero-copy
-  AccountLoader), `a_mint` (PDA mint authority, mint_to / burn). solana-program 2.2.1: `n_vault`, `n_token`
-  (spl-token CPIs with invoke_signed), `n_pool`. pinocchio 0.8.4: `p_counter`.
-- Variants are cargo features `v_<name>` removing exactly one property; `bin/<prog>@<name>.so`.
+  AccountLoader), `a_mint` (PDA mint authority, mint_to / burn), `a_audit` (one instruction per audit rule,
+  init-if-needed). solana-program 2.2.1: `n_vault`, `n_token` (spl-token CPIs with invoke_signed), `n_pool`.
+  pinocchio 0.8.4: `p_counter`.
+- Variants are cargo features `v_<name>` removing exactly one property (a_audit: seeding the bug its rule looks for);
+  `bin/<prog>@<name>.so`.
 - `bin/`: the stripped binaries (platform-tools v1.48, as `cargo build-sbf` deploys them). `build.sh` rebuilds them
   in the `sbf-builder` container (see scripts/refbuild.ts for the toolchain); not needed to run the bench.
 - `idl/`: Anchor IDLs (0.30+ spec) written from the sources; passed as `--idl`.

@@ -16,6 +16,7 @@ export interface AuditFacts {
 	ignored: number[]                                             // CPIs whose result (the Result it returns) is never read
 	casts: { op: number; expr: string; bits: number; source: string }[] // value-path amounts narrowed from 64 bits
 	remChecked: string[]                                          // Anchor: remaining accounts whose key / owner / data a check reads
+	ownerCmp?: string[]                                           // Anchor: accounts whose owner a check compares
 	reinit: { op: number; acct: string }[]                        // authority writes to an init_if_needed account, no state read on the way
 	sameType?: { fn: string; n: number; type?: string; accts: string[] } // Anchor: an account type try_accounts deserializes more than once (its try call, the accounts it names)
 }
@@ -43,8 +44,10 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 			const B = ptr ? D.fpOff(ptr[0]) : undefined
 			if (len && len[0].k === 'const' && len[0].v === 1n && B !== undefined) {
 				const v = D.reaching(D.SLOT(B), p, true)
-				const ixs = v ? src(fn, v[0], v[1]).filter(x => x.kind === 'ix') : []
-				if (ixs.length) out.bumps.push({ op: oi, source: ixs[0].source })
+				// (loaded straight from instruction data: not through a call's results (e.g. a deserialized, stored bump))
+				const ld = v && direct(v[0], v[1], D, 0)
+				const ss = ld ? src(fn, ld[0], ld[1]) : []
+				if (ss.length && ss.every(x => x.kind === 'ix')) out.bumps.push({ op: oi, source: ss[0].source })
 			}
 		}
 		// (a CPI whose Result (the out object its first argument points to) no later statement reads; not the syscall itself:
@@ -64,22 +67,29 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 			}
 		}
 	})
-	// (Anchor: the remaining accounts a check reads (its compared bytes / values), by the handler's evaluation contexts)
-	if (r.anchor && ctx && ix.ops.some(o => o.target?.startsWith('remaining_accounts[') || o.cpi?.accounts.some(x => /remaining_accounts\[/.test(x.text)))) {
+	// (Anchor: the accounts' keys / owners / data the checks compare (their compared bytes / values, through the variables
+	// holding a comparison's result), by the handler's evaluation contexts: remaining accounts checked, owners compared)
+	if (r.anchor && ctx && (out.dataReads.length || ix.ops.some(o => o.target?.startsWith('remaining_accounts[') || o.cpi?.accounts.some(x => /remaining_accounts\[/.test(x.text))))) {
 		const ev = evaluators(r, ix)
-		const seen = new Set<string>()
+		const seen = new Set<string>(), owners = new Set<string>()
 		for (const ck of ix.checks) {
 			const E = ev(ck.fnPc), st = ck.at.pc !== undefined ? stmtAt(I, ck.fnPc, ck.at.pc) : undefined
-			const fo = I.byPc.get(ck.fnPc)
+			const fo = I.byPc.get(ck.fnPc), D = defsIn(I, ck.fnPc)
 			const b = fo && ck.c ? cfgOf(fo).condBlock.get(ck.c) : undefined
 			const p = b !== undefined ? b << 16 | fo!.f.blocks[b].stmts.length : st?.[1]
-			if (!E || !ck.c || p === undefined) continue
-			walkExpr(ck.c, x => {
-				const args = x.k === 'call' || x.k === 'fn' ? x.args : x.k === 'var' ? [x] : []
-				for (const a of args) for (const v of reads(E, a, p)) if (/^remaining_accounts\[/.test(v)) seen.add(v)
+			if (!E || !D || !ck.c || p === undefined) continue
+			const scan = (e: Expr, q: number, d: number) => walkExpr(e, x => {
+				if (x.k === 'call' || x.k === 'fn') { for (const a of x.args) for (const [v, k] of reads(E, a, q)) { if (/^remaining_accounts\[/.test(v)) seen.add(v); if (k === 'ownp') owners.add(v) } }
+				else if (x.k === 'var' && d < 3) {
+					const y: [Expr, number] | null = D.defs.has(x.id) ? [D.defs.get(x.id)!, D.defPos.get(x.id)!] : D.multi.has(x.id) ? D.reaching(x.id, q) : null
+					if (y) scan(y[0], y[1], d + 1)
+					else for (const [v] of reads(E, x, q)) if (/^remaining_accounts\[/.test(v)) seen.add(v)
+				}
 			})
+			scan(ck.c, p, 0)
 		}
 		out.remChecked = [...seen]
+		out.ownerCmp = [...owners]
 	}
 	// (Anchor: a deserialization (a try call checking a discriminator) try_accounts makes for several accounts)
 	if (r.anchor && ctx) {
@@ -145,6 +155,21 @@ function readAfter(I: ReturnType<typeof irOf>, fn: number, p: number, fpOff: (e:
 		work.push(...blocks[b].succs)
 	}
 	return false
+}
+
+/** the load a value is (through variables and frame words, not a call's results): its address, with its position */
+function direct(e: Expr, p: number, D: NonNullable<ReturnType<typeof defsIn>>, d: number): [Expr, number] | undefined {
+	if (d > 8) return undefined
+	if (e.k === 'ext') return direct(e.a, p, D, d + 1)
+	if (e.k === 'var') {
+		const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null
+		return y && y[0].k !== 'call' ? direct(y[0], y[1], D, d + 1) : undefined
+	}
+	if (e.k !== 'load') return undefined
+	const o = D.fpOff(e.addr)
+	if (o === undefined) return [e.addr, p]
+	const y = D.reaching(D.SLOT(o), p, true)
+	return y && y[0].k !== 'call' ? direct(y[0], y[1], D, d + 1) : undefined
 }
 
 /** the expressions of a statement */
@@ -253,9 +278,9 @@ function readsAcct(r: Result, ix: IxOut, fn: number, e: Expr, p: number, acct: s
 }
 
 /** the accounts a compared value comes from: pointers to a key / owner / data, and the frame bytes copied from them */
-function reads(E: EvCtx, e: Expr, p: number): string[] {
-	const out: string[] = []
-	const one = (v: HVal | undefined) => { if (v && v.k !== 'fr' && (v.k === 'keyp' || v.k === 'ownp' || v.k === 'data' || v.k === 'info')) out.push(v.acct) }
+function reads(E: EvCtx, e: Expr, p: number): [string, string][] {
+	const out: [string, string][] = []
+	const one = (v: HVal | undefined) => { if (v && v.k !== 'fr' && (v.k === 'keyp' || v.k === 'ownp' || v.k === 'data' || v.k === 'info')) out.push([v.acct, v.k]) }
 	const v = E.ev(e, p)
 	one(v)
 	// (bytes copied into the frame from a key: the copy's source)
