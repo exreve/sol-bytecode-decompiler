@@ -14,6 +14,7 @@
 			"pdas": ["escrow/*", "vault/*"]
 		},
 		"take": {
+			"note": "permissionless by design: any signer paying amount_b takes the vault; the escrow closes to the maker it names (has_one): no finding expected",
 			"accounts": {
 				"taker": ["signer"], "maker": ["writable"], "escrow": ["owner", "discriminator", "writable", "has_one", "pda", "close"],
 				"mint_a": ["owner", "discriminator?"], "mint_b": ["owner", "discriminator?"], "vault": ["owner", "discriminator?", "writable", "pda"],

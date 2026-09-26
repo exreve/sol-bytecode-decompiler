@@ -31,7 +31,7 @@
 		}
 	},
 	"variants": {
-		"ungated": { "ix": "set_admin", "rules": ["state-write-ungated", "value-move-no-signer"], "idl": { "set_admin": "counter:w" } },
+		"ungated": { "ix": "set_admin", "rules": ["state-write-ungated", "value-move-no-signer", "caller-controlled-sensitive-param"], "idl": { "set_admin": "counter:w" } },
 		"no_signer": { "ix": "increment", "rules": ["state-write-ungated"], "idl": { "increment": "counter:w admin" } }
 	}
 }

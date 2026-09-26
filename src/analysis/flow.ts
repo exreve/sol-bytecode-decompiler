@@ -1211,7 +1211,7 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 /** a memcpy / memmove of a constant size: [dst, src, n] */
 function memcpyOf(c: { t: CallTarget; args: Expr[] }, callee?: Callee): [Expr, Expr, number] | undefined {
 	const nm = c.t.k === 'sys' ? c.t.name : c.t.k === 'fn' ? callee?.name(c.t.pc) ?? '' : ''
-	return /^(sol_)?(memcpy|memmove)_?$/.test(nm) && c.args.length >= 3 && c.args[2].k === 'const' && c.args[2].v <= 0x400n ? [c.args[0], c.args[1], Number(c.args[2].v)] : undefined
+	return /^(sol_)?(memcpy|memmove)_?$/.test(nm) && c.args.length >= 3 && c.args[2].k === 'const' && c.args[2].v <= 0x2000n ? [c.args[0], c.args[1], Number(c.args[2].v)] : undefined
 }
 
 /** a stored value that is a sum / difference (through its variables' definitions): += / -=, else = */

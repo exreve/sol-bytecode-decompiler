@@ -26,6 +26,7 @@ categories). `--verbose` lists the variants (caught / MISSED), every miss and ev
   - `relations`: account pairs bound by a key equality (has_one, token::mint / authority, native compares);
   - `cpis`: `PROGRAM.Instruction`; `writes`: `account.field`, `account.data[a..b]` (native), `account.lamports`;
   - `pdas`: seeds, `literal/*` (`*` = non-literal seed, bump dropped);
+  - `note`: why the instruction is clean as written (e.g. permissionless by design), not scored;
   - `variants`: `{ ix, rules: [accepted rule ids], idl?: { ix: "acct:ws …" } }` (the variant's IDL accounts).
   A trailing `?` marks an optional fact (not a miss when absent, not a false report when present).
 

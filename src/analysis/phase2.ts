@@ -389,6 +389,10 @@ const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] =>
 	const o = ix.ops[row.op]
 	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 	if (!hasSigner || stored || o.cpi?.seeds || initMechanics(ix, o)) return []
+	// (Anchor's close constraint on an account bound by has_one: the rent goes to the target its stored data names, e.g. a
+	// permissionless trade closing the maker's escrow to the maker)
+	const closed = o.anchorClose && o.target ? o.target.split('.')[0] + '.' : undefined
+	if (closed && (ix.relations ?? []).some(x => (x.kind === 'has_one' || x.kind === 'field_eq') && ((x.a.startsWith(closed) && x.b.endsWith('.key')) || (x.b.startsWith(closed) && x.a.endsWith('.key'))))) return []
 	if (initWrite(ix, o)) return []
 	// (a CPI passing the signer on: the callee checks it against its own state, e.g. a token account's owner)
 	// (or through a library helper, its accounts not decoded: the callee checks the authority's signature too)
