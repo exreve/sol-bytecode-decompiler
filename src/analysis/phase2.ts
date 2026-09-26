@@ -204,7 +204,7 @@ export function phase2(a: Analysis, r: Result) {
 			// (Anchor has_one on account T: T.<f> == f.key; the error names T, not f: each signer is a candidate)
 			if (c.kinds.includes('has_one') && c.account) for (const sgn of ix.accounts) if (sgn.name !== c.account && sgn.constraints.signer && sgn.constraints.signer.status !== 'not_found') rel.push({ a: hasOneField(c.account, sgn.name, c.cond, a), b: `${sgn.name}.key`, kind: 'has_one', status: c.status, at: c.at })
 			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
-			const sides = eqSides(c.cond)
+			const sides = c.sides ?? eqSides(c.cond)
 			if (!sides) continue
 			const norm = (t: string) => {
 				for (const m of t.matchAll(ACCT_REF)) { const acct = acctOf(m[1]); if (acct) return `${acct}.${m[2]}` }

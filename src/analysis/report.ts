@@ -62,7 +62,7 @@ import type { Result } from '../decompile.ts'
 import type { FnFacts, Op, OpKind } from './facts.ts'
 import { refOf } from './facts.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, type DispatchGroup, type AcctRef } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 
@@ -78,6 +78,7 @@ export interface AccountRow {
 }
 export interface CheckOut {
 	at: Loc; status: 'found' | 'partial'; account?: string; kinds: string[]; cond: string; failsIf: boolean; error: string; via?: string
+	sides?: [string, string]              // native: the two account fields an equality compares (by the IR)
 	fnPc: number; c?: Expr; main: boolean // (internal: the dominance analysis, phase2.ts)
 }
 export interface OpOut {
@@ -243,19 +244,30 @@ function analyze0(r: Result): Analysis {
 		for (const ff of fns) {
 			const fm = main.get(ff.pc)!
 			// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice)
-			const R = !r.anchor && byPc.get(ff.pc) ? accountResolver(byPc.get(ff.pc)!) : undefined
+			const R = !r.anchor && byPc.get(ff.pc) ? accountResolver(byPc.get(ff.pc)!, { f: pc => byPc.get(pc)?.f, name: pc => p.funcs.get(pc)?.name ?? '' }) : undefined
 			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
 			for (const c of ff.checks) {
-				if (!keep(ff.pc, c.pc)) continue
+				// (by the block deciding the condition: the failing side may be an error exit the tags share)
+				const cb = grp && c.c && byPc.get(ff.pc) ? cfgOf(byPc.get(ff.pc)!).condBlock.get(c.c) : undefined
+				if (cb !== undefined ? !grp!.allowed(ff.pc, cb) : !keep(ff.pc, c.pc)) continue
 				const status: 'found' | 'partial' = fm && c.main ? 'found' : 'partial'
 				const irRefs = R && c.c ? R.refs(c.c) : []
 				// (an account the code holds in a temporary: its name, marked with ?)
 				const acct = cn(c.named) ?? cn(c.refs.find(x => cn(x.acct))?.acct) ?? (irRefs[0] ? idxName(irRefs[0].index) : undefined) ?? (c.refs[0] ? `${c.refs[0].acct}?` : undefined)
 				const fk = (f: string | undefined) => ({ is_signer: 'signer', is_writable: 'writable', owner: 'owner', key: 'key', executable: 'executable', data_len: 'data_len', lamports: 'lamports' } as Record<string, string>)[f ?? '']
 				const kinds = [...c.kinds, ...(c.via?.kinds ?? []).filter(k => k !== 'count' && !c.kinds.includes(k)), ...irRefs.map(x => fk(x.field)).filter((k, i, a): k is string => !!k && !c.kinds.includes(k) && a.indexOf(k) === i)]
+				// (native: an account key compared with a constant (address), with a derived address in the frame (pda),
+				// or two account fields compared (a relation))
+				const sd = R && c.c ? R.sides(c.c) : undefined
+				const keyed = sd?.find((x): x is AcctRef => typeof x === 'object' && x.field === 'key')
+				const other = keyed && sd!.find(x => x !== keyed)
+				const sk = other === 'const' ? 'address' : other === 'pda' ? 'pda' : undefined
+				if (sk && !kinds.includes(sk)) kinds.push(sk)
+				const sides = sd && typeof sd[0] === 'object' && typeof sd[1] === 'object' && sd[0].index !== sd[1].index ? sd.map(x => `${idxName((x as AcctRef).index)}.${(x as AcctRef).field}`) as [string, string] : undefined
 				const at = loc(ff, c.line, c.pc)
-				checks.push({ at, status, account: acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, fnPc: ff.pc, c: c.c, main: c.main })
+				checks.push({ at, status, account: sk ? idxName(keyed!.index) : acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, main: c.main })
 				const ci = checks.length - 1
+				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind
 				// (applied once the statuses are final: see the dominance analysis below)
 				if (c.named && cn(c.named)) for (const k of kinds) pend.push([cn(c.named)!, k, ci, c.via && !c.kinds.includes(k) ? c.via.fn : undefined])

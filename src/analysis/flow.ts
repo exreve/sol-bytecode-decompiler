@@ -9,7 +9,7 @@
 // printed from and never changes it.
 import type { FuncOut, Result } from '../decompile.ts'
 import type { VarFunc } from '../dataflow.ts'
-import type { Expr, Stmt } from '../ir.ts'
+import type { CallTarget, Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
 import { computeRpo, dominators } from '../structure.ts'
 import { stmtExprs } from '../simplify.ts'
@@ -483,16 +483,21 @@ function tagStates(fo: FuncOut, forced?: number): TagStates | undefined {
  */
 export function splitDispatch(r: Result, root: FuncOut, roots: Set<number>): DispatchGroup[] | undefined {
 	const byPc = new Map(r.funcs.map(x => [x.pc, x]))
-	let first: TagStates | undefined
 	const q: [number, number][] = [[root.pc, 0]], seen = new Set([root.pc])
-	while (q.length && !first) {
+	// (the first function whose matching splits into instructions: e.g. not the entrypoint's error-code conversion after the processor returns)
+	while (q.length) {
 		const [pc, d] = q.shift()!
 		const fo = byPc.get(pc)
 		if (!fo) continue
-		first = tagStates(fo)
+		const first = tagStates(fo)
+		const gs = first && splitFrom(r, first, roots, byPc)
+		if (gs) return gs
 		if (d < 2) for (const c of r.facts.get(pc)?.calls ?? []) if (!c.errPath && !seen.has(c.callee) && !roots.has(c.callee)) { seen.add(c.callee); q.push([c.callee, d + 1]) }
 	}
-	if (!first) return undefined
+	return undefined
+}
+
+function splitFrom(r: Result, first: TagStates, roots: Set<number>, byPc: Map<number, FuncOut>): DispatchGroup[] | undefined {
 	// nested dispatchers: callees the tag is passed to
 	const ds: TagStates[] = [first]
 	const tried = new Set([first.fo.pc])
@@ -619,65 +624,380 @@ const evalCmpN = (op: string, a: bigint, b: bigint): boolean => {
 
 /** AccountInfo (solana-program, 0x30 bytes): field by offset */
 const INFO_FIELD: Record<number, string> = { 0: 'key', 8: 'lamports', 0x10: 'data', 0x18: 'owner', 0x20: 'rent_epoch', 0x28: 'is_signer', 0x29: 'is_writable', 0x2a: 'executable' }
+/** a serialized input record (the entrypoint's input; pinocchio's AccountInfo points to one): field by offset, size */
+const REC_FIELD: Record<number, [string, number]> = { 1: ['is_signer', 1], 2: ['is_writable', 1], 3: ['executable', 1], 8: ['key', 32], 0x28: ['owner', 32], 0x48: ['lamports', 8], 0x50: ['data_len', 8] }
 export interface AcctRef { index: number; field?: string }
-export interface AcctResolver { byName: Map<string, AcctRef>; refs: (e: Expr) => AcctRef[] }
+export type Side = AcctRef | 'stack' | 'pda' | 'const' | undefined // 'stack': a frame buffer ('pda': written by a PDA derivation); 'const': a constant (program memory)
+export interface AcctResolver {
+	byName: Map<string, AcctRef>
+	refs: (e: Expr) => AcctRef[]                          // account fields an expression reads
+	store: (s: Stmt) => AcctRef | undefined                // the account field a store writes (lamports, data[a..b])
+	sides: (c: Expr) => [Side, Side] | undefined           // the two sides of an equality (key / field compares; 'stack': a frame buffer)
+}
+
+/**
+ * Abstract values of the account model: pointers into the accounts (an &[AccountInfo] slice, the input
+ * records or an array of pointers to them, the RcBox of a RefCell'd lamports / data field, a field) and
+ * values read from them.
+ */
+type AV =
+	| { k: 'slice'; off: number }                                 // &[AccountInfo] (0x30-byte entries)
+	| { k: 'recs'; off: number }                                  // array of pointers to input records
+	| { k: 'rec'; i: number; off: number }                        // input record i
+	| { k: 'rc'; i: number; f: 'lamports' | 'data'; off: number } // Rc<RefCell<&mut ..>> of AccountInfo i
+	| { k: 'ptr'; i: number; f: string; off: number }             // &lamports / &data[..] / &key / &owner of account i
+	| { k: 'val'; i: number; f: string }                          // a field value read
+	| { k: 'base'; v: number; off: number }                       // (first pass) a pointer variable
+	| { k: 'elem'; v: number; e: number; off: number }            // (first pass) a pointer loaded from base v, entry e
 
 const resMemo = new WeakMap<object, AcctResolver>()
+
+/** a function's IR (when decompiled) and name (library code) */
+export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<string, number> }
+/** writes through a pointer argument, by the callee's name (library code not decompiled) */
+const LIB_WRITES: [RegExp, number][] = [[/find_program_address/, 33], [/create_program_address/, 33], [/^(sol_)?(memcpy|memmove|memset)/, -1]]
 /**
- * Accounts a native function holds in temporaries: loads from a frame array of account-record pointers
- * the entrypoint fills (8-byte entries, the first stored being the first record, `input + 8`), and
- * offsets into an `&[AccountInfo]` slice (0x30-byte entries: a variable read at 0x30·i + field offsets for
- * two or more i). Names are the printed variable names.
+ * How many bytes a call may write through its argument j (a pointer to the caller's frame): the stores the
+ * callee makes through that parameter (and through the calls it passes it to, 3 levels); 0x80 when unknown
+ * (the pointer escapes, or library code not known).
  */
-export function accountResolver(fo: { f: VarFunc; names: string[] }): AcctResolver {
+function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee, depth = 3): number {
+	const nm = t.k === 'sys' ? t.name : t.k === 'fn' ? cl.name(t.pc) : ''
+	for (const [re, n] of LIB_WRITES) if (re.test(nm)) return n < 0 ? (j === 0 ? 0x80 : 0) : n
+	if (t.k === 'sys') return /log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80
+	if (t.k !== 'fn' || depth <= 0) return 0x80
+	const key = `${t.pc}:${j}`
+	const memo = cl.memo ??= new Map()
+	const m = memo.get(key)
+	if (m !== undefined) return m
+	memo.set(key, 0x80) // (recursion)
+	const f = cl.f(t.pc)
+	const pv = f?.vars.find(v => v.param === j + 1)?.id
+	let n = 0
+	if (f && pv !== undefined) {
+		const defs = new Map<number, Expr>(), multi = new Set<number>()
+		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { if (defs.has(s.dst) || multi.has(s.dst) || s.k === 'call') { defs.delete(s.dst); multi.add(s.dst) } else defs.set(s.dst, s.e) }
+		// (param + c through single definitions)
+		const off = (e: Expr, d = 0): number | undefined => {
+			if (d > 8) return undefined
+			if (e.k === 'var') return e.id === pv ? 0 : defs.has(e.id) ? off(defs.get(e.id)!, d + 1) : undefined
+			if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const x = off(e.a, d + 1); return x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)) }
+			return undefined
+		}
+		outer: for (const b of f.blocks) for (const s of b.stmts) {
+			if (s.k === 'store' || s.k === 'stores' || s.k === 'copy') {
+				const a = off(s.k === 'copy' ? s.dst : s.addr)
+				if (a !== undefined) n = Math.max(n, a + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n))
+				// (the pointer stored somewhere: it escapes)
+				if (s.k === 'store' && off(s.v) !== undefined || s.k === 'stores' && s.vals.some(v => off(v) !== undefined)) { n = 0x80; break outer }
+			}
+			const c = callOf(s)
+			if (c) for (let k = 0; k < c.args.length; k++) { const a = off(c.args[k]); if (a !== undefined) n = Math.max(n, a + callWrites(c.t, k, cl, depth - 1)) }
+			if (n >= 0x80) break
+		}
+	} else n = 0x80
+	memo.set(key, n)
+	return n
+}
+/**
+ * Accounts a native function reaches through its temporaries: the frame array of input-record pointers
+ * the entrypoint fills (8-byte entries, the first stored being `input + 8`), a variable used as an
+ * `&[AccountInfo]` slice (read at 0x30·i + field offsets for two or more i), or as an array of pointers to
+ * input records (pinocchio: entries read for two or more i, dereferenced at record offsets). Variables
+ * with one definition and frame slots stored once (no call gets a pointer near them) are followed, and
+ * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
+ * Names are the printed variable names.
+ */
+export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee): AcctResolver {
 	let res = resMemo.get(fo.f)
 	if (res) return res
 	const f = fo.f
 	const fp = f.vars.find(v => v.param === 10)?.id ?? -1
 	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
-	const defs = singleDefs(fo as FuncOut)
-	const rec0 = (d: Expr) => input !== undefined && d.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
-	const rec0Vars = new Set<number>()
-	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' && rec0(s.e)) rec0Vars.add(s.dst)
-	const isRec0 = (e: Expr): boolean => rec0(e) || (e.k === 'var' && rec0Vars.has(e.id))
-	let arr: number | undefined
-	const hits = new Map<number, Set<number>>() // slice var -> entries read
-	for (const b of f.blocks) for (const s of b.stmts) {
-		if (s.k === 'store' && s.size === 8 && isRec0(s.v)) { const o = offOf(s.addr, fp); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
-		for (const e of stmtExprs(s)) walkExpr(e, x => {
-			if (x.k !== 'load') return
-			const a = x.addr
-			if (a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id !== fp && a.b.k === 'const') {
-				const c = Number(BigInt.asIntN(64, a.b.v))
-				if (c >= 0 && c < 0x30 * 64 && INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) { let h = hits.get(a.a.id); if (!h) hits.set(a.a.id, (h = new Set())); h.add(Math.floor(c / 0x30)) }
-			}
+	const fpOff = (e: Expr): number | undefined => offOf(e, fp)
+	// definitions: single ones (a `set` or a call result); the others by position (reaching definitions)
+	const defs = new Map<number, Expr>(), defPos = new Map<number, number>(), multi = new Set<number>()
+	const pos = new Map<Stmt | Expr, number>() // statement / branch condition -> position (block << 16 | index)
+	f.blocks.forEach((b, bi) => {
+		b.stmts.forEach((s, i) => {
+			pos.set(s, bi << 16 | i)
+			if (s.k !== 'set' && s.k !== 'call') return
+			const d = s.dst
+			if (d < 0) return
+			if (defs.has(d) || multi.has(d)) { defs.delete(d); multi.add(d) } else { defs.set(d, s.k === 'set' ? s.e : { k: 'call', t: s.t, args: s.args }); defPos.set(d, bi << 16 | i) }
 		})
+		if (b.term.k === 'br') pos.set(b.term.c, bi << 16 | b.stmts.length)
+	})
+	/** the key of a frame slot (negative; its own inverse) */
+	const SLOT = (o: number) => -(1 << 24) - o
+	/**
+	 * What a statement does to a variable (key >= 0) / a frame slot (key < 0: SLOT(offset)): its value, null
+	 * (clobbered) or undefined (untouched). `loose` (where a byte of the slot comes from): a store of any size
+	 * at the slot, a copy (as a load of its source) and a call writing it (the call) count too.
+	 */
+	const effect = (s: Stmt, key: number, loose = false): Expr | null | undefined => {
+		if (key >= 0) return (s.k === 'set' || s.k === 'call') && s.dst === key ? (s.k === 'set' ? s.e : { k: 'call', t: s.t, args: s.args }) : undefined
+		const o = SLOT(key)
+		if (s.k === 'store') { const a = fpOff(s.addr); return a === undefined ? undefined : a === o ? (s.size === 8 || loose ? s.v : null) : a < o + 8 && a + s.size > o ? null : undefined }
+		if (s.k === 'stores' || s.k === 'copy') {
+			const a = fpOff(s.k === 'stores' ? s.addr : s.dst), n = s.k === 'stores' ? s.vals.length * s.size : s.n
+			if (a === undefined || a >= o + 8 || a + n <= o) return undefined
+			if (s.k === 'stores') return (s.size === 8 || loose) && (o - a) % s.size === 0 ? s.vals[(o - a) / s.size] : null
+			const src = loose && a <= o ? fpOff(s.src) : undefined
+			return src === undefined ? null : { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } }
+		}
+		const c = callOf(s)
+		// (a callee may write the structure it gets a pointer to)
+		if (c) for (let j = 0; j < c.args.length; j++) { const p = fpOff(c.args[j]); if (p !== undefined && p <= o && o < p + (callee ? callWrites(c.t, j, callee) : 0x80)) return loose ? { k: 'call', t: c.t, args: c.args } : null }
+		return undefined
 	}
-	const slices = new Set([...hits].filter(([, ks]) => ks.size >= 2).map(([v]) => v))
-	const at = (a: Expr): AcctRef | undefined => {
-		const [base, c] = a.k === 'bin' && a.op === 'add' && a.b.k === 'const' ? [a.a, Number(BigInt.asIntN(64, a.b.v))] : [a, 0]
-		if (base.k === 'var' && slices.has(base.id) && c >= 0) return { index: Math.floor(c / 0x30), field: INFO_FIELD[c % 0x30] }
-		if (arr !== undefined && base.k === 'var' && base.id === fp && (c - arr) % 8 === 0 && c >= arr && c - arr < 8 * 64) return { index: (c - arr) / 8 }
+	const endMemo = new Map<string, [Expr, number] | null>()
+	/** the definition of key reaching position p (the same one on every path), with its position */
+	const reaching = (key: number, p: number, loose = false): [Expr, number] | null => {
+		const path = new Set<number>()
+		let steps = 0, cyc = false
+		// (undefined: only paths around a loop back to a block being searched)
+		const go = (b: number, from: number): [Expr, number] | null | undefined => {
+			const ss = f.blocks[b].stmts
+			for (let i = from - 1; i >= 0; i--) { const x = effect(ss[i], key, loose); if (x !== undefined) return x && [x, b << 16 | i] }
+			const preds = f.blocks[b].preds
+			if (!preds.length || ++steps > 400) return null
+			let r: [Expr, number] | undefined
+			path.add(b)
+			for (const q of preds) {
+				const mk = `${q}|${key}${loose ? '~' : ''}`
+				let x = endMemo.get(mk)
+				if (x === undefined) {
+					if (path.has(q)) { cyc = true; continue }
+					const c0 = cyc
+					cyc = false
+					const y = go(q, f.blocks[q].stmts.length)
+					if (!cyc && y !== undefined) endMemo.set(mk, y)
+					cyc ||= c0
+					if (y === undefined) continue
+					x = y
+				}
+				if (!x || (r && r[0] !== x[0])) { path.delete(b); return null }
+				r = x
+			}
+			path.delete(b)
+			return r
+		}
+		return go(p >> 16, p & 0xffff) ?? null
+	}
+	const rec0 = (d: Expr | undefined) => input !== undefined && d?.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
+	let arr: number | undefined
+	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'store' && s.size === 8 && (rec0(s.v) || (s.v.k === 'var' && rec0(defs.get(s.v.id))))) { const o = fpOff(s.addr); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
+	}
+	const roots = new Map<number, AV>()
+	let pass1 = true
+	const memo = new Map<Expr, Map<number, AV | undefined>>()
+	/** the value of e evaluated at position p */
+	const ev = (e: Expr, p: number, d = 0): AV | undefined => {
+		if (d > 24) return undefined
+		let m = memo.get(e)
+		if (m?.has(p)) return m.get(p)
+		const r = ev0(e, p, d)
+		if (!m) memo.set(e, (m = new Map()))
+		m.set(p, r)
+		return r
+	}
+	const ev0 = (e: Expr, p: number, d: number): AV | undefined => {
+		switch (e.k) {
+			case 'var': {
+				const r = roots.get(e.id)
+				if (r) return r
+				const x = defs.get(e.id)
+				if (x) return x.k !== 'call' ? ev(x, defPos.get(e.id)!, d + 1) : undefined
+				if (multi.has(e.id)) { const y = reaching(e.id, p); return y && y[0].k !== 'call' ? ev(y[0], y[1], d + 1) : undefined }
+				return pass1 && e.id !== fp ? { k: 'base', v: e.id, off: 0 } : undefined
+			}
+			case 'ext': return ev(e.a, p, d + 1)
+			case 'bin': {
+				if (e.op !== 'add' || e.b.k !== 'const') return undefined
+				const a = ev(e.a, p, d + 1)
+				return a && a.k !== 'val' ? { ...a, off: a.off + Number(BigInt.asIntN(64, e.b.v)) } : undefined
+			}
+			case 'load': {
+				const o = fpOff(e.addr)
+				if (o !== undefined) {
+					if (arr !== undefined && e.size === 8 && o >= arr && (o - arr) % 8 === 0 && o - arr < 8 * 64) return { k: 'rec', i: (o - arr) / 8, off: 0 }
+					const y = e.size === 8 ? reaching(SLOT(o), p) : null
+					return y ? ev(y[0], y[1], d + 1) : undefined
+				}
+				return deref(ev(e.addr, p, d + 1), e.size)
+			}
+		}
+		return undefined
+	}
+	const deref = (a: AV | undefined, size: number): AV | undefined => {
+		if (!a) return undefined
+		switch (a.k) {
+			case 'base': return pass1 && size === 8 && a.off >= 0 && a.off % 8 === 0 ? { k: 'elem', v: a.v, e: a.off / 8, off: 0 } : undefined
+			case 'slice': {
+				if (a.off < 0) return undefined
+				const i = Math.floor(a.off / 0x30), o = a.off % 0x30, fl = INFO_FIELD[o]
+				if (size === 8 && (o === 0 || o === 0x18)) return { k: 'ptr', i, f: fl, off: 0 }
+				if (size === 8 && (o === 8 || o === 0x10)) return { k: 'rc', i, f: o === 8 ? 'lamports' : 'data', off: 0 }
+				return fl && o >= 0x20 ? { k: 'val', i, f: fl } : undefined
+			}
+			case 'recs': return size === 8 && a.off >= 0 && a.off % 8 === 0 ? { k: 'rec', i: a.off / 8, off: 0 } : undefined
+			case 'rec': {
+				if (a.off >= 0x58) return { k: 'val', i: a.i, f: `data[${a.off - 0x58}..${a.off - 0x58 + size}]` }
+				const x = REC_FIELD[a.off]
+				if (x && (x[1] === size || x[1] === 32)) return { k: 'val', i: a.i, f: x[0] }
+				for (const o of [8, 0x28]) if (a.off > o && a.off < o + 32) return { k: 'val', i: a.i, f: REC_FIELD[o][0] }
+				return undefined
+			}
+			case 'rc':
+				if (a.off === 0x18 && size === 8) return { k: 'ptr', i: a.i, f: a.f, off: 0 }
+				return a.f === 'data' && a.off === 0x20 && size === 8 ? { k: 'val', i: a.i, f: 'data_len' } : undefined
+			case 'ptr': return { k: 'val', i: a.i, f: a.f === 'data' ? `data[${a.off}..${a.off + size}]` : a.f }
+		}
+		return undefined
+	}
+	// first pass: the variables used as a slice / an array of record pointers
+	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
+	const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
+	const recUse = (a: AV | undefined, ok: boolean) => { if (a?.k === 'elem' && ok) recUses.set(a.v, (recUses.get(a.v) ?? 0) + 1) }
+	f.blocks.forEach((b, bi) => {
+		let p = bi << 16
+		const note = (x: Expr) => {
+			if (x.k !== 'load') return
+			const a = ev(x.addr, p)
+			if (a?.k === 'base' && a.off >= 0 && a.off < 0x30 * 64) {
+				const c = a.off
+				if (INFO_FIELD[c % 0x30] !== undefined && (x.size === 8 || c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
+				if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
+			}
+			recUse(a, a?.k === 'elem' && REC_FIELD[a.off]?.[1] === x.size)
+		}
+		b.stmts.forEach((s, i) => {
+			p = bi << 16 | i
+			for (const e of stmtExprs(s)) walkExpr(e, note)
+			// (a key / owner compared: memcmp(rec + 8 | rec + 0x28, ..); lamports stored)
+			const c = callOf(s)
+			if (c) for (const a of c.args) { const x = ev(a, p); recUse(x, x?.k === 'elem' && (x.off === 8 || x.off === 0x28)) }
+			if (s.k === 'store') { const x = ev(s.addr, p); recUse(x, x?.k === 'elem' && x.off === 0x48) }
+		})
+		p = bi << 16 | b.stmts.length
+		if (b.term.k === 'br') walkExpr(b.term.c, note)
+	})
+	for (const [v, ks] of hits) if (ks.size >= 2) roots.set(v, { k: 'slice', off: 0 })
+	for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
+	pass1 = false
+	memo.clear()
+	const asRef = (a: AV | undefined): AcctRef | undefined => {
+		if (!a) return undefined
+		if (a.k === 'val') return { index: a.i, field: a.f }
+		// (a pointer standing for the 32 bytes compared)
+		if (a.k === 'ptr') return { index: a.i, field: a.f === 'data' ? `data[${a.off}..${a.off + 32}]` : a.f }
+		if (a.k === 'rec') { const r = REC_FIELD[a.off]; return a.off >= 0x58 ? { index: a.i, field: `data[${a.off - 0x58}..${a.off - 0x58 + 32}]` } : r && r[1] === 32 ? { index: a.i, field: r[0] } : undefined }
 		return undefined
 	}
 	const byName = new Map<string, AcctRef>()
 	for (const [v, e] of defs) {
 		const nm = fo.names[v]
-		if (!nm) continue
-		// (a record pointer loaded from the array; &slice[i]; a field of slice[i] (key / owner pointer))
-		if (e.k === 'load' && e.size === 8) { const r0 = at(e.addr); if (r0) { byName.set(nm, r0.field === undefined ? { index: r0.index } : r0); continue } }
-		const r1 = at(e)
-		if (r1 && r1.field === 'key' && e.k !== 'load') byName.set(nm, { index: r1.index })
+		const a = nm ? ev(e, defPos.get(v)!) : undefined
+		if (!a) continue
+		if (a.k === 'rec' && a.off === 0) byName.set(nm, { index: a.i })
+		else if (a.k === 'slice' && a.off % 0x30 === 0) byName.set(nm, { index: a.off / 0x30 })
+		else if (a.k === 'ptr' && a.f === 'key' && a.off === 0) byName.set(nm, { index: a.i })
+	}
+	/** the two pointers of a 32-byte comparison: a call (memcmp / sol_memcmp) or a memeq */
+	const cmpArgs = (x: Expr): [Expr, Expr] | undefined =>
+		(x.k === 'call' || (x.k === 'fn' && x.name === 'memeq')) && x.args.length >= 3 && x.args[2].k === 'const' && x.args[2].v === 0x20n ? [x.args[0], x.args[1]] : undefined
+	/** through casts and variables holding a call's result: the expression, at its position */
+	const follow = (e: Expr, p: number): [Expr, number] => {
+		for (let k = 0; k < 4; k++) {
+			if (e.k === 'ext') { e = e.a; continue }
+			if (e.k !== 'var') break
+			const y: [Expr, number] | null = defs.has(e.id) ? [defs.get(e.id)!, defPos.get(e.id)!] : multi.has(e.id) ? reaching(e.id, p) : null
+			if (!y || (y[0].k !== 'call' && !(y[0].k === 'ext' && y[0].a.k === 'call'))) break
+			e = y[0]
+			p = y[1]
+		}
+		return [e, p]
 	}
 	const refs = (e: Expr): AcctRef[] => {
+		const p0 = pos.get(e)
+		if (p0 === undefined) return []
 		const out: AcctRef[] = []
+		const push = (r: AcctRef | undefined) => { if (r && !out.some(y => y.index === r.index && y.field === r.field)) out.push(r) }
 		walkExpr(e, x => {
-			if (x.k === 'load') { const r0 = at(x.addr); if (r0 && r0.field) out.push(r0) }
-			else if (x.k === 'var') { const nm = fo.names[x.id]; const r0 = nm ? byName.get(nm) : undefined; if (r0?.field) out.push(r0) }
+			if (x.k === 'load' || x.k === 'var') { const a = ev(x, p0); if (a?.k === 'val') push(asRef(a)) }
+			const [y, p] = x.k === 'var' ? follow(x, p0) : [x, p0]
+			const ca = cmpArgs(y)
+			if (ca) for (const q of ca) push(asRef(ev(q, p)))
+			if (y.k === 'fn' && y.name === 'keyeq') push(asRef(ev(y.args[0], p)))
 		})
 		return out
 	}
-	res = { byName, refs }
+	const store = (s: Stmt): AcctRef | undefined => {
+		const p = pos.get(s)
+		if ((s.k !== 'store' && s.k !== 'stores') || p === undefined) return undefined
+		const a = ev(s.addr, p)
+		const n = s.k === 'store' ? s.size : s.size * s.vals.length
+		if (a?.k === 'ptr' && (a.f === 'lamports' || a.f === 'data')) return { index: a.i, field: a.f === 'lamports' ? 'lamports' : `data[${a.off}..${a.off + n}]` }
+		if (a?.k === 'rec' && a.off === 0x48 && s.k === 'store' && s.size === 8) return { index: a.i, field: 'lamports' }
+		if (a?.k === 'rec' && a.off >= 0x58) return { index: a.i, field: `data[${a.off - 0x58}..${a.off - 0x58 + n}]` }
+		return undefined
+	}
+	/** the call that wrote the frame bytes a pointer points to (through copies and stores of loaded bytes) */
+	const origin = (e: Expr, p: number, d = 0): Extract<Expr, { k: 'call' }> | undefined => {
+		for (let k = 0; k < 6 && d < 12; k++, d++) {
+			if (e.k === 'ext') { e = e.a; continue }
+			if (e.k !== 'var') break
+			const y: [Expr, number] | null = defs.has(e.id) ? [defs.get(e.id)!, defPos.get(e.id)!] : multi.has(e.id) ? reaching(e.id, p) : null
+			if (!y) return undefined
+			;[e, p] = y
+		}
+		const o = fpOff(e)
+		if (o === undefined) return undefined
+		const r = reaching(SLOT(o), p, true)
+		if (!r) return undefined
+		let [x, q] = r
+		if (x.k === 'call') return x
+		for (let k = 0; k < 6 && (x.k === 'ext' || x.k === 'var'); k++) {
+			if (x.k === 'ext') { x = x.a; continue }
+			const y: [Expr, number] | null = defs.has(x.id) ? [defs.get(x.id)!, defPos.get(x.id)!] : multi.has(x.id) ? reaching(x.id, q) : null
+			if (!y) return undefined
+			;[x, q] = y
+		}
+		return x.k === 'load' && d < 12 ? origin(x.addr, q, d + 1) : undefined
+	}
+	/** a PDA derivation: by name, or a function making the syscall (2 levels) */
+	const pdaCall = (t: CallTarget, d = 0): boolean => {
+		if (t.k === 'sys') return /program_address/.test(t.name)
+		if (t.k !== 'fn' || !callee) return false
+		if (/program_address/.test(callee.name(t.pc))) return true
+		const g = d < 2 ? callee.f(t.pc) : undefined
+		return !!g && g.blocks.some(b => b.stmts.some(s => { const c = callOf(s); return !!c && c.t.k !== 'ind' && pdaCall(c.t, d + 1) }))
+	}
+	const side = (e: Expr, p: number): Side => {
+		const r = asRef(ev(e, p))
+		if (r) return r
+		let st = false
+		walkExpr(e, x => { if (fpOff(x) !== undefined) st = true })
+		if (st) { const c = origin(e, p); return c && pdaCall(c.t) ? 'pda' : 'stack' }
+		return e.k === 'const' || (e.k === 'var' && defs.get(e.id)?.k === 'const') ? 'const' : undefined
+	}
+	const sides = (c: Expr): [Side, Side] | undefined => {
+		const p0 = pos.get(c)
+		if (p0 === undefined) return undefined
+		let x = c
+		while (x.k === 'lnot') x = x.a
+		const cmp = (e: Expr): [Side, Side] | undefined => { const [y, p] = follow(e, p0); const ca = cmpArgs(y); return ca && [side(ca[0], p), side(ca[1], p)] }
+		if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne')) {
+			const r = cmp(x.a) ?? cmp(x.b)
+			if (r) return r
+			const [ra, rb] = [asRef(ev(x.a, p0)), asRef(ev(x.b, p0))]
+			return ra || rb ? [ra, rb] : undefined
+		}
+		return cmp(x)
+	}
+	res = { byName, refs, store, sides }
 	resMemo.set(fo.f, res)
 	return res
 }

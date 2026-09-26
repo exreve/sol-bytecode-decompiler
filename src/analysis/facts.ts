@@ -33,6 +33,7 @@ export interface FnInput {
 	seedsAt?: (ptr: bigint, n: bigint) => string | undefined // a seed list in program memory, as text
 	programId?: number                                      // the variable holding the program id (Anchor handler ABI)
 	irRefs?: (e: Expr) => { field?: string }[]               // native: account fields a condition reads (flow.ts accountResolver)
+	irStore?: (s: Stmt) => { index: number; field?: string } | undefined // native: the account field a store writes (flow.ts accountResolver)
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -225,6 +226,23 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (!s || (s.k !== 'store' && s.k !== 'stores')) return
 		const l = lineOf(n)
 		const t = lines[l]?.trim() ?? ''
+		// (native: an account's lamports / data reached through temporaries, by the IR)
+		const ir = inp.irStore?.(s)
+		if (ir?.field) {
+			const v = /^st(?:8|16|32|64)\((.*)\)$/.exec(t)?.[1]?.split(', ').slice(1).join(', ') ?? t
+			const kinds: OpKind[] = ir.field === 'lamports' ? ['LAMPORT_WRITE'] : ['ACCOUNT_DATA_WRITE']
+			if (ir.field === 'lamports' && /^(0x)?0$/.test(v)) kinds.push('ACCOUNT_CLOSE')
+			// (a copy in 8-byte words, e.g. a key: one write of the whole range)
+			const prev = facts.ops[facts.ops.length - 1], r = /^data\[(\d+)\.\.(\d+)\]$/.exec(ir.field)
+			const pr = prev?.line === l && prev.target?.acct === `account[${ir.index}]` && /^ld64\(/.test(v) && /^ld64\(/.test(prev.value ?? '') ? /^data\[(\d+)\.\.(\d+)\]$/.exec(prev.target.field ?? '') : null
+			if (r && pr && (r[1] === pr[2] || r[2] === pr[1])) {
+				prev.target!.field = r[1] === pr[2] ? `data[${pr[1]}..${r[2]}]` : `data[${r[1]}..${pr[2]}]`
+				prev.line = l + 1
+				return
+			}
+			facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: `account[${ir.index}]`, field: ir.field }, how: '=', value: v })
+			return
+		}
 		const m = /^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: \/\/.*)?$/.exec(t)
 		if (!m) {
 			// raw account data: stN(X.data + off, v) with X an account (record / AccountInfo)

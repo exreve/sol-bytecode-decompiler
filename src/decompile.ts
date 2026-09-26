@@ -26,7 +26,7 @@ import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
-import { accountResolver } from './analysis/flow.ts';
+import { accountResolver, type Callee } from './analysis/flow.ts';
 
 export interface Options {
   sugar?: boolean;       // Solana-aware rendering (strings, pubkeys, account fields)
@@ -315,6 +315,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // (analysis only, src/analysis: CPIs made through small user functions wrapping invoke, decoded at their
   // call sites by a run of the caller; own budget, nothing printed)
   const wrapBudget = { steps: 150_000 };
+  const callee: Callee = { f: pc => built.get(pc)?.f, name: fnName }; // (native account resolution: what calls write through frame pointers)
   const userInvoke = new Set<number>();
   if (opts.sugar !== false) for (const [pc, bt] of built) {
     let n = 0, hit = false;
@@ -1094,7 +1095,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false) facts.set(pc, functionFacts({
       pc, name: f.name, body, lines, at: bodyAt, spans, sites: siteNotes, anchor: sem.anchor,
       noreturn: t => !!p.funcs.get(t)?.noreturn, calleeName: fnName, seedsAt,
-      irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }).refs(e),
+      irRefs: sem.anchor ? undefined : e => accountResolver({ f, names }, callee).refs(e),
+      irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
