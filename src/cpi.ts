@@ -612,3 +612,73 @@ function fmtValue(v: Expr, site: CpiSite, env: CpiEnv): string {
 	}
 	return `*${wrap(env.expr(v))}`
 }
+
+/** A frame object a site shows the role of: its offset, a name for it and its view type (src/views.ts). */
+export interface SiteObject { off: number; name: string; type?: string }
+
+/**
+ * The frame objects of a CPI / PDA / fmt site whose layout the site's ABI fixes: the instruction, its
+ * account metas and data, signer seed lists, a PDA's seed list and result, a fmt::Arguments and its
+ * argument list. Only objects the frame contents at the site show to be built there (as the
+ * descriptions above read them).
+ */
+export function siteObjects(site: CpiSite, fp: number, read?: (a: bigint, n: number) => bigint | undefined): SiteObject[] {
+	const out: SiteObject[] = []
+	const fo = (e: Expr | undefined) => (e ? frameOff(e, fp) : null)
+	const at = atFacts(site.facts)
+	const seedArr = (ptr: Expr | undefined, n: Expr | undefined, name: string) => {
+		const o = fo(ptr)
+		if (o === null || n?.k !== 'const' || n.v === 0n || n.v > 16n) return
+		for (let i = 0; i < Number(n.v); i++) if (!at(o + 16 * i, 8) || !at(o + 16 * i + 8, 8)) return
+		out.push({ off: o, name, type: 'Slice' })
+	}
+	if (site.abi === 'c' || site.abi === 'rust') {
+		const ix = fo(site.args[0])
+		if (ix === null) return out
+		const c = site.abi === 'c'
+		const metas = fo(at(c ? ix + 8 : ix, 8)), data = fo(at(ix + 24, 8))
+		if (!at(ix + 16, 8)) return out
+		out.push({ off: ix, name: 'ix', type: c ? 'SolInstruction' : 'StableInstruction' })
+		if (metas !== null) out.push({ off: metas, name: 'metas', type: c ? 'SolAccountMeta' : 'AccountMeta' })
+		if (data !== null) out.push({ off: data, name: 'ix_data' })
+		// signer seeds: [{ ptr, len }] of [{ ptr, len }]
+		const so = fo(site.args[3]), sn = site.args[4]
+		if (so !== null && sn?.k === 'const' && sn.v > 0n && sn.v <= 4n) {
+			out.push({ off: so, name: 'signers', type: 'SeedList' })
+			for (let j = 0; j < Number(sn.v); j++) seedArr(at(so + 16 * j, 8), at(so + 16 * j + 8, 8), 'seeds')
+		}
+		return out
+	}
+	if (site.abi.startsWith('pda')) {
+		const o = site.abi === 'pda_find_out' || site.abi === 'pda_create_out'
+		const [seeds, n] = o ? site.args.slice(1, 3) : site.args.slice(0, 2)
+		seedArr(seeds, n, 'seeds')
+		const res = fo(o ? site.args[0] : site.args[3])
+		if (res !== null) out.push({ off: res, name: 'pda' })
+		if (site.abi === 'pda_find') { const b = fo(site.args[4]); if (b !== null) out.push({ off: b, name: 'bump' }) }
+		return out
+	}
+	if (site.abi === 'call' && read) {
+		// fmt::Arguments: pieces (a rodata &[&str]) first, then args / fmt in either order
+		const word = (o: number) => site.facts.find(x => x.off === o && x.size === 8)?.e
+		for (const a of site.args) {
+			const o = fo(a)
+			if (o === null) continue
+			const p = word(o), n = word(o + 8)
+			if (p?.k !== 'const' || n?.k !== 'const' || n.v < 1n || n.v > 12n || read(p.v, 8) === undefined) continue
+			for (const k of [16, 32]) {
+				const ap = word(o + k), an = word(o + k + 8), s = word(o + (k === 16 ? 32 : 16))
+				if (!ap || an?.k !== 'const' || an.v > 16n || !s) continue
+				const A = fo(ap)
+				if (an.v !== 0n && A === null) continue
+				let ok = true
+				for (let i = 0; i < Number(an.v) && ok; i++) if (!word(A! + 16 * i) || word(A! + 16 * i + 8)?.k !== 'const') ok = false
+				if (!ok) continue
+				out.push({ off: o, name: 'fmt', type: k === 16 ? 'FmtArguments' : 'FmtArgumentsSpecsFirst' })
+				if (an.v !== 0n) out.push({ off: A!, name: 'fmt_args', type: 'FmtArg' })
+				return out
+			}
+		}
+	}
+	return out
+}

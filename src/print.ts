@@ -27,6 +27,7 @@ export interface PrintCtx {
   keyAt?: (ptr: bigint) => string | undefined; // base58 of a 32-byte rodata value (public key) at ptr
   dropUndefArgs?: boolean; // omit trailing `undef` call arguments (readability mode)
   frameRef?: (off: bigint) => string | undefined; // name for fp + off (stack object), e.g. `s30 + 8`
+  frameTyped?: (off: bigint) => { t: string; type: string; rel: number } | undefined; // typed stack object holding fp + off: its name, view type, offset in it
   varName: (id: number) => string;
   exprHook?: (e: Expr, pr: (e: Expr, prec: number) => string) => string | undefined;
   nodeNote?: (n: Node) => string | undefined; // comment line printed before a statement / return
@@ -84,6 +85,8 @@ export class Printer {
     const V = this.ctx.views;
     if (!V) return undefined;
     if (e.k === 'var') { const type = this.ctx.varType?.(e.id); return type ? { t: this.ctx.varName(e.id), type } : undefined; }
+    const fo = this.frameObj(e);
+    if (fo) return fo.rel ? undefined : { t: fo.t, type: fo.type };
     const f = e.k === 'load' && e.size === 8 ? this.viewField(e.addr) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? this.viewField(e) : undefined;
     if (!f || f.rest) return undefined;
     if (e.k === 'load' && f.last.k === 'ref') return { t: f.t, type: f.last.to };
@@ -92,11 +95,19 @@ export class Printer {
   }
 
   /** `obj.path` for an address expression obj + c (c inside a declared field), with the byte offset left over. */
+  /** A frame address fp + c inside a typed stack object. */
+  frameObj(e: Expr): { t: string; type: string; rel: number } | undefined {
+    if (!this.ctx.frameTyped || e.k !== 'bin' || e.op !== 'add' || e.a.k !== 'var' || e.b.k !== 'const' || this.ctx.varName(e.a.id) !== 'fp') return undefined;
+    return this.ctx.frameTyped(BigInt.asIntN(64, e.b.v));
+  }
+
   viewField(addr: Expr): { t: string; rest: number; last: import('./views.ts').FieldType } | undefined {
     let b: Expr = addr, off = 0n;
-    if (addr.k === 'bin' && addr.op === 'add' && addr.b.k === 'const') { b = addr.a; off = BigInt.asIntN(64, addr.b.v); }
+    const fo = this.frameObj(addr);
+    if (fo) { b = { k: 'var', id: -1 }; off = BigInt(fo.rel); }
+    else if (addr.k === 'bin' && addr.op === 'add' && addr.b.k === 'const') { b = addr.a; off = BigInt.asIntN(64, addr.b.v); }
     if (off < 0n || off > 0x10000n) return undefined;
-    const o = this.typedObj(b);
+    const o = fo ? { t: fo.t, type: fo.type } : this.typedObj(b);
     if (!o) return undefined;
     // objects of a sized view in a row (e.g. a slice of AccountInfo): x[k]
     const size = this.ctx.views!.map.get(o.type)?.size;

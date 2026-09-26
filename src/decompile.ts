@@ -17,10 +17,10 @@ import { classify, type LibInfo } from './library.ts';
 import { signatures, type FnSig } from './fingerprint.ts';
 import { statementIdioms } from './stmtidioms.ts';
 import { builtinName } from './builtins.ts';
-import { findCpiSites, cpiDesc, formatIx, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
+import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
-import { Views, exprType } from './views.ts';
+import { Views, exprType, BUILTIN_VIEWS, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
 import { accountObjects, loaderWord, type AccountObjs } from './anchorstate.ts';
@@ -155,6 +155,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   sem.noteResultCompares(niche);
   sem.noteResultTags(tags, tagStores);
   const resultOut = sem.resultOkTag !== undefined && opts.sugar !== false ? resultOutParams(built, sem.resultOkTag) : new Set<number>();
+  const outParams = opts.sugar !== false ? pureOutParams(built) : new Set<number>();
 
   // ---- Anchor error helpers (named before anything is printed) ----
   const heurNames = new Map<number, string>(); // pc -> provenance note of a heuristic function name
@@ -794,6 +795,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       else if (v.reg === -1) names[v.id] = 'state';
     }
     for (const v of f.vars) if (names[v.id] === undefined && used.has(v.id)) names[v.id] = gen.next().value as string;
+    // an out parameter (the caller's object the result is written to)
+    if (outParams.has(pc)) { const a = f.vars.find(v => v.param === 1); if (a && !names.includes('ret')) names[a.id] = 'ret'; }
     // recovered names (see anchor.ts), unique and distinct from every other identifier of the output
     const an = anchorInfo.get(pc);
     const recovered: string[] = [];
@@ -899,31 +902,57 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
     }
     // stack objects: frame addresses that escape (or are bases of copies) name an object; other
-    // frame accesses are shown relative to the nearest object below them
+    // frame accesses are shown relative to the nearest object below them. Objects whose role is known
+    // (see frameRoles) are named after it, with a view type when their layout is known
     let frameDecl = '';
-    if (opts.sugar !== false) {
+    const setupFrame = (claims: Map<number, FrameClaim[]>) => {
       const fpv = f.vars.find(v => v.param === 10);
-      if (fpv) {
-        const { bases, all } = frameOffsets(f, fpv.id);
-        const sorted = [...bases].sort((a, b) => a - b);
-        const usedBases = new Set<number>();
-        const pick = (o: number): [number, number] => {
-          let b = o;
-          for (const x of sorted) { if (x <= o && o - x < 0x200) b = x; if (x > o) break; }
-          return [b, o - b];
-        };
-        for (const o of all) if (o < 0 && o >= -0x2000) usedBases.add(pick(o)[0]); // (frameRef names these only)
-        const nm = (b: number) => `s${(-b).toString(16)}`;
-        ctx.frameRef = off => {
-          const o = Number(off);
-          if (o >= 0 || o < -0x2000) return undefined;
-          const [b, d] = pick(o);
-          return d ? `${nm(b)} + ${d < 10 ? d : '0x' + d.toString(16)}` : nm(b);
-        };
-        const list = [...usedBases].sort((a, b) => b - a);
-        if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
+      if (!fpv) return;
+      const { bases, all } = frameOffsets(f, fpv.id);
+      // a role claimed consistently (one name; a view type only when every claim gives the same one)
+      const objName = new Map<number, string>(), objType = new Map<number, string>(), objWhy = new Map<number, string>();
+      for (const [o, cs] of [...claims].sort((x, y) => y[0] - x[0])) {
+        if (o >= 0 || o < -0x2000 || cs.some(c => c.name !== cs[0].name)) continue;
+        bases.add(o);
+        objName.set(o, unique(cs[0].name));
+        objWhy.set(o, cs[0].why);
+        const t = cs[0].type;
+        if (t && cs.every(c => c.type === t) && views.map.get(t) === BUILTIN_VIEW[t]) objType.set(o, t);
       }
-    }
+      const sorted = [...bases].sort((a, b) => a - b);
+      const usedBases = new Set<number>();
+      const pick = (o: number): [number, number] => {
+        let b = o;
+        for (const x of sorted) { if (x <= o && o - x < 0x200) b = x; if (x > o) break; }
+        return [b, o - b];
+      };
+      // a typed object is only one when every access to it fits its view (else: a slot reused for other data)
+      if (objType.size) for (const a of frameAccesses(f, fpv.id)) {
+        const [b, d] = pick(a.off);
+        const t = objType.get(b);
+        if (t && !fitsAccess(views, t, d, a.size, a.copy)) { objType.delete(b); objName.delete(b); }
+      }
+      for (const o of all) if (o < 0 && o >= -0x2000) usedBases.add(pick(o)[0]); // (frameRef names these only)
+      const nm = (b: number) => objName.get(b) ?? `s${(-b).toString(16)}`;
+      ctx.frameRef = off => {
+        const o = Number(off);
+        if (o >= 0 || o < -0x2000) return undefined;
+        const [b, d] = pick(o);
+        return d ? `${nm(b)} + ${d < 10 ? d : '0x' + d.toString(16)}` : nm(b);
+      };
+      if (objType.size) ctx.frameTyped = off => {
+        const o = Number(off);
+        if (o >= 0 || o < -0x2000) return undefined;
+        const [b, d] = pick(o);
+        const type = objType.get(b);
+        return type ? { t: nm(b), type, rel: d } : undefined;
+      };
+      const list = [...usedBases].sort((a, b) => b - a);
+      if (list.length) frameDecl = `\tconst ${list.map(b => `${nm(b)}${objType.has(b) ? `: ${objType.get(b)}` : ''} = fp - 0x${(-b).toString(16)}`).join(', ')}`;
+      const named = list.filter(b => objName.has(b));
+      if (named.length) frameNote = `stack objects [heur: ${[...new Set(named.map(b => objWhy.get(b)!))].join('; ')}]: ${named.map(b => nm(b)).join(', ')}`;
+    };
+    let frameNote = '';
     // typed views: variables known to point to an account (see accounts.ts), the entrypoint input
     const varTypes = new Map<number, string>();
     const dataNotes: string[] = [];
@@ -987,8 +1016,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }
     // cross-program invocations: what is invoked (comment before the call)
     const fpVar = f.vars.find(v => v.param === 10)?.id;
+    let siteList: CpiSite[] = [];
     if (opts.sugar !== false && fpVar !== undefined) {
       const sites = findCpiSites(body, fpVar, t => (t.k === 'sys' ? invokeAbi(t.name) ?? 'call' : t.k === 'fn' ? invokeThunks.get(t.pc) ?? pdaAbi(fnName(t.pc)) ?? pdaWrappers.get(t.pc) ?? (invokeWrappers.has(t.pc) ? 'invoke' : 'call') : null));
+      siteList = [...sites.values()];
       if (sites.size) {
         // exec descriptions (cpiexec.ts) are expressions of the parameters: variables defined (once) as such
         // an expression print as that variable
@@ -1066,6 +1097,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
       visit(body);
     }
+    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image));
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
@@ -1100,6 +1132,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         lines.push(`// names [str: account-error string on the failing branch; which variable holds the account is inferred${idlAcc.size ? '; [idl]: also an account name in the IDL' : ''}]: ${recovered.map(tag).join(', ')}`);
       }
     }
+    if (frameNote) lines.push(`// ${frameNote}`);
     if (irreducible) lines.push('// note: irreducible control flow, emitted as a state machine');
     lines.push(`${sig} {`);
     if (frameDecl) lines.push(frameDecl);
@@ -1133,6 +1166,106 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const res: Result = { program: p, funcs, stubs, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, tryOf, acctLayouts, programId: stateIdl?.address, sigs, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
   res.text = renderSingle(res);
   return res;
+}
+
+const BUILTIN_VIEW: Record<string, View> = Object.fromEntries(BUILTIN_VIEWS.map(v => [v.name, v]));
+
+/** A role of a stack object: a name for it, its view type when the layout is known, and where the role comes from. */
+interface FrameClaim { name: string; type?: string; why: string }
+
+/** stack-object role of the first argument of a call to a function of this name (it writes its result there) */
+function outRole(name: string): { name: string; type?: string } | undefined {
+  const m = /^__(multi3|udivti3|umodti3|divti3|modti3)(_[0-9a-f]+)?$/.exec(name);
+  if (m) return { name: m[1] === 'multi3' ? 'prod' : /div/.test(m[1]) ? 'quot' : 'rem', type: 'U128' };
+  if (/^Error_with_|^anchor_error_from$/.test(name)) return { name: 'err' };
+  return undefined;
+}
+
+/**
+ * Roles of stack objects (frame offset -> claims): the objects of CPI / PDA / fmt sites (their layout is
+ * the ABI's, cpi.ts siteObjects; not when the object is passed to other calls too), and objects only ever
+ * passed as the out parameter (first argument) of calls whose result role is known: u128 builtins (U128),
+ * Anchor error constructors (`err`).
+ */
+function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image']): Map<number, FrameClaim[]> {
+  const claims = new Map<number, FrameClaim[]>();
+  const fp = f.vars.find(v => v.param === 10)?.id;
+  if (fp === undefined) return claims;
+  const add = (o: number, c: FrameClaim) => { let l = claims.get(o); if (!l) claims.set(o, (l = [])); l.push(c); };
+  const read = (a: bigint, n: number) => (image.region(a, n)?.exec === false ? image.read(a, n) : undefined);
+  const sited = new Map<number, FrameClaim[]>();
+  for (const s of sites) for (const o of siteObjects(s, fp, read)) { let l = sited.get(o.off); if (!l) sited.set(o.off, (l = [])); l.push({ name: o.name, type: o.type, why: 'the CPI / PDA / fmt calls they are built for' }); }
+  // out parameters: every use of the object's address is as the first argument of such calls
+  const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
+  const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>();
+  const visit = (e: Expr, addr: boolean) => {
+    const o = fo(e);
+    if (o !== undefined) { if (!addr) escapes.set(o, (escapes.get(o) ?? 0) + 1); return; }
+    switch (e.k) {
+      case 'load': visit(e.addr, true); break;
+      case 'call': {
+        const o0 = e.args[0] && fo(e.args[0]);
+        const r = o0 !== undefined && e.t.k === 'fn' ? outRole(fnName(e.t.pc)) : undefined;
+        if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ ...r, why: 'out parameter of the calls they are passed to' }); }
+        for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
+        if (e.t.k === 'ind') visit(e.t.e, false);
+        e.args.forEach(a => visit(a, false));
+        break;
+      }
+      case 'bin': case 'cmp': case 'land': case 'lor': visit(e.a, false); visit(e.b, false); break;
+      case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': visit(e.a, false); break;
+      case 'sel': visit(e.c, false); visit(e.a, false); visit(e.b, false); break;
+      case 'fn': e.args.forEach(a => visit(a, false)); break;
+    }
+  };
+  for (const b of f.blocks) {
+    for (const s of b.stmts) {
+      if (s.k === 'call') visit({ k: 'call', t: s.t, args: s.args }, false);
+      else if (s.k === 'store') { visit(s.addr, true); visit(s.v, false); }
+      else if (s.k === 'stores') { visit(s.addr, true); s.vals.forEach(v => visit(v, false)); }
+      else if (s.k === 'copy') { visit(s.dst, true); visit(s.src, true); }
+      else stmtExprs(s).forEach(e => visit(e, false));
+    }
+    if (b.term.k === 'br') visit(b.term.c, false);
+    else if (b.term.k === 'ret' && b.term.e) visit(b.term.e, false);
+  }
+  // (a site object passed to other calls too is a slot reused for something else)
+  for (const [o, cs] of sited) if ((argEsc.get(o) ?? 0) <= cs.length) cs.forEach(c => add(o, c));
+  for (const [o, cs] of outs) if (cs.length === escapes.get(o) && !claims.has(o)) cs.forEach(c => add(o, c));
+  return claims;
+}
+
+/**
+ * User functions whose first parameter is only an out pointer (sret: the caller's object the result
+ * is written to): never reassigned, used only as the address of stores and copies into it, or passed
+ * on as the first argument of another call (possibly offset); at least one store or copy; no load.
+ */
+function pureOutParams(built: Map<number, Built>): Set<number> {
+  const out = new Set<number>();
+  for (const [pc, { f }] of built) {
+    const a = f.vars.find(v => v.param === 1)?.id;
+    if (a === undefined || f.isEntry) continue;
+    const base = (e: Expr) => (e.k === 'var' && e.id === a) || (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === a && e.b.k === 'const');
+    let writes = 0, ok = true;
+    const other = (e: Expr) => walkExpr(e, x => { if (x.k === 'var' && x.id === a) ok = false; });
+    const callArgs = (args: Expr[]) => args.forEach((x, i) => { if (!(i === 0 && base(x))) other(x); });
+    for (const b of f.blocks) {
+      for (const s of b.stmts) {
+        if ((s.k === 'set' || s.k === 'call') && s.dst === a) ok = false;
+        if (s.k === 'store' || s.k === 'stores') { if (base(s.addr)) writes++; else other(s.addr); (s.k === 'store' ? [s.v] : s.vals).forEach(other); }
+        else if (s.k === 'copy') { if (base(s.dst)) writes++; else other(s.dst); other(s.src); }
+        else if (s.k === 'call') { callArgs(s.args); s.extra?.forEach(other); if (s.t.k === 'ind') other(s.t.e); }
+        else if (s.k === 'set') { if (s.e.k === 'call') { callArgs(s.e.args); if (s.e.t.k === 'ind') other(s.e.t.e); } else other(s.e); }
+        else stmtExprs(s).forEach(other);
+        if (!ok) break;
+      }
+      if (b.term.k === 'br') other(b.term.c);
+      else if (b.term.k === 'ret' && b.term.e) other(b.term.e);
+      if (!ok) break;
+    }
+    if (ok && writes) out.add(pc);
+  }
+  return out;
 }
 
 /**
@@ -1460,6 +1593,39 @@ function nameThunks(p: Program) {
     f.name = name;
   }
 }
+
+/** Loads, stores and copies of the frame: offset, size in bytes, copy or not. */
+function frameAccesses(f: VarFunc, fp: number): { off: number; size: number; copy: boolean }[] {
+  const out: { off: number; size: number; copy: boolean }[] = [];
+  const off = (e: Expr): number | null => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const') ? Number(BigInt.asIntN(64, e.b.v)) : null;
+  const loads = (e: Expr) => walkExpr(e, x => { if (x.k === 'load') { const o = off(x.addr); if (o !== null) out.push({ off: o, size: x.size, copy: false }); } });
+  for (const b of f.blocks) {
+    for (const s of b.stmts) {
+      if (s.k === 'store') { const o = off(s.addr); if (o !== null) out.push({ off: o, size: s.size, copy: false }); }
+      else if (s.k === 'stores') { const o = off(s.addr); if (o !== null) s.vals.forEach((_, i) => out.push({ off: o + i * s.size, size: s.size, copy: false })); }
+      else if (s.k === 'copy') for (const x of [s.dst, s.src]) { const o = off(x); if (o !== null) out.push({ off: o, size: s.n, copy: true }); }
+      stmtExprs(s).forEach(loads);
+    }
+    if (b.term.k === 'br') loads(b.term.c);
+    else if (b.term.k === 'ret' && b.term.e) loads(b.term.e);
+  }
+  return out;
+}
+
+/** An access of `size` bytes at offset d of an object of view `type` (arrays of a sized view: any element) hits a field exactly (a copy: stays inside). */
+function fitsAccess(V: Views, type: string, d: number, size: number, copy: boolean): boolean {
+  const v = V.map.get(type);
+  if (!v?.size || d < 0) return false;
+  const array = ARRAY_VIEWS.has(type);
+  if (copy) return array ? d % v.size === 0 && size % v.size === 0 : d + size <= v.size;
+  if (!array && d >= v.size) return false;
+  const r = V.resolve(type, d % v.size);
+  if (!r) return false;
+  if (r.last.k === 'scalar') return !r.rest && r.last.size === size;
+  if (r.last.k === 'ref') return !r.rest && size === 8;
+  return r.rest + size <= V.width(r.last);
+}
+const ARRAY_VIEWS = new Set(['SolAccountMeta', 'AccountMeta', 'Slice', 'SeedList', 'FmtArg']);
 
 /** Frame offsets used in a function: `bases` = addresses that escape or start a copy/store run. */
 function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<number> } {

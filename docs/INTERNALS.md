@@ -29,6 +29,30 @@ Built-in views: `AccountInfo` (Rust; `lamports` / `data` point to `LamportsCell`
 `acc0`). A variable defined once as such a field (`const j = acc.data`) gets the field's view type. A view is an exact alias whatever the variable holds; *which*
 variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
 
+**Stack objects** (`[heur]`, per function: `// stack objects [heur: …]: ix, metas, err`). A frame object is
+named after its role, and typed when its layout is fixed by that role, when the role is consistent:
+
+* the objects of a CPI / PDA / fmt site read back from the frame (`src/cpi.ts` `siteObjects`): the instruction
+  `ix: SolInstruction` (C ABI) / `ix: StableInstruction` (Rust ABI), its account metas `metas: SolAccountMeta` /
+  `AccountMeta` (arrays: `metas[1].is_writable`), its data `ix_data`, signer seed lists `signers: SeedList` and
+  `seeds: Slice`, a PDA's seed list, result `pda` and `bump`, a `fmt: FmtArguments` and its `fmt_args: FmtArg`;
+  not when the object's address is passed to other calls too, nor (typed) when an access to it does not hit a
+  field of the view exactly (a slot reused for other data);
+* objects whose address is only ever the first argument (the out parameter) of u128 builtins (`prod`, `quot`,
+  `rem: U128`: `prod.lo`, `prod.hi`) or of Anchor error constructors (`err`).
+
+```ts
+	const prod: U128 = fp - 0x40
+	__multi3(prod, d + e - 1 & -d, 0, g, 0)
+	if (prod.hi != 0) { … }
+	const ix: SolInstruction = fp - 0x60, metas: SolAccountMeta = fp - 0x90
+	ix.account_len = 2
+```
+
+**Out parameters.** A user function whose first parameter is only written through (stores and copies at
+constant offsets, or passed on as another call's first argument; never loaded, never reassigned) names it
+`ret`: the caller's object the result is written to (Rust's return slot for values larger than 8 bytes).
+
 ## Recovered names and their provenance
 
 Every recovered name says where it comes from, so a reader knows what to double-check:

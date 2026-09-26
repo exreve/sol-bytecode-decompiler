@@ -175,7 +175,7 @@ function usedSyscalls(r: Result): string[] {
 /** How recovered names are marked (per-function "// names" / "// accounts" lines carry the tags). */
 export const PROVENANCE = `// recovered names carry their source: [idl] Anchor IDL · [str] the program's own strings (instruction logs, Anchor account-error
 //   names) · [known] well-known program ids and layouts · [heur] structural inference (verify); per-function "// names" lines list them.
-//   Other names are plain temporaries: a..e = parameters r1..r5, f, g, … = locals, s30 = stack object at fp - 0x30, fn_<addr> = unnamed function`
+//   Other names are plain temporaries: a..e = parameters r1..r5 (ret: an out parameter, the object the result is written to), f, g, … = locals, s30 = stack object at fp - 0x30 (or named after its role: ix, metas, seeds, fmt, err, prod, …), fn_<addr> = unnamed function`
 
 function summary(r: Result): string[] {
 	const p = r.program

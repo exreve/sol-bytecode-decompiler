@@ -83,6 +83,94 @@ export const BUILTIN_VIEWS: View[] = [
 		],
 	},
 	{
+		name: 'SolInstruction', size: 0x28, doc: 'C-ABI instruction (sol_invoke_signed_c): program id, account metas, data',
+		fields: [
+			{ name: 'program_id', off: 0x00, t: REF('Pubkey'), doc: '&Pubkey' },
+			{ name: 'accounts', off: 0x08, t: REF('SolAccountMeta') },
+			{ name: 'account_len', off: 0x10, t: S(8) },
+			{ name: 'data', off: 0x18, t: REF('bytes') },
+			{ name: 'data_len', off: 0x20, t: S(8) },
+		],
+	},
+	{
+		name: 'SolAccountMeta', size: 0x10, doc: 'C-ABI account meta of a SolInstruction (16 bytes)',
+		fields: [
+			{ name: 'pubkey', off: 0x00, t: REF('Pubkey'), doc: '&Pubkey' },
+			{ name: 'is_writable', off: 0x08, t: S(1) },
+			{ name: 'is_signer', off: 0x09, t: S(1) },
+		],
+	},
+	{
+		name: 'StableInstruction', size: 0x50, doc: 'solana_program StableInstruction (sol_invoke_signed_rust): account metas and data as StableVec { ptr, cap, len }, the program id in place',
+		fields: [
+			{ name: 'accounts', off: 0x00, t: REF('AccountMeta') },
+			{ name: 'accounts_cap', off: 0x08, t: S(8) },
+			{ name: 'accounts_len', off: 0x10, t: S(8) },
+			{ name: 'data', off: 0x18, t: REF('bytes') },
+			{ name: 'data_cap', off: 0x20, t: S(8) },
+			{ name: 'data_len', off: 0x28, t: S(8) },
+			{ name: 'program_id', off: 0x30, t: EMB('Pubkey') },
+		],
+	},
+	{
+		name: 'AccountMeta', size: 0x22, doc: 'solana_program::instruction::AccountMeta (34 bytes: the key in place, then the flags)',
+		fields: [
+			{ name: 'pubkey', off: 0x00, t: EMB('Pubkey') },
+			{ name: 'is_signer', off: 0x20, t: S(1) },
+			{ name: 'is_writable', off: 0x21, t: S(1) },
+		],
+	},
+	{
+		name: 'Slice', size: 0x10, doc: '&[u8]: pointer and length (a seed)',
+		fields: [
+			{ name: 'ptr', off: 0x00, t: REF('bytes') },
+			{ name: 'len', off: 0x08, t: S(8) },
+		],
+	},
+	{
+		name: 'SeedList', size: 0x10, doc: "&[&[u8]]: one signer's seeds (pointer to Slices, count)",
+		fields: [
+			{ name: 'ptr', off: 0x00, t: REF('Slice') },
+			{ name: 'len', off: 0x08, t: S(8) },
+		],
+	},
+	{
+		name: 'U128', size: 0x10, doc: 'u128 / i128 in place (little-endian words)',
+		fields: [
+			{ name: 'lo', off: 0x00, t: S(8) },
+			{ name: 'hi', off: 0x08, t: S(8) },
+		],
+	},
+	{
+		name: 'FmtArguments', size: 0x30, doc: 'core::fmt::Arguments { pieces: &[&str], args: &[Argument], fmt: Option<&[Placeholder]> } (fields in this order)',
+		fields: [
+			{ name: 'pieces', off: 0x00, t: REF('Slice'), doc: '&[&str] (rodata)' },
+			{ name: 'pieces_len', off: 0x08, t: S(8) },
+			{ name: 'args', off: 0x10, t: REF('FmtArg') },
+			{ name: 'args_len', off: 0x18, t: S(8) },
+			{ name: 'fmt', off: 0x20, t: REF('bytes'), doc: 'placeholder specs (0: none)' },
+			{ name: 'fmt_len', off: 0x28, t: S(8) },
+		],
+	},
+	{
+		name: 'FmtArgumentsSpecsFirst', size: 0x30, doc: 'core::fmt::Arguments { pieces: &[&str], fmt: Option<&[Placeholder]>, args: &[Argument] } (fields in this order)',
+		fields: [
+			{ name: 'pieces', off: 0x00, t: REF('Slice'), doc: '&[&str] (rodata)' },
+			{ name: 'pieces_len', off: 0x08, t: S(8) },
+			{ name: 'fmt', off: 0x10, t: REF('bytes'), doc: 'placeholder specs (0: none)' },
+			{ name: 'fmt_len', off: 0x18, t: S(8) },
+			{ name: 'args', off: 0x20, t: REF('FmtArg') },
+			{ name: 'args_len', off: 0x28, t: S(8) },
+		],
+	},
+	{
+		name: 'FmtArg', size: 0x10, doc: 'core::fmt::rt::Argument: value pointer, formatter function',
+		fields: [
+			{ name: 'value', off: 0x00, t: REF('bytes') },
+			{ name: 'formatter', off: 0x08, t: S(8) },
+		],
+	},
+	{
 		name: 'Input', doc: 'program input (entrypoint parameter): account count, then the first serialized account',
 		fields: [
 			{ name: 'num_accounts', off: 0, t: S(8) },

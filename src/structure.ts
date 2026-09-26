@@ -523,6 +523,53 @@ function sameTree(a: any, b: any): boolean {
   return na === nb;
 }
 
+/** sameTree, ignoring instruction addresses (`pc`) */
+function samePcFree(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!samePcFree(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  let na = 0, nb = 0;
+  for (const k in a) { if (a[k] === undefined || k === 'pc') continue; na++; if (!samePcFree(a[k], b[k])) return false; }
+  for (const k in b) if (b[k] !== undefined && k !== 'pc') nb++;
+  return na === nb;
+}
+
+/** An expression that cannot trap, read memory or call: evaluating it or not is the same. */
+function inert(e: Expr): boolean {
+  switch (e.k) {
+    case 'const': case 'var': case 'reg': case 'undef': return true;
+    case 'bin': return !['udiv', 'urem', 'sdiv', 'srem', 'sdiv32', 'srem32'].includes(e.op) && inert(e.a) && inert(e.b);
+    case 'cmp': case 'land': case 'lor': return inert(e.a) && inert(e.b);
+    case 'neg': case 'not': case 'ext': case 'bswap': case 'lnot': return inert(e.a);
+    case 'sel': return inert(e.c) && inert(e.a) && inert(e.b);
+    default: return false;
+  }
+}
+
+/** `if (c) { A } else { A }` (the same statements, c without effects) -> A */
+function sameArmsPass(ns: Node[]): Node[] {
+  const out: Node[] = [];
+  for (const n of ns) {
+    switch (n.k) {
+      case 'if': {
+        const t = sameArmsPass(n.then), e = sameArmsPass(n.else);
+        if (t.length && inert(n.c) && samePcFree(t, e)) out.push(...t);
+        else out.push({ ...n, then: t, else: e });
+        break;
+      }
+      case 'block': case 'loop': out.push({ ...n, body: sameArmsPass(n.body) } as Node); break;
+      case 'switch': out.push({ ...n, cases: n.cases.map(c => ({ ...c, body: sameArmsPass(c.body) })) }); break;
+      default: out.push(n);
+    }
+  }
+  return out;
+}
+
 const nodeSize = (ns: Node[]): number => ns.reduce((a, n) => a + (n.k === 'if' ? 1 + nodeSize(n.then) + nodeSize(n.else)
   : n.k === 'block' || n.k === 'loop' ? 1 + nodeSize(n.body) : n.k === 'switch' ? 1 + n.cases.reduce((b, c) => b + nodeSize(c.body), 0) : 1), 0);
 
@@ -595,6 +642,7 @@ export function cleanup(s: Structured, returnsValue: boolean): Node[] {
     let refs = new Map<string, number>(); countRefs(body, refs);
     body = labelPass(body, refs);
     body = ifPass(body, top);
+    body = sameArmsPass(body);
     body = dupPass(body);
     body = tailPass(body, top, []);
     refs = new Map(); countRefs(body, refs);

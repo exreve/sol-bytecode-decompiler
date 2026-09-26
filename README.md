@@ -86,7 +86,7 @@ types and comments are derived and say where they come from:
 | `[heur]` | structural inference: verify before relying on it |
 | `[exec]` | read from concrete runs of the function in the reference interpreter |
 
-Untagged names are plain temporaries (`a..e` = register arguments r1..r5, then `f, g, …`; `s30` stack objects;
+Untagged names are plain temporaries (`a..e` = register arguments r1..r5, `ret` an out parameter, then `f, g, …`; `s30` stack objects;
 `fn_<addr>` unnamed functions). How each name, view and annotation is recovered: [docs/INTERNALS.md](docs/INTERNALS.md).
 
 ### Runtime model
