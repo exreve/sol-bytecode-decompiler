@@ -331,9 +331,9 @@ export function pruneUnreachable(f: Func) {
     else if (t.k === 'br') { t.t = remap[t.t]; t.f = remap[t.f]; }
   }
   f.blocks = nb;
-  const blockAt = new Map<number, number>();
-  for (const [pc, id] of f.blockAt) if (remap[id] >= 0) blockAt.set(pc, remap[id]);
-  f.blockAt = blockAt;
+  // (in place: the surviving entries keep their order, as in a rebuilt map; nothing else holds f.blockAt)
+  const blockAt = f.blockAt;
+  for (const [pc, id] of blockAt) { const r = remap[id]; if (r < 0) blockAt.delete(pc); else if (r !== id) blockAt.set(pc, r); }
 }
 
 // ---------------- variable recovery ----------------
