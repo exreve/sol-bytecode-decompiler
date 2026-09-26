@@ -8,7 +8,7 @@ import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
 import type { IxCtx, IxOut, Loc } from './report.ts'
 import { irOf, stmtAt, defsIn, pathTo, blockAt, valueKey } from './paths.ts'
-import { dataReads, callOf, cfgOf, anchorEval, tryInfo, type HVal, type EvCtx } from './flow.ts'
+import { dataReads, callOf, cfgOf, anchorEval, tryInfo, ctxResolver, calleeOf, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
 
 export interface AuditFacts {
@@ -501,6 +501,11 @@ function sysvarReads(r: Result, ix: IxOut, src: (fn: number, e: Expr, p: number)
 		for (const [base, p, what] of cands) {
 			if (what.includes('offset') && !bases0.has(key(base))) continue
 			const accts = [...new Set(src(ff.pc, base, p).filter(x => x.kind === 'data' && x.acct).map(x => x.acct!))]
+			// (native: the account model along the instruction's call path (pointers into a caller's accounts struct))
+			if (!accts.length && !r.anchor && ix.ctx) {
+				const ref = ctxResolver(I, calleeOf(r), ix.ctx, ff.pc)?.valueAt(base, p)
+				if (ref && /^data/.test(ref.field ?? '')) accts.push(ix.accounts.find(x => x.index === ref.index)?.name ?? `account[${ref.index}]`)
+			}
 			const line = ff.pcLine.get(fo.f.blocks[p >> 16].stmts[p & 0xffff].pc) ?? ff.at + 1
 			for (const acct of accts.length ? accts : ['?']) if (!out.some(y => y.acct === acct)) out.push({ acct, sysvar: what, at: { fn: ff.name, line }, idCompared })
 		}

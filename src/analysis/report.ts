@@ -69,7 +69,7 @@ import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
@@ -346,11 +346,7 @@ function analyze0(r: Result): Analysis {
 			const pf = par && byPc.get(par.fn)
 			const at = pf && par!.pc !== undefined ? callAt(pf).get(par!.pc) : undefined
 			const pos = at?.pos ?? -1, c = at?.c
-			const seed = new Map<number, AcctVal>()
-			if (PR && c && c.t.k === 'fn' && c.t.pc === fn) c.args.forEach((a, j) => {
-				const v = PR.av(a, pos), pv = fo.f.vars.find(x => x.param === j + 1)?.id
-				if (v && pv !== undefined && (v.k === 'slice' || v.k === 'recs' || v.k === 'rec' || v.k === 'ptr' || v.k === 'rc')) seed.set(pv, v)
-			})
+			const seed = seedFrom(PR, pf, c, pos, fo, fn)
 			if (seed.size) resMemo.set(fn, accountResolver(fo, clr, seed))
 			return resMemo.get(fn)
 		}

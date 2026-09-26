@@ -715,7 +715,8 @@ const RULES: Rule[] = [
 			// (by behavior: an account's data parsed with the Instructions sysvar's layout, whatever its name)
 			for (const x of ix.audit?.sysvarReads ?? []) {
 				if (x.idCompared || out.some(y => y.accounts[0] === x.acct) || addressChecked(ix, x.acct) || found(ix, x.acct, 'key') || found(ix, x.acct, 'owner')) continue
-				out.push({ accounts: [x.acct], path: [L(x.at)], evidence: [`${x.acct}'s data is parsed as the ${x.sysvar} sysvar`, `no check of ${x.acct}'s key against the sysvar id found: an account with forged data passes (load_instruction_at_checked / load_current_index_checked check it)`], confidence: 'medium' as const, weight: 5 })
+				// (the account not identified: a lead (the u16 layout alone is weak evidence, its key check may be elsewhere))
+				out.push({ accounts: [x.acct], path: [L(x.at)], evidence: [`${x.acct === '?' ? 'an account' : x.acct}'s data is parsed as the ${x.sysvar} sysvar`, `no check of ${x.acct === '?' ? 'its' : `${x.acct}'s`} key against the sysvar id found: an account with forged data passes (load_instruction_at_checked / load_current_index_checked check it)`], confidence: x.acct === '?' ? 'info' as const : 'medium' as const, weight: 5 })
 			}
 			return out
 		},
