@@ -931,7 +931,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const siteNotes = new Map<Node, SiteNote>();
     if (opts.sugar !== false) ctx.nodeLines = (n, a, b) => { spans.set(n, [a, b]); };
     // entrypoint: annotate fields of the serialized input (first account + header)
-    const inputVar = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined;
+    // (not when the variable is reassigned: e.g. the C SDK's deserializer reuses it as its cursor)
+    const inputVar0 = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
+    const inputVar = inputVar0 !== undefined && !f.blocks.some(b => b.stmts.some(s => (s.k === 'set' || s.k === 'call') && s.dst === inputVar0)) ? inputVar0 : undefined
     if (opts.sugar !== false && inputVar !== undefined) {
       const prev = ctx.exprHook;
       ctx.exprHook = (e, pr) => {
