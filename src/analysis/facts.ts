@@ -490,7 +490,8 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (c.k === 'lnot') condLines(c.a, l)
 		else if (c.k === 'land' || c.k === 'lor') { condLines(c.a, l); condLines(c.b, l) }
 	}
-	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean) => {
+	// (contFail: falling off the end of the list goes into the failing side of an enclosing check)
+	const walk = (ns: Node[], main: boolean, err: boolean, cont: boolean, contFail = false) => {
 		let before: number | undefined
 		for (let k = 0; k < ns.length; k++) {
 			const n = ns[k]
@@ -545,10 +546,15 @@ export function functionFacts(inp: FnInput): FnFacts {
 					if (fail) {
 						const failNodes = fail === 'then' ? n.then : fail === 'else' ? n.else : rest
 						check(n, failNodes, fail === 'then', main, before, fail === 'then' ? (n.else.length ? n.else : rest) : n.then)
-						walk(n.then, fail === 'then' ? false : main, err || fail === 'then', after)
+						walk(n.then, fail === 'then' ? false : main, err || fail === 'then', after, fail === 'rest' || (!rest.length && contFail))
 						walk(n.else, fail === 'else' ? false : main, err || fail === 'else', after)
 						if (fail === 'rest') { walk(rest, false, true, cont); return }
-					} else { walk(n.then, false, err, after); walk(n.else, false, err, after) }
+					}
+					// (the last node of a list whose end falls into an enclosing check's failing side, its else side empty: a
+					// further condition of that check (e.g. the next word of a 32-byte key comparison), its then side on every
+					// non-failing path)
+					else if (contFail && !n.else.length && !rest.length) walk(n.then, main, err, after, true)
+					else { walk(n.then, false, err, after); walk(n.else, false, err, after) }
 					before = undefined
 					break
 				}

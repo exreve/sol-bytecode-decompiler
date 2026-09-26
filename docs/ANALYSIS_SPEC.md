@@ -211,6 +211,25 @@ Precision guards (eval/ blind review):
   their fields), its stored Pubkey fields (IDL type) never compared or written, and GAP lines (such a field named
   like an instruction account bound by nothing else); no rule (too imprecise on the corpus: Anchor constraints the
   analysis does not match to fields);
+- validation consistency (src/analysis/consistency.ts; analysis.json `validation_consistency`, summary.md / <ix>.md
+  `## Validation consistency`): accounts grouped by role across instructions (the IDL account type, else the data length
+  a native unpack checks (`data_len 0x23b`), else the account's name; not programs / sysvars; not in instructions creating
+  or initializing it); per instruction the validations it applies: owner, type (discriminator / length), signer,
+  writable, address / PDA, and stored-key relations labelled by the counterpart's role (`lending_market == LendingMarket.key`,
+  native `stored key == (owner-checked account).key`, `key == Obligation.reserve`). An inconsistency: a validation >= 2
+  and >= 2/3 of the other instructions of the role apply (for a relation: of those that have an account of the
+  counterpart's role), missing in an instruction that uses the account (data unpacked / read by an operation / updated,
+  stored keys compared, data checked). Signer, address / PDA and writable are shown, not reported (mostly by design: a
+  party that does not sign there, an account bound by has_one instead of its seeds); nor owner / type in an Anchor program
+  (Account<T> / AccountLoader<T> check them: a missing one is mostly the analysis'); nor a relation where the counterpart
+  is created. No rule: informational (corpus noise and spot-check precision in bench/README.md);
+- stored keys in summary.md (`## Stored keys not compared`, at most 5 lines): program accounts (type checked) of an
+  instruction moving value / changing an authority that no stored field of binds, bound only through another program
+  account's field (not a token account's mint / owner) and not pinned by their own key (PDA / address / key / has_one)
+  (cashio print_cash: bank only through collateral.bank; at most 2), then GAP lines of such instructions;
+- statuses: `partial` is rendered "found on some paths": the check is complete (e.g. all 32 bytes of a key compared) but
+  does not dominate every operation; the last node of a list falling into an enclosing check's failing side (the next
+  word of a key compared word by word) keeps its then side on every non-failing path (facts.ts `contFail`);
 - check-bypassable (informational): only checks shaped like a binding (the flag read / keys compared / the
   constraint's error; not a distinctness check failing when two keys are equal) on some path to the operation (the
   check reaches it); the evidence says whether the path avoids every check of that kind (on that account) too;
