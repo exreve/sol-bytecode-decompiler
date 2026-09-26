@@ -380,7 +380,9 @@ function paramVar(f: VarFunc, n: number): number | undefined {
 	}
 	return c.m.get(n)
 }
-/** an evaluator's memo of an expression: its value at the first position evaluated, at the others */
+/** an evaluator's memo of an expression: its value at the first position evaluated, at the others (only values
+ * whose evaluation reached no depth limit (evCuts unchanged): those do not depend on the depth nor on what was asked before) */
+let evCuts = 0
 interface EvMemo<T> { p: number; x: T | undefined; more?: Map<number, T | undefined> }
 /** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
 const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
@@ -463,11 +465,12 @@ function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number,
 		}
 		const memo = new Map<Expr, EvMemo<HVal>>()
 		const ev = (e: Expr, p: number, d = 0): HVal | undefined => {
-			if (d > 16) return undefined
+			if (d > 16) { evCuts++; return undefined }
 			const m = memo.get(e)
 			if (m) { if (m.p === p) return m.x; if (m.more?.has(p)) return m.more.get(p) }
+			const c0 = evCuts
 			const x = ev0(e, p, d)
-			if (d === 0) { if (m) (m.more ??= new Map()).set(p, x); else memo.set(e, { p, x }) }
+			if (evCuts === c0) { if (m) (m.more ??= new Map()).set(p, x); else memo.set(e, { p, x }) }
 			return x
 		}
 		const ev0 = (e: Expr, p: number, d: number): HVal | undefined => {
@@ -551,6 +554,7 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 			// success path)
 			let layout: Field[] = []
 			const named = tf.checks.filter(k => k.named && k.before !== undefined && k.pc !== undefined)
+			const names = new Set(tf.checks.map(k => k.named).filter(x => x !== undefined))
 			const g = cfgOf(T), dbm = new Map<object, number | undefined>()
 			const dbOf = (k: typeof named[number]) => { if (!dbm.has(k)) dbm.set(k, decisionBlock(g, k.c, k.pc, k.passPc)); return dbm.get(k) }
 			// (an expression through variables and the frame words it was saved to: its origin (a call, a parameter, …))
@@ -580,7 +584,13 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 				nst++
 				// (the value: a word a call left in the frame, through variables)
 				const y = follow(s.v, bi << 16 | i)
-				if (!y) return
+				if (!y || y[0].k !== 'call' || y[0].t.k !== 'fn') {
+					// (else an &AccountInfo taken straight from the accounts slice (no try call, e.g. an UncheckedAccount): the
+					// variable the code names after the account a check names)
+					const vn = s.v.k === 'var' ? T.names[s.v.id] : undefined
+					if (vn && names.has(vn)) { wordOf.set(off, 0); bl.push({ name: vn, off, t: { k: 'ref', to: 'AccountInfo' }, doc: 'the analysis: stored by try_accounts, taken from the accounts slice' }) }
+					return
+				}
 				const [e, p] = y
 				if (e.k !== 'call' || e.t.k !== 'fn') return
 				// (a word of the call's out object other than its first (the &AccountInfo; the rest: the deserialized data))
@@ -623,12 +633,14 @@ export function anchorEval(r: Result, H: FuncOut): AnchorEval {
 }
 
 const visitMemo = new WeakMap<VarFunc, number[]>()
-/** positions (block << 16 | index) of the statements calleeWrites looks at: calls of functions, stores, copies */
+/** positions (block << 16 | index) of the statements calleeWrites looks at: calls of functions, stores, copies (not
+ * to the function's own frame: those write no account) */
 function visitPos(f: VarFunc): number[] {
 	let r = visitMemo.get(f)
 	if (!r) {
 		r = []
-		for (let bi = 0; bi < f.blocks.length; bi++) f.blocks[bi].stmts.forEach((s, i) => { if (s.k === 'store' || s.k === 'stores' || s.k === 'copy' || callOf(s)?.t.k === 'fn') r!.push(bi << 16 | i) })
+		const fp = paramVar(f, 10) ?? -1
+		for (let bi = 0; bi < f.blocks.length; bi++) f.blocks[bi].stmts.forEach((s, i) => { if (((s.k === 'store' || s.k === 'stores') && offOf(s.addr, fp) === undefined) || (s.k === 'copy' && offOf(s.dst, fp) === undefined) || callOf(s)?.t.k === 'fn') r!.push(bi << 16 | i) })
 		visitMemo.set(f, r)
 	}
 	return r
@@ -649,10 +661,19 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 	const { ctxOf, zcField } = A
 	const tryPc = tryInfo(r, H)?.tryPc
 	const done = new Set<string>()
+	// (a function visited with the same roots (by content: a frame pointer by the visit whose frame it points into) and
+	// at least the same depth left makes the same writes: visited once)
+	const seen = new Map<string, number>(), ctxKey = new WeakMap<EvCtx, string>()
+	let uniq = 0
+	const hkey = (v: HVal): string => v.k === 'fr' ? `fr(${ctxKey.get(v.ctx) ?? `#${uniq++}`})${v.z}@${v.at}` : `${v.k}:${v.acct}:${v.ty ?? ''}:${v.off}:${v.guess ? 1 : 0}`
 	const visit = (C: FuncOut, roots: Map<number, HVal>, depth: number) => {
 		const ff = r.facts.get(C.pc)
 		if (!ff || exits.has(C.pc) || tryPc === C.pc) return
+		const vk = `${C.pc}|${[...roots].map(([k, v]) => `${k}=${hkey(v)}`).join(',')}`
+		if ((seen.get(vk) ?? -1) >= depth) return
+		seen.set(vk, depth)
 		const X = ctxOf(C, roots, 2)
+		ctxKey.set(X, vk)
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
@@ -1082,7 +1103,7 @@ type AV =
 
 /** an account-model value (opaque outside this file) */
 export type AcctVal = AV
-const resMemo = new WeakMap<object, AcctResolver>()
+const resMemo = new WeakMap<object, AcctResolver>(), seedMemo = new WeakMap<object, Map<string, AcctResolver>>()
 
 /** a function's IR (when decompiled) and name (library code) */
 export interface Callee { f: (pc: number) => VarFunc | undefined; name: (pc: number) => string; memo?: Map<number, number> }
@@ -1098,11 +1119,11 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 	for (const [re, n] of LIB_WRITES) if (re.test(nm)) return n < 0 ? (j === 0 ? 0x80 : 0) : n
 	if (t.k === 'sys') return /log|invoke|get_.*sysvar|clock|rent/.test(nm) ? (/get_|clock|rent/.test(nm) ? 0x40 : 0) : 0x80
 	if (t.k !== 'fn' || depth <= 0) return 0x80
-	const key = t.pc * 0x10000 + j
+	// (by depth too: a result cut off deeper is not the one asked higher up)
+	const key = (t.pc * 0x10000 + j) * 4 + depth
 	const memo = cl.memo ??= new Map()
 	const m = memo.get(key)
 	if (m !== undefined) return m
-	memo.set(key, 0x80) // (recursion)
 	const f = cl.f(t.pc)
 	const pv = f?.vars.find(v => v.param === j + 1)?.id
 	let n = 0
@@ -1146,7 +1167,7 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
  * which the check right after it names (`calls`: call position -> account). `direct`: the bytes are in the
  * frame (a copy of the deserialized account's data) rather than behind a pointer (an AccountInfo's key).
  */
-export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number, string>): { acct: string; direct: boolean }[] | undefined {
+export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number, string>, acctVar?: (id: number) => string | undefined): { acct: string; direct: boolean }[] | undefined {
 	let x = c
 	while (x.k === 'lnot') x = x.a
 	const cmpArgs = (e: Expr): [Expr, Expr] | undefined => (e.k === 'call' || (e.k === 'fn' && e.name === 'memeq')) && e.args.length >= 3 && e.args[2].k === 'const' && e.args[2].v === 0x20n ? [e.args[0], e.args[1]] : undefined
@@ -1173,11 +1194,15 @@ export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number,
 			if (!y) return undefined
 			const [v, q] = follow(y[0], y[1])
 			if (v.k === 'call') { const a = calls.get(y[1]); return a ? { acct: a, direct } : undefined }
+			// (a pointer to another frame object, e.g. a copy of an account object: the bytes are there, as read here)
+			if (!direct && D.fpOff(v) !== undefined) return prov(v, p, true, d + 1)
 			return v.k === 'load' ? prov(v.addr, q, direct, d + 1) : undefined
 		}
 		// (bytes behind a pointer: where the pointer comes from)
 		const base = e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? e.a : e
 		const [b, q] = follow(base, p)
+		// (an &AccountInfo try_accounts takes straight from the accounts slice: the variable the code names after the account)
+		if (b.k === 'var' && !direct) { const a = acctVar?.(b.id); if (a) return { acct: a, direct } }
 		return b.k === 'load' && b.size === 8 ? prov(b.addr, q, false, d + 1) : undefined
 	}
 	return ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
@@ -1263,10 +1288,6 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 		if (c) for (let j = 0; j < c.args.length; j++) { const p = fpOff(c.args[j]); if (p !== undefined && p <= o && o < p + (callee ? callWrites(c.t, j, callee) : 0x80)) return loose ? { k: 'call', t: c.t, args: c.args } : null }
 		return undefined
 	}
-	// (per (key, loose): block -> the definition reaching its end; n: the number of entries)
-	const endMemo = new Map<number, { v: ([Expr, number] | null | undefined)[]; n: number }>()
-	// (the blocks on the search's path)
-	const onPath = new Uint8Array(f.blocks.length)
 	// (per block, lazily: the statements a frame slot / a variable may be affected by (where effect is not
 	// undefined for some key), ascending; the others are skipped)
 	const slotAt: (number[] | undefined)[] = [], varAt: (Map<number, number[]> | undefined)[] = []
@@ -1292,66 +1313,84 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 		}
 		return r
 	}
-	// (the search from a block's preds is a function of the block, the key and endMemo: a search that added nothing to
-	// endMemo and stayed within the step budget is repeated as long as endMemo stays the same (n entries); its result
-	// is endMemo's own array, or rebuilt from the statement as the search builds it)
-	const predMemo = new Map<number, Map<number, { r: [Expr, number] | null; n: number }>>()
-	const memoed = new WeakSet<object>()
-	/** the definition of key reaching position p (the same one on every path), with its position */
-	const reaching = (key: number, p: number, loose = false): [Expr, number] | null => {
-		let steps = 0, cyc = false, over = false
-		const mkey = key * 2 + (loose ? 1 : 0)
-		let em = endMemo.get(mkey)
-		if (!em) endMemo.set(mkey, (em = { v: [], n: 0 }))
-		const memo = em, mv = em.v
-		// (undefined: only paths around a loop back to a block being searched)
-		const go = (b: number, from: number): [Expr, number] | null | undefined => {
-			const ss = f.blocks[b].stmts
-			const cand = key >= 0 ? varStmts(b).get(key) : slotStmts(b)
-			if (cand) for (let j = cand.length - 1; j >= 0; j--) {
-				const i = cand[j]
-				if (i >= from) continue
-				const x = effect(ss[i], key, loose)
-				if (x !== undefined) return x && [x, b << 16 | i]
-			}
-			const preds = f.blocks[b].preds
-			if (!preds.length) return null
-			if (++steps > 400) { over = true; return null }
-			let r: [Expr, number] | undefined
-			onPath[b] = 1
-			for (const q of preds) {
-				let x = mv[q]
-				if (x === undefined) {
-					if (onPath[q]) { cyc = true; continue }
-					const c0 = cyc
-					cyc = false
-					const y = go(q, f.blocks[q].stmts.length)
-					if (!cyc && y !== undefined) { mv[q] = y; memo.n++; if (y) memoed.add(y) }
-					cyc ||= c0
-					if (y === undefined) continue
-					x = y
-				}
-				if (!x || (r && r[0] !== x[0])) { onPath[b] = 0; return null }
-				r = x
-			}
-			onPath[b] = 0
-			return r
-		}
-		const b0 = p >> 16, ss = f.blocks[b0].stmts, from = p & 0xffff
-		const cand = key >= 0 ? varStmts(b0).get(key) : slotStmts(b0)
+	// (per (key, loose): block -> the definition reaching its end, exact (a fixpoint over the blocks it depends on,
+	// computed once); TOPV: only paths around a loop reach it (no definition, no entry))
+	const TOPV = 0 as const
+	type EndV = [Expr, number] | null | typeof TOPV
+	const endMemo = new Map<number, (EndV | undefined)[]>()
+	// (the blocks being solved)
+	const open = new Uint8Array(f.blocks.length)
+	/** the last statement of block b before `to` affecting key: its value, null (clobbered), undefined (none) */
+	const last = (b: number, to: number, key: number, loose: boolean): [Expr, number] | null | undefined => {
+		const ss = f.blocks[b].stmts
+		const cand = key >= 0 ? varStmts(b).get(key) : slotStmts(b)
 		if (cand) for (let j = cand.length - 1; j >= 0; j--) {
 			const i = cand[j]
-			if (i >= from) continue
+			if (i >= to) continue
 			const x = effect(ss[i], key, loose)
-			if (x !== undefined) return x && [x, b0 << 16 | i]
+			if (x !== undefined) return x && [x, b << 16 | i]
 		}
-		let pm = predMemo.get(mkey)
-		if (!pm) predMemo.set(mkey, (pm = new Map()))
-		const n = memo.n, c = pm.get(b0)
-		if (c && c.n === n) { const r = c.r; return !r || memoed.has(r) ? r : [effect(f.blocks[r[1] >> 16].stmts[r[1] & 0xffff], key, loose)!, r[1]] }
-		const r = go(b0, 0) ?? null
-		if (!over && memo.n === n) pm.set(b0, { r, n })
+		return undefined
+	}
+	/** the meet of block b's predecessors' end values (TOPV ignored; different definitions: null) */
+	const meet = (b: number, val: (q: number) => EndV | undefined): EndV => {
+		let r: EndV = TOPV
+		for (const q of f.blocks[b].preds) {
+			const x = val(q)
+			if (x === TOPV || x === undefined) continue
+			if (!x || (r !== TOPV && r![0] !== x[0])) return null
+			r = x
+		}
 		return r
+	}
+	/**
+	 * the definition of key reaching position p (the same one on every path), with its position: the meet over the
+	 * paths reaching it. The blocks it depends on are solved together once per key (a fixpoint), so the answer does
+	 * not depend on the queries asked before.
+	 */
+	const reaching = (key: number, p: number, loose = false): [Expr, number] | null => {
+		const b0 = p >> 16
+		const x0 = last(b0, p & 0xffff, key, loose)
+		if (x0 !== undefined) return x0
+		const mkey = key * 2 + (loose ? 1 : 0)
+		let mv = endMemo.get(mkey)
+		if (!mv) endMemo.set(mkey, (mv = []))
+		const known = mv
+		// (the blocks not known yet the position depends on: a block defining key is known at once, the others are
+		// solved together)
+		const todo: number[] = [], stack = [...f.blocks[b0].preds]
+		while (stack.length) {
+			const q = stack.pop()!
+			if (known[q] !== undefined || open[q]) continue
+			const x = last(q, f.blocks[q].stmts.length, key, loose)
+			if (x !== undefined) { known[q] = x; continue }
+			const preds = f.blocks[q].preds
+			if (!preds.length) { known[q] = null; continue }
+			open[q] = 1
+			todo.push(q)
+			for (const r of preds) stack.push(r)
+		}
+		if (todo.length) {
+			// (optimistic: TOPV first, then a definition, then null)
+			const cur = new Map<number, EndV>()
+			for (const q of todo) cur.set(q, TOPV)
+			const val = (q: number) => open[q] ? cur.get(q) : known[q]
+			const succs = new Map<number, number[]>()
+			for (const q of todo) for (const r of f.blocks[q].preds) if (open[r]) { const l = succs.get(r); if (l) l.push(q); else succs.set(r, [q]) }
+			const work = [...todo], inW = new Uint8Array(f.blocks.length)
+			for (const q of todo) inW[q] = 1
+			while (work.length) {
+				const q = work.pop()!
+				inW[q] = 0
+				const v = meet(q, val), o = cur.get(q)!
+				if (v === o || (v && o && v[0] === o[0])) continue
+				cur.set(q, v)
+				for (const s of succs.get(q) ?? []) if (!inW[s]) { inW[s] = 1; work.push(s) }
+			}
+			for (const q of todo) { known[q] = cur.get(q)!; open[q] = 0 }
+		}
+		const r = meet(b0, q => known[q])
+		return r === TOPV ? null : r
 	}
 	d0 = { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching }
 	defsMemo.set(f, d0)
@@ -1396,12 +1435,12 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
 	const memo = new Map<Expr, EvMemo<AV>>()
 	/** the value of e evaluated at position p */
 	const ev = (e: Expr, p: number, d = 0): AV | undefined => {
-		if (d > 24) return undefined
+		if (d > 24) { evCuts++; return undefined }
 		const m = memo.get(e)
 		if (m) { if (m.p === p) return m.x; if (m.more?.has(p)) return m.more.get(p) }
+		const c0 = evCuts
 		const r = ev0(e, p, d)
-		if (m) (m.more ??= new Map()).set(p, r)
-		else memo.set(e, { p, x: r })
+		if (evCuts === c0) { if (m) (m.more ??= new Map()).set(p, r); else memo.set(e, { p, x: r }) }
 		return r
 	}
 	const ev0 = (e: Expr, p: number, d: number): AV | undefined => {
@@ -1483,9 +1522,10 @@ function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | 
  * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
  * Names are the printed variable names.
  */
-/** seed: a callee's pointer parameters bound to the caller's values at a call site (not memoized) */
+/** seed: a callee's pointer parameters bound to the caller's values at a call site (memoized by the values) */
 export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee, seed?: Map<number, AcctVal>): AcctResolver {
-	let res = seed?.size ? undefined : resMemo.get(fo.f)
+	const sk = seed?.size ? JSON.stringify([...seed]) : undefined
+	let res = sk === undefined ? resMemo.get(fo.f) : seedMemo.get(fo.f)?.get(sk)
 	if (res) return res
 	const f = fo.f
 	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
@@ -1672,6 +1712,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return hit
 	}
 	res = { byName, refs, store, sides, valueRef, valueAt: (e, p) => asRef(ev(e, p)), av: (e, p) => ev(e, p), cmp32 }
-	if (!seed?.size) resMemo.set(fo.f, res)
+	if (sk === undefined) resMemo.set(fo.f, res)
+	else { let m = seedMemo.get(fo.f); if (!m) seedMemo.set(fo.f, (m = new Map())); m.set(sk, res) }
 	return res
 }

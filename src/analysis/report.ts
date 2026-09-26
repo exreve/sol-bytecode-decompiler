@@ -286,7 +286,8 @@ function analyze0(r: Result): Analysis {
 				}
 			}
 			if (!calls.size) return undefined
-			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls) }
+			const acctVar = (id: number) => { const n = fo.names[id]; return n && accounts.some(x => x.name === n) ? n : undefined }
+			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls, acctVar) }
 		}
 		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
 		/** the accounts whose keys a call passes (arguments 1.., native), by name */
