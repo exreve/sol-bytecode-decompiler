@@ -293,7 +293,7 @@ export function addExitWrites(r: Result) {
 		const sites = [...stmtsOf(fo)].filter(s => { const c = callOf(s); return c?.t.k === 'fn' && exits.has(c.t.pc) })
 		if (!sites.length) { objsMemo.set(fo, []); if (fo.name.startsWith('ix_')) calleeWrites(r, fo, [], exits); continue }
 		const g = cfgOf(fo)
-		const defs = singleDefs(fo), D = defsOf(fo.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
+		const defs = singleDefs(fo), D = defsOf(fo.f, calleeOf(r))
 		const objs: FrameObj[] = []
 		for (const s0 of sites) for (const ex of exitObjs(exits.get((callOf(s0)!.t as { pc: number }).pc)!)) {
 			const c = callOf(s0)!
@@ -407,7 +407,7 @@ interface EvMemo<T> { p: number; x: T | undefined; more?: Map<number, T | undefi
 /** a function's 8-byte stores at an offset from a parameter (through single definitions): by `param var|offset` */
 const outStores = new WeakMap<VarFunc, Map<string, [Expr, number][]>>()
 function anchorEval0(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number, ExitFn>): AnchorEval {
-	const cl: Callee = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' }
+	const cl = calleeOf(r)
 	const D = defsOf(H.f, cl)
 	const ti = tryInfo(r, H)
 	const layout = ti?.layout ?? []
@@ -583,7 +583,7 @@ export function tryInfo(r: Result, H: FuncOut): { tryPc: number; layout: Field[]
 		const T = tpc !== undefined ? byPcOf(r).get(tpc) : undefined
 		const tf = tpc !== undefined ? r.facts.get(tpc) : undefined
 		if (T && tf) {
-			const D = defsOf(T.f, { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })
+			const D = defsOf(T.f, calleeOf(r))
 			const out = T.f.vars.find(v => v.param === 1)?.id
 			// (per block: the words stored into the out object that come from named calls; the block storing the most is the
 			// success path)
@@ -769,23 +769,25 @@ function derivedFrom(f: VarFunc, D: Defs, seed: (v: number) => boolean): { dep: 
 	return { dep, ptrDep }
 }
 
-const keepMemo = new WeakMap<VarFunc, Set<number>>()
+const keepMemo = new WeakMap<VarFunc, Map<string, Set<number>>>()
 /**
- * The statements (of visitPos) through which an AnchorEval context of a callee (ctxOf, its roots: parameters)
- * may reach something derived from its roots (derivedFrom). The others write no account and give the
+ * The statements (of visitPos) through which an AnchorEval context of a callee (ctxOf) may reach something
+ * derived from its roots (derivedFrom; by the root variables). The others write no account and give the
  * callee's callees nothing derived from the roots: calleeWrites skips them.
  */
-function rootKeep(f: VarFunc, D: Defs): Set<number> {
-	let keep = keepMemo.get(f)
+function rootKeep(f: VarFunc, D: Defs, roots: Map<number, unknown>): Set<number> {
+	let m = keepMemo.get(f)
+	if (!m) keepMemo.set(f, (m = new Map()))
+	const k = [...roots.keys()].sort((a, b) => a - b).join(',')
+	let keep = m.get(k)
 	if (keep) return keep
-	const params = new Set(f.vars.filter(v => v.param >= 1 && v.param !== 10 && v.id !== D.fp).map(v => v.id))
-	const { dep, ptrDep } = derivedFrom(f, D, v => params.has(v))
+	const { dep, ptrDep } = derivedFrom(f, D, v => roots.has(v) && v !== D.fp)
 	keep = new Set()
 	for (const q of visitPos(f)) {
 		const s = f.blocks[q >> 16].stmts[q & 0xffff], c = callOf(s)
 		if (c ? c.args.some(ptrDep) : dep(s.k === 'copy' ? s.dst : (s as Extract<Stmt, { k: 'store' | 'stores' }>).addr)) keep.add(q)
 	}
-	keepMemo.set(f, keep)
+	m.set(k, keep)
 	return keep
 }
 
@@ -818,7 +820,8 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		const X = ctxOf(C, roots, 2)
 		ctxKey.set(X, vk)
 		// (a callee: statements without an expression derived from its roots are skipped, see rootKeep)
-		const keep = C === H ? undefined : rootKeep(C.f, X.D)
+		const keep = C === H ? undefined : rootKeep(C.f, X.D, roots)
+		if (keep && !keep.size) return
 		const each = (s: Stmt, bi: number, i: number) => {
 			const p = bi << 16 | i
 			const c = callOf(s)
@@ -870,6 +873,9 @@ const dataReadsMemo = new WeakMap<Result, Map<number, Set<string>>>()
 export const dataReads = (r: Result, handler: number): Set<string> | undefined => dataReadsMemo.get(r)?.get(handler)
 
 const byPcMemo = new WeakMap<Result, Map<number, FuncOut>>()
+const calleeMemo = new WeakMap<Result, Callee>()
+/** the functions of a result as a Callee (one object per result: its memo of callWrites is shared) */
+export const calleeOf = (r: Result): Callee => { let c = calleeMemo.get(r); if (!c) calleeMemo.set(r, (c = { f: pc => byPcOf(r).get(pc)?.f, name: pc => r.program.funcs.get(pc)?.name ?? '' })); return c }
 const byPcOf = (r: Result) => { let m = byPcMemo.get(r); if (!m) byPcMemo.set(r, (m = new Map(r.funcs.map(x => [x.pc, x])))); return m }
 
 // ---- indirect calls: constant function pointers, tables, vtables ----
