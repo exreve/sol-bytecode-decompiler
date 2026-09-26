@@ -5,7 +5,10 @@ import type { Program } from './program.ts'
 import { Image, MM_STACK_START } from './elf.ts'
 import { SYSCALL_BY_HASH } from './syscalls.ts'
 
-export class Abort extends Error {}
+/** (an expected outcome of a run, caught by the runners: its stack is not captured, costly in deep recursions) */
+export class Abort extends Error {
+	constructor(message?: string) { const n = Error.stackTraceLimit; Error.stackTraceLimit = 0; super(message); Error.stackTraceLimit = n }
+}
 /** Value the test emulator leaves in call-clobbered registers; the evaluator maps `undef` to it. */
 export const UNDEF = 0xdeadbeef_deadbeefn
 export class StepLimit extends Error {}
