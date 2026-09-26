@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "flash_loan", "accounts": ["reserve account[2]", "lending_market account[5]", "fee receiver account[3]", "source_liquidity account[0]"], "issue": "reserve owner never compared to program id (other reserve instructions check it); counterfeit reserve drives fee logic", "confidence": 0.6}], "tokens_read": 123873}

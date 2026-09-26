@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "flash_loan", "accounts": ["account[2] reserve", "account[0] supply", "account[3] fee receiver", "account[5] lending market", "account[6] authority"], "issue": "reserve owner never checked in flash_loan while borrow/repay/liquidate check it; fake reserve bypasses fees/limits", "confidence": 0.6}], "tokens_read": 91360}

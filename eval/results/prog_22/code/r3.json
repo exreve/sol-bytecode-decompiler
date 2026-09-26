@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "VerifySignatures (tag_7)", "accounts": ["account[3] instructions sysvar", "signature_set", "guardian_set"], "issue": "instructions sysvar account never checked by key; forged secp256k1 instruction data marks guardians signed; forged VAA posted", "confidence": 0.9},
+{"instruction": "tag_3/4/5/6 governance", "accounts": ["posted VAA account"], "issue": "posted message accepted as VAA (prefix/PDA not checked); barrier is emitter check", "confidence": 0.35},
+{"instruction": "tag_3/4/5", "accounts": ["posted VAA", "bridge config"], "issue": "governance VAA guardian set index not required current", "confidence": 0.3}
+], "tokens_read": 136338}

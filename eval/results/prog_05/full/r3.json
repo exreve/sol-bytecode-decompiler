@@ -1,0 +1,6 @@
+{"findings": [
+{"instruction": "initialize_candy_machine", "accounts": ["candyMachine", "authority", "wallet"], "issue": "no uninitialized check; re-initialize live candy machine with attacker authority/wallet", "confidence": 0.85},
+{"instruction": "withdraw_funds/update_candy_machine/update_authority/add_config_lines", "accounts": ["candyMachine", "authority"], "issue": "follow-on of re-init takeover", "confidence": 0.6},
+{"instruction": "add_config_lines", "accounts": ["candyMachine"], "issue": "index+len not bounded (authority only)", "confidence": 0.3},
+{"instruction": "mint_nft", "accounts": ["recentBlockhashes", "candyMachine"], "issue": "predictable config line selection", "confidence": 0.3}
+], "tokens_read": 146700}

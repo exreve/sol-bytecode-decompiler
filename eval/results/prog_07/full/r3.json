@@ -1,0 +1,4 @@
+{"findings": [
+{"instruction": "burn_cash", "accounts": ["authorFeeDestination", "protocolFeeDestination"], "issue": "fee destinations not bound (depends on crate CPI)", "confidence": 0.5},
+{"instruction": "print_cash / burn_cash", "accounts": ["bank", "collateral"], "issue": "bank only pinned via collateral.bank and collateral has no address binding; caller presents self-consistent market; reviewer judged not forgeable", "confidence": 0.2}
+], "tokens_read": 121101}

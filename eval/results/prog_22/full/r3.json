@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "tag_0", "accounts": ["g"], "issue": "realloc/data write without discriminator check (mitigated by owner+PDA)", "confidence": 0.15},
+{"instruction": "tag_2", "accounts": ["y", "account[2]"], "issue": "realloc/data write without discriminator check", "confidence": 0.15},
+{"instruction": "tag_6", "accounts": ["n"], "issue": "realloc/data write without discriminator check", "confidence": 0.15}
+], "reviewer_notes_on_security_folder": "high-scoring LAMPORT SET effects are false positives: AccountInfo struct-copy field initializations in the deserializer (copying LamportsCell/DataCell Rc pointers), not balance changes; PDA 'compared: not_found' is a false negative (derived PDA compared word-by-word with the key)", "tokens_read": 88566}

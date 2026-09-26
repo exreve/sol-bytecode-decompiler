@@ -1,0 +1,1 @@
+{"findings": [{"instruction": "redeem_reserve_collateral", "accounts": ["token_program", "reserve", "lending_market"], "issue": "token program not compared with lending_market.token_program_id (other token instructions check it)", "confidence": 0.35}], "tokens_read": 113682}

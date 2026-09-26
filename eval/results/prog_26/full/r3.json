@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "mint_nft", "accounts": ["gateway token", "gateway program", "expire feature", "payer"], "issue": "expire path skips gateway token owner/wallet/network checks (relies on CPI)", "confidence": 0.25},
+{"instruction": "update_candy_machine", "accounts": ["candyMachine", "wallet", "remaining_accounts[0]"], "issue": "token_mint/wallet not validated (authority only)", "confidence": 0.3},
+{"instruction": "add_config_lines", "accounts": ["candyMachine", "authority"], "issue": "index+len not bounded (authority only)", "confidence": 0.25}
+], "tokens_read": 143165}

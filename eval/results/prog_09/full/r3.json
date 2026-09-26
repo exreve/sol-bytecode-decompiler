@@ -1,0 +1,5 @@
+{"findings": [
+{"instruction": "update_reserve_config", "accounts": ["reserve", "lending_market", "lending_market_authority", "lending_market_owner"], "issue": "reserve.lending_market never compared with provided lending_market (other instructions compare it); attacker market rewrites victim reserve config", "confidence": 0.85},
+{"instruction": "flash_loan", "accounts": ["reserve"], "issue": "reserve owner not checked", "confidence": 0.35},
+{"instruction": "redeem_reserve_collateral / deposit_reserve_liquidity", "accounts": ["reserve"], "issue": "reserve owner check message absent in bundle (likely blocked by runtime write rule)", "confidence": 0.3}
+], "tokens_read": 96365}
