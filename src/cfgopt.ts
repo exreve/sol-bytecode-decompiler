@@ -59,16 +59,19 @@ export function tailDuplicate(f: VarFunc, budget = 6): boolean {
  * whose two edges then coincide becomes a jump (keeping its condition as `eval` if it may trap).
  */
 export function threadJumps(f: VarFunc): boolean {
+  // seen[x] === stamp: block x was passed in the current final() call
+  const seen = new Uint32Array(f.blocks.length);
+  let stamp = 0;
   const final = (id: number): number => {
-    const seen = new Set<number>();
+    stamp++;
     let b = f.blocks[id];
-    while (b.id !== 0 && !b.stmts.length && b.term.k === 'jmp' && !seen.has(b.id)) { seen.add(b.id); b = f.blocks[b.term.to]; }
-    return seen.has(b.id) ? id : b.id; // a cycle of empty blocks is left alone
+    while (b.id !== 0 && !b.stmts.length && b.term.k === 'jmp' && seen[b.id] !== stamp) { seen[b.id] = stamp; b = f.blocks[b.term.to]; }
+    return seen[b.id] === stamp ? id : b.id; // a cycle of empty blocks is left alone
   };
   let changed = false;
   for (const b of f.blocks) {
     if (!b.succs.length) continue;
-    for (const s of [...new Set(b.succs)]) {
+    for (const s of distinct(b.succs)) {
       const to = final(s);
       if (to === s) continue;
       retarget(b, s, to);
@@ -92,6 +95,13 @@ export function threadJumps(f: VarFunc): boolean {
   return changed;
 }
 
+/** the distinct elements of a (short) list, in first-occurrence order ([...new Set(xs)]) */
+function distinct(xs: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < xs.length; i++) if (!out.includes(xs[i])) out.push(xs[i]);
+  return out;
+}
+
 function retarget(pb: Block, from: number, to: number) {
   const t = pb.term;
   if (t.k === 'jmp' && t.to === from) t.to = to;
@@ -106,7 +116,7 @@ export function mergeBlocks(f: VarFunc): boolean {
     while (b.term.k === 'jmp') {
       const s = f.blocks[b.term.to];
       if (s.id === b.id || s.id === 0 || s.preds.length !== 1) break;
-      b.stmts = [...b.stmts, ...s.stmts];
+      b.stmts = b.stmts.concat(s.stmts);
       b.term = s.term;
       b.succs = s.succs;
       for (const x of s.succs) f.blocks[x].preds = f.blocks[x].preds.map(p => (p === s.id ? b.id : p));
@@ -158,15 +168,18 @@ function subAll(es: Expr[], sub: (e: Expr) => Expr): Expr[] {
 /** Within each block: forward-substitute variables currently known to hold a constant. */
 export function localConstProp(f: VarFunc): boolean {
   let changed = false;
+  // (one map for all blocks, emptied between them)
+  const m = new Map<number, Expr>();
+  const look = (v: number) => m.get(v);
+  // substConst returns a new object exactly when a variable was replaced (what the former
+  // JSON comparison of before/after detected)
+  const sub = (e: Expr) => { if (!m.size) return e; const n = substConst(e, look); if (n !== e) changed = true; return n; };
+  // (a statement mentioning no variable of m is left as it is by substConst)
+  const same = (s: Stmt) => { if (!m.size) return true; const vs = stmtInfo(s).vars; for (let k = 0; k < vs.length; k++) if (m.has(vs[k])) return false; return true; };
+  const def = (dst: number, ns: Stmt) => { m.delete(dst); if (ns.k === 'set' && (ns.e.k === 'const' || ns.e.k === 'undef')) m.set(dst, ns.e); };
   for (const b of f.blocks) {
-    const m = new Map<number, Expr>();
-    const look = (v: number) => m.get(v);
-    // substConst returns a new object exactly when a variable was replaced (what the former
-    // JSON comparison of before/after detected)
-    const sub = (e: Expr) => { if (!m.size) return e; const n = substConst(e, look); if (n !== e) changed = true; return n; };
-    // (a statement mentioning no variable of m is left as it is by substConst)
-    const same = (s: Stmt) => { if (!m.size) return true; for (const v of stmtInfo(s).vars) if (m.has(v)) return false; return true; };
-    rewriteBlock(b, sub, (dst, ns) => { m.delete(dst); if (ns.k === 'set' && (ns.e.k === 'const' || ns.e.k === 'undef')) m.set(dst, ns.e); }, same);
+    if (m.size) m.clear();
+    rewriteBlock(b, sub, def, same);
   }
   return changed;
 }
@@ -182,8 +195,12 @@ export function localConstProp(f: VarFunc): boolean {
 function solveLiveIn(f: VarFunc, W: number, gen: Uint32Array, kill: Uint32Array): Uint32Array {
   const nb = f.blocks.length;
   const liveIn = gen.slice();
-  const users: number[][] = Array.from({ length: nb }, () => []); // blocks whose OUT reads liveIn[s]
-  for (const b of f.blocks) for (const s of b.succs) users[s].push(b.id);
+  // users of s (blocks whose OUT reads liveIn[s]): users[uStart[s] .. uStart[s + 1])
+  const uStart = new Int32Array(nb + 1);
+  for (const b of f.blocks) for (const s of b.succs) uStart[s + 1]++;
+  for (let i = 0; i < nb; i++) uStart[i + 1] += uStart[i];
+  const users = new Int32Array(uStart[nb]), fill = uStart.slice(0, nb);
+  for (const b of f.blocks) for (const s of b.succs) users[fill[s]++] = b.id;
   const stack: number[] = []; // (block, variable) pairs just made live-in
   for (let b = 0; b < nb; b++) {
     for (let k = 0; k < W; k++) {
@@ -194,8 +211,8 @@ function solveLiveIn(f: VarFunc, W: number, gen: Uint32Array, kill: Uint32Array)
   while (stack.length) {
     const v = stack.pop()!, b = stack.pop()!;
     const k = v >>> 5, m = 1 << (v & 31);
-    for (const u of users[b]) {
-      const i = u * W + k;
+    for (let j = uStart[b], e = uStart[b + 1]; j < e; j++) {
+      const u = users[j], i = u * W + k;
       if (!(kill[i] & m) && !(liveIn[i] & m)) { liveIn[i] |= m; stack.push(u, v); }
     }
   }
@@ -214,25 +231,32 @@ function genKill(f: VarFunc, compact: boolean): { W: number; ix: Int32Array | nu
   if (compact) {
     const m = ix = new Int32Array(f.vars.length).fill(-1);
     n = 0;
-    const see = (v: number) => { if (m[v] < 0) m[v] = n++; };
+    const see = (x: Expr) => { if (x.k === 'var' && m[x.id] < 0) m[x.id] = n++; };
     for (const b of f.blocks) {
-      for (const s of b.stmts) { for (const v of stmtInfo(s).vars) see(v); if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) see(s.dst); }
-      if (b.term.k === 'br') walkExpr(b.term.c, x => { if (x.k === 'var') see(x.id); });
-      else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, x => { if (x.k === 'var') see(x.id); });
+      for (const s of b.stmts) {
+        const vs = stmtInfo(s).vars;
+        for (let k = 0; k < vs.length; k++) if (m[vs[k]] < 0) m[vs[k]] = n++;
+        if ((s.k === 'set' || s.k === 'call') && s.dst >= 0 && m[s.dst] < 0) m[s.dst] = n++;
+      }
+      if (b.term.k === 'br') walkExpr(b.term.c, see);
+      else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, see);
     }
   }
   const W = (n + 31) >>> 5;
   const gen = new Uint32Array(nb * W), kill = new Uint32Array(nb * W);
+  let base = 0; // (the current block's row)
+  const set = (v: number) => { const i = ix ? ix[v] : v; gen[base + (i >>> 5)] |= 1 << (i & 31); };
+  const use = (x: Expr) => { if (x.k === 'var') set(x.id); };
   for (let id = 0; id < nb; id++) {
-    const b = f.blocks[id], base = id * W;
-    const set = (v: number) => { const i = ix ? ix[v] : v; gen[base + (i >>> 5)] |= 1 << (i & 31); };
-    const uses = (e: Expr) => walkExpr(e, x => { if (x.k === 'var') set(x.id); });
-    if (b.term.k === 'br') uses(b.term.c);
-    else if (b.term.k === 'ret' && b.term.e) uses(b.term.e);
+    const b = f.blocks[id];
+    base = id * W;
+    if (b.term.k === 'br') walkExpr(b.term.c, use);
+    else if (b.term.k === 'ret' && b.term.e) walkExpr(b.term.e, use);
     for (let i = b.stmts.length - 1; i >= 0; i--) {
       const s = b.stmts[i];
       if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { const d = ix ? ix[s.dst] : s.dst; gen[base + (d >>> 5)] &= ~(1 << (d & 31)); kill[base + (d >>> 5)] |= 1 << (d & 31); }
-      for (const v of stmtInfo(s).vars) set(v); // = walking stmtExprs(s)
+      const vs = stmtInfo(s).vars; // = walking stmtExprs(s)
+      for (let k = 0; k < vs.length; k++) set(vs[k]);
     }
   }
   return { W, ix, gen, kill };
@@ -320,36 +344,44 @@ export function globalConstProp(f: VarFunc): boolean {
   const K = slotVar.length;
   if (!K) return false; // nothing can be substituted (an assignment only becomes constant through substitution)
   const ABSENT = -1, VARY = -2;
-  // per-block transfer: (slot, value) pairs in statement order
-  const gen: number[][] = new Array(nb);
-  for (const b of f.blocks) {
-    const g: number[] = [];
-    for (const s of b.stmts) {
+  // per-block transfer: (slot, value) pairs in statement order, gen[gStart[id] .. gStart[id + 1])
+  const g: number[] = [], gStart = new Int32Array(nb + 1);
+  for (let id = 0; id < nb; id++) {
+    for (const s of f.blocks[id].stmts) {
       if (s.k === 'set') { const k = slot[s.dst]; if (k >= 0) g.push(k, s.e.k === 'const' ? cid(s.e.v) : VARY); }
       else if (s.k === 'call' && s.dst >= 0) { const k = slot[s.dst]; if (k >= 0) g.push(k, VARY); }
     }
-    gen[b.id] = g;
+    gStart[id + 1] = g.length;
   }
+  const gen = Int32Array.from(g);
   const entry = new Int32Array(K).fill(ABSENT);
   for (const v of f.vars) if (v.param >= 0 && slot[v.id] >= 0) entry[slot[v.id]] = VARY;
   // IN/OUT states are K-wide rows of flat arrays (row = block id); hasIn/hasOut mark defined rows
   const IN = new Int32Array(nb * K), OUT = new Int32Array(nb * K);
   const hasIn = new Uint8Array(nb), hasOut = new Uint8Array(nb);
   IN.set(entry, 0); hasIn[0] = 1;
-  const order: number[] = [];
-  { const seen = new Uint8Array(nb); const post: number[] = []; const st: [number, number][] = [[0, 0]]; seen[0] = 1;
-    while (st.length) { const t = st[st.length - 1]; const b = f.blocks[t[0]]; if (t[1] < b.succs.length) { const s = b.succs[t[1]++]; if (!seen[s]) { seen[s] = 1; st.push([s, 0]); } } else { post.push(t[0]); st.pop(); } }
-    order.push(...post.reverse()); }
+  // reverse postorder of a depth-first walk along successors (stack of (block, next successor index))
+  const order = new Int32Array(nb);
+  let no = 0;
+  { const seen = new Uint8Array(nb), stB = new Int32Array(nb), stI = new Int32Array(nb); let sp = 0;
+    stB[sp] = 0; stI[sp++] = 0; seen[0] = 1;
+    while (sp) { const b = f.blocks[stB[sp - 1]]; if (stI[sp - 1] < b.succs.length) { const s = b.succs[stI[sp - 1]++]; if (!seen[s]) { seen[s] = 1; stB[sp] = s; stI[sp++] = 0; } } else order[no++] = stB[--sp]; }
+    order.subarray(0, no).reverse(); }
   const inn = new Int32Array(K), out = new Int32Array(K); // scratch rows
   // A block whose predecessors' OUT did not change since it was last evaluated would recompute the
   // same IN/OUT, so it is skipped (same states and same per-iteration `changed` as re-evaluating
   // every block each round, hence also the same behaviour under the iteration cap).
-  const dependents: number[][] = Array.from({ length: nb }, () => []);
-  for (const b of f.blocks) for (const p of b.preds) dependents[p].push(b.id);
+  // dependents of p (blocks listing p among their predecessors): dep[dStart[p] .. dStart[p + 1])
+  const dStart = new Int32Array(nb + 1);
+  for (const b of f.blocks) for (const p of b.preds) dStart[p + 1]++;
+  for (let i = 0; i < nb; i++) dStart[i + 1] += dStart[i];
+  const dep = new Int32Array(dStart[nb]), dFill = dStart.slice(0, nb);
+  for (const b of f.blocks) for (const p of b.preds) dep[dFill[p]++] = b.id;
   const dirty = new Uint8Array(nb).fill(1);
   for (let changed = true, it = 0; changed && it < 50; it++) {
     changed = false;
-    for (const id of order) {
+    for (let oi = 0; oi < no; oi++) {
+      const id = order[oi];
       if (!dirty[id]) continue;
       dirty[id] = 0;
       const b = f.blocks[id];
@@ -363,39 +395,41 @@ export function globalConstProp(f: VarFunc): boolean {
       }
       if (!any) continue;
       out.set(inn);
-      const g = gen[id];
-      for (let i = 0; i < g.length; i += 2) out[g[i]] = g[i + 1];
+      for (let i = gStart[id], e = gStart[id + 1]; i < e; i += 2) out[gen[i]] = gen[i + 1];
       const r = id * K;
       let same = !!hasOut[id];
       if (same) for (let k = 0; k < K; k++) if (OUT[r + k] !== out[k]) { same = false; break; }
-      if (!same) { OUT.set(out, r); hasOut[id] = 1; changed = true; for (const d of dependents[id]) dirty[d] = 1; }
+      if (!same) { OUT.set(out, r); hasOut[id] = 1; changed = true; for (let j = dStart[id], e = dStart[id + 1]; j < e; j++) dirty[dep[j]] = 1; }
       IN.set(inn, r); hasIn[id] = 1;
     }
   }
   let changed = false;
+  // the entry state of the block being rewritten is IN[r0 .. r0 + K); loc: its block-local overrides
+  // (null = no longer known constant). The map and closures serve all blocks.
+  let r0 = 0;
+  const loc = new Map<number, Expr | null>();
+  const look = (v: number): Expr | undefined => {
+    const l = loc.get(v);
+    if (l !== undefined) return l ?? undefined;
+    const k = slot[v];
+    return k >= 0 && IN[r0 + k] >= 0 ? { k: 'const', v: cval[IN[r0 + k]] } : undefined;
+  };
+  const sub = (e: Expr) => { const n = substConst(e, look); if (n !== e) changed = true; return n; };
+  // (a statement none of whose variables has a known constant is left as it is by substConst)
+  const known = (v: number) => { const l = loc.get(v); if (l !== undefined) return l !== null; const k = slot[v]; return k >= 0 && IN[r0 + k] >= 0; };
+  const same = (s: Stmt) => { const vs = stmtInfo(s).vars; for (let k = 0; k < vs.length; k++) if (known(vs[k])) return false; return true; };
+  const def = (dst: number, ns: Stmt) => { loc.set(dst, ns.k === 'set' && ns.e.k === 'const' ? ns.e : null); };
   for (const b of f.blocks) {
     if (!hasIn[b.id]) continue;
     // (in a block where no variable holds a known constant on entry and none is assigned one, no
     // variable ever becomes known: rewriteBlock would leave the block as it is)
-    const r0 = b.id * K;
+    r0 = b.id * K;
     let any = false;
     for (let k = 0; k < K && !any; k++) if (IN[r0 + k] >= 0) any = true;
-    if (!any) { const g = gen[b.id]; for (let i = 1; i < g.length && !any; i += 2) if (g[i] >= 0) any = true; }
+    for (let i = gStart[b.id] + 1, e = gStart[b.id + 1]; i < e && !any; i += 2) if (gen[i] >= 0) any = true;
     if (!any) continue;
-    const st = IN.subarray(r0, r0 + K);
-    // block-local overrides of the entry state (null = no longer known constant)
-    const loc = new Map<number, Expr | null>();
-    const look = (v: number): Expr | undefined => {
-      const l = loc.get(v);
-      if (l !== undefined) return l ?? undefined;
-      const k = slot[v];
-      return k >= 0 && st[k] >= 0 ? { k: 'const', v: cval[st[k]] } : undefined;
-    };
-    const sub = (e: Expr) => { const n = substConst(e, look); if (n !== e) changed = true; return n; };
-    // (a statement none of whose variables has a known constant is left as it is by substConst)
-    const known = (v: number) => { const l = loc.get(v); if (l !== undefined) return l !== null; const k = slot[v]; return k >= 0 && st[k] >= 0; };
-    const same = (s: Stmt) => { for (const v of stmtInfo(s).vars) if (known(v)) return false; return true; };
-    rewriteBlock(b, sub, (dst, ns) => loc.set(dst, ns.k === 'set' && ns.e.k === 'const' ? ns.e : null), same);
+    if (loc.size) loc.clear();
+    rewriteBlock(b, sub, def, same);
   }
   return changed;
 }
@@ -416,36 +450,41 @@ function substConst(e: Expr, look: (v: number) => Expr | undefined): Expr {
 /** Block-local copy propagation: after `x = y`, uses of x become y until x or y is reassigned. */
 export function localCopyProp(f: VarFunc, st?: { real: boolean }): boolean {
   let changed = false;
+  // (the maps and closures serve all blocks: emptied between blocks)
+  const m = new Map<number, Expr>();
+  // m's entries are copies `k = y`; copiesOf[y] = those k (so a reassignment of y finds them
+  // without scanning m)
+  const copiesOf = new Map<number, Set<number>>();
+  const del = (k: number) => { const e = m.get(k); if (e) { m.delete(k); if (e.k === 'var') copiesOf.get(e.id)?.delete(k); } };
+  const killVar = (v: number) => { del(v); const ks = copiesOf.get(v); if (ks) { for (const k of ks) m.delete(k); ks.clear(); } };
+  const look = (v: number) => m.get(v);
+  // `changed` keeps its historical meaning: the former copying substitution returned a new object
+  // for every composite expression whenever m was non-empty, and optimizeFunc's round loop (whose
+  // round count shapes the output) is driven by it.
+  const sub = (e: Expr) => {
+    if (!m.size) return e;
+    if (COMPOSITE.has(e.k) || (e.k === 'var' && m.has(e.id))) changed = true;
+    const n = substConst(e, look);
+    if (n !== e && st) st.real = true; // an actual substitution
+    return n;
+  };
+  // a statement without a variable of m is left as it is by substConst: not rewritten, but `sub`
+  // would still have flagged its composite top-level expressions
+  const same = (s: Stmt) => {
+    if (!m.size) return true;
+    const vs = stmtInfo(s).vars;
+    for (let k = 0; k < vs.length; k++) if (m.has(vs[k])) return false;
+    if (!changed) changed = topComposite(s);
+    return true;
+  };
+  const def = (dst: number, ns: Stmt) => {
+    killVar(dst);
+    if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) { m.set(dst, ns.e); let ks = copiesOf.get(ns.e.id); if (!ks) copiesOf.set(ns.e.id, (ks = new Set())); ks.add(dst); }
+  };
   for (const b of f.blocks) {
-    const m = new Map<number, Expr>();
-    // m's entries are copies `k = y`; copiesOf[y] = those k (so a reassignment of y finds them
-    // without scanning m)
-    const copiesOf = new Map<number, Set<number>>();
-    const del = (k: number) => { const e = m.get(k); if (e) { m.delete(k); if (e.k === 'var') copiesOf.get(e.id)?.delete(k); } };
-    const killVar = (v: number) => { del(v); const ks = copiesOf.get(v); if (ks) { for (const k of ks) m.delete(k); ks.clear(); } };
-    const look = (v: number) => m.get(v);
-    // `changed` keeps its historical meaning: the former copying substitution returned a new object
-    // for every composite expression whenever m was non-empty, and optimizeFunc's round loop (whose
-    // round count shapes the output) is driven by it.
-    const sub = (e: Expr) => {
-      if (!m.size) return e;
-      if (COMPOSITE.has(e.k) || (e.k === 'var' && m.has(e.id))) changed = true;
-      const n = substConst(e, look);
-      if (n !== e && st) st.real = true; // an actual substitution
-      return n;
-    };
-    // a statement without a variable of m is left as it is by substConst: not rewritten, but `sub`
-    // would still have flagged its composite top-level expressions
-    const same = (s: Stmt) => {
-      if (!m.size) return true;
-      for (const v of stmtInfo(s).vars) if (m.has(v)) return false;
-      if (!changed) changed = topComposite(s);
-      return true;
-    };
-    rewriteBlock(b, sub, (dst, ns) => {
-      killVar(dst);
-      if (ns.k === 'set' && ns.e.k === 'var' && ns.e.id !== dst) { m.set(dst, ns.e); let ks = copiesOf.get(ns.e.id); if (!ks) copiesOf.set(ns.e.id, (ks = new Set())); ks.add(dst); }
-    }, same);
+    if (m.size) m.clear();
+    if (copiesOf.size) copiesOf.clear();
+    rewriteBlock(b, sub, def, same);
   }
   return changed;
 }
