@@ -12,6 +12,8 @@ export const TYPES: Record<string, AccountType> = {
 	Profile: { fields: [['authority', 'Pubkey'], ['fee', 'u64']] },
 	Pool: { fields: [['admin', 'Pubkey'], ['mint', 'Pubkey'], ['total_staked', 'u64'], ['total_shares', 'u64'], ['fee_bps', 'u16'], ['paused', 'bool'], ['limit', 'u64'], ['bump', 'u8']] },
 	Stake: { fields: [['owner', 'Pubkey'], ['pool', 'Pubkey'], ['shares', 'u64']] },
+	Reserve: { fields: [['admin', 'Pubkey'], ['mint', 'Pubkey'], ['vault', 'Pubkey'], ['oracle', 'Pubkey'], ['total_assets', 'u64'], ['total_shares', 'u64'], ['min_liquidity', 'u64'], ['bump', 'u8']] },
+	Ledger: { fields: [['owner', 'Pubkey'], ['reserve', 'Pubkey'], ['shares', 'u64'], ['deposited', 'u64'], ['borrowed', 'u64']] },
 }
 
 const R = {

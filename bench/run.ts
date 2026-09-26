@@ -15,7 +15,8 @@ const ROOT = dirname(fileURLToPath(import.meta.url))
 interface Job { id: number; prog: string; variant?: string; so: string; idl?: any; evalKey?: string }
 interface ExpIx { tag?: number; accounts: Record<string, string[]>; relations?: [string, string][]; cpis?: string[]; writes?: string[]; pdas?: string[] }
 interface ExpVariant { ix: string; rules: string[]; idl?: Record<string, string> }
-interface Expected { kind: 'anchor' | 'native'; idl?: string; generated?: boolean; instructions: Record<string, ExpIx>; variants?: Record<string, ExpVariant> }
+interface FundMover { ix: string; authority: string; from: string; index?: number }
+interface Expected { kind: 'anchor' | 'native'; idl?: string; generated?: boolean; instructions: Record<string, ExpIx>; variants?: Record<string, ExpVariant>; fund_movers?: FundMover[] }
 
 const CATS = ['checks', 'relations', 'cpis', 'writes', 'pdas', 'rules'] as const
 type Cat = typeof CATS[number]
@@ -28,6 +29,9 @@ const misses: string[] = [], falses: string[] = [], variantLines: string[] = []
 // generated programs (bench/gen, expected.generated): rules only, tallied apart from the six categories
 const gen = new Map<string, { rule: string; n: number; caught: number; missed: string[] }>()
 const genFalse: string[] = [], genInfo: string[] = [], genExtra: string[] = []
+// informational expectations (expected.fund_movers): an authority-only instruction that can move user funds, expected
+// listed in analysis.json fund_movers ({ instruction, authority, ... }), not as a finding
+const movers: { where: string; listed: boolean }[] = []
 
 async function main() {
 	const verbose = process.argv.includes('--verbose') || process.argv.includes('-v')
@@ -52,6 +56,7 @@ async function main() {
 	for (const [prog, exp] of exps) {
 		const base = out.get(jobs.find(j => j.prog === prog && !j.variant && !j.evalKey)!.id)!
 		const baseFindings = scoreFacts(prog, exp, base)
+		for (const m of exp.fund_movers ?? []) movers.push({ where: `${prog} ${m.ix} (${m.authority} moves ${m.from})`, listed: fundMoverListed(base, m, exp) })
 		for (const j of jobs) if (j.prog === prog && j.variant) scoreVariant(prog, j.variant, exp, out.get(j.id)!, baseFindings)
 	}
 	if (verbose) {
@@ -242,6 +247,12 @@ function scoreVariant(prog: string, v: string, exp: Expected, a: any, baseFindin
 	variantLines.push(`${hit ? 'caught' : 'MISSED'} ${prog}@${v}: ${ve.rules.join(' | ')} @${ve.ix}${extra.length ? `  (+${extra.join(', ')})` : ''}`)
 }
 
+/** the expected authority-only fund move is listed in analysis.json fund_movers (instruction + authority account) */
+function fundMoverListed(a: any, m: FundMover, exp: Expected): boolean {
+	const ix = findIx(a, m.ix, exp.instructions[m.ix])
+	return !!ix && (a.fund_movers ?? []).some((x: any) => x.instruction === ix.name && [m.authority, `account[${m.index}]`].includes(String(x.authority ?? '').split(/[.\s]/)[0]))
+}
+
 /** validation_consistency inconsistencies at an instruction (`account lacks validation`) */
 function consistencyAt(a: any, ix: string): string[] {
 	return (a.validation_consistency ?? []).flatMap((r: any) => (r.inconsistencies ?? []).filter((x: any) => x.instruction === ix).map((x: any) => `~consistency ${x.account} lacks ${x.validation}`))
@@ -259,6 +270,10 @@ function printGenerated(verbose: boolean) {
 		for (const f of genFalse) console.log(`  FALSE ${f}`)
 		for (const f of genInfo) console.log(`  info on a clean base: ${f}`)
 		for (const f of genExtra) console.log(`  extra ${f}`)
+	}
+	if (movers.length) {
+		console.log(`  fund movers listed (informational, analysis.json fund_movers): ${movers.filter(m => m.listed).length}/${movers.length}`)
+		if (verbose) for (const m of movers) console.log(`  ${m.listed ? 'listed' : 'NOT LISTED'} ${m.where}`)
 	}
 	console.log(`generated: ${c}/${n} variants caught (${(100 * c / (n || 1)).toFixed(1)}%), ${genFalse.length} false findings on the clean bases (+${genInfo.length} inconsistencies), ${genExtra.length} unexpected findings in variants`)
 	console.log()
