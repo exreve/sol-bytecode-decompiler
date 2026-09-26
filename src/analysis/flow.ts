@@ -717,6 +717,9 @@ export function indirectTargets(r: Result): Indirect {
 	const discs = new Set(r.instructions.map(i => i.disc))
 	// (a constant: the functions it designates, as an address or a read-only table of them)
 	const constFns = new Map<bigint, number[]>()
+	// (below the text and every region: neither a function nor a table)
+	let lowest = p.textVaddr
+	for (const g of p.image.regions) if (g.vaddr < lowest) lowest = g.vaddr
 	for (const fo of r.funcs) {
 		const out = new Set<number>()
 		const consts = new Map<number, { v: bigint; b: number }[]>() // var -> the constants it is set to (in which block)
@@ -726,7 +729,7 @@ export function indirectTargets(r: Result): Indirect {
 				if (s.k === 'set') { if (s.e.k === 'const') { let l = consts.get(s.dst); if (!l) consts.set(s.dst, (l = [])); l.push({ v: s.e.v, b: bi }) } else other.add(s.dst) }
 				else if (s.k === 'call' && s.dst >= 0) other.add(s.dst)
 				for (const e of stmtExprs(s)) walkExpr(e, x => {
-					if (x.k !== 'const') return
+					if (x.k !== 'const' || x.v < lowest) return
 					let ts = constFns.get(x.v)
 					if (!ts) {
 						ts = []

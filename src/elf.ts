@@ -207,7 +207,11 @@ export class Image {
   regions: Region[];
   constructor(regions: Region[]) { this.regions = [...regions].sort((a, b) => (a.vaddr < b.vaddr ? -1 : 1)); }
   region(addr: bigint, len = 1): Region | undefined {
-    for (const r of this.regions) if (addr >= r.vaddr && addr + BigInt(len) <= r.vaddr + BigInt(r.bytes.length)) return r;
+    const end = addr + BigInt(len);
+    for (const r of this.regions) {
+      if (addr < r.vaddr) return undefined; // (sorted by address: no later region starts at or below addr)
+      if (end <= r.vaddr + BigInt(r.bytes.length)) return r;
+    }
     return undefined;
   }
   bytesAt(addr: bigint, len: number): Uint8Array | undefined {
