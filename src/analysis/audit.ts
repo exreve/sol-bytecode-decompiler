@@ -23,6 +23,7 @@ export interface AuditFacts {
 	sameType?: { fn: string; n: number; type?: string; accts: string[] } // Anchor: an account type try_accounts deserializes more than once (its try call, the accounts it names)
 	initWrites?: InitWrite[]                                      // an account type's discriminator written into an account's data with no state check before
 	sysvarReads?: { acct: string; sysvar: string; at: Loc; idCompared: boolean }[] // an account's data parsed as a sysvar's layout (by behavior); idCompared: the instruction compares a key with that sysvar's id
+	initGated?: string[]                                          // accounts set to 1 (a flag / state) behind a condition reading their data (an is_initialized test)
 }
 export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean; field?: string; tag?: string } // field: native, an authority field written (no discriminator) // owner: a check compares the account's owner
 
@@ -121,6 +122,19 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 			const gated = conds.some(k => k.how !== 'before' && (src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data') || readsAcct(r, ix, k.fn, k.c, k.pos, acct)))
 			if (!gated) out.reinit.push({ op: oi, acct })
 		})
+	}
+	// (an account the instruction sets a byte / word of to 1 (is_initialized, a state) behind a condition on the way reading
+	// its data (its state unpacked and tested): an initialization gated by the account's state)
+	if (ctx) {
+		const gated = new Set<string>()
+		for (const o of ix.ops) {
+			if (!o.kinds.includes('ACCOUNT_DATA_WRITE') || !o.target || o.fnPc === undefined || o.at.pc === undefined || !/^(0x0*)?1$/.test(o.value ?? '')) continue
+			const acct = o.target.split('.')[0]
+			if (gated.has(acct)) continue
+			const conds = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc))
+			if (conds.some(k => k.how !== 'before' && src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data'))) gated.add(acct)
+		}
+		if (gated.size) out.initGated = [...gated]
 	}
 	if (ctx) out.initWrites = initWrites(r, ix, out.ownerCmp ?? [])
 	if (ctx) out.sysvarReads = sysvarReads(r, ix, src)

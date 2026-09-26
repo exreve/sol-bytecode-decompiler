@@ -2174,6 +2174,90 @@ export function seedFrom(PR: AcctResolver | undefined, pf: FuncOut | undefined, 
 	return seed
 }
 
+const sliceMemo = new WeakMap<VarFunc, Map<string, Set<number>>>()
+/** the parameters (numbers) a function uses as an &[AccountInfo] by its own evidence (and its callees', depth levels) */
+function sliceParams(g: VarFunc, callee: Callee, depth: number): Set<number> {
+	let m = sliceMemo.get(g)
+	if (!m) sliceMemo.set(g, (m = new Map()))
+	const k = `${callee.legacy ? 'L' : 'C'}${depth}`
+	let r = m.get(k)
+	if (r) return r
+	m.set(k, (r = new Set()))
+	if (g.blocks.length > 4000) return r
+	const roots = new Map<number, AV>()
+	classifyRoots(g, defsOf(g, callee), roots, undefined, callee, undefined, undefined, depth)
+	for (const v of g.vars) if (v.param >= 1 && v.param <= 5 && roots.get(v.id)?.k === 'slice' && roots.get(v.id)!.off === 0) r.add(v.param)
+	return r
+}
+/**
+ * (accountResolver's first pass) the variables of f used as a slice / an array of record pointers: the roots it adds;
+ * depth: how many levels of callees a pointer passed on is classified in (a parameter a callee uses as a slice)
+ */
+function classifyRoots(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, infos: number | undefined, input: number | undefined, depth = 2) {
+	const { ev } = avEvaluator(f, D, roots, arr, callee, 2, true, infos)
+	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
+	// (evidence a base is an &[AccountInfo], not any struct read at a few offsets: a flag byte read, a key / owner
+	// pointer loaded from it and compared as 32 bytes or read word-wise, a data Rc's pointer / length read)
+	const IF = callee?.legacy ? LEGACY_INFO_FIELD : INFO_FIELD
+	const infoEv = new Set<number>(), misfit = new Set<number>(), keyWords = new Map<string, Set<number>>()
+	const elemField = (a: AV | undefined) => a?.k === 'elem' ? IF[(a.e * 8) % 0x30] : undefined
+	const cmpNote = (y: Expr, p: number) => {
+		if (y.k === 'fn' && (y.name === 'memeq' || y.name === 'keyeq')) for (const a of y.name === 'memeq' ? y.args.slice(0, 2) : y.args.slice(0, 1)) { const x = ev(a, p); if (x?.k === 'elem' && x.off < 0x20 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
+	}
+	const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
+	const recUse = (a: AV | undefined, ok: boolean) => { if (a?.k === 'elem' && ok) recUses.set(a.v, (recUses.get(a.v) ?? 0) + 1) }
+	// (a base plus a variable count of 0x30-byte entries (e.g. an accounts iterator's end), or passed to a callee that uses
+	// that parameter as a slice: accounts at several indices, the latter with the callee's AccountInfo evidence)
+	const several = new Set<number>()
+	const x30 = (e: Expr, k = 0): boolean => e.k === 'bin' && e.op === 'mul' ? (e.b.k === 'const' && e.b.v === 0x30n && e.a.k !== 'const') || (e.a.k === 'const' && e.a.v === 0x30n && e.b.k !== 'const')
+		: e.k === 'var' && k < 3 && D.defs.has(e.id) ? x30(D.defs.get(e.id)!, k + 1) : false
+	f.blocks.forEach((b, bi) => {
+		let p = bi << 16
+		const note = (x: Expr) => {
+			if (x.k === 'bin' && x.op === 'add') for (const [u, w] of [[x.a, x.b], [x.b, x.a]]) if (x30(w)) { const a = ev(u, p); if (a?.k === 'base' && a.off === 0) several.add(a.v) }
+			if (x.k !== 'load') return
+			const a = ev(x.addr, p)
+			if (a?.k === 'base' && a.v !== input && a.off >= 0 && a.off < 0x30 * 64) { // (the entrypoint's input is the serialized input, not a slice)
+				const c = a.off
+				const fl = IF[c % 0x30]
+				// (a load no AccountInfo field explains: some other struct)
+				if (!(x.size === 8 ? c % 8 === 0 : x.size === 1 && c % 0x30 >= 0x28 && c % 0x30 <= 0x2a)) misfit.add(a.v)
+				if (fl !== undefined && (x.size === 8 ? c % 0x30 < 0x28 : x.size === 1 && c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
+				if (x.size === 1 && c % 0x30 >= 0x28 && fl) infoEv.add(a.v)
+				if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
+			}
+			const ef = elemField(a)
+			// (a word loaded from it dereferenced past what that field points to: key / owner 32 bytes, an Rc box
+			// 0x28; a value (rent_epoch) dereferenced at all)
+			if (a?.k === 'elem' && (ef === undefined || ef === 'rent_epoch' || a.off < 0 || a.off + x.size > (ef === 'key' || ef === 'owner' ? 0x20 : 0x28))) misfit.add(a.v)
+			if (a?.k === 'elem' && x.size === 8) {
+				if (ef === 'data' && (a.off === 0x18 || a.off === 0x20)) infoEv.add(a.v)
+				if ((ef === 'key' || ef === 'owner') && a.off < 0x20 && a.off % 8 === 0) { const k = `${a.v}:${a.e}`; let w = keyWords.get(k); if (!w) keyWords.set(k, (w = new Set())); w.add(a.off); if (w.size >= 2) infoEv.add(a.v) }
+			}
+			recUse(a, a?.k === 'elem' && REC_FIELD[a.off]?.[1] === x.size)
+		}
+		b.stmts.forEach((s, i) => {
+			p = bi << 16 | i
+			for (const e of stmtExprs(s)) walkExpr(e, note)
+			// (a key / owner compared: memcmp(rec + 8 | rec + 0x28, ..); lamports stored)
+			const c = callOf(s)
+			if (c) for (const a of c.args) { const x = ev(a, p); recUse(x, x?.k === 'elem' && (x.off === 8 || x.off === 0x28)); if (x?.k === 'elem' && x.off === 0 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
+			const g = c?.t.k === 'fn' && depth > 0 ? callee?.f(c.t.pc) : undefined
+			if (g && g !== f) {
+				const ps = sliceParams(g, callee!, depth - 1)
+				if (ps.size) c!.args.forEach((a, j) => { if (!ps.has(j + 1)) return; const x = ev(a, p); if (x?.k === 'base' && x.off === 0 && x.v !== input) { several.add(x.v); infoEv.add(x.v) } })
+			}
+			for (const e of stmtExprs(s)) walkExpr(e, y => cmpNote(y, p))
+			if (s.k === 'store') { const x = ev(s.addr, p); recUse(x, x?.k === 'elem' && x.off === 0x48) }
+		})
+		p = bi << 16 | b.stmts.length
+		if (b.term.k === 'br') { walkExpr(b.term.c, note); walkExpr(b.term.c, y => cmpNote(y, p)) }
+	})
+	for (const v of several) if (!hits.has(v)) hits.set(v, new Set())
+	for (const [v, ks] of hits) if ((ks.size >= 2 || several.has(v)) && infoEv.has(v) && !misfit.has(v)) roots.set(v, { k: 'slice', off: 0 })
+	for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
+}
+
 export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee, seed?: Map<number, AcctVal>): AcctResolver {
 	// (per kind of callee (see defsMemo), the AccountInfo layout it gives, and the seed)
 	const ck = callee ? (callee.legacy ? 'L' : 'C') : '-'
@@ -2193,58 +2277,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	let infos: number | undefined
 	if (input !== undefined && arr === undefined) ({ ptrs: arr, infos } = cursorArrays(f, input, fpOff))
 	// first pass: the variables used as a slice / an array of record pointers (classify: the roots it adds)
-	const classify0 = (roots: Map<number, AV>) => {
-		const { ev } = avEvaluator(f, D, roots, arr, callee, 2, true, infos)
-		const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
-		// (evidence a base is an &[AccountInfo], not any struct read at a few offsets: a flag byte read, a key / owner
-		// pointer loaded from it and compared as 32 bytes or read word-wise, a data Rc's pointer / length read)
-		const IF = callee?.legacy ? LEGACY_INFO_FIELD : INFO_FIELD
-		const infoEv = new Set<number>(), misfit = new Set<number>(), keyWords = new Map<string, Set<number>>()
-		const elemField = (a: AV | undefined) => a?.k === 'elem' ? IF[(a.e * 8) % 0x30] : undefined
-		const cmpNote = (y: Expr, p: number) => {
-			if (y.k === 'fn' && (y.name === 'memeq' || y.name === 'keyeq')) for (const a of y.name === 'memeq' ? y.args.slice(0, 2) : y.args.slice(0, 1)) { const x = ev(a, p); if (x?.k === 'elem' && x.off < 0x20 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
-		}
-		const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
-		const recUse = (a: AV | undefined, ok: boolean) => { if (a?.k === 'elem' && ok) recUses.set(a.v, (recUses.get(a.v) ?? 0) + 1) }
-		f.blocks.forEach((b, bi) => {
-			let p = bi << 16
-			const note = (x: Expr) => {
-				if (x.k !== 'load') return
-				const a = ev(x.addr, p)
-				if (a?.k === 'base' && a.v !== input && a.off >= 0 && a.off < 0x30 * 64) { // (the entrypoint's input is the serialized input, not a slice)
-					const c = a.off
-					const fl = IF[c % 0x30]
-					// (a load no AccountInfo field explains: some other struct)
-					if (!(x.size === 8 ? c % 8 === 0 : x.size === 1 && c % 0x30 >= 0x28 && c % 0x30 <= 0x2a)) misfit.add(a.v)
-					if (fl !== undefined && (x.size === 8 ? c % 0x30 < 0x28 : x.size === 1 && c % 0x30 >= 0x28)) addTo(hits, a.v, Math.floor(c / 0x30))
-					if (x.size === 1 && c % 0x30 >= 0x28 && fl) infoEv.add(a.v)
-					if (x.size === 8 && c % 8 === 0) addTo(elems, a.v, c / 8)
-				}
-				const ef = elemField(a)
-				// (a word loaded from it dereferenced past what that field points to: key / owner 32 bytes, an Rc box
-				// 0x28; a value (rent_epoch) dereferenced at all)
-				if (a?.k === 'elem' && (ef === undefined || ef === 'rent_epoch' || a.off < 0 || a.off + x.size > (ef === 'key' || ef === 'owner' ? 0x20 : 0x28))) misfit.add(a.v)
-				if (a?.k === 'elem' && x.size === 8) {
-					if (ef === 'data' && (a.off === 0x18 || a.off === 0x20)) infoEv.add(a.v)
-					if ((ef === 'key' || ef === 'owner') && a.off < 0x20 && a.off % 8 === 0) { const k = `${a.v}:${a.e}`; let w = keyWords.get(k); if (!w) keyWords.set(k, (w = new Set())); w.add(a.off); if (w.size >= 2) infoEv.add(a.v) }
-				}
-				recUse(a, a?.k === 'elem' && REC_FIELD[a.off]?.[1] === x.size)
-			}
-			b.stmts.forEach((s, i) => {
-				p = bi << 16 | i
-				for (const e of stmtExprs(s)) walkExpr(e, note)
-				// (a key / owner compared: memcmp(rec + 8 | rec + 0x28, ..); lamports stored)
-				const c = callOf(s)
-				if (c) for (const a of c.args) { const x = ev(a, p); recUse(x, x?.k === 'elem' && (x.off === 8 || x.off === 0x28)); if (x?.k === 'elem' && x.off === 0 && /^(key|owner)$/.test(elemField(x) ?? '')) infoEv.add(x.v) }
-				for (const e of stmtExprs(s)) walkExpr(e, y => cmpNote(y, p))
-				if (s.k === 'store') { const x = ev(s.addr, p); recUse(x, x?.k === 'elem' && x.off === 0x48) }
-			})
-			p = bi << 16 | b.stmts.length
-			if (b.term.k === 'br') { walkExpr(b.term.c, note); walkExpr(b.term.c, y => cmpNote(y, p)) }
-		})
-		for (const [v, ks] of hits) if (ks.size >= 2 && infoEv.has(v) && !misfit.has(v)) roots.set(v, { k: 'slice', off: 0 })
-		for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
-	}
+	const classify0 = (roots: Map<number, AV>) => classifyRoots(f, D, roots, arr, callee, infos, input)
 	// (the roots classify sets depend on the function, the kind of callee and the roots given only (a fresh evaluator): it
 	// looks for base / elem values, which a caller's frame pointer (ext: its words by the caller's evaluator, never a base
 	// or an elem) and what is derived from it are not; by those, with ext roots as one opaque value, what it sets)

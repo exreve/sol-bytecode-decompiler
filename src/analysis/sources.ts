@@ -182,6 +182,8 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 				case 'ext': case 'neg': case 'not': case 'bswap': case 'lnot': walk(fn, e.a, p, d + 1, via); return
 				case 'sel': walk(fn, e.a, p, d + 1, via); walk(fn, e.b, p, d + 1, via); return
 				case 'fn': for (const a of e.args) walk(fn, a, p, d + 1, via); return
+				// (a condition: what its operands come from)
+				case 'cmp': case 'land': case 'lor': walk(fn, e.a, p, d + 1, via); walk(fn, e.b, p, d + 1, via); return
 				default: return
 			}
 		}

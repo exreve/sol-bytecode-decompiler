@@ -126,13 +126,19 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 			// (a check made after the operation on every path, e.g. in the exit code, is not one it could bypass)
 			&& !pointsOf[oi].some(p => siteOf[ci].some(s => s.fn === p.fn && s.b !== p.b && dom(s.fn, p, s))))
 		for (const ci of cand.slice(0, 3)) {
-			for (const s of siteOf[ci]) {
+			for (const [si, s] of siteOf[ci].entries()) {
 				const p = pointsOf[oi].find(x => x.fn === s.fn)
 				if (!p) continue
 				const g = cfg(s.fn)!
-				const al = ctx.allowed ? (b: number) => ctx.allowed!(s.fn, b) : undefined
+				// (a site up the call path: every call of the same callee there makes the check too, e.g. one helper called on
+				// both branches (validate_owner of the owner or of the delegate))
+				const child = si > 0 ? siteOf[ci][si - 1].fn : undefined
+				const calls = new Set<number>()
+				if (child !== undefined) g.fo.f.blocks.forEach((bl, bi) => { if (bi !== s.b && bl.stmts.some(st => { const c = callOf(st); return c?.t.k === 'fn' && c.t.pc === child })) calls.add(bi) })
+				const al0 = ctx.allowed ? (b: number) => ctx.allowed!(s.fn, b) : undefined
+				const al = calls.size ? (b: number) => !calls.has(b) && (!al0 || al0(b)) : al0
 				// (a check on some paths to the operation, not one guarding other code (e.g. another instruction's branch))
-				if (s.b === p.b || !reaches(g, s.b, p.b, al)) continue
+				if (s.b === p.b || !reaches(g, s.b, p.b, al0)) continue
 				const path = bypass(g, s.b, p.b, al)
 				if (!path) continue
 				const ff = r.facts.get(s.fn)
@@ -829,7 +835,8 @@ const RULES: Rule[] = [
 			const gate = GATE.filter(k => !['has_one', 'key', 'token_owner', 'associated'].includes(k))
 			// (an initialization: an account the instruction creates, or whose type tag / discriminator it writes (a constant into
 			// its first bytes): reinit-unchecked's when the account may be live)
-			const tagged = new Set(ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]))
+			// (or one it sets a flag / state of to 1 behind a test of its current data: is_initialized)
+			const tagged = new Set([...ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]), ...ix.audit?.initGated ?? []])
 			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => ix.checks[i].kinds.some(k => gate.includes(k))))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
