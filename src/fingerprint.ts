@@ -24,15 +24,20 @@ function funcPcs(f: Func): number[] {
 const V2_MEM: Record<number, number> = { 0x2c: 0x71, 0x3c: 0x69, 0x8c: 0x61, 0x9c: 0x79, 0x27: 0x72, 0x37: 0x6a, 0x87: 0x62, 0x97: 0x7a, 0x2f: 0x73, 0x3f: 0x6b, 0x8f: 0x63, 0x9f: 0x7b }
 
 export function fingerprint(p: Program, f: Func): FnPrint {
-	const raw = printOf(p, f, false)
+	const pcs = funcPcs(f)
+	const raw = printOf(p, f, false, pcs)
 	if (p.version < 2) return raw
-	const alt = printOf(p, f, true).hash
+	const alt = printOf(p, f, true, pcs).hash
 	return alt === raw.hash ? raw : { ...raw, alt }
 }
 
-function printOf(p: Program, f: Func, norm: boolean): FnPrint {
+/** (printOf) the UTF-8 bytes of the hashed immediates that are strings */
+const immBytes = new Map<string, Buffer>()
+/** (printOf) constImm's result for a 64-bit constant in the image: its string preview, by program */
+const previews = new WeakMap<Program, Map<bigint, string | undefined>>()
+
+function printOf(p: Program, f: Func, norm: boolean, pcs: number[]): FnPrint {
 	const h = createHash('sha1')
-	const pcs = funcPcs(f)
 	// the hashed byte stream is assembled in one buffer and hashed with a single update (same
 	// digest as updating per instruction, without a native call per instruction)
 	let out = Buffer.allocUnsafe(pcs.length * 12 + 64), len = 0
@@ -40,19 +45,25 @@ function printOf(p: Program, f: Func, norm: boolean): FnPrint {
 	const textLo = p.textVaddr, textHi = p.textVaddr + BigInt(p.insns.length * 8)
 	const strings: string[] = []
 	const v = p.version
+	// (the bytes Buffer's writeUInt8 / writeInt16LE / writeInt32LE write)
+	const w32 = (x: number, at: number) => { out[at] = x & 0xff; out[at + 1] = (x >>> 8) & 0xff; out[at + 2] = (x >>> 16) & 0xff; out[at + 3] = (x >>> 24) & 0xff }
 	const put = (opc: number, regs: number, off: number, imm: string | number, hi: number) => {
-		const tail = typeof imm === 'number' ? undefined : Buffer.from(imm, 'utf8')
+		let tail: Buffer | undefined
+		if (typeof imm !== 'number') { tail = immBytes.get(imm); if (!tail) immBytes.set(imm, (tail = Buffer.from(imm, 'utf8'))) }
 		need(4 + (tail ? tail.length : 8))
-		out.writeUInt8(opc, len); out.writeUInt8(regs, len + 1); out.writeInt16LE(off, len + 2)
+		out[len] = opc & 0xff; out[len + 1] = regs & 0xff; out[len + 2] = off & 0xff; out[len + 3] = (off >> 8) & 0xff
 		len += 4
-		if (typeof imm === 'number') { out.writeInt32LE(imm, len); out.writeInt32LE(hi, len + 4); len += 8 }
+		if (typeof imm === 'number') { w32(imm, len); w32(hi, len + 4); len += 8 }
 		else { tail!.copy(out, len); len += tail!.length }
 	}
+	let pv = previews.get(p)
+	if (!pv) previews.set(p, (pv = new Map()))
 	/** a 64-bit constant (lddw): text / rodata addresses normalized */
 	const constImm = (val: bigint, lo: number, hiImm: number): [string | number, number] => {
 		if (val >= textLo && val < textHi) return ['T', 0]
 		if (p.image.region(val)) {
-			const s = p.image.bytesAt(val, 1) ? previewString(p, val) : undefined
+			let s = pv!.get(val)
+			if (s === undefined && !pv!.has(val)) pv!.set(val, (s = p.image.bytesAt(val, 1) ? previewString(p, val) : undefined))
 			if (s) strings.push(s)
 			return ['A', 0]
 		}
