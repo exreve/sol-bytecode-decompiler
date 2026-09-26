@@ -171,6 +171,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 	const sig = lines.find(l => l.startsWith('function ') || l.startsWith('export function '))
 	if (sig) for (const m of sig.matchAll(/(\w+): (\w+)/g)) facts.types.set(m[1], m[2])
 	for (const l of lines) {
+		if (!l.includes(' = ')) continue // (neither pattern matches)
 		const m = /^\s*(?:const |let )?(\w+)(?:: (\w+))? = ([A-Za-z_]\w*\.[\w.]+)$/.exec(l)
 		if (m) { alias.set(m[1], alias.has(m[1]) && alias.get(m[1]) !== m[3] ? null : m[3]); if (m[2]) facts.types.set(m[1], m[2]) }
 		else { const d = /^\s*(?:const |let )?(\w+)(?:: (\w+))? = /.exec(l); if (d) { if (alias.has(d[1])) alias.set(d[1], null); if (d[2]) facts.types.set(d[1], d[2]) } }
