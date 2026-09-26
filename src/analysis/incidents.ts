@@ -96,27 +96,46 @@ function scope(r: Result, ix: IxOut): Fn[] {
 
 const stmtExprs = (s: Stmt): Expr[] => s.k === 'set' || s.k === 'eval' ? [s.e] : s.k === 'store' ? [s.addr, s.v] : s.k === 'stores' ? [s.addr, ...s.vals] : s.k === 'copy' ? [s.dst, s.src] : s.k === 'call' ? s.args : []
 /** every expression of the scope (sub-expressions included), with its function and position */
+type ExprAt = [e: Expr, p: number, top: Expr]
+const exprMemo = new WeakMap<FuncOut, ExprAt[][]>()
+function exprsOf(fo: FuncOut, b: number): ExprAt[] {
+	let m = exprMemo.get(fo)
+	if (!m) exprMemo.set(fo, (m = []))
+	let out = m[b]
+	if (out) return out
+	out = m[b] = []
+	const bl = fo.f.blocks[b], o = out
+	bl.stmts.forEach((s, i) => { for (const e of stmtExprs(s)) walkExpr(e, x => { o.push([x, b << 16 | i, e]) }) })
+	if (bl.term.k === 'br') { const c = bl.term.c; walkExpr(c, x => { o.push([x, b << 16 | bl.stmts.length, c]) }) }
+	else if (bl.term.k === 'ret' && bl.term.e) { const c = bl.term.e; walkExpr(c, x => { o.push([x, b << 16 | bl.stmts.length, c]) }) }
+	return out
+}
 function eachExpr(sc: Fn[], f: (fn: Fn, e: Expr, p: number, top: Expr) => void) {
-	for (const fn of sc) for (const b of fn.blocks) {
-		const bl = fn.fo.f.blocks[b]
-		bl.stmts.forEach((s, i) => { for (const e of stmtExprs(s)) walkExpr(e, x => f(fn, x, b << 16 | i, e)) })
-		if (bl.term.k === 'br') { const c = bl.term.c; walkExpr(c, x => f(fn, x, b << 16 | bl.stmts.length, c)) }
-		else if (bl.term.k === 'ret' && bl.term.e) { const c = bl.term.e; walkExpr(c, x => f(fn, x, b << 16 | bl.stmts.length, c)) }
-	}
+	for (const fn of sc) for (const b of fn.blocks) for (const [x, p, e] of exprsOf(fn.fo, b)) f(fn, x, p, e)
 }
 /** the calls of the scope (statements and calls nested in expressions), with their position */
-function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number, target?: number) => void, r: Result) {
+type CallAt = [name: string, args: Expr[], p: number, pc: number, target: number | undefined]
+const callMemo = new WeakMap<FuncOut, CallAt[][]>()
+function callsOf(fo: FuncOut, b: number, r: Result): CallAt[] {
+	let m = callMemo.get(fo)
+	if (!m) callMemo.set(fo, (m = []))
+	let out = m[b]
+	if (out) return out
+	out = m[b] = []
+	const o = out
 	const nameOf = (t: Extract<Expr, { k: 'call' }>['t']) => t.k === 'sys' ? t.name : t.k === 'fn' ? r.program.funcs.get(t.pc)?.name ?? '' : ''
-	for (const fn of sc) for (const b of fn.blocks) {
-		const bl = fn.fo.f.blocks[b]
-		bl.stmts.forEach((s, i) => {
-			const c = callOf(s)
-			if (s.k === 'call') f(fn, nameOf(s.t), s.args, b << 16 | i, s.pc, s.t.k === 'fn' ? s.t.pc : undefined)
-			for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x !== (c as unknown)) f(fn, nameOf(x.t), x.args, b << 16 | i, s.pc, x.t.k === 'fn' ? x.t.pc : undefined) })
-		})
-		const t = bl.term.k === 'ret' ? bl.term.e : bl.term.k === 'br' ? bl.term.c : null
-		if (t) walkExpr(t, x => { if (x.k === 'call') f(fn, nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined) })
-	}
+	const bl = fo.f.blocks[b]
+	bl.stmts.forEach((s, i) => {
+		const c = callOf(s)
+		if (s.k === 'call') o.push([nameOf(s.t), s.args, b << 16 | i, s.pc, s.t.k === 'fn' ? s.t.pc : undefined])
+		for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x !== (c as unknown)) o.push([nameOf(x.t), x.args, b << 16 | i, s.pc, x.t.k === 'fn' ? x.t.pc : undefined]) })
+	})
+	const t = bl.term.k === 'ret' ? bl.term.e : bl.term.k === 'br' ? bl.term.c : null
+	if (t) walkExpr(t, x => { if (x.k === 'call') o.push([nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined]) })
+	return out
+}
+function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number, target?: number) => void, r: Result) {
+	for (const fn of sc) for (const b of fn.blocks) for (const [name, args, p, pc, t] of callsOf(fn.fo, b, r)) f(fn, name, args, p, pc, t)
 }
 
 /** a sum's terms: the non-constant ones and the constant */
@@ -251,7 +270,9 @@ function sysvarKeyChecked(r: Result, ix: IxOut, sc: Fn[], cmps: Cmp[], acct?: st
 
 const srcOf = (r: Result, ix: IxOut) => { const S = sourceCtx(r, ix); return (fn: number, e: Expr, p: number): Source[] => { try { return S.of(fn, e, p) } catch { return [] } } }
 /** the sources of a compared operand: its value, and for a pointer (a memcmp side) the first word it points to */
-const sideSrc = (src: ReturnType<typeof srcOf>, k: Cmp, e: Expr): Source[] => { const s = src(k.fn.pc, e, k.p); return k.n ? [...s, ...src(k.fn.pc, { k: 'load', size: 8, addr: e }, k.p)] : s }
+const derefMemo = new WeakMap<Expr, Expr>()
+const deref = (e: Expr): Expr => { let x = derefMemo.get(e); if (!x) derefMemo.set(e, (x = { k: 'load', size: 8, addr: e })); return x }
+const sideSrc = (src: ReturnType<typeof srcOf>, k: Cmp, e: Expr): Source[] => { const s = src(k.fn.pc, e, k.p); return k.n ? [...s, ...src(k.fn.pc, deref(e), k.p)] : s }
 /**
  * The program signs the CPI (signer seeds, a PDA signature): not when the seeds are a parameter slice (a shared transfer
  * helper) whose length the instruction's call path passes as 0
@@ -308,20 +329,22 @@ function introspection(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	// account key / an argument (binding it to this instruction); the sysvar's bytes by their sources, else (sources not
 	// resolved) the comparisons of the parsing functions and their callees)
 	const local = below(ix, sc, new Set(sites.map(s => s.fn))), bySrc = sites.some(s => s.bySrc)
-	const fromSys = (k: Cmp, e: Expr) => sideSrc(src, k, e).some(y => (y.kind === 'data' || y.kind === 'remaining') && y.acct === acct)
+	const fromSys = (s: Source[]) => s.some(y => (y.kind === 'data' || y.kind === 'remaining') && y.acct === acct)
 	let prog: Loc | undefined, bind: Loc | undefined
-	for (const k of cmps) {
+	// (value moves of the program's funds: not a system transfer (a fee the caller pays))
+	const moves = ix.ops.filter(o => VALUE_MOVE(o) && (signs(r, ix, o) || (o.cpi?.family !== 'system' && !/SYSTEM_PROGRAM/.test(o.cpi?.known ?? ''))))
+	// (prog / bind are read only with the sysvar account known and a value move; the first of each is kept)
+	if (acct && moves.length) for (const k of cmps) {
+		if (prog && bind) break
 		if (isSysvarCmp(k)) continue
 		const A = sideSrc(src, k, k.a), B = sideSrc(src, k, k.b)
-		let sa = !!acct && fromSys(k, k.a), sb = !!acct && fromSys(k, k.b)
+		let sa = fromSys(A), sb = fromSys(B)
 		if (sa === sb && !bySrc && local.has(k.fn) && !WELL_KNOWN.test(lineText(k.fn, k.p))) { sa = !A.length && k.a.k !== 'const'; sb = !B.length && k.b.k !== 'const'; if (sa && sb) continue }
 		if (sa === sb) continue
 		const other = sa ? B : A, oe = sa ? k.b : k.a
 		if (other.some(y => y.kind === 'key' || y.kind === 'ix')) bind ??= locOf(k.fn, k.p)
 		else if (k.n === 32 && (isConstKey(oe) || !other.length)) prog ??= locOf(k.fn, k.p)
 	}
-	// (value moves of the program's funds: not a system transfer (a fee the caller pays))
-	const moves = ix.ops.filter(o => VALUE_MOVE(o) && (signs(r, ix, o) || (o.cpi?.family !== 'system' && !/SYSTEM_PROGRAM/.test(o.cpi?.known ?? ''))))
 	// (the loaded instruction's fields: only with the sysvar account known)
 	if (!prog && moves.length && acct) out.push({ rule: 'introspection-unchecked', ix: ix.name, accounts: accts, path: [at], evidence: [`an instruction is loaded from the Instructions sysvar before a value move (${moves[0].text.slice(0, 80)}), but no 32-byte comparison of its program id with a known id / this program's id was found: its data is trusted whatever program it targets`], confidence: 'medium', weight: 5 })
 	// (flash loans: the program's funds out, not a system transfer (a fee the caller pays))

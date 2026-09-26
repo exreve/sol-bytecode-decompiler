@@ -112,7 +112,18 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 
 	/** the pointer terms of an address (a sum): not the offsets added to it (constants, products, masks, shifts) */
 	const bases_ = (a: Expr): Expr[] => a.k === 'bin' && a.op === 'add' ? [...bases_(a.a), ...bases_(a.b)] : a.k === 'const' || (a.k === 'bin' && a.op !== 'sub') ? [] : [a]
+	// (memo: by the expression, function, position and the instruction's account names (acctSrc reads them))
+	const ofMemo = new WeakMap<Expr, Map<string, Source[] | { err: unknown }>>()
 	const of = (fn0: number, e0: Expr, p0: number): Source[] => {
+		let m = ofMemo.get(e0)
+		if (!m) ofMemo.set(e0, (m = new Map()))
+		const k = `${fn0}|${p0}|${ix.accounts.map(x => `${x.index}:${x.name}`).join(',')}`
+		let y = m.get(k)
+		if (!y) { try { y = of0(fn0, e0, p0) } catch (err) { y = { err } } m.set(k, y) }
+		if ('err' in y) throw y.err
+		return [...y]
+	}
+	const of0 = (fn0: number, e0: Expr, p0: number): Source[] => {
 		const out = new Map<string, Source>()
 		const add = (s: Source) => { if (!out.has(s.source)) out.set(s.source, s) }
 		let budget = 400
