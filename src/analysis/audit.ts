@@ -5,8 +5,9 @@
 import type { Result } from '../decompile.ts'
 import type { Expr, Stmt } from '../ir.ts'
 import { walkExpr } from '../ir.ts'
+import { stmtExprs } from '../simplify.ts'
 import type { IxCtx, IxOut, Loc } from './report.ts'
-import { irOf, stmtAt, defsIn, pathTo, blockAt } from './paths.ts'
+import { irOf, stmtAt, defsIn, pathTo, blockAt, valueKey } from './paths.ts'
 import { dataReads, callOf, cfgOf, anchorEval, tryInfo, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
 
@@ -20,8 +21,9 @@ export interface AuditFacts {
 	reinit: { op: number; acct: string }[]                        // authority writes to an init_if_needed account, no state read on the way
 	sameType?: { fn: string; n: number; type?: string; accts: string[] } // Anchor: an account type try_accounts deserializes more than once (its try call, the accounts it names)
 	initWrites?: InitWrite[]                                      // an account type's discriminator written into an account's data with no state check before
+	sysvarReads?: { acct: string; sysvar: string; at: Loc; idCompared: boolean }[] // an account's data parsed as a sysvar's layout (by behavior); idCompared: the instruction compares a key with that sysvar's id
 }
-export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean; field?: string } // field: native, an authority field written (no discriminator) // owner: a check compares the account's owner
+export interface InitWrite { acct: string; type: string; at: Loc; owner: boolean; field?: string; tag?: string } // field: native, an authority field written (no discriminator) // owner: a check compares the account's owner
 
 const VALUE_OPS = new Set(['LAMPORT_WRITE', 'LAMPORT_TRANSFER', 'TOKEN_TRANSFER', 'MINT', 'BURN'])
 
@@ -120,17 +122,44 @@ export function auditIx(r: Result, ix: IxOut): AuditFacts {
 		})
 	}
 	if (ctx) out.initWrites = initWrites(r, ix, out.ownerCmp ?? [])
+	if (ctx) out.sysvarReads = sysvarReads(r, ix, src)
 	// (native: an authority field written into an account the instruction does not create, no condition on the way
 	// reading the account's data (an is_initialized flag, a state unpacked))
 	if (ctx && !r.anchor && !out.initWrites?.length && !ix.ops.some(o => o.kinds.includes('ACCOUNT_CREATE') || (o.cpi && (o.cpi.family === 'system' || (!o.cpi.known && !o.cpi.family))))) {
+		// (a signer's key written into raw account data: an authority field too)
+		const signerKey = (o: typeof ix.ops[number]) => !!o.target && (o.sources ?? []).some(x => x.param === o.target && /\.key$/.test(x.source) && ix.accounts.some(a => `${a.name}.key` === x.source && a.constraints.signer && a.constraints.signer.status !== 'not_found'))
 		for (const o of ix.ops) {
-			if (!o.kinds.includes('AUTHORITY_WRITE') || !o.target || o.fnPc === undefined || o.at.pc === undefined) continue
+			if (!(o.kinds.includes('AUTHORITY_WRITE') || (o.kinds.includes('ACCOUNT_DATA_WRITE') && /\.data\[\d+\.\.\d+\]$/.test(o.target ?? '') && signerKey(o))) || !o.target || o.fnPc === undefined || o.at.pc === undefined) continue
 			const acct = o.target.split('.')[0]
 			if (/\?$|^account\[/.test(acct) && !ix.accounts.some(a => a.name === acct)) continue
 			const conds = pathTo(I, ctx, o.fnPc, blockAt(I, o.fnPc, o.at.pc))
 			if (conds.some(k => k.how !== 'before' && src(k.fn, k.c, k.pos).some(x => x.acct === acct && x.kind === 'data'))) continue
-			if (ix.checks.some(k => k.account === acct && k.kinds.some(x => x === 'state' || x === 'discriminator' || x === 'initialized'))) continue
-			out.initWrites!.push({ acct, type: '', field: o.target, at: o.at, owner: ix.checks.some(k => k.account === acct && k.kinds.includes('owner')) })
+			// (a condition loading a byte / word the instruction then writes into the account (e.g. its tag tested): its state read)
+			const wk = new Set(ix.ops.flatMap(x => {
+				if (!x.target?.startsWith(`${acct}.`) || x.fnPc === undefined || x.at.pc === undefined) return []
+				const st = stmtAt(I, x.fnPc, x.at.pc), fx = x.fnPc
+				if (st?.[0].k === 'store') return [valueKey(I, ctx, fx, st[0].addr, st[1])]
+				const d = st?.[0].k === 'copy' ? st[0].dst : undefined
+				return d ? [0, 8, 16, 24].map(o => valueKey(I, ctx, fx, o ? { k: 'bin', op: 'add', a: d, b: { k: 'const', v: BigInt(o) } } : d, st![1])) : []
+			}))
+			// (a load of those bytes, or a call comparing them (memcmp / memeq of a pointer to them))
+			const readsW = (k: { fn: number; c: Expr; pos: number }) => {
+				const KD = defsIn(I, k.fn)
+				let hit = false
+				const go = (e: Expr, q: number, d: number) => walkExpr(e, y => {
+					if (hit) return
+					if (y.k === 'load') hit = wk.has(valueKey(I, ctx, k.fn, y.addr, q))
+					else if (y.k === 'call' || y.k === 'fn') hit = y.args.some(a => wk.has(valueKey(I, ctx, k.fn, a, q)))
+					else if (y.k === 'var' && KD && d < 3) { const z: [Expr, number] | null = KD.defs.has(y.id) ? [KD.defs.get(y.id)!, KD.defPos.get(y.id)!] : KD.multi.has(y.id) ? KD.reaching(y.id, q) : null; if (z) go(z[0], z[1], d + 1) }
+				})
+				go(k.c, k.pos, 0)
+				return hit
+			}
+			if (wk.size && conds.some(k => k.how !== 'before' && readsW(k))) continue
+			if (ix.checks.some(k => (k.account === acct || (!k.account && k.kinds.includes('initialized'))) && k.kinds.some(x => x === 'state' || x === 'discriminator' || x === 'initialized'))) continue
+			// (a type tag written too: a constant into the first byte(s) of the data)
+			const tag = ix.ops.find(x => x.target && new RegExp(`^${acct.replace(/[[\]]/g, '\\$&')}\\.data\\[0\\.\\.[18]\\]$`).test(x.target) && /^(0x[0-9a-f]+|\d+)$/.test(x.value ?? ''))
+			out.initWrites!.push({ acct, type: '', field: o.target, at: o.at, owner: ix.checks.some(k => k.account === acct && k.kinds.includes('owner')), ...(tag ? { tag: `${tag.target} = ${tag.value}` } : {}) })
 			break
 		}
 	}
@@ -420,6 +449,61 @@ function reads(E: EvCtx, e: Expr, p: number): [string, string][] {
 	if (v?.k === 'fr') {
 		const y = v.ctx.D.reaching(v.ctx.D.SLOT(v.z), v.at, true)
 		if (y && y[0].k === 'load') one(v.ctx.ev(y[0].addr, y[1]))
+	}
+	return out
+}
+
+/**
+ * Accounts whose data the instruction parses as the Instructions sysvar (by behavior, whatever the account is named):
+ * the current instruction's index, a u16 read from the last 2 bytes (load_current_index), or an instruction's offset,
+ * a u16 read at 2 + 2 * index after the count read at 0 (load_instruction_at). The data pointer's account by the
+ * sources walk.
+ */
+function sysvarReads(r: Result, ix: IxOut, src: (fn: number, e: Expr, p: number) => { kind: string; acct?: string }[]): NonNullable<AuditFacts['sysvarReads']> {
+	const I = irOf(r), out: NonNullable<AuditFacts['sysvarReads']> = []
+	const byName = new Map([...r.facts.values()].map(f => [f.name, f]))
+	// (the id materialized anywhere in the instruction's code: compared with a key (load_instruction_at_checked, an explicit
+	// check); the account it is compared with is not always known)
+	const idCompared = ix.functions.some(n => byName.get(n)?.lines.some(l => /SYSVAR_INSTRUCTIONS/.test(l)))
+	const i64 = (x: Expr) => x.k === 'const' ? BigInt.asIntN(64, x.v) : undefined
+	for (const fname of ix.functions) {
+		const ff = byName.get(fname), fo = ff && I.byPc.get(ff.pc), D = ff && defsIn(I, ff.pc)
+		if (!ff || !fo || !D || out.length >= 4) continue
+		const def = (e: Expr, p: number): [Expr, number] => {
+			for (let k = 0; k < 4 && e.k === 'var'; k++) { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null; if (!y) break; [e, p] = y }
+			return [e, p]
+		}
+		const minus2 = (e: Expr, p: number): boolean => { const [x] = def(e, p); return x.k === 'bin' && ((x.op === 'sub' && i64(x.b) === 2n) || (x.op === 'add' && i64(x.b) === -2n)) }
+		const twiceplus2 = (e: Expr, p: number): boolean => {
+			const [x, q] = def(e, p)
+			if (x.k !== 'bin' || x.op !== 'add' || i64(x.b) !== 2n) return false
+			const [y] = def(x.a, q)
+			return y.k === 'bin' && ((y.op === 'shl' && i64(y.b) === 1n) || (y.op === 'mul' && i64(y.b) === 2n))
+		}
+		const bases0 = new Set<string>(), cands: [Expr, number, string][] = []
+		const key = (e: Expr) => JSON.stringify(e, (_, v) => typeof v === 'bigint' ? String(v) : v)
+		const scan = (e: Expr, p: number) => walkExpr(e, x => {
+			if (x.k !== 'load' || x.size !== 2) return
+			const a = x.addr
+			if (a.k !== 'bin' || a.op !== 'add') { bases0.add(key(a)); return }
+			// (data + (len - 2), or (data + len) - 2)
+			if (minus2(a.b, p)) cands.push([a.a, p, 'Instructions (current index: the last 2 bytes)'])
+			else if (i64(a.b) === -2n && a.a.k === 'bin' && a.a.op === 'add') cands.push([a.a.a, p, 'Instructions (current index: the last 2 bytes)'])
+			else if (twiceplus2(a.b, p)) cands.push([a.a, p, 'Instructions (an instruction\'s offset: u16 at 2 + 2 * index)'])
+		})
+		const ctx = ix.ctx
+		fo.f.blocks.forEach((b, bi) => {
+			// (a dispatcher's function shared by instructions: the blocks this instruction's tags reach)
+			if (ctx?.restricted?.has(ff.pc) && ctx.allowed && !ctx.allowed(ff.pc, bi)) return
+			b.stmts.forEach((s, si) => { for (const e of stmtExprs(s)) scan(e, bi << 16 | si) })
+			if (b.term.k === 'br') scan(b.term.c, bi << 16 | b.stmts.length)
+		})
+		for (const [base, p, what] of cands) {
+			if (what.includes('offset') && !bases0.has(key(base))) continue
+			const accts = [...new Set(src(ff.pc, base, p).filter(x => x.kind === 'data' && x.acct).map(x => x.acct!))]
+			const line = ff.pcLine.get(fo.f.blocks[p >> 16].stmts[p & 0xffff].pc) ?? ff.at + 1
+			for (const acct of accts.length ? accts : ['?']) if (!out.some(y => y.acct === acct)) out.push({ acct, sysvar: what, at: { fn: ff.name, line }, idCompared })
+		}
 	}
 	return out
 }

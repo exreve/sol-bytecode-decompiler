@@ -1008,7 +1008,7 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 			// (the handler's logic borrowing an account's data itself, to read it (not a deserialization of try_accounts, not a
 			// mutable borrow: e.g. an AccountLoader's load_init / load_mut))
 			// (not a borrow followed by a discriminator check of its own: an AccountLoader's load)
-			if (c?.t.k === 'fn' && /try_borrow_data/.test(r.program.funcs.get(c.t.pc)?.name ?? '') && !ff.checks.some(k => k.kinds.includes('discriminator'))) for (const x of c.args) {
+			if (c?.t.k === 'fn' && isBorrowData(r, c.t.pc) && !ff.checks.some(k => k.kinds.includes('discriminator'))) for (const x of c.args) {
 				// (an &AccountInfo, or a clone of one in a frame (to_account_info): its data RcBox at +0x10)
 				let v = X.ev(x, p)
 				if (v?.k === 'fr') { const w = X.ev({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: x, b: { k: 'const', v: 0x10n } } }, p); v = w?.k === 'drc' ? { ...w, k: 'info' } : undefined }
@@ -1047,6 +1047,24 @@ function calleeWrites(r: Result, H: FuncOut, objs: FrameObj[], exits: Map<number
 		for (const q of keep ?? visitPos(C.f)) each(bs[q >> 16].stmts[q & 0xffff], q >> 16, q & 0xffff)
 	}
 	visit(H, new Map(), 3)
+}
+
+const borrowMemo = new WeakMap<Result, Map<number, boolean>>()
+/** AccountInfo::try_borrow_data: by name, else by behavior (a small function incrementing the data RefCell's borrow count,
+ * failing with AccountBorrowFailed: the shared borrow; the mutable one sets it to -1) */
+export function isBorrowData(r: Result, pc: number): boolean {
+	const nm = r.program.funcs.get(pc)?.name ?? ''
+	if (/try_borrow_data/.test(nm)) return !/_mut/.test(nm)
+	let m = borrowMemo.get(r)
+	if (!m) borrowMemo.set(r, (m = new Map()))
+	let v = m.get(pc)
+	if (v === undefined) {
+		const ff = r.facts.get(pc)
+		const t = ff && ff.lines.length < 40 ? ff.lines.join('\n') : ''
+		v = /AccountBorrowFailed/.test(t) && /\.borrow = \w+ \+ 1\b/.test(t)
+		m.set(pc, v)
+	}
+	return v
 }
 
 const dataReadsMemo = new WeakMap<Result, Map<number, Set<string>>>()

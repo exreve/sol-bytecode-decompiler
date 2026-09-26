@@ -513,6 +513,12 @@ export function functionFacts(inp: FnInput): FnFacts {
 		else if (ams.length) error = `anchor::${ams[0]}`
 		else { const em = /\b(Err\([^)]*\)?\))/.exec(ft) ?? /ProgramError::(\w+)/.exec(ft); if (em) error = em[0] }
 		if (!error) error = /\btrap\(|\babort\(|panic/.test(ft) || failNodes[failNodes.length - 1]?.k === 'trap' ? 'abort' : 'return'
+		// (native: a flag the caller passes (e.g. a helper taking `is_signer` by value) tested, the failing side returning
+		// MissingRequiredSignature: a signer check)
+		if (!kinds.length && /MissingRequiredSignature/.test(error)) add('signer')
+		// (an account's state tested, the failing side returning AccountAlreadyInitialized / UninitializedAccount: its
+		// initialized state)
+		if (!kinds.includes('initialized') && /AccountAlreadyInitialized|UninitializedAccount/.test(error)) add('initialized')
 		let named: string | undefined
 		const nm = /Error_with_account_name\([^\n]*?"(\w+)"/.exec(ft)
 		if (nm) named = nm[1]

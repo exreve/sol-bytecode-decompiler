@@ -221,7 +221,7 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 					let acct = false
 					if (wide && !seen.some(x => SUPPLY.test(x))) {
 						const [fe, fq] = follow(I, ff.pc, dv, p)
-						acct = fe.k === 'load' && (R ? /^data/.test(R.valueRef(fe, stmtOfPos(I, ff.pc, fq) ?? s)?.field ?? '') : seen.some(x => /\bld(?:32|64)\(accounts\b|\.accounts\.|[A-Za-z_]\w*\.(?!data\b)[a-z_]\w*\)?$/.test(x)))
+						acct = fe.k === 'load' && (R ? /^data/.test(R.valueRef(fe, stmtOfPos(I, ff.pc, fq) ?? s)?.field ?? '') : seen.some(x => /\bld(?:32|64)\(accounts\b|\.accounts\.|[A-Za-z_]\w*\.(?!data\b)[a-z_]\w*\)?$/.test(x) && !/\b(?:res|ret|arg|prod|quot|rem)(?:_\d+)?\.f0x[0-9a-f]+_\w+\)?$/.test(x)))
 					}
 					if (!seen.some(x => SUPPLY.test(x)) && !acct) continue
 					const k = valueKey(I, ctx, ff.pc, dv, p)

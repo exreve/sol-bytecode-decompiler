@@ -150,6 +150,21 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 	}
 }
 
+const getterMemo = new WeakMap<Result, Map<number, boolean>>()
+/** AccountInfo::lamports(): a small function returning the value of its AccountInfo parameter's lamports RefCell */
+function lamportsGetter(r: Result, pc: number): boolean {
+	let m = getterMemo.get(r)
+	if (!m) getterMemo.set(r, (m = new Map()))
+	let v = m.get(pc)
+	if (v === undefined) {
+		const ls = r.facts.get(pc)?.lines ?? []
+		const t = ls.length < 16 ? ls.join('\n') : ''
+		v = /= \w+\.lamports\b/.test(t) && /(\w+) = \w+\.value\.amount\b[\s\S]*return \1\b/.test(t) && !/\.value\.amount = /.test(t)
+		m.set(pc, v)
+	}
+	return v
+}
+
 /** the invoke call a returned expression makes (a tail call, possibly wrapped, e.g. the drop of its result) */
 const invokeCall = (r: Result, e: Expr): Extract<Expr, { k: 'call' }> | undefined => {
 	let out: Extract<Expr, { k: 'call' }> | undefined
@@ -274,7 +289,9 @@ export function phase2(a: Analysis, r: Result) {
 				if (o.cpi.seeds) params.push(['signer seeds', o.cpi.seeds, undefined])
 			}
 			if (o.pda) params.push(['seeds', o.pda.seeds, undefined])
-			if (o.value !== undefined && o.target) params.push([o.target, o.value, fn !== undefined && o.at.pc !== undefined ? storedAt(I, fn, o.at.pc)?.[0] : undefined])
+			// (a word copy into the account (e.g. a key's 32 bytes): the first word it copies)
+			const cp = call?.[0].k === 'copy' ? call[0] : undefined
+			if (o.value !== undefined && o.target) params.push([o.target, o.value, fn !== undefined && o.at.pc !== undefined ? storedAt(I, fn, o.at.pc)?.[0] ?? (cp ? { k: 'load', size: 8, addr: cp.src } : undefined) : undefined])
 			const src: NonNullable<OpOut['sources']> = []
 			for (const [p, t, e] of params) {
 				// (an account passed to a CPI is named by the account model; its key's flow is the account itself)
@@ -299,6 +316,23 @@ export function phase2(a: Analysis, r: Result) {
 			}
 			const uniq = src.filter((x, i) => src.findIndex(y => y.param === x.param && y.source === x.source) === i)
 			if (uniq.length) o.sources = uniq.slice(0, 24)
+			// (a debit of the account's whole balance, e.g. sub_lamports(lamports()): its lamports drained, a close)
+			if (o.kinds.includes('LAMPORT_WRITE') && !o.kinds.includes('ACCOUNT_CLOSE') && o.target?.endsWith('.lamports') && fn !== undefined && o.at.pc !== undefined) {
+				const sv = storedAt(I, fn, o.at.pc)
+				let [e, q] = sv ?? [undefined, 0]
+				const D = defsIn(I, fn)
+				for (let k = 0; e && D && k < 4 && e.k === 'var'; k++) { const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, q) : null; if (!y) break; [e, q] = y }
+				if (e?.k === 'bin' && e.op === 'sub') {
+					const t = o.target.slice(0, -'.lamports'.length)
+					const of = (x: Expr) => { try { return S.of(fn, x, q) } catch { return [] } }
+					const bal = (x: Expr) => { const ss = of(x); return ss.length > 0 && ss.every(y => y.kind === 'lamports' && y.acct === t) }
+					// (the amount: the account's lamports() (a getter on an AccountInfo copy), taken from its current balance)
+					const def1 = (x: Expr): Expr => { let y = x, w = q; for (let k = 0; D && k < 4 && y.k === 'var'; k++) { const z: [Expr, number] | null = D.defs.has(y.id) ? [D.defs.get(y.id)!, D.defPos.get(y.id)!] : D.multi.has(y.id) ? D.reaching(y.id, w) : null; if (!z) break; [y, w] = z } return y }
+					const getter = (x: Expr) => { const y = def1(x); return y.k === 'call' && y.t.k === 'fn' && lamportsGetter(r, y.t.pc) }
+					const a0 = def1(e.a)
+					if ((bal(e.a) && bal(e.b)) || (getter(e.b) && (getter(e.a) || a0.k === 'load'))) o.kinds = [...o.kinds, 'ACCOUNT_CLOSE']
+				}
+			}
 		}
 		// relations: two sides of an equality check, at least one an account key / field
 		const rel: Relation[] = []
@@ -403,7 +437,11 @@ const initWrite = (ix: IxOut, o: OpOut) => {
 	const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
 	if (!t) return false
 	const z = t.constraints.zero
+	const none = (k: string) => !t.constraints[k] || t.constraints[k].status === 'not_found'
+	// (Anchor: typed fields written into an account try_accounts neither deserialized (no discriminator check) nor checked the
+	// owner of (the runtime's only): an `init` account, its creation not seen)
 	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && t.constraints.discriminator?.status !== 'found')
+		|| (ix.kind === 'anchor' && none('discriminator') && none('initialized') && (none('owner') || t.constraints.owner.status === 'runtime'))
 }
 
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
@@ -537,6 +575,9 @@ const progAccount = (ix: IxOut, o: OpOut): string | undefined => {
 const progIdChecked = (ix: IxOut, o: OpOut, acct?: string): boolean => {
 	const cpi = o.cpi!
 	if (/\(id compared with/.test(cpi.checked ?? '')) return true
+	// (an instruction built by a token program builder function (spl_token / spl_token_2022::instruction::*): the builder
+	// compares the program id with the token program's (check_program_account) and fails otherwise)
+	if (/built before it: \w+ \(TokenInstruction::pack/.test(o.text)) return true
 	// (the program account not identified, e.g. an instruction built by a library builder: a key compared with a constant)
 	const unid = !cpi.accounts.length && /^[A-Z_0-9|]+$/.test(cpi.program)
 	const prog = acct ?? progAccount(ix, o)
@@ -595,7 +636,8 @@ const RULES: Rule[] = [
 			// (not a movement of the signer's own funds: a CPI the signer signs, e.g. a deposit)
 			const own = (o: OpOut) => !!o.cpi?.accounts.some(x => x.s && signers.has(/^\*?([A-Za-z_]\w*)/.exec(x.text)?.[1] ?? ''))
 			const row = (ix.authority ?? []).find(x => !initMechanics(ix, ix.ops[x.op]) && !initWrite(ix, ix.ops[x.op]) && !own(ix.ops[x.op]))
-			if (!a.program.anchor || !row) return []
+			// (a has_one check the analysis did not attribute to an account: it may be this one)
+			if (!a.program.anchor || !row || ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides)) return []
 			return (a.authorityFields ?? []).flatMap(({ field, writtenBy }) => {
 				const [acct, f] = [field.slice(0, field.indexOf('.')), field.slice(field.indexOf('.') + 1)]
 				if (!signers.has(f) || writtenBy.includes(ix.name) || !ix.accounts.some(x => x.name === acct)) return []
@@ -658,9 +700,17 @@ const RULES: Rule[] = [
 	// ---- audit pattern rules (audit.ts facts) ----
 	{
 		id: 'sysvar-account-unchecked', title: 'Sysvar data (Clock / Rent / Instructions / …) read from an account whose key is not checked against the sysvar id',
-		run: ix => (ix.audit?.dataReads ?? []).filter(a => SYSVAR_NAME.test(a) && !addressChecked(ix, a)).map(a => ({
-			accounts: [a], path: [], evidence: [`the logic borrows ${a}'s data and reads it as a sysvar`, `no check of ${a}'s key against the sysvar id found: any account with chosen data passes (Sysvar<T> / from_account_info / get() check or avoid it)`], confidence: 'medium' as const, weight: 4,
-		})),
+		run: ix => {
+			const out = (ix.audit?.dataReads ?? []).filter(a => SYSVAR_NAME.test(a) && !addressChecked(ix, a)).map(a => ({
+				accounts: [a], path: [] as string[], evidence: [`the logic borrows ${a}'s data and reads it as a sysvar`, `no check of ${a}'s key against the sysvar id found: any account with chosen data passes (Sysvar<T> / from_account_info / get() check or avoid it)`], confidence: 'medium' as const, weight: 4,
+			}))
+			// (by behavior: an account's data parsed with the Instructions sysvar's layout, whatever its name)
+			for (const x of ix.audit?.sysvarReads ?? []) {
+				if (x.idCompared || out.some(y => y.accounts[0] === x.acct) || addressChecked(ix, x.acct) || found(ix, x.acct, 'key') || found(ix, x.acct, 'owner')) continue
+				out.push({ accounts: [x.acct], path: [L(x.at)], evidence: [`${x.acct}'s data is parsed as the ${x.sysvar} sysvar`, `no check of ${x.acct}'s key against the sysvar id found: an account with forged data passes (load_instruction_at_checked / load_current_index_checked check it)`], confidence: 'medium' as const, weight: 5 })
+			}
+			return out
+		},
 	},
 	{
 		id: 'pda-bump-from-ix', title: 'PDA address from create_program_address with a bump taken from instruction data (not the canonical bump)',
@@ -723,7 +773,7 @@ const RULES: Rule[] = [
 	{
 		id: 'reinit-unchecked', title: 'Account initialized (its type discriminator written) with no check that it is uninitialized (reinitialization)',
 		run: ix => (ix.audit?.initWrites ?? []).slice(0, 1).map(x => {
-			if (x.field) return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the authority field ${x.field}${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (an is_initialized flag, its state unpacked): calling it again on an initialized ${x.acct} overwrites the authority`], confidence: 'info' as const, weight: 3 }
+			if (x.field) return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the authority field ${x.field}${x.tag ? ` and the type tag (${x.tag})` : ''}${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (an is_initialized flag, its state unpacked): calling it again on an initialized ${x.acct} overwrites the authority`], confidence: x.tag ? 'medium' as const : 'info' as const, weight: 3 }
 			return { accounts: [x.acct], path: [L(x.at)], evidence: [`writes the ${x.type} discriminator into ${x.acct}'s data${x.owner ? ' (its owner is checked: an existing account of this program)' : ''}`, `${x.acct} is not created by the instruction and no condition on the way reads its data (discriminator == 0 / Anchor \`zero\` / an is_initialized flag): calling it again on a live ${x.type} overwrites it (e.g. its authority)`], confidence: 'medium' as const, weight: 5 }
 		}),
 	},
