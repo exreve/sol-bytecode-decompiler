@@ -75,6 +75,7 @@ import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './p
 import type { AuditFacts } from './audit.ts'
 import { libCpiOps } from './libcpi.ts'
 import type { RoleView, Inconsistency } from './consistency.ts'
+import type { FundMover } from './incidents.ts'
 
 export type Status = 'found' | 'partial' | 'not_found' | 'runtime'
 export interface Loc { fn: string; line: number; pc?: number }
@@ -137,6 +138,7 @@ export interface Analysis {
 	authorityFields?: { field: string; writtenBy: string[] }[]
 	states?: StateField[] // phase 3 state machine (phase3.ts)
 	consistency?: RoleView[] // validation consistency across instructions (consistency.ts)
+	fundMovers?: FundMover[] // instructions moving program-controlled funds and the authority gating them (incidents.ts)
 }
 
 /** Sensitivity weights (ranking of the instruction surface). */
@@ -628,6 +630,7 @@ export function renderJson(a: Analysis, where: Where): string {
 		dependencies: a.deps.map(d => ({ target: d.target, read_by: d.readBy, written_by: d.writtenBy })),
 		findings: a.findings?.map(f => ({ rule: f.rule, instruction: f.ix, confidence: f.confidence, title: f.title, accounts: f.accounts, path: f.path, evidence: f.evidence })),
 		authority_fields: a.authorityFields,
+		fund_movers: a.fundMovers?.length ? a.fundMovers : undefined,
 		validation_consistency: a.consistency?.length ? a.consistency.map(v => ({ role: v.role, by: v.by, instructions: v.members, inconsistencies: v.inconsistencies.map(x => ({ instruction: x.ix, account: x.account, validation: x.validation, applied_in: x.appliedIn.map(y => ({ instruction: y.ix, account: y.account, at: y.at && L(y.ix, y.at) })), others: x.others, uses: x.uses })) })) : undefined,
 		unattributed_operations: a.unattributed.map(o => ({ at: L(undefined, o.at), kinds: o.kinds, text: o.text, target: o.target, how: o.how, cpi: o.cpi && { program: o.cpi.program, known: o.cpi.known, instruction: o.cpi.ix, accounts: o.cpi.accounts, fields: o.cpi.fields, seeds: o.cpi.seeds } })),
 	}
@@ -713,11 +716,21 @@ function renderStoredGaps(a: Analysis): string[] {
 	return ['## Stored keys not compared (accounts whose data is used; see <ix>.md Stored keys)', '', ...out, ...(more ? [`- … ${more} more in the <ix>.md files`] : []), '']
 }
 
+/** summary.md: who can move program-controlled funds (incidents.ts fundMovers; informational), at most 8 lines */
+function renderFundMovers(a: Analysis): string[] {
+	const xs = a.fundMovers ?? []
+	if (!xs.length) return []
+	const out = ['## Who can move funds (program-controlled funds: PDA-signed token moves, lamport debits; informational)', '']
+	for (const x of xs.slice(0, 8)) out.push(`- ${x.instruction}: ${x.authority} — ${x.kind}${x.from ? ` from ${x.from}` : ''} (${x.at})`.slice(0, 240))
+	if (xs.length > 8) out.push(`- … ${xs.length - 8} more in analysis.json (fund_movers)`)
+	return [...out, '']
+}
+
 /** security/summary.md: the ranked instruction surface tree. */
 export function renderSummary(a: Analysis, where: Where, ixFile: (ix: IxOut) => string): string {
 	const out = ['# Security summary', '', ...HEADER, '',
 		`Program: sBPF v${a.program.version}, ${a.program.instructions} instructions, ${a.program.functions} functions${a.program.anchor ? ', Anchor' : ''}${a.program.idl ? ' (with IDL)' : ''}. Machine-readable: analysis.json.`, '',
-		...renderFindings(a, where), ...renderConsistency(a, where), ...renderStoredGaps(a), '## Instructions (most sensitive first)', '']
+		...renderFindings(a, where), ...renderConsistency(a, where), ...renderStoredGaps(a), ...renderFundMovers(a), '## Instructions (most sensitive first)', '']
 	for (const ix of a.ixs) {
 		const signers = ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => `${x.name} (${ST[x.constraints.signer.status]})`)
 		const anon = ix.checks.filter(c => c.kinds.includes('signer') && (!c.account || c.account.endsWith('?'))).length
