@@ -94,7 +94,7 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 						else if (e.k === 'load') {
 							const b = base(e.addr); const bn = b && node(b.v)
 							if (bn !== undefined) dn = pointee(bn, b!.off)
-							else if (fo(e.addr) !== undefined) { const r = resultField(x, fo(e.addr)!); if (r) { dn = fresh(); fieldEdges.push([dn, r.cpc * 256 + r.reg, r.rel]) } }
+							else if (fo(e.addr) !== undefined) { const r = resultField(x, fo(e.addr)!); if (r) { dn = fresh(); fieldEdges.push([dn, r.cpc * 256 + r.reg, r.rel]) } else dn = cell(fo(e.addr)!) }
 						}
 						if (dn === undefined) { ns.length = 0; break }
 						ns.push(dn)
@@ -113,7 +113,9 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 						// (a pointer field of a call's result in the frame: the callee's out object's field)
 						else if (fo(e.addr) !== undefined) {
 							const r = resultField(d[0], fo(e.addr)!)
-							if (r) { n = fresh(); fieldEdges.push([n, r.cpc * 256 + r.reg, r.rel]); direct.add(`${pc}:${v}`) }
+							if (r) { n = fresh(); fieldEdges.push([n, r.cpc * 256 + r.reg, r.rel]) }
+							else n = cell(fo(e.addr)!)
+							if (n !== undefined) direct.add(`${pc}:${v}`)
 						}
 					}
 					// (a heap object: an allocation the bump allocator's code gives inline)
@@ -124,6 +126,49 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 			}
 			memo.set(v, n ?? null)
 			return n
+		}
+		// frame words holding pointers (spills): one object per word and function (a word reused for another object
+		// merges them only when their layouts agree)
+		const cells = new Map<number, number>()
+		const cell = (off: number): number | undefined => {
+			if (off >= 0 || off < -0x2000) return undefined
+			let n = cells.get(off)
+			if (n === undefined) cells.set(off, (n = fresh()))
+			return cellOk(off) ? n : fresh()
+		}
+		// (only a word that holds one value: every variable stored there is the same parameter, or reloaded from the word)
+		let stored: Map<number, Set<number>> | undefined
+		const storedAt = (off: number) => {
+			if (!stored) {
+				stored = new Map()
+				for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' || s.k === 'stores') && s.size === 8) {
+					const F = fo(s.addr)
+					if (F !== undefined) (s.k === 'store' ? [s.v] : s.vals).forEach((x, i) => { if (x.k === 'var') { let l = stored!.get(F + 8 * i); if (!l) stored!.set(F + 8 * i, (l = new Set())); l.add(x.id) } })
+				}
+			}
+			return stored.get(off) ?? []
+		}
+		const rootsOf = (v: number, seen: Set<number>): Set<string> => {
+			if (seen.has(v)) return new Set()
+			seen.add(v)
+			if (f.vars[v]?.param >= 0) return new Set([`p${v}`])
+			const r = new Set<string>()
+			for (const d of defs.get(v) ?? []) {
+				if (d.k === 'set' && d.e.k === 'var') for (const x of rootsOf(d.e.id, seen)) r.add(x)
+				else if (d.k === 'set' && d.e.k === 'load' && d.e.size === 8 && fo(d.e.addr) !== undefined) r.add(`c${fo(d.e.addr)}`)
+				else r.add(`v${v}`)
+			}
+			return r
+		}
+		const okMemo = new Map<number, boolean>()
+		const cellOk = (off: number): boolean => {
+			let ok = okMemo.get(off)
+			if (ok === undefined) {
+				const r = new Set<string>()
+				for (const v of storedAt(off)) for (const x of rootsOf(v, new Set())) if (x !== `c${off}`) r.add(x)
+				okMemo.set(off, (ok = r.size <= 1))
+			}
+			return ok
 		}
 		// where a statement is (block, index)
 		const where = new Map<Stmt, [number, number]>()
@@ -249,8 +294,11 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 					case 'store': case 'stores': {
 						const vals = s.k === 'store' ? [s.v] : s.vals
 						const b0 = base(s.addr)
+						const F = fo(s.addr)
 						vals.forEach((x, i) => {
 							visit(x)
+							// (a pointer spilled to a frame word: the word's cell holds its object)
+							if (F !== undefined && s.size === 8 && x.k === 'var') { const xn = node(x.id), cn = xn === undefined ? undefined : cell(F + 8 * i); if (cn !== undefined) edges.push([cn, xn!]) }
 							if (!b0) return
 							access(i ? { k: 'bin', op: 'add', a: { k: 'var', id: b0.v }, b: { k: 'const', v: BigInt(b0.off + i * s.size) } } : s.addr, s.size)
 							// (a pointer stored in a field: the field points to its object)
@@ -431,11 +479,33 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 	const out = new Map<number, Map<number, string>>()
 	for (const [pc, memo] of nodeOf) for (const [v, n] of memo) {
 		if (n === null || f0(pc, v)) continue
-		const t = build(n, `S_${pc.toString(16)}`)
+		const t = build(n, `S_${cfg.fnName(pc).replace(/^fn_/, '')}_local`)
 		if (!t) continue
 		let m = out.get(pc); if (!m) out.set(pc, (m = new Map()))
 		m.set(v, t)
 	}
+	// small layouts of plain words (4 fields at most, no pointer field, no known names) are shared by every object
+	// with that layout, named after it: S_u64_u64 (fields from offset 0 on, each after the last), else S_0x8u64_0x18u32
+	const rename = new Map<string, string>(), shared = new Map<string, { names: string[] }>()
+	for (const nm of synth) {
+		const v = views.map.get(nm)!
+		if (v.fields.length > 4 || nm.startsWith('Data_') || !v.fields.every(x => x.t.k === 'scalar' && /^f0x[0-9a-f]+_u\d+$/.test(x.name))) continue
+		let end = 0
+		const contiguous = v.fields.every(x => { const ok = x.off === end; end = x.off + (x.t as { size: number }).size; return ok })
+		const shape = `S_${v.fields.map(x => `${contiguous ? '' : `0x${x.off.toString(16)}`}u${(x.t as { size: number }).size * 8}`).join('_')}`
+		let sh = shared.get(shape)
+		if (!sh) shared.set(shape, (sh = { names: [] }))
+		sh.names.push(nm)
+		rename.set(nm, shape)
+	}
+	for (const [shape, { names }] of shared) {
+		const first = views.map.get(names[0])!
+		for (const nm of names) { views.map.delete(nm); synth.delete(nm) }
+		views.add({ name: shape, doc: `[heur] layout of plain words: the fixed-offset accesses through ${names.length > 1 ? `${names.length} unrelated objects with this layout` : 'an object'} (fields: offset and size; other bytes not described)`, fields: first.fields })
+		synth.add(shape)
+	}
+	if (rename.size) for (const nm of synth) for (const x of views.map.get(nm)!.fields) if (x.t.k === 'ref' && rename.has(x.t.to)) x.t = { k: 'ref', to: rename.get(x.t.to)! }
+	for (const m of out.values()) for (const [v, t] of m) if (rename.has(t)) m.set(v, rename.get(t)!)
 	// (locals: typed through their pointer field, except account data pointers)
 	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 && !direct.has(`${pc}:${v}`) && !cls[find(nodeOf.get(pc)!.get(v)!)].data.some(x => x.pc === pc && x.v === v) }
 	return { types: out, synth }
