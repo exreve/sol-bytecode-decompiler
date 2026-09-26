@@ -224,7 +224,17 @@ export function phase3Ix(r: Result, ix: IxOut, a: Analysis) {
 		if (!vars.length) return
 		const { conds } = pathConds(r, ix, fn, line, 80)
 		// (an operand copied from another local: `const am = z` — the check may name either)
-		const alias = (v: string): string[] => { const out = [v]; for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) } return out }
+		const alias = (v: string): string[] => {
+			const out = [v]
+			// (a reload of a frame slot: the value stored there last, before the line)
+			const fm = /^ld64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?)\)$/.exec(v)
+			if (fm) {
+				const re = new RegExp(`^\\s*st64\\(${fm[1].replace(/[+]/g, '\\+')}, ([A-Za-z_]\\w*)\\)$`)
+				for (let i = l - 2, n = 0; i >= ff.at && n < 400; i--, n++) { const m = re.exec(ff.lines[i]); if (m) { v = m[1]; out.push(v); break } }
+			}
+			for (let k = 0, x = v; k < 2 && /^[A-Za-z_]\w*$/.test(x); k++) { const d = defOf(ff, x, l); if (!d || !/^[A-Za-z_][\w.]*$/.test(d.expr.trim())) break; x = d.expr.trim(); out.push(x) }
+			return out
+		}
 		const al = vars.map(alias)
 		const hit = (c: string, vs: string[]) => vs.some(v => mentions(c, v))
 		const opText = al.map(vs => { const d = defOf(ff, vs[vs.length - 1], l); return d && d.expr.length < 100 && !/^[A-Za-z_][\w.]*$/.test(d.expr.trim()) ? [...vs, d.expr.trim()] : vs })
