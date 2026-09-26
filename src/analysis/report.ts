@@ -62,7 +62,7 @@ import type { Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, type DispatchGroup, type AcctRef } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 
@@ -254,7 +254,8 @@ function analyze0(r: Result): Analysis {
 				let b = decisionBlock(g, c.c, c.pc, c.passPc)
 				for (let k = 0; b !== undefined && k < 6; k++) {
 					const ss = blocks[b].stmts
-					const i = ss.findLastIndex(s => { const x = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined; return x?.t.k === 'fn' && x.t.pc === c.before })
+					let i = ss.length - 1
+					for (; i >= 0; i--) { const x = callOf(ss[i]); if (x?.t.k === 'fn' && x.t.pc === c.before) break }
 					if (i >= 0) { calls.set(b << 16 | i, c.named); break }
 					b = blocks[b].preds.length === 1 ? blocks[b].preds[0] : undefined
 				}

@@ -1072,28 +1072,34 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 }
 
 /**
- * Accounts a native function reaches through its temporaries: the frame array of input-record pointers
- * the entrypoint fills (8-byte entries, the first stored being `input + 8`), a variable used as an
- * `&[AccountInfo]` slice (read at 0x30·i + field offsets for two or more i), or as an array of pointers to
- * input records (pinocchio: entries read for two or more i, dereferenced at record offsets). Variables
- * with one definition and frame slots stored once (no call gets a pointer near them) are followed, and
- * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
- * Names are the printed variable names.
+ * The evaluator of the native account model in a function: roots (variables holding a slice / record
+ * array, or a callee's parameters bound to the caller's values), the entrypoint's record array at frame
+ * offset `arr`; `pass1`: unknown pointer variables as bases (root discovery). A frame word a call wrote is
+ * what the callee stores there (its stores through that parameter, evaluated with its parameters bound;
+ * `depth` levels), or for AccountInfo::try_borrow_(mut_)data / lamports, the RefCell's value.
  */
-export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee): AcctResolver {
-	let res = resMemo.get(fo.f)
-	if (res) return res
-	const f = fo.f
-	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
-	const D = defsOf(f, callee)
-	const { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching } = D
-	const rec0 = (d: Expr | undefined) => input !== undefined && d?.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
-	let arr: number | undefined
-	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
-		if (s.k === 'store' && s.size === 8 && (rec0(s.v) || (s.v.k === 'var' && rec0(defs.get(s.v.id))))) { const o = fpOff(s.addr); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
+function avEvaluator(f: VarFunc, D: Defs, roots: Map<number, AV>, arr: number | undefined, callee: Callee | undefined, depth: number, pass1: boolean): { ev: (e: Expr, p: number, d?: number) => AV | undefined } {
+	const { fp, fpOff, defs, defPos, multi, SLOT, reaching } = D
+	const outOf = (c: Extract<Expr, { k: 'call' }>, o: number, p: number, d: number): AV | undefined => {
+		const g = c.t.k === 'fn' && depth > 0 ? callee?.f(c.t.pc) : undefined
+		if (!g) return undefined
+		const j = c.args.findIndex(a => { const q = fpOff(a); return q !== undefined && q <= o && o < q + 0x80 })
+		const pv = g.vars.find(v => v.param === j + 1)?.id
+		if (j < 0 || pv === undefined) return undefined
+		const off = o - fpOff(c.args[j])!
+		const GD = defsOf(g, callee)
+		const at = (e: Expr, k = 0): number | undefined => e.k === 'var' ? (e.id === pv ? 0 : GD.defs.has(e.id) && k < 6 ? at(GD.defs.get(e.id)!, k + 1) : undefined) : e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? ((x => x === undefined ? undefined : x + Number(BigInt.asIntN(64, e.b.v)))(at(e.a, k + 1))) : undefined
+		const vs: [Expr, number][] = []
+		g.blocks.forEach((b, bi) => b.stmts.forEach((s, i) => { if (s.k === 'store' && s.size === 8 && at(s.addr) === off) vs.push([s.v, bi << 16 | i]) }))
+		if (!vs.length || vs.length > 8) return undefined
+		const rs = new Map<number, AV>()
+		c.args.forEach((a, k) => { const x = k === j ? undefined : ev(a, p, d + 1); const q = g.vars.find(u => u.param === k + 1)?.id; if (x && q !== undefined) rs.set(q, x) })
+		if (!rs.size) return undefined
+		// (the stores whose value is known agree: other paths store error values)
+		const G = avEvaluator(g, GD, rs, undefined, callee, depth - 1, false)
+		const xs = vs.map(([e, q]) => G.ev(e, q, d + 1)).filter((x): x is AV => !!x)
+		return xs.length && xs.every(x => JSON.stringify(x) === JSON.stringify(xs[0])) ? xs[0] : undefined
 	}
-	const roots = new Map<number, AV>()
-	let pass1 = true
 	const memo = new Map<Expr, Map<number, AV | undefined>>()
 	/** the value of e evaluated at position p */
 	const ev = (e: Expr, p: number, d = 0): AV | undefined => {
@@ -1132,10 +1138,11 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 					const z = e.size === 8 && callee ? reaching(SLOT(o), p, true) : null
 					const c = z?.[0].k === 'call' && z[0].t.k === 'fn' ? z[0] : undefined
 					const m = c && /try_borrow_(?:mut_)?(data|lamports)/.exec(callee!.name((c.t as { pc: number }).pc))
-					if (!m || fpOff(c!.args[0]) !== o - 8) return undefined
-					const a = ev(c!.args[1], z![1], d + 1)
-					if (a?.k === 'slice' && a.off % 0x30 === 0) return { k: 'rc', i: a.off / 0x30, f: m[1] as 'data' | 'lamports', off: 0x18 }
-					return undefined
+					if (m && fpOff(c!.args[0]) === o - 8) {
+						const a = ev(c!.args[1], z![1], d + 1)
+						return a?.k === 'slice' && a.off % 0x30 === 0 ? { k: 'rc', i: a.off / 0x30, f: m[1] as 'data' | 'lamports', off: 0x18 } : undefined
+					}
+					return c && !pass1 ? outOf(c, o, z![1], d) : undefined
 				}
 				return deref(ev(e.addr, p, d + 1), e.size)
 			}
@@ -1168,6 +1175,32 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		return undefined
 	}
+	return { ev }
+}
+
+/**
+ * Accounts a native function reaches through its temporaries: the frame array of input-record pointers
+ * the entrypoint fills (8-byte entries, the first stored being `input + 8`), a variable used as an
+ * `&[AccountInfo]` slice (read at 0x30·i + field offsets for two or more i), or as an array of pointers to
+ * input records (pinocchio: entries read for two or more i, dereferenced at record offsets). Variables
+ * with one definition and frame slots stored once (no call gets a pointer near them) are followed, and
+ * so are the RefCell'd lamports / data of an AccountInfo (the pointer at +0x18 of its RcBox).
+ * Names are the printed variable names.
+ */
+export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Callee): AcctResolver {
+	let res = resMemo.get(fo.f)
+	if (res) return res
+	const f = fo.f
+	const input = f.isEntry ? f.vars.find(v => v.param === 1)?.id : undefined
+	const D = defsOf(f, callee)
+	const { fp, fpOff, defs, defPos, multi, pos, SLOT, reaching } = D
+	const rec0 = (d: Expr | undefined) => input !== undefined && d?.k === 'bin' && d.op === 'add' && d.a.k === 'var' && d.a.id === input && d.b.k === 'const' && d.b.v === 8n
+	let arr: number | undefined
+	if (input !== undefined) for (const b of f.blocks) for (const s of b.stmts) {
+		if (s.k === 'store' && s.size === 8 && (rec0(s.v) || (s.v.k === 'var' && rec0(defs.get(s.v.id))))) { const o = fpOff(s.addr); if (o !== undefined && (arr === undefined || o > arr)) arr = o }
+	}
+	const roots = new Map<number, AV>()
+	let { ev } = avEvaluator(f, D, roots, arr, callee, 2, true)
 	// first pass: the variables used as a slice / an array of record pointers
 	const hits = new Map<number, Set<number>>(), elems = new Map<number, Set<number>>(), recUses = new Map<number, number>()
 	const addTo = (m: Map<number, Set<number>>, v: number, x: number) => { let h = m.get(v); if (!h) m.set(v, (h = new Set())); h.add(x) }
@@ -1197,8 +1230,7 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	})
 	for (const [v, ks] of hits) if (ks.size >= 2) roots.set(v, { k: 'slice', off: 0 })
 	for (const [v, ks] of elems) if (!roots.has(v) && ks.size >= 2 && (recUses.get(v) ?? 0) >= 2) roots.set(v, { k: 'recs', off: 0 })
-	pass1 = false
-	memo.clear()
+	ev = avEvaluator(f, D, roots, arr, callee, 2, false).ev
 	const asRef = (a: AV | undefined): AcctRef | undefined => {
 		if (!a) return undefined
 		if (a.k === 'val') return { index: a.i, field: a.f }
