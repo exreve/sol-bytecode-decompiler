@@ -333,6 +333,44 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       return false;
     };
     for (const pc of libs.keys()) { const fn = p.funcs.get(pc); if (fn && (fn.nparams >= 4 || fn.stackArgs) && reaches(pc, 2)) invokeWrappers.add(pc); }
+    // CPI wrappers not recognized as library code (e.g. solana-program built for sBPF v2 / v3, whose code the
+    // library signatures do not cover): functions passing their own account infos and count (parameters 3, 4)
+    // on to the CPI syscall (arguments 2, 3) or to such a wrapper (arguments 3, 4), two levels
+    if (opts.sugar !== false) for (let round = 0; round < 2; round++) for (const [pc, bt] of built) {
+      if (isLib(pc) || invokeWrappers.has(pc) || bt.f.nparams < 4) continue
+      // (a parameter, or a word of the frame stored once, with the parameter: v3 code spills them)
+      const slot = (a: Expr): string | undefined => a.k === 'var' ? `${a.id}:0` : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.b.k === 'const' ? `${a.a.id}:${BigInt.asIntN(64, a.b.v)}` : undefined
+      let spills: Map<string, Expr[]> | undefined
+      const spilled = () => {
+        if (spills) return spills
+        spills = new Map()
+        const put = (k: string | undefined, v: Expr) => { if (k) (spills!.get(k) ?? spills!.set(k, []).get(k)!).push(v) }
+        const at = (a: Expr, d: number) => { const k = slot(a); if (!k) return undefined; const i = k.lastIndexOf(':'); return `${k.slice(0, i)}:${BigInt(k.slice(i + 1)) + BigInt(d)}` }
+        for (const b of bt.f.blocks) for (const st of b.stmts) {
+          if (st.k === 'store' && st.size === 8) put(slot(st.addr), st.v)
+          else if (st.k === 'stores' && st.size === 8) st.vals.forEach((v, i) => put(at(st.addr, 8 * i), v))
+        }
+        return spills
+      }
+      const par = (e: Expr | undefined, r: number): boolean => {
+        if (e?.k === 'var') return bt.f.vars[e.id]?.param === r
+        if (e?.k !== 'load' || e.size !== 8) return false
+        const k = slot(e.addr), vs = k ? spilled().get(k) : undefined
+        return vs?.length === 1 && vs[0].k === 'var' && bt.f.vars[vs[0].id]?.param === r
+      }
+      const passes = (t: Extract<Stmt, { k: 'call' }>['t'], args: Expr[]) => t.k === 'sys'
+        ? /^sol_invoke_signed_(c|rust)$/.test(t.name) && par(args[1], 3) && par(args[2], 4)
+        : t.k === 'fn' && invokeWrappers.has(t.pc) && par(args[2], 3) && par(args[3], 4)
+      let hit = false
+      for (const b of bt.f.blocks) {
+        for (const st of b.stmts) {
+          if (st.k === 'call' && passes(st.t, st.args)) hit = true
+          if (st.k === 'set' && st.e.k === 'call' && passes(st.e.t, st.e.args)) hit = true
+        }
+        if (b.term.k === 'ret' && b.term.e?.k === 'call' && passes(b.term.e.t, b.term.e.args)) hit = true
+      }
+      if (hit) invokeWrappers.add(pc)
+    }
   }
   // the call instruction of each (function, target) pair, when there is exactly one (sites in return expressions)
   const callInsns = (fpc: number, target: string): number[] => {
@@ -1101,7 +1139,9 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const s = sites.get(n);
           if (!s) return undefined;
           const d = cpiDesc(s, env);
-          if (s.abi !== 'call') siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
+          // (not the undecoded CPI inside an invoke wrapper, decoded at its call sites: as for library wrappers)
+          const inWrapper = !s.abi.startsWith('pda') && invokeWrappers.has(pc) && !d?.family
+          if (s.abi !== 'call' && !inWrapper) siteNotes.set(n, { kind: s.abi.startsWith('pda') ? 'pda' : 'cpi', desc: d });
           // (a PDA function recognized by its syscall: for the analysis only, printed as a plain call)
           if (s.t?.k === 'fn' && pdaWrappers.has(s.t.pc)) return cpiDesc({ ...s, abi: 'call' }, env)?.text;
           const kind = execKind(s);
