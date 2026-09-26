@@ -112,7 +112,8 @@ export const ANCHOR_KIND: Record<string, string> = {
 	AccountSysvarMismatch: 'address', ConstraintSpace: 'space', ConstraintDuplicateMutableAccount: 'duplicate',
 }
 const ERROR_RAISE = /anchor::(Constraint|Account|Require)\w*|error::\w|ProgramError::\w/
-const ERROR_MARK = /anchor::\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
+// (Anchor's codes 100-103 (Instruction*) name small constants too, e.g. a space of 0x64 bytes: markers only when raised)
+const ERROR_MARK = /anchor::(?!Instruction(?:Missing|FallbackNotFound|DidNotDeserialize|DidNotSerialize)\b)\w|error::\w|\bErr\(|ProgramError::|Error_with_account_name\(|anchor_error_from\(|\btrap\(|\babort\(|sol_panic|panic/
 /** a two-letter account name built on the heap (inlineString wants three): one 16-bit store, the String's length 2 */
 export const shortName = (t: string): string | undefined => {
 	const m = /\bst16\((\w+), (0x[0-9a-f]{4})\)/.exec(t)
@@ -495,7 +496,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
 		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
-		if (/\bkeyeq\(|memeq\([^)]*0x20\)|memcmp\([^)]*0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
+		if (/\bkeyeq\(|(?:memeq|memcmp)\((?:[^()]|\([^()]*\))*, 0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// (vipers assert_keys_eq!(a, b) logs "self.a != self.b" on its failing side; the comparison itself is split into
 		// word / 16-byte pieces the condition alone does not show as a key comparison)
 		const lr = VIPERS_LOG.exec(leadText(failNodes))
@@ -582,7 +583,14 @@ export function functionFacts(inp: FnInput): FnFacts {
 					} else if (tEx && !eEx) fail = 'then'
 					else if (eEx && !tEx) fail = 'else'
 					// (both exit, or both fall into a continuation that exits: the one that looks like the error path)
-					else if ((tEx && eEx) || (!tEx && !eEx && after)) { const pf = pickFail(n.then, n.else); fail = pf === 'then' ? 'then' : pf === 'rest' ? 'else' : undefined }
+					else if ((tEx && eEx) || (!tEx && !eEx && after)) {
+						const pf = pickFail(n.then, n.else)
+						fail = pf === 'then' ? 'then' : pf === 'rest' ? 'else' : undefined
+						// (Anchor's init: create_account when the account holds no lamports, else (payer != account, raising
+						// TryingToInitPayerAsProgramAccount) transfer + allocate + assign: two alternatives, neither the failing one)
+						const initAlt = (ns: Node[]) => ns.some(x => x.k === 'if' && /TryingToInitPayerAsProgramAccount/.test(textOf(x.then, 60)))
+						if (fail && inp.anchor && initAlt(fail === 'then' ? n.else : n.then) && !ERROR_MARK.test(textOf(fail === 'then' ? n.then : n.else))) fail = undefined
+					}
 					// (the side logging a violated key equality (vipers) fails, whatever the shapes say)
 					const vt = vlog(n.then)
 					if (n.else.length) { const ve = vlog(n.else); if (vt !== ve) fail = vt ? 'then' : 'else' } else if (vt !== vlog(rest)) fail = vt ? 'then' : 'rest'
@@ -633,7 +641,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 		// raising a constraint / program error first thing: the success return before the error path)
 		if (!strict && okOut && la <= 8 && okOut.test(textOf(a, 80)) && !ERROR_MARK.test(textOf(a, 80)) && firstMark(b) <= 2 && ERROR_RAISE.test(textOf(b, 4))) return 'rest'
 		// (Anchor: a short side without any error marker is not the failing one when the other raises an Anchor error first thing)
-		const quiet = (x: Node[], y: Node[]) => !!inp.anchor && firstMark(y) === 0 && /anchor::\w/.test(topText(y)) && !ERROR_MARK.test(textOf(x))
+		const quiet = (x: Node[], y: Node[]) => !!inp.anchor && firstMark(y) === 0 && /anchor::(?!Instruction(?:Missing|FallbackNotFound|DidNotDeserialize|DidNotSerialize)\b)\w/.test(topText(y)) && !ERROR_MARK.test(textOf(x))
 		if (!strict && la * 4 <= lb && la <= 40 && !quiet(a, b)) return 'then'
 		if (!strict && lb * 4 <= la && lb <= 40 && !quiet(b, a)) return 'rest'
 		// (Anchor: the failing side names the account it reports, e.g. a heap-built "system_program")
@@ -654,8 +662,17 @@ export function functionFacts(inp: FnInput): FnFacts {
 		if (ca && cb && ca !== cb && Math.min(ca, cb) * 2 < Math.max(ca, cb)) return ca < cb ? 'then' : 'rest'
 		const ma = ERROR_MARK.test(topText(a)), mb = ERROR_MARK.test(topText(b))
 		if (ma !== mb) return ma ? 'then' : 'rest'
+		// (native, no error markers (error codes stored into the out object): the passing side goes on to make several
+		// further checks exiting early, the failing one is short and makes none)
+		if (!strict && !inp.anchor) {
+			const ea = condExits(a), eb = condExits(b)
+			if (ea === 0 && eb >= 2 && la <= 16 && !a.some(n => n.k === 'loop')) return 'then'
+			if (eb === 0 && ea >= 2 && lb <= 16 && !b.some(n => n.k === 'loop')) return 'rest'
+		}
 		return undefined
 	}
+	/** branches of a list (nested) returning directly (an early return; not a panic) */
+	const condExits = (ns: Node[]): number => ns.reduce((s, n) => s + (n.k === 'if' ? Number(n.then.some(x => x.k === 'return')) + Number(n.else.some(x => x.k === 'return')) + condExits(n.then) + condExits(n.else) : n.k === 'block' || n.k === 'loop' ? condExits(n.body) : 0), 0)
 	const hasExit = (ns: Node[]): boolean => ns.some(n => n.k === 'return' || n.k === 'trap' || (n.k === 'if' ? hasExit(n.then) || hasExit(n.else) : n.k === 'block' || n.k === 'loop' ? hasExit(n.body) : false))
 	/** lines from the start of a list to its first own statement (not nested) with an error marker */
 	const firstMark = (ns: Node[]): number => {

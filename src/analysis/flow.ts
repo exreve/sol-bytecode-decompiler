@@ -2207,6 +2207,11 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		}
 		let x = c
 		while (x.k === 'lnot') x = x.a
+		// (a conjunction / disjunction of comparisons (e.g. a length, a tag and a 32-byte key): the key comparison first)
+		if (x.k === 'land' || x.k === 'lor') {
+			const ss = [sides(x.a, b), sides(x.b, b)].filter((s): s is [Side, Side] => !!s)
+			return ss.find(s => typeof s[0] === 'object' && typeof s[1] === 'object') ?? ss.find(s => s.some(y => typeof y === 'object' && y?.field === 'key')) ?? ss[0]
+		}
 		const cmp = (e: Expr): [Side, Side] | undefined => { const [y, p] = follow(e, p0); const ca = cmpArgs(y); return ca && [side(ca[0], p), side(ca[1], p)] }
 		if (x.k === 'cmp' && (x.op === 'eq' || x.op === 'ne')) {
 			const r = cmp(x.a) ?? cmp(x.b)

@@ -21,7 +21,7 @@ import { consistency } from './consistency.ts'
 import { structFields } from '../idl.ts'
 import { irOf, posAt, stmtAt, storedAt, defsIn } from './paths.ts'
 import { sourceCtx, type Source } from './sources.ts'
-import type { Expr } from '../ir.ts'
+import { walkExpr, type Expr } from '../ir.ts'
 import { knownIx } from '../cpi.ts'
 import { cpiKinds } from './facts.ts'
 import { b58, KNOWN_KEYS } from '../semantics.ts'
@@ -150,6 +150,13 @@ export function dominance(r: Result, checks: CheckOut[], ops: OpOut[], ctx: IxCt
 	}
 }
 
+/** the invoke call a returned expression makes (a tail call, possibly wrapped, e.g. the drop of its result) */
+const invokeCall = (r: Result, e: Expr): Extract<Expr, { k: 'call' }> | undefined => {
+	let out: Extract<Expr, { k: 'call' }> | undefined
+	walkExpr(e, x => { if (!out && x.k === 'call' && x.t.k === 'fn' && /invoke/.test(r.program.funcs.get(x.t.pc)?.name ?? '')) out = x })
+	return out
+}
+
 const idx = new WeakMap<Result, Map<number, Result['funcs'][number]>>()
 function fnIndex(r: Result) { let m = idx.get(r); if (!m) idx.set(r, (m = new Map(r.funcs.map(f => [f.pc, f])))); return m }
 
@@ -275,6 +282,21 @@ export function phase2(a: Analysis, r: Result) {
 				if (ir?.length) for (const x of ir) src.push({ param: p, source: x.source, trust: trustSrc(x) })
 				else for (const x of classify(t)) src.push({ param: p, ...x })
 			}
+			// (a CPI whose program the printed text does not trace (e.g. an Instruction built by hand, passed to invoke_signed):
+			// the key the instruction struct's program_id (after its two Vecs, +0x30) is copied from)
+			// (a CPI whose program the printed text does not trace (e.g. an Instruction built by hand, passed to invoke_signed):
+			// the key its program_id (after its two Vecs, +0x30) is copied from; the Instruction: the argument whose first
+			// word is not an account key (an AccountInfo array's is), one argument only)
+			const ic = call ? callOf(call[0]) : o.ret ? invokeCall(r, o.ret) : undefined
+			if (o.cpi && !o.cpi.known && !src.some(x => x.param === 'program') && fn !== undefined && pos !== undefined && ic) {
+				const ld = (a: Expr, k: number): Expr => ({ k: 'load', size: 8, addr: { k: 'bin', op: 'add', a, b: { k: 'const', v: BigInt(k) } } })
+				const of = (e: Expr) => { try { return S.of(fn, e, pos) } catch { return [] } }
+				const hits = ic.args.flatMap(a => {
+					const ks = of(ld(a, 0x30)).filter(x => x.kind === 'key' || x.kind === 'remaining')
+					return ks.length === 1 && ks[0].source.endsWith('.key') && !of(ld(a, 0)).some(x => x.kind === 'key') ? [ks[0]] : []
+				})
+				if (hits.length === 1) src.push({ param: 'program', source: hits[0].source, trust: trustSrc(hits[0]) })
+			}
 			const uniq = src.filter((x, i) => src.findIndex(y => y.param === x.param && y.source === x.source) === i)
 			if (uniq.length) o.sources = uniq.slice(0, 24)
 		}
@@ -381,7 +403,7 @@ const initWrite = (ix: IxOut, o: OpOut) => {
 	const t = !o.cpi && o.target ? ix.accounts.find(x => x.name === o.target!.split('.')[0]) : undefined
 	if (!t) return false
 	const z = t.constraints.zero
-	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && (!t.constraints.discriminator || t.constraints.discriminator.status === 'not_found'))
+	return (!!z && z.status !== 'not_found') || (ix.ops.some(x => x.kinds.includes('ACCOUNT_CREATE')) && t.constraints.discriminator?.status !== 'found')
 }
 
 /** an operation enabled by a stored authority the signer is bound to, or a PDA signature (authority rows) */
@@ -458,6 +480,15 @@ function hasOneField(t: string, s: string, cond: string, a: Analysis): string {
 
 /** the two sides of an (in)equality condition: a == b, a != b, memeq/keyeq/memcmp(a, b, 0x20) */
 function eqSides(cond: string): [string, string] | undefined {
+	// (a conjunction, e.g. a length, a tag and a 32-byte comparison: the key comparison)
+	if (/ && /.test(cond) && !/ \|\| /.test(cond)) {
+		const bal = (t: string) => { let x = t.trim(); for (let k = 0; k < 4; k++) { const o = (x.match(/\(/g) ?? []).length, c = (x.match(/\)/g) ?? []).length; if (o > c && x.startsWith('(')) x = x.slice(1); else if (c > o && x.endsWith(')')) x = x.slice(0, -1); else break } return x }
+		for (const p of cond.split(' && ').map(bal)) if (/memeq|keyeq|memcmp/.test(p)) { const s = eqSides1(p); if (s) return s }
+		return undefined
+	}
+	return eqSides1(cond)
+}
+function eqSides1(cond: string): [string, string] | undefined {
 	const c = cond.replace(/^!+\(?/, '').replace(/\)$/, '')
 	const m = /^(?:\(\s*)?(?:memeq|keyeq|memcmp)\(([^,]+), ([^,]+?)(?:, 0x20)?\)(?: as u32\))?(?: [!=]= 0)?$/.exec(c)
 	if (m) return [m[1], m[2]]
@@ -491,19 +522,54 @@ const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] =>
 	return [{ accounts: row.enabledBy.filter(e => e.kind === 'signer').map(e => e.what), path: [L(o.at)], evidence: [o.text.slice(0, 140), 'signers: ' + row.enabledBy.filter(e => e.kind === 'signer').map(e => `${e.what} (${e.status})`).join(', ')], confidence: 'low' as const, weight: wOf(o) }]
 })
 
+/**
+ * A CPI's account-supplied program id checked: compared with a known id (the builder / the call site), a check of the
+ * program account's key / address dominating the call, or its key related to a stored field.
+ */
+/** the account whose key a CPI's program id is (by the IR sources, else the printed program naming an account) */
+const progAccount = (ix: IxOut, o: OpOut): string | undefined => {
+	const isAcct = (a: string) => ix.accounts.some(x => x.name === a) || /^(remaining_accounts|account)\[\d+\]$/.test(a)
+	for (const s of o.sources ?? []) { const m = s.param === 'program' ? /^(.+)\.key$/.exec(s.source) : null; if (m && isAcct(m[1])) return m[1] }
+	const pa = /^\*?([A-Za-z_]\w*(?:\[\d+\])?)(?:\.key)?$/.exec(o.cpi!.program.trim())?.[1]
+	return pa && isAcct(pa) ? pa : undefined
+}
+
+const progIdChecked = (ix: IxOut, o: OpOut, acct?: string): boolean => {
+	const cpi = o.cpi!
+	if (/\(id compared with/.test(cpi.checked ?? '')) return true
+	// (the program account not identified, e.g. an instruction built by a library builder: a key compared with a constant)
+	const unid = !cpi.accounts.length && /^[A-Z_0-9|]+$/.test(cpi.program)
+	const prog = acct ?? progAccount(ix, o)
+	if ((o.guards ?? []).map(i => ix.checks[i]).some(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && ((!c.account && !c.kinds.includes('initialized')) || /program/.test(c.account ?? '') || (!!c.account && (cpi.program.includes(c.account.replace(/\?$/, '')) || c.account === prog)) || (unid && c.kinds.includes('address'))))) return true
+	if (!prog) return false
+	// (the program account's key checked on every path (address / key / PDA), or compared with a stored field)
+	if (['address', 'key', 'pda', 'has_one'].some(k => ix.accounts.find(x => x.name === prog)?.constraints[k]?.status === 'found')) return true
+	return (ix.relations ?? []).some(x => (x.a === `${prog}.key` && !x.b.endsWith('.key')) || (x.b === `${prog}.key` && !x.a.endsWith('.key') && !x.a.startsWith('(')))
+}
+
 const RULES: Rule[] = [
 	{
 		id: 'cpi-unchecked-program', title: 'CPI to an account-supplied program id with no dominating check against a known id',
-		run: ix => ix.ops.filter(o => o.cpi && !o.cpi.known && o.cpi.program !== '?' && !/\(id compared with/.test(o.cpi.checked ?? '')).flatMap(o => {
-			// (the program account not identified, e.g. an instruction built by a library builder: a key compared with a constant)
-			const unid = !o.cpi!.accounts.length && /^[A-Z_0-9|]+$/.test(o.cpi!.program)
-			const g = (o.guards ?? []).map(i => ix.checks[i]).filter(c => c.kinds.some(k => k === 'address' || k === 'executable' || k === 'key') && ((!c.account && !c.kinds.includes('initialized')) || /program/.test(c.account ?? '') || (!!c.account && o.cpi!.program.includes(c.account.replace(/\?$/, ''))) || (unid && c.kinds.includes('address'))))
-			if (g.length) return []
-			const progAcct = ix.accounts.find(x => /program/.test(x.name) && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
-			// (the program signs it (PDA): whatever program the caller passes gets the PDA's authority)
-			const pda = !!o.cpi!.seeds || o.kinds.includes('PDA_SIGNATURE')
-			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, progAcct ? `a program account (${progAcct.name}) is checked, but no check dominating this CPI compares its id` : 'no address / executable check on a program account found', ...(pda ? ['PDA-signed: the program lends its PDA signature to the account-supplied program'] : [])], confidence: pda ? 'high' as const : progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + (pda ? 4 : 2) }]
-		}),
+		// (only a program id that is an account's key (an instruction / remaining account): an id the analysis does not trace
+		// to an account (e.g. a library helper's parameter, a shared invoke wrapper) is not reported; one finding per program
+		// account and instruction, its first call site, the PDA-signed one first)
+		run: ix => {
+			const by = new Map<string, { o: OpOut; n: number; pda: boolean }>()
+			for (const o of ix.ops) {
+				if (!o.cpi || o.cpi.known || o.cpi.program === '?') continue
+				const acct = progAccount(ix, o)
+				if (!acct || progIdChecked(ix, o, acct)) continue
+				const pda = !!o.cpi.seeds || o.kinds.includes('PDA_SIGNATURE')
+				const e = by.get(acct)
+				if (!e) by.set(acct, { o, n: 1, pda })
+				else { e.n++; if (pda && !e.pda) { e.o = o; e.pda = true } }
+			}
+			return [...by].map(([acct, { o, n, pda }]) => {
+				const progAcct = ix.accounts.find(x => x.name === acct && ['address', 'executable'].some(k => x.constraints[k] && x.constraints[k].status !== 'not_found'))
+				// (the program signs it (PDA): whatever program the caller passes gets the PDA's authority)
+				return { accounts: [acct], path: [L(o.at)], evidence: [`${o.text.slice(0, 140)}`, `program id ← ${acct}.key${n > 1 ? ` (${n} call sites)` : ''}`, progAcct ? `${acct} is checked on some paths, but no check dominating this CPI compares its id` : `no check of ${acct}'s key against a known program id or a stored key found`, ...(pda ? ['PDA-signed: the program lends its PDA signature to the account-supplied program'] : [])], confidence: pda ? 'high' as const : progAcct ? 'low' as const : 'medium' as const, weight: wOf(o) + (pda ? 4 : 2) }
+			})
+		},
 	},
 	{
 		id: 'value-move-no-signer', title: 'Value movement or authority change with no signer check and no PDA signature',
@@ -563,7 +629,8 @@ const RULES: Rule[] = [
 	{
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
 		// (an authority set to the key of an account that signed, or while initializing: the usual assignments)
-		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && (s.param === 'program' || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o)))).slice(0, 2).map(s => ({
+		// (a CPI program id from an account: cpi-unchecked-program's, which weighs the checks of that account)
+		run: ix => ix.ops.flatMap((o, oi) => (o.sources ?? []).filter(s => s.trust === 'caller-controlled' && ((s.param === 'program' && !(o.cpi && progAccount(ix, o))) || (o.kinds.includes('AUTHORITY_WRITE') && o.target && s.param === o.target && !authorized(ix, oi) && !signerKey(ix, s.source) && !initWrite(ix, o)))).slice(0, 2).map(s => ({
 			accounts: [s.source], path: [L(o.at)], evidence: [`${s.param} ← ${s.source} (${s.trust})`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o),
 		}))),
 	},
@@ -705,8 +772,9 @@ const RULES: Rule[] = [
 			if (!accts.length || !accts.every(x => { const m = /^\*?([A-Za-z_]\w*(?:\[\d+\])?)$/.exec(x.text.trim()); return m && names.has(m[1]) || /remaining/.test(x.text) })) return []
 			const dataCaller = !o.cpi!.fields.length || (o.sources ?? []).some(s => s.trust === 'caller-controlled' && (s.source === 'instruction data' || s.source.startsWith('ix.')))
 			if (!dataCaller) return []
-			const checked = /\(id compared with/.test(o.cpi!.checked ?? '')
-			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${accts.length} accounts, all caller-provided; data ${o.cpi!.fields.length ? 'from the instruction data' : 'not decoded'}; program id ${checked ? 'compared with a known id' : 'not compared with a known id'}`], confidence: checked ? 'low' as const : 'medium' as const, weight: 4 }]
+			// (a program id compared with a known id / a stored one, or a PDA-signed call: not a verbatim forwarder)
+			if (progIdChecked(ix, o) || o.kinds.includes('PDA_SIGNATURE')) return []
+			return [{ accounts: [o.cpi!.program], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${accts.length} accounts, all caller-provided; data ${o.cpi!.fields.length ? 'from the instruction data' : 'not decoded'}; program id not compared with a known id`], confidence: 'medium' as const, weight: 4 }]
 		}),
 	},
 	{
