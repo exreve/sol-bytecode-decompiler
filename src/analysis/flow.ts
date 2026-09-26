@@ -1128,22 +1128,31 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 	const pv = f?.vars.find(v => v.param === j + 1)?.id
 	let n = 0
 	if (f && pv !== undefined) {
-		const defs = new Map<number, Expr>(), multi = new Set<number>()
-		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { if (defs.has(s.dst) || multi.has(s.dst) || s.k === 'call') { defs.delete(s.dst); multi.add(s.dst) } else defs.set(s.dst, s.e) }
-		// (param + c through single definitions, and frame words holding only the parameter (spilled and reloaded))
+		// (a variable's definitions (null: a call result))
+		const defs = new Map<number, Expr[] | null>()
+		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'set' || s.k === 'call') { const l = defs.get(s.dst); if (s.k === 'call' || l === null) defs.set(s.dst, null); else if (l) l.push(s.e); else defs.set(s.dst, [s.e]) }
+		// (param + c through variables all of whose definitions agree (e.g. reloaded from a spill), and frame words
+		// holding only the parameter (spilled and reloaded))
 		const fpv = f.vars.find(v => v.param === 10)?.id ?? -1
 		const spill = new Map<number, boolean>()
 		const off = (e: Expr, d = 0): number | undefined => {
 			if (d > 8) return undefined
-			if (e.k === 'var') return e.id === pv ? 0 : defs.has(e.id) ? off(defs.get(e.id)!, d + 1) : undefined
+			if (e.k === 'var') {
+				if (e.id === pv) return 0
+				const l = defs.get(e.id)
+				if (!l) return undefined
+				const x = off(l[0], d + 1)
+				return x !== undefined && l.every((y, i) => i === 0 || off(y, d + 1) === x) ? x : undefined
+			}
 			if (e.k === 'load' && e.size === 8) { const z = offOf(e.addr, fpv); return z !== undefined && spill.get(z) ? 0 : undefined }
 			if (e.k === 'bin' && e.op === 'add' && e.b.k === 'const') { const x = off(e.a, d + 1); return x === undefined ? undefined : x + sNum(e.b.v) }
 			return undefined
 		}
-		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) {
-			const z = offOf(s.addr, fpv)
-			if (z !== undefined) spill.set(z, spill.get(z) !== false && off(s.v) === 0)
-		}
+		// (optimistic: every frame word stored to is a spill until a store of something else is found there)
+		const fst: [number, Expr][] = []
+		for (const b of f.blocks) for (const s of b.stmts) if (s.k === 'store' && s.size === 8) { const z = offOf(s.addr, fpv); if (z !== undefined) { fst.push([z, s.v]); spill.set(z, true) } }
+		for (let ch = true, k = 0; ch && k < 4; k++) { ch = false; for (const [z, v] of fst) if (spill.get(z) && off(v) !== 0) { spill.set(z, false); ch = true } }
+		for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' && s.size !== 8) || s.k === 'stores' || s.k === 'copy') { const z = offOf(s.k === 'copy' ? s.dst : s.addr, fpv); if (z !== undefined) for (const [y] of fst) if (y >= z - 7 && y < z + (s.k === 'store' ? s.size : s.k === 'stores' ? s.size * s.vals.length : s.n)) spill.set(y, false) }
 		outer: for (const b of f.blocks) for (const s of b.stmts) {
 			// (the parameter spilled to the frame: not an escape)
 			if (s.k === 'store' && s.size === 8 && spill.get(offOf(s.addr, fpv) ?? NaN)) continue
