@@ -150,10 +150,10 @@ export class Printer {
     return undefined;
   }
 
-  /** Store destination as a view field (`x.is_writable`), if the store writes exactly that scalar field. */
+  /** Store destination as a view field (`x.is_writable`), if the store writes exactly that scalar (or pointer) field. */
   viewLvalue(size: number, addr: Expr): string | undefined {
     const f = this.viewField(addr);
-    return f && !f.rest && f.last.k === 'scalar' && f.last.size === size ? f.t : undefined;
+    return f && !f.rest && ((f.last.k === 'scalar' && f.last.size === size) || (f.last.k === 'ref' && size === 8)) ? f.t : undefined;
   }
 
   expr0(e: Expr): { t: string; prec: number } {

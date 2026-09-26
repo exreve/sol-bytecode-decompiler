@@ -21,6 +21,7 @@ import { builtinName } from './builtins.ts';
 import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite, type CpiDesc } from './cpi.ts';
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
+import { inferStructs } from './structs.ts';
 import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, LEGACY_INFO_VIEW, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
@@ -736,6 +737,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   // at least half of the direct calls pass an object of that type and none one of another type (a few
   // rounds, so types flow down call chains)
   const baseTypes = new Map<number, Map<number, string>>();
+  const structTypes = new Map<number, Map<number, string>>(); // inferred struct views of parameters (structs.ts)
   // the type of a set's value: a typed expression, or a load of a frame slot stored exactly once (a spill)
   // with a typed value
   const setType = (f: VarFunc, e: Expr, ty: (id: number) => string | undefined): string | undefined => {
@@ -753,6 +755,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     for (const [v, o] of objVars.get(pc)?.boxes ?? []) if (!t.has(v)) t.set(v, o.view);
     for (const [v, [ty]] of paramTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
     for (const [v, ty] of dataVars.get(pc) ?? []) if (!t.has(v) || t.get(v) === 'AccountRecord') t.set(v, ty);
+    for (const [v, ty] of structTypes.get(pc) ?? []) if (!t.has(v)) t.set(v, ty);
     for (let it = 0, grew = true; grew && it < 4; it++) {
       grew = false;
       for (const b of f.blocks) for (const st of b.stmts) {
@@ -849,8 +852,49 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (st.k === 'set' && st.e.k === 'call' && st.e.t.k === 'fn') visit(st.e.args, st.e.t.pc);
       }
     }
-    for (let round = 0; round < 3; round++) {
+    // library functions taking an AccountInfo (&self / &AccountInfo): the parameters whose own accesses fit it
+    for (const [pc, bt] of built) {
+      if (!isLib(pc) || !LIB_INFO_FN.test(p.funcs.get(pc)!.name)) continue;
+      for (const reg of [1, 2]) {
+        const pv = bt.f.vars.find(v => v.param === reg);
+        if (!pv || defCount(bt.f, pv.id) !== 0 || baseTypes.get(pc)!.has(pv.id) || !fitsView(bt.f, pv.id, 'AccountInfo', 1)) continue;
+        let pt = paramTypes.get(pc); if (!pt) paramTypes.set(pc, (pt = new Map()));
+        pt.set(pv.id, ['AccountInfo', `[known] a solana_program AccountInfo method; its accesses fit the view`]);
+        baseTypes.set(pc, computeTypes(pc));
+      }
+    }
+    const propagate = () => { for (let round = 0; round < 6; round++) {
       let changed: number[] = [];
+      // up: a caller's parameter (never reassigned) or single-definition variable passed as an argument
+      // whose parameter has a view type, when every such call agrees and its own accesses fit the view
+      const up = new Map<number, Map<number, { ty: string | null; callees: string[] }>>();
+      for (const [cpc, sites] of callArgs) {
+        const ct = baseTypes.get(cpc)!;
+        for (const { caller, v, a } of sites) {
+          if (a.k !== 'var') continue;
+          const ty = ct.get(v);
+          if (!ty) continue;
+          let m = up.get(caller); if (!m) up.set(caller, (m = new Map()));
+          const r = m.get(a.id);
+          const nm = p.funcs.get(cpc)!.name;
+          if (!r) m.set(a.id, { ty, callees: [nm] });
+          else { if (r.ty !== ty) r.ty = null; if (!r.callees.includes(nm)) r.callees.push(nm); }
+        }
+      }
+      for (const [pc, m] of up) {
+        const f = built.get(pc)!.f, bt = baseTypes.get(pc)!;
+        for (const [u, { ty, callees }] of m) {
+          if (!ty || bt.has(u) || !views.map.has(ty) || ['AccountRecord', 'UnalignedAccount', 'Input'].includes(ty)) continue;
+          const pv = f.vars[u];
+          if (!pv || pv.param === 10 || defCount(f, u) !== (pv.param >= 0 ? 0 : 1) || !fitsView(f, u, ty, 0)) continue;
+          // (a local: defined as a pointer, a loaded word or a copy of a variable)
+          if (pv.param < 0 && !f.blocks.some(b => b.stmts.some(st => st.k === 'set' && st.dst === u && ((st.e.k === 'load' && st.e.size === 8) || st.e.k === 'var')))) continue;
+          let pt = paramTypes.get(pc); if (!pt) paramTypes.set(pc, (pt = new Map()));
+          if (pt.has(u)) continue;
+          pt.set(u, [ty, `passed where the callee's parameter is one: ${callees.slice(0, 3).join(', ')}${callees.length > 3 ? ', …' : ''}`]);
+          changed.push(pc);
+        }
+      }
       for (const [cpc, sites] of callArgs) {
         // param var -> the view type the calls pass (null: two types), how many calls do, of how many, callers passing one
         const seen = new Map<number, { ty: string | null | undefined; n: number; of: number; callers: string[] }>();
@@ -875,13 +919,25 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       }
       if (!changed.length) break;
       for (const pc of new Set(changed)) baseTypes.set(pc, computeTypes(pc));
+    } };
+    propagate();
+    // pointers still without a view: inferred struct layouts (see structs.ts), then propagated again
+    const st = inferStructs({
+      built, skip: pc => isLib(pc), typed: (pc, v) => baseTypes.get(pc)!.has(v), fnName: pc => p.funcs.get(pc)!.name, outParam: pc => outParams.has(pc),
+      paramReg: (cpc, i) => (built.get(cpc)!.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1),
+    }, views);
+    for (const [pc, m] of st.types) {
+      structTypes.set(pc, new Map([...m].filter(([, t]) => st.synth.has(t))));
+      for (const [v, t] of m) if (!st.synth.has(t)) { let pt = paramTypes.get(pc); if (!pt) paramTypes.set(pc, (pt = new Map())); pt.set(v, [t, 'its accesses, and those through the pointers it holds, fit the view (flags or RefCell boxes)']); }
+      baseTypes.set(pc, computeTypes(pc));
     }
+    propagate();
   }
   /**
    * Do all loads and stores through `v + c` in f hit fields of view `ty` exactly (scalars of their size,
    * pointers as 8-byte loads, inside embedded fields), and at least 3 different fields?
    */
-  function fitsView(f: VarFunc, v: number, ty: string): boolean {
+  function fitsView(f: VarFunc, v: number, ty: string, min = 3): boolean {
     const hit = new Set<string>();
     let ok = true;
     const acc = (addr: Expr, size: number) => {
@@ -897,8 +953,16 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       stmtExprs(st).forEach(e => walkExpr(e, x => { if (x.k === 'load') acc(x.addr, x.size); }));
       if (!ok) return false;
     }
-    return ok && hit.size >= 3;
+    return ok && hit.size >= min;
   }
+  // the view type of a (user) function's parameter (register reg), when it is never reassigned
+  const paramView = (cpc: number, reg: number): string | undefined => {
+    const cb = built.get(cpc);
+    if (!cb || isLib(cpc)) return undefined;
+    const pv = cb.f.vars.find(v => v.param === reg);
+    const t = pv && defCount(cb.f, pv.id) === 0 ? baseTypes.get(cpc)?.get(pv.id) : undefined;
+    return t && !['AccountRecord', 'UnalignedAccount', 'Input'].includes(t) ? t : undefined;
+  };
   const funcs: FuncOut[] = [];
   const facts = new Map<number, FnFacts>();
   // a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
@@ -1084,7 +1148,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         if (cs[0].out) outObj.add(o);
         if (cs[0].extent) extentOf.set(o, cs[0].extent);
         const t = cs[0].type;
-        if (t && cs.every(c => c.type === t) && views.map.get(t) === BUILTIN_VIEW[t]) objType.set(o, t);
+        if (t && cs.every(c => c.type === t) && (BUILTIN_VIEW[t] ? views.map.get(t) === BUILTIN_VIEW[t] : views.map.has(t))) objType.set(o, t);
       }
       const sorted = [...bases].sort((a, b) => a - b);
       const pick = (o: number): [number, number] => {
@@ -1097,7 +1161,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       if (objType.size || outObj.size || extentOf.size) for (const a of frameAccesses(f, fpv.id)) {
         const [b, d] = pick(a.off);
         const t = objType.get(b), x = extentOf.get(b);
-        if ((t && !fitsAccess(views, t, d, a.size, a.copy)) || (a.write && outObj.has(b)) || (x !== undefined && d + a.size > x)) { objType.delete(b); objName.delete(b); }
+        if ((t && !(BUILTIN_VIEW[t] || views.map.get(t)?.size ? fitsAccess(views, t, d, a.size, a.copy) : a.copy || fitsLoose(views, t, d, a.size))) || (a.write && outObj.has(b)) || (x !== undefined && d + a.size > x)) { objType.delete(b); objName.delete(b); }
       }
       // regions (see frameregions.ts): call results of a known layout in a frame slot, and copies of them
       // (a generic single-call result yields to a region: its layout is known there)
@@ -1170,7 +1234,8 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           if (role && !role.inout) return { name: role.name, copyName: `${role.name}_copy`, type: role.type, why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
           const cn = fnName(t.pc).replace(/_[0-9a-f]{3,}$/, '');
           const rn = /^fn$|^fn_/.test(cn) || cn.length > 20 ? 'res' : `${cn}_res`;
-          if (tag !== undefined || outParams.has(t.pc)) return { name: rn, copyName: `${rn}_copy`, type: tag !== undefined ? `Tagged${tag * 8}` : undefined, why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
+          if (tag !== undefined || outParams.has(t.pc)) return { name: rn, copyName: `${rn}_copy`, type: paramView(t.pc, 1) ?? (tag !== undefined ? `Tagged${tag * 8}` : undefined), why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
+          if (isLib(t.pc) && _args.length > 1) return { name: 'res', copyName: 'res_copy', type: 'Result64', why: 'the result of the library call writing it (per call where the slot is reused)', reused: true };
           return undefined;
         },
       });
@@ -1336,7 +1401,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       };
       visit(body);
     }
-    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags, pc => isLib(pc) || outParams.has(pc)));
+    if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags, pc => isLib(pc) || outParams.has(pc), (cpc, i) => {
+      const reg = built.get(cpc)?.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
+      const t = paramView(cpc, reg);
+      return t ? { type: t, out: reg === 1 && outParams.has(cpc) } : undefined;
+    }));
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
     const paramType = (reg: number) => { const v = f.vars.find(x => x.param === reg); return (v && varTypes.get(v.id)) ?? 'u64'; };
@@ -1448,7 +1517,7 @@ function outRole(name: string): { name: string; type?: string; inout?: boolean }
   const n = name.replace(/_[0-9a-f]+$/, '');
   const m = /^__(multi3|udivti3|umodti3|divti3|modti3)$/.exec(n);
   if (m) return { name: m[1] === 'multi3' ? 'prod' : /div/.test(m[1]) ? 'quot' : 'rem', type: 'U128' };
-  if (/^Error_with_|^anchor_error_from$|^program_error_from(_\d+)?$/.test(n)) return { name: 'err' };
+  if (/^Error_with_|^anchor_error_from$|^program_error_from(_\d+)?$/.test(n)) return { name: 'err', type: 'Result64' };
   if (n === 'AccountInfo_clone') return { name: 'info', type: 'AccountInfo' };
   if (/^AccountInfo_try_borrow_(mut_)?data$/.test(n)) return { name: 'data_ref' };
   if (/^AccountInfo_try_borrow_(mut_)?lamports$/.test(n)) return { name: 'lamports_ref' };
@@ -1467,7 +1536,8 @@ function outRole(name: string): { name: string; type?: string; inout?: boolean }
  * passed as the out parameter (first argument) of calls whose result role is known: u128 builtins (U128),
  * Anchor error constructors (`err`).
  */
-function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>, outCallee: (pc: number) => boolean): Map<number, FrameClaim[]> {
+function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string, image: Program['image'], outTags: Map<number, number>, outCallee: (pc: number) => boolean,
+  argView?: (callee: number, i: number) => { type: string; out: boolean } | undefined): Map<number, FrameClaim[]> {
   const claims = new Map<number, FrameClaim[]>();
   const fp = f.vars.find(v => v.param === 10)?.id;
   if (fp === undefined) return claims;
@@ -1478,6 +1548,7 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   // out parameters: every use of the object's address is as the first argument of such calls
   const fo = (e: Expr): number | undefined => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const' ? Number(BigInt.asIntN(64, e.b.v)) : undefined);
   const escapes = new Map<number, number>(), argEsc = new Map<number, number>(), outs = new Map<number, FrameClaim[]>(), generic = new Map<number, FrameClaim[]>(), keyUses = new Map<number, number>();
+  const typedArgs = new Map<number, FrameClaim[]>(); // objects passed where the callee's parameter has a view type
   const keyUse = (o: number) => keyUses.set(o, (keyUses.get(o) ?? 0) + 1);
   const visit = (e: Expr, addr: boolean) => {
     const o = fo(e);
@@ -1494,6 +1565,10 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
         // (another library function or one only writing through its first parameter: a result, as words)
         else if (o0 !== undefined && e.t.k === 'fn' && outCallee(e.t.pc) && e.args.length > 1) { let l = generic.get(o0); if (!l) generic.set(o0, (l = [])); l.push({ name: 'res', type: 'Result64', why: GENERIC_RESULT, out: true }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
+        if (argView && e.t.k === 'fn') e.args.forEach((a, i) => {
+          const x = fo(a), v = x !== undefined ? argView((e.t as { pc: number }).pc, i) : undefined;
+          if (v) { let l = typedArgs.get(x!); if (!l) typedArgs.set(x!, (l = [])); l.push({ name: v.out ? 'res' : `s${(-x!).toString(16)}`, type: v.type, why: `typed as the parameter of the calls they are passed to`, out: v.out }); }
+        });
         if (e.t.k === 'ind') visit(e.t.e, false);
         e.args.forEach(a => visit(a, false));
         break;
@@ -1521,6 +1596,8 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
   // (a site object passed to other calls too is a slot reused for something else)
   for (const [o, cs] of sited) if ((argEsc.get(o) ?? 0) <= cs.length) cs.forEach(c => add(o, c));
   for (const [o, cs] of outs) if (cs.length === escapes.get(o) && !claims.has(o)) cs.forEach(c => add(o, c));
+  // (every use of its address as an argument whose parameter has one view type)
+  for (const [o, cs] of typedArgs) if (cs.length === escapes.get(o) && !claims.has(o) && cs.every(c => c.type === cs[0].type && c.name === cs[0].name)) cs.forEach(c => add(o, { ...c, out: false }));
   // (a single call's result; slots reused for several results: frameregions.ts)
   for (const [o, cs] of generic) if (cs.length === 1 && escapes.get(o) === 1 && !outs.has(o) && !claims.has(o)) add(o, cs[0]);
   // (a key: its address only ever an operand of 32-byte comparisons; its accesses inside its 32 bytes, see setupFrame)
@@ -2030,6 +2107,8 @@ function fitsLoose(V: Views, type: string, d: number, size: number): boolean {
   if (r.last.k === 'ref') return !r.rest && size === 8;
   return r.rest + size <= V.width(r.last);
 }
+/** library functions of solana_program's AccountInfo (their AccountInfo parameter: see the view propagation) */
+const LIB_INFO_FN = /^AccountInfo_(try_borrow_(mut_)?(data|lamports)|try_data_len|try_lamports|clone|realloc|resize|assign|lamports|data_len|data_is_empty|signer_key|unsigned_key)(_[0-9a-f]+)?$/;
 const ARRAY_VIEWS = new Set(['SolAccountMeta', 'AccountMeta', 'Slice', 'SeedList', 'FmtArg']);
 
 /** Frame offsets used in a function: `bases` = addresses that escape or start a copy/store run. */

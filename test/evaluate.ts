@@ -290,9 +290,9 @@ function compile(fn: ts.FunctionDeclaration): Compiled {
 		if (ts.isBinaryExpression(e)) {
 			const op = e.operatorToken.kind
 			if (op === K.EqualsToken && ts.isPropertyAccessExpression(e.left)) {
-				// x.f = v: store to a scalar view field
+				// x.f = v: store to a scalar (or pointer: 8 bytes) view field
 				const f = field(e.left), obj = ex(e.left.expression), r = ex(e.right), off = f.off, size = f.size
-				if (f.kind !== 'scalar') throw new EvalError('assignment to a non-scalar view field: ' + e.getText())
+				if (f.kind === 'embed') throw new EvalError('assignment to an embedded view field: ' + e.getText())
 				return () => { const a = W(obj() + off), v = W(r()); env().mem.store(a, size, v); return v }
 			}
 			if (op === K.EqualsToken) {
