@@ -523,7 +523,8 @@ function sameTree(a: any, b: any): boolean {
   return na === nb;
 }
 
-/** sameTree, ignoring instruction addresses (`pc`) */
+/** sameTree, ignoring statements' instruction addresses (`pc` of a statement; a call target's `pc` is its callee) */
+const STMT_KINDS = new Set(['set', 'store', 'call', 'eval', 'stores', 'copy', 'trap']);
 function samePcFree(a: any, b: any): boolean {
   if (a === b) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
@@ -533,9 +534,10 @@ function samePcFree(a: any, b: any): boolean {
     return true;
   }
   if (Array.isArray(b)) return false;
+  const skip = STMT_KINDS.has(a.k) ? 'pc' : undefined;
   let na = 0, nb = 0;
-  for (const k in a) { if (a[k] === undefined || k === 'pc') continue; na++; if (!samePcFree(a[k], b[k])) return false; }
-  for (const k in b) if (b[k] !== undefined && k !== 'pc') nb++;
+  for (const k in a) { if (a[k] === undefined || k === skip) continue; na++; if (!samePcFree(a[k], b[k])) return false; }
+  for (const k in b) if (b[k] !== undefined && k !== skip) nb++;
   return na === nb;
 }
 

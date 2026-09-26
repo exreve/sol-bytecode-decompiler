@@ -1225,7 +1225,7 @@ interface FrameClaim { name: string; type?: string; why: string; out?: boolean; 
  * Stack-object role of the first argument of a call to a (library) function of this name: where it writes
  * its result (Rust's return slot), or the object it works on (`&mut self`).
  */
-function outRole(name: string): { name: string; type?: string } | undefined {
+function outRole(name: string): { name: string; type?: string; inout?: boolean } | undefined {
   const n = name.replace(/_[0-9a-f]+$/, '');
   const m = /^__(multi3|udivti3|umodti3|divti3|modti3)$/.exec(n);
   if (m) return { name: m[1] === 'multi3' ? 'prod' : /div/.test(m[1]) ? 'quot' : 'rem', type: 'U128' };
@@ -1238,7 +1238,7 @@ function outRole(name: string): { name: string; type?: string } | undefined {
   if (/^Pubkey_(try_)?find_program_address$/.test(n)) return { name: 'pda' };
   if (/^Pubkey_create_program_address$/.test(n)) return { name: 'pda' };
   if (/^try_accounts$/.test(n)) return { name: 'accts' };
-  if (/^(RawVec_)?(reserve|reserve_for_push|grow_one|reserve_do_reserve_and_handle|do_reserve_and_handle|grow_amortized)$/.test(n)) return { name: 'vec' };
+  if (/^(RawVec_)?(reserve|reserve_for_push|grow_one|reserve_do_reserve_and_handle|do_reserve_and_handle|grow_amortized)$/.test(n)) return { name: 'vec', inout: true };
   return undefined;
 }
 
@@ -1271,7 +1271,7 @@ function frameRoles(f: VarFunc, sites: CpiSite[], fnName: (pc: number) => string
         // 32-byte comparisons: the operands are public keys
         const cn = e.t.k === 'fn' ? fnName(e.t.pc) : e.t.k === 'sys' ? e.t.name : '';
         if (/^(sol_)?memcmp_?$/.test(cn) && e.args[2]?.k === 'const' && e.args[2].v === 32n) for (const a of e.args.slice(0, 2)) { const x = fo(a); if (x !== undefined) keyUse(x); }
-        if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ ...r, why: 'out parameter of the calls they are passed to', out: true }); }
+        if (r) { let l = outs.get(o0!); if (!l) outs.set(o0!, (l = [])); l.push({ name: r.name, type: r.type, why: r.inout ? 'the object the calls they are passed to work on' : 'out parameter of the calls they are passed to', out: !r.inout }); }
         for (const a of e.args) { const x = fo(a); if (x !== undefined) argEsc.set(x, (argEsc.get(x) ?? 0) + 1); }
         if (e.t.k === 'ind') visit(e.t.e, false);
         e.args.forEach(a => visit(a, false));

@@ -512,7 +512,7 @@ export function functionFacts(inp: FnInput): FnFacts {
 	}
 	/** both sides exit: the one that looks like the error path (error markers; else much shorter) */
 	const out0 = sig && /^(?:export )?function \w+\((\w+)/.exec(sig)?.[1]
-	const okOut = out0 ? new RegExp(`^\\s*st64\\(${out0}, 0\\)$`, 'm') : undefined
+	const okOut = out0 ? new RegExp(`^\\s*(?:st64\\(${out0}, 0\\)|${out0}\\.tag = 0)$`, 'm') : undefined
 	const pickFail = (a: Node[], b: Node[], strict = false): 'then' | 'rest' | undefined => {
 		const la = span(a), lb = span(b)
 		// (a short side storing the Ok tag into the out object (the first parameter) and showing no error, before a rest
