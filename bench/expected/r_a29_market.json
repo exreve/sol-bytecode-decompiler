@@ -1,0 +1,88 @@
+{
+	"kind": "anchor",
+	"idl": "r_a29_market.json",
+	"set": "realistic",
+	"source": "bench/real29/r_a29_market (Anchor 0.29.0, solana-program 1.16.27, written for the bench)",
+	"about": "Realistic clean program: every finding on it is false. Scored for rules only. Market / Listing are Anchor accounts (owner + discriminator on load).",
+	"instructions": {
+		"init_market": {
+			"accounts": {},
+			"why": {
+				"admin": "Signer with address = ADMIN (hard-coded): only the deployer's admin initializes; pays the market rent and funds the fee vault's rent-exempt minimum.",
+				"market": "init at the constant PDA [market]: once.",
+				"fee_vault": "SystemAccount at PDA [fee_vault] (bump stored).",
+				"system_program": "Program<System>."
+			}
+		},
+		"set_fee": {
+			"accounts": {},
+			"why": { "market": "PDA [market] / stored bump, has_one = admin; fee_bps <= 500.", "admin": "Signer (has_one)." }
+		},
+		"set_paused": {
+			"accounts": {},
+			"why": { "market": "PDA [market]; constraint market.admin == admin.key() (Unauthorized).", "admin": "Signer." }
+		},
+		"transfer_admin": {
+			"accounts": {},
+			"why": { "market": "PDA [market], has_one = admin.", "admin": "Signer (current admin).", "new_admin": "Signer: the new admin accepts in the same transaction." }
+		},
+		"withdraw_fees": {
+			"accounts": {},
+			"why": {
+				"market": "PDA [market], has_one = admin.",
+				"admin": "Signer, the stored admin.",
+				"fee_vault": "SystemAccount at PDA [fee_vault] / market.fee_vault_bump; system transfer signed with those seeds; amount <= balance - rent minimum.",
+				"destination": "Any account the admin picks (UncheckedAccount by design).",
+				"system_program": "Program<System>."
+			}
+		},
+		"list": {
+			"accounts": {},
+			"why": {
+				"seller": "Signer; pays both rents and signs the deposit (token authority).",
+				"market": "PDA [market]; not paused.",
+				"mint": "Account<Mint>.",
+				"seller_token": "token::mint = mint, token::authority = seller.",
+				"listing": "init at PDA [listing, seller, mint]: fresh, bound to the seller and mint.",
+				"escrow": "init token account at PDA [escrow, listing] with the listing PDA as authority.",
+				"token_program / system_program": "Program<Token>, Program<System>."
+			}
+		},
+		"update_price": {
+			"accounts": {},
+			"why": { "listing": "Account<Listing>, has_one = seller.", "seller": "Signer, the stored seller. Buyers are protected by max_price in buy." }
+		},
+		"cancel_listing": {
+			"accounts": {},
+			"why": {
+				"seller": "Signer; the listing PDA seeds use seller.key() and has_one = seller; receives both rents (close = seller, CloseAccount destination).",
+				"listing": "PDA [listing, seller, listing.mint] / bump, has_one seller / escrow, close = seller; signs the escrow transfer and close.",
+				"escrow": "equal to listing.escrow.",
+				"seller_token": "token::mint = listing.mint; the seller's own choice of destination.",
+				"token_program": "Program<Token>."
+			}
+		},
+		"buy": {
+			"accounts": {},
+			"why": {
+				"buyer": "Signer; pays price * amount (checked) by system transfers from its own account; price <= max_price.",
+				"market": "PDA [market]; not paused; fee_bps.",
+				"listing": "PDA [listing, listing.seller, listing.mint] / bump, has_one = escrow; amount <= remaining; signs the escrow transfer.",
+				"escrow": "equal to listing.escrow.",
+				"seller": "address = listing.seller: the proceeds can only go to the seller.",
+				"fee_vault": "PDA [fee_vault] / market.fee_vault_bump.",
+				"buyer_token": "token::mint = listing.mint; the buyer's choice of destination.",
+				"token_program / system_program": "Program<Token>, Program<System>."
+			}
+		},
+		"sweep_listing": {
+			"accounts": {},
+			"why": {
+				"listing": "PDA / bump, has_one escrow / seller, constraint remaining == 0 (NotSoldOut), close = seller. Permissionless by design: closes a sold-out listing, every lamport goes to the stored seller.",
+				"escrow": "equal to listing.escrow; closed by CloseAccount signed by the listing PDA (the token program requires a zero balance).",
+				"seller": "has_one = seller: the rents can only go to the seller.",
+				"token_program": "Program<Token>."
+			}
+		}
+	}
+}

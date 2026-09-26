@@ -1,0 +1,138 @@
+{
+	"kind": "anchor",
+	"idl": "r_a31_staking.json",
+	"set": "realistic",
+	"source": "bench/real/r_a31_staking (Anchor 0.31.1, written for the bench)",
+	"about": "Realistic clean program: every finding on it is false. Scored for rules only. `why` gives, per instruction, why each account is safely validated. Config / Pool / Position / PoolStats are Anchor accounts (owner = this program + discriminator on every load).",
+	"instructions": {
+		"init_config": {
+			"accounts": {},
+			"why": {
+				"admin": "Signer, and program_data.upgrade_authority_address == Some(admin) (Unauthorized): only the upgrade authority can run the one-time setup.",
+				"config": "init at the constant PDA [config]: exists once, cannot be re-initialized.",
+				"program": "Program<StakingPool> (this program's id, executable), and programdata_address() == program_data (InvalidProgramData).",
+				"program_data": "Account<ProgramData>: owned by the upgradeable loader, deserialized; bound to this program by the constraint above.",
+				"system_program": "Program<System>."
+			}
+		},
+		"propose_admin": {
+			"accounts": {},
+			"why": { "config": "PDA [config] with stored bump, has_one = admin (Unauthorized).", "admin": "Signer, equal to config.admin." }
+		},
+		"accept_admin": {
+			"accounts": {},
+			"why": {
+				"config": "PDA [config]; constraint config.pending_admin == new_admin (NotPendingAdmin). pending_admin is reset to the default key, which nobody can sign for.",
+				"new_admin": "Signer: two-step rotation, the proposed key must sign."
+			}
+		},
+		"set_fee": {
+			"accounts": {},
+			"why": { "config": "PDA [config]; fee_bps <= MAX_FEE_BPS.", "admin": "Signer with address = config.admin (Unauthorized)." }
+		},
+		"set_paused": {
+			"accounts": {},
+			"why": { "config": "PDA [config].", "admin": "Signer, compared with config.admin by the only_admin helper (require_keys_eq!, Unauthorized) before the write." }
+		},
+		"set_treasury": {
+			"accounts": {},
+			"why": { "config": "PDA [config], has_one = admin.", "admin": "Signer (has_one)." }
+		},
+		"create_pool": {
+			"accounts": {},
+			"why": {
+				"admin": "Signer, config has_one = admin: only the admin creates pools (and pays their rent).",
+				"config": "PDA [config].",
+				"stake_mint / reward_mint": "Account<Mint> (SPL Token owned, unpacked); reward_mint != stake_mint (SameMint).",
+				"pool": "init at PDA [pool, stake_mint]: one pool per stake mint, fresh.",
+				"stake_vault / reward_vault": "init at PDAs [stake_vault|reward_vault, pool] as token accounts of the pool's mints with the pool PDA as authority.",
+				"stats": "init zero-copy at PDA [stats, pool].",
+				"token_program / system_program": "Program<Token>, Program<System>."
+			}
+		},
+		"set_reward_rate": {
+			"accounts": {},
+			"why": { "config": "PDA [config], has_one = admin.", "admin": "Signer.", "pool": "PDA [pool, pool.stake_mint] with the stored bump; accrued before the rate changes; rate bounded." }
+		},
+		"open_position": {
+			"accounts": {},
+			"why": {
+				"payer": "Signer, pays the rent. Permissionless by design (payer-funded init).",
+				"owner": "Any wallet (UncheckedAccount): only its key is stored and seeds the PDA, so the position can only ever be used by that wallet; creating it for someone else only costs the payer the rent.",
+				"pool": "PDA [pool, stake_mint] / stored bump.",
+				"position": "init at PDA [position, pool, owner]: fresh, one per (pool, owner).",
+				"system_program": "Program<System>."
+			}
+		},
+		"stake": {
+			"accounts": {},
+			"why": {
+				"config": "PDA [config]; must not be paused.",
+				"pool": "PDA [pool, stake_mint] / bump; has_one = stake_vault.",
+				"position": "PDA [position, pool, owner] / bump; has_one = owner, has_one = pool.",
+				"owner": "Signer (position owner; also the transfer authority).",
+				"user_stake": "token::mint = pool.stake_mint, token::authority = owner (the token program also requires the owner's signature).",
+				"stake_vault": "Account<TokenAccount> equal to pool.stake_vault (has_one).",
+				"token_program": "Program<Token>."
+			}
+		},
+		"unstake": {
+			"accounts": {},
+			"why": {
+				"config": "PDA [config] (fee_bps, treasury).",
+				"pool": "PDA / bump; has_one = stake_vault, has_one = stake_mint; signs the vault transfers with its own seeds.",
+				"position": "PDA [position, pool, owner]; has_one owner / pool; amount <= position.amount.",
+				"owner": "Signer, the position's owner.",
+				"stake_mint": "Account<Mint> equal to pool.stake_mint.",
+				"user_stake": "token::mint = stake_mint; any token account the owner picks (the owner withdraws its own stake).",
+				"stake_vault": "equal to pool.stake_vault.",
+				"treasury_token": "associated_token (mint = stake_mint, authority = config.treasury): the fee can only go to the configured treasury's ATA.",
+				"token_program / associated_token_program": "Program<Token>, Program<AssociatedToken>."
+			}
+		},
+		"claim": {
+			"accounts": {},
+			"why": {
+				"pool": "PDA / bump; has_one = reward_vault; signs the payout.",
+				"position": "PDA [position, pool, owner]; has_one owner / pool. Pays min(pending, vault balance), saturating.",
+				"owner": "Signer.",
+				"user_reward": "token::mint = pool.reward_mint; the owner's choice of destination.",
+				"reward_vault": "equal to pool.reward_vault.",
+				"stats": "zero-copy AccountLoader at PDA [stats, pool] / pool.stats_bump (owner + discriminator on load_mut).",
+				"token_program": "Program<Token>."
+			}
+		},
+		"fund_rewards": {
+			"accounts": {},
+			"why": {
+				"funder": "Signer; permissionless by design: anyone may donate rewards from its own account.",
+				"pool": "PDA / bump; has_one = reward_vault.",
+				"funder_token": "token::mint = pool.reward_mint, token::authority = funder (and the token program requires the funder's signature).",
+				"reward_vault": "equal to pool.reward_vault.",
+				"token_program": "Program<Token>."
+			}
+		},
+		"crank": {
+			"accounts": {},
+			"why": {
+				"cranker": "Signer, fee payer only: permissionless by design (moves the reward index to the current time, which every other instruction does too).",
+				"pool": "PDA / bump.",
+				"stats": "zero-copy at PDA [stats, pool] / pool.stats_bump. head is a ring-buffer cursor (wrapping_add by design, used modulo 16), not a value."
+			}
+		},
+		"sync_positions": {
+			"accounts": {},
+			"why": {
+				"pool": "PDA / bump. Permissionless: settles accrued rewards into each position's pending, exactly what the owner's own stake / unstake / claim would do; moves no tokens.",
+				"remaining accounts": "each one: owner == this program, writable, Account<Position>::try_from (discriminator), position.pool == pool (InvalidPosition). A position passed twice settles 0 the second time (reward_debt updated and written by exit)."
+			}
+		},
+		"close_position": {
+			"accounts": {},
+			"why": {
+				"owner": "Signer, has_one = owner; receives the rent (close = owner).",
+				"position": "Account<Position>, has_one = owner, close = owner (Anchor close: lamports moved, discriminator overwritten); amount == 0 and pending == 0 (PositionNotEmpty)."
+			}
+		}
+	}
+}
