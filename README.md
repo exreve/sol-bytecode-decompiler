@@ -132,7 +132,8 @@ entrypoint.ts   entrypoint, dispatcher, code not owned by a single instruction
 ix/<name>.ts    one instruction handler + helpers only it uses
 shared.ts       helpers used by several instructions
 lib.d.ts        runtime model, used syscalls, library stubs
-bundle/<ix>.ts  self-contained: one handler + all user code it reaches + the stubs it needs (an instruction a native
+bundle/<ix>.ts  one handler + the user code it reaches, nearest calls first, up to 30k lines (the rest declared
+                with the place of its body) + the stubs it needs (an instruction a native
                 processor handles inline: the processor cut down to the paths its tag takes)
 security/       summary.md (read first), <ix>.md per instruction, analysis.json, fingerprints.json
 ```

@@ -2,8 +2,8 @@
 // grow without bound: every path condition of every operation of every instruction). Detail is dropped
 // lowest-priority first, each cut leaving a "… N more" note (markdown) or an `<key>_omitted` count (JSON).
 
-/** Budgets: summary.md / <ix>.md lines, analysis.json bytes. */
-export const BUDGET = { summaryLines: 150, ixLines: 400, jsonBytes: 2 * 1024 * 1024 }
+/** Budgets: summary.md / <ix>.md lines, analysis.json bytes, lines of the functions inlined in a bundle/<ix>.ts. */
+export const BUDGET = { summaryLines: 150, ixLines: 400, jsonBytes: 2 * 1024 * 1024, bundleLines: 30_000 }
 
 interface Item { head: string; kids: string[] }
 interface Section { head: string[]; items: Item[]; tail: string[]; table: boolean }

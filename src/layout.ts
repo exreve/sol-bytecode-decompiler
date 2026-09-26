@@ -331,33 +331,54 @@ export function renderProject(r: Result): Map<string, string> {
 	const isRoot = (f: FuncOut | undefined) => !!f && (f.name.startsWith('ix_') || procNames.has(f.name))
 	const namesIn = (text: string) => new Set([...text.matchAll(CALLED)].map(m => m[1]))
 	const bundle = (ix: string, h: FuncOut, what: string, view?: (f: FuncOut) => Sliced | undefined) => {
-		// breadth-first from the handler (closest helpers first) over the functions its text calls (and the
-		// outlined tails it calls): every user function reached is in the bundle
+		// breadth-first from the handler by call depth (the handler, its direct callees, theirs, …; at each depth
+		// callees on non-error paths before error-only ones) up to a size budget; the functions left out are
+		// declared with the place of their body. Outlined tails called are always included.
+		type Code = FuncOut | { name: string; text: string }
 		const order = [h], outl: { name: string; text: string }[] = [], seen = new Set<string>([h.name]), sliced = new Map<FuncOut, Sliced>()
-		const q: string[] = []
 		// (other instructions' handlers / processors a path calls are not part of this instruction: declared)
-		const other: FuncOut[] = []
-		const visit = (names: Iterable<string>) => {
-			for (const n of names) if (!seen.has(n) && (byName.has(n) || outlByName.has(n))) { seen.add(n); if (isRoot(byName.get(n))) other.push(byName.get(n)!); else q.push(n) }
+		const other: FuncOut[] = [], left: FuncOut[] = []
+		const view1 = (g: FuncOut) => { const v = view?.(g); if (v) sliced.set(g, v); return v }
+		let size = view1(h)?.lines ?? lineCount(h)
+		// (the callees of a function by name, each with whether every call to it is on an error path)
+		const callees = (g: Code): [string, boolean][] => {
+			const fo = 'pc' in g ? g : undefined
+			const names = fo ? (sliced.has(fo) ? namesIn(sliced.get(fo)!.text) : scan(fo).called) : namesIn(g.text)
+			const err = new Map<number, boolean>()
+			if (fo) for (const c of r.facts.get(fo.pc)?.calls ?? []) err.set(c.callee, (err.get(c.callee) ?? true) && c.errPath)
+			return [...names].map(n => { const t = byName.get(n); return [n, !!t && err.get(t.pc) === true] })
 		}
-		const v0 = view?.(h)
-		if (v0) sliced.set(h, v0)
-		visit(v0 ? namesIn(v0.text) : scan(h).called)
-		while (q.length) {
-			const n = q.shift()!, g = byName.get(n)
-			if (!g) { const o = outlByName.get(n)!; outl.push(o); visit(namesIn(o.text)); continue }
-			order.push(g)
-			const v = view?.(g)
-			if (v) sliced.set(g, v)
-			visit(v ? namesIn(v.text) : scan(g).called)
+		let level: Code[] = [h]
+		while (level.length) {
+			const next = new Map<string, boolean>()
+			const add = (x: Code) => { for (const [n, e] of callees(x)) if (!seen.has(n) && (byName.has(n) || outlByName.has(n))) next.set(n, (next.get(n) ?? true) && e) }
+			for (const x of level) add(x)
+			// (outlined tails belong to the functions calling them: their callees are at the same depth)
+			for (let changed = true; changed;) {
+				changed = false
+				for (const n of [...next.keys()]) { const o = outlByName.get(n); if (o && !seen.has(n)) { seen.add(n); next.delete(n); outl.push(o); add(o); changed = true } }
+			}
+			level = []
+			for (const [n] of [...next].sort((x, y) => Number(x[1]) - Number(y[1]))) {
+				const g = byName.get(n)!
+				seen.add(n)
+				if (isRoot(g)) { other.push(g); continue }
+				const lines = view1(g)?.lines ?? lineCount(g)
+				if (size + lines > BUDGET.bundleLines) { sliced.delete(g); left.push(g); continue }
+				size += lines
+				order.push(g); level.push(g)
+			}
 		}
 		const sig = (f: FuncOut) => f.text.split('\n').find(l => l.startsWith('function '))!.replace(/^function /, 'declare function ').replace(/ \{$/, '')
-		const text = order.map(f => sliced.get(f)?.text ?? f.text).join('\n\n') + (other.length ? '\n\n// other instructions\' handlers called on these paths (see their own bundle / module):\n' + other.map(f => `${sig(f)} // ${f.name.startsWith('ix_') ? `bundle/${f.name.slice(3)}.ts` : `${home.get(f.name) ?? 'entrypoint'}.ts`}`).join('\n') : '')
+		const body = (f: FuncOut) => { const m = modLoc.get(f.name); return m ? `${m.file}:${m.line}` : `${home.get(f.name) ?? 'entrypoint'}.ts` }
+		const text = order.map(f => sliced.get(f)?.text ?? f.text).join('\n\n')
+			+ (left.length ? `\n\n// user functions this instruction reaches, not inlined (bundle size budget: ${BUDGET.bundleLines} lines); their bodies are in the modules named:\n` + left.map(f => `${sig(f)} // body: ${body(f)} (not inlined: bundle size budget)`).join('\n') : '')
+			+ (other.length ? '\n\n// other instructions\' handlers called on these paths (see their own bundle / module):\n' + other.map(f => `${sig(f)} // ${f.name.startsWith('ix_') ? `bundle/${f.name.slice(3)}.ts` : body(f)}`).join('\n') : '')
 		const used = new Set([...namesIn(text), ...outl.flatMap(o => [...namesIn(o.text)])])
 		const stubs = r.stubs.filter(x => used.has(/declare function (\w+)/.exec(x)![1]))
 		const sys = usedSyscalls(r, used)
 		const outlSorted = r.outlined.filter(x => seen.has(x.name))
-		const pre = [PRELUDE, `// instruction ${ix}: ${what} + ${order.length - 1} reachable functions`, ...usedViews(r, order), ...sys, ...stubs, ...(outlSorted.length ? ['', OUTLINED, ...outlSorted.map(x => x.text)] : []), ''].join('\n')
+		const pre = [PRELUDE, `// instruction ${ix}: ${what} + ${order.length - 1} reachable functions${left.length ? ` (${left.length} more declared at the end: bundle size budget)` : ''}`, ...usedViews(r, order), ...sys, ...stubs, ...(outlSorted.length ? ['', OUTLINED, ...outlSorted.map(x => x.text)] : []), ''].join('\n')
 		files.set(`bundle/${ix}.ts`, pre + '\n' + text + '\n')
 		const m = new Map<string, (line: number) => number>()
 		let at = pre.split('\n').length + 1
