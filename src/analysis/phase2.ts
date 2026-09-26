@@ -16,6 +16,7 @@ import type { Analysis, CheckOut, OpOut, IxOut, IxCtx, Loc } from './report.ts'
 import { cfgOf, decisionBlock, dominates, bypass, blockPc, type Cfg } from './flow.ts'
 import { dominators } from '../structure.ts'
 import { phase3Ix, stateMachine, closeZeroing } from './phase3.ts'
+import { structFields } from '../idl.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
 export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare'; status: 'found' | 'partial'; at: Loc; negated?: boolean }
@@ -201,8 +202,13 @@ export function phase2(a: Analysis, r: Result) {
 		// relations: two sides of an equality check, at least one an account key / field
 		const rel: Relation[] = []
 		for (const c of ix.checks) {
-			// (Anchor has_one on account T: T.<f> == f.key; the error names T, not f: each signer is a candidate)
-			if (c.kinds.includes('has_one') && c.account) for (const sgn of ix.accounts) if (sgn.name !== c.account && sgn.constraints.signer && sgn.constraints.signer.status !== 'not_found') rel.push({ a: hasOneField(c.account, sgn.name, c.cond, a), b: `${sgn.name}.key`, kind: 'has_one', status: c.status, at: c.at })
+			// (Anchor has_one on account T: T.<f> == f.key, f an account of the instruction and a field of T's type (the
+			// error names T, not f): by the bytes compared (c.sides), else the IDL's field names, else (no IDL) each signer)
+			if (c.kinds.includes('has_one') && c.account && !c.sides) {
+				const fields = idlFields(r)
+				const cands = fields ? ix.accounts.filter(x => x.name !== c.account && fields.has(x.name)) : ix.accounts.filter(x => x.name !== c.account && x.constraints.signer && x.constraints.signer.status !== 'not_found')
+				for (const t of cands) rel.push({ a: fields ? `${c.account}.${t.name}` : hasOneField(c.account, t.name, c.cond, a), b: `${t.name}.key`, kind: 'has_one', status: c.status, at: c.at })
+			}
 			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
 			const sides = c.sides ?? eqSides(c.cond)
 			if (!sides) continue
@@ -251,6 +257,15 @@ export function phase2(a: Analysis, r: Result) {
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
 	a.findings = findings
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
+}
+
+/** the fields of the IDL's account types (undefined without an IDL) */
+function idlFields(r: Result): Set<string> | undefined {
+	const idl = r.idl
+	if (!idl?.accounts?.length) return undefined
+	const out = new Set<string>()
+	for (const x of idl.accounts) for (const f of structFields(x.name, idl.types) ?? []) out.add(f.name)
+	return out
 }
 
 /**

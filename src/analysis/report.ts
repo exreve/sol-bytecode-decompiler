@@ -62,7 +62,7 @@ import type { Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
 import { refOf, cpiKinds } from './facts.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, type DispatchGroup, type AcctRef } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, accountResolver, cfgOf, decisionBlock, defsOf, compareAccounts, type DispatchGroup, type AcctRef } from './flow.ts'
 import type { Expr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 
@@ -241,6 +241,27 @@ function analyze0(r: Result): Analysis {
 		const pend: [string, string, number, string | undefined][] = []
 		const ops: OpOut[] = []
 		const idxName = (i: number) => accounts.find(y => y.index === i)?.name ?? `account[${i}]`
+		/** Anchor try_accounts: the accounts a check's key comparison reads (flow.ts compareAccounts) */
+		const anchorCompares = (ff: FnFacts): ((c: FnFacts['checks'][number]) => { acct: string; direct: boolean }[] | undefined) | undefined => {
+			const fo = byPc.get(ff.pc)
+			if (!fo || !ff.checks.some(c => c.named && c.before !== undefined)) return undefined
+			const D = defsOf(fo.f, { f: pc => byPc.get(pc)?.f, name: pc => p.funcs.get(pc)?.name ?? '' })
+			const g = cfgOf(fo), blocks = fo.f.blocks
+			// (each account's call: the last call of the checked callee before the check naming the account)
+			const calls = new Map<number, string>()
+			for (const c of ff.checks) {
+				if (!c.named || c.before === undefined || !c.c) continue
+				let b = decisionBlock(g, c.c, c.pc, c.passPc)
+				for (let k = 0; b !== undefined && k < 6; k++) {
+					const ss = blocks[b].stmts
+					const i = ss.findLastIndex(s => { const x = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined; return x?.t.k === 'fn' && x.t.pc === c.before })
+					if (i >= 0) { calls.set(b << 16 | i, c.named); break }
+					b = blocks[b].preds.length === 1 ? blocks[b].preds[0] : undefined
+				}
+			}
+			if (!calls.size) return undefined
+			return c => { const b = decisionBlock(g, c.c, c.pc, c.passPc); return b === undefined ? undefined : compareAccounts(D, c.c!, b << 16 | blocks[b].stmts.length, calls) }
+		}
 		/** the nearest instruction built before a line of a function: its own hints and calls to builders (functions with hints of one instruction) */
 		const hintBefore = (ff: FnFacts, line: number): IxHint | undefined => {
 			let best: IxHint | undefined
@@ -257,6 +278,7 @@ function analyze0(r: Result): Analysis {
 			// (native: accounts held in temporaries, by their place in the input / the AccountInfo slice)
 			const R = !r.anchor && byPc.get(ff.pc) ? accountResolver(byPc.get(ff.pc)!, { f: pc => byPc.get(pc)?.f, name: pc => p.funcs.get(pc)?.name ?? '' }) : undefined
 			const cn = (a: string | undefined) => { const x = a ? R?.byName.get(a) : undefined; return x ? idxName(x.index) : canon(a) }
+			const AC = r.anchor ? anchorCompares(ff) : undefined
 			for (const c of ff.checks) {
 				// (by the block deciding the condition: the failing side may be an error exit the tags share)
 				const cb = (grp || R) && c.c && byPc.get(ff.pc) ? decisionBlock(cfgOf(byPc.get(ff.pc)!), c.c, c.pc, c.passPc) : undefined
@@ -274,9 +296,21 @@ function analyze0(r: Result): Analysis {
 				const other = keyed && sd!.find(x => x !== keyed)
 				const sk = other === 'const' ? 'address' : other === 'pda' ? 'pda' : undefined
 				if (sk && !kinds.includes(sk)) kinds.push(sk)
-				const sides = sd && typeof sd[0] === 'object' && typeof sd[1] === 'object' && sd[0].index !== sd[1].index ? sd.map(x => `${idxName((x as AcctRef).index)}.${(x as AcctRef).field}`) as [string, string] : undefined
+				let sides = sd && typeof sd[0] === 'object' && typeof sd[1] === 'object' && sd[0].index !== sd[1].index ? sd.map(x => `${idxName((x as AcctRef).index)}.${(x as AcctRef).field}`) as [string, string] : undefined
+				// (Anchor: the accounts a key comparison reads, by where its bytes come from: an account's data (the
+				// checked account) and another account's key; has_one: the field is named after the target account)
+				const ac = AC && c.c && kinds.some(k => ['has_one', 'token_mint', 'token_owner', 'key', 'raw', 'custom'].includes(k)) ? AC(c) : undefined
+				let account = sk ? idxName(keyed!.index) : acct
+				if (ac) {
+					const dat = ac.find(x => x.direct), key = ac.find(x => !x.direct)
+					const d = canon(dat?.acct), k = canon(key?.acct)
+					if (d && k && d !== k) {
+						sides = [`${d}.${kinds.includes('has_one') ? k : kinds.includes('token_mint') ? 'mint' : kinds.includes('token_owner') ? 'owner' : 'data'}`, `${k}.key`]
+						if (!account || account.endsWith('?')) account = d
+					}
+				}
 				const at = loc(ff, c.line, c.pc)
-				checks.push({ at, status, account: sk ? idxName(keyed!.index) : acct, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main })
+				checks.push({ at, status, account, kinds, cond: c.cond, failsIf: c.failsIf, error: c.error, via: c.via ? `${c.via.fn} (${c.via.kinds.join(', ')})` : undefined, sides, fnPc: ff.pc, c: c.c, passPc: c.passPc, main: c.main })
 				const ci = checks.length - 1
 				if (sk) pend.push([idxName(keyed!.index), sk, ci, undefined])
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind

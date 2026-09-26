@@ -923,6 +923,50 @@ function callWrites(t: Extract<Stmt, { k: 'call' }>['t'], j: number, cl: Callee,
 	memo.set(key, n)
 	return n
 }
+/**
+ * Anchor try_accounts: the accounts two 32-byte comparisons read (has_one, token::mint / token::authority,
+ * address constraints). Each side's bytes are followed back (frame copies, stores of loaded words, pointers
+ * loaded from the frame) to the call that produced them: an account's try_accounts / deserialization call,
+ * which the check right after it names (`calls`: call position -> account). `direct`: the bytes are in the
+ * frame (a copy of the deserialized account's data) rather than behind a pointer (an AccountInfo's key).
+ */
+export function compareAccounts(D: Defs, c: Expr, p0: number, calls: Map<number, string>): { acct: string; direct: boolean }[] | undefined {
+	let x = c
+	while (x.k === 'lnot') x = x.a
+	const cmpArgs = (e: Expr): [Expr, Expr] | undefined => (e.k === 'call' || (e.k === 'fn' && e.name === 'memeq')) && e.args.length >= 3 && e.args[2].k === 'const' && e.args[2].v === 0x20n ? [e.args[0], e.args[1]] : undefined
+	const follow = (e: Expr, p: number): [Expr, number] => {
+		for (let k = 0; k < 6; k++) {
+			if (e.k === 'ext') { e = e.a; continue }
+			if (e.k !== 'var') break
+			const y: [Expr, number] | null = D.defs.has(e.id) ? [D.defs.get(e.id)!, D.defPos.get(e.id)!] : D.multi.has(e.id) ? D.reaching(e.id, p) : null
+			if (!y) break
+			;[e, p] = y
+		}
+		return [e, p]
+	}
+	let ca: [Expr, Expr] | undefined, cp = p0
+	for (const side of x.k === 'cmp' ? [x.a, x.b] : [x]) { const [e, p] = follow(side, p0); ca ??= cmpArgs(e); if (ca && cp === p0) cp = p }
+	if (!ca) return undefined
+	/** where the bytes a pointer points to come from */
+	const prov = (e: Expr, p: number, direct: boolean, d: number): { acct: string; direct: boolean } | undefined => {
+		if (d > 10) return undefined
+		;[e, p] = follow(e, p)
+		const o = D.fpOff(e)
+		if (o !== undefined) {
+			const y = D.reaching(D.SLOT(o), p, true)
+			if (!y) return undefined
+			const [v, q] = follow(y[0], y[1])
+			if (v.k === 'call') { const a = calls.get(y[1]); return a ? { acct: a, direct } : undefined }
+			return v.k === 'load' ? prov(v.addr, q, direct, d + 1) : undefined
+		}
+		// (bytes behind a pointer: where the pointer comes from)
+		const base = e.k === 'bin' && e.op === 'add' && e.b.k === 'const' ? e.a : e
+		const [b, q] = follow(base, p)
+		return b.k === 'load' && b.size === 8 ? prov(b.addr, q, false, d + 1) : undefined
+	}
+	return ca.map(a => prov(a, cp, true, 0)).filter((s): s is { acct: string; direct: boolean } => !!s)
+}
+
 /** Definitions in a function: single ones (a `set` or a call result), and the others and frame slots by position (reaching definitions). */
 export interface Defs {
 	fp: number
@@ -966,8 +1010,9 @@ export function defsOf(f: VarFunc, callee?: Callee): Defs {
 			const a = fpOff(s.k === 'stores' ? s.addr : s.dst), n = s.k === 'stores' ? s.vals.length * s.size : s.n
 			if (a === undefined || a >= o + 8 || a + n <= o) return undefined
 			if (s.k === 'stores') return (s.size === 8 || loose) && (o - a) % s.size === 0 ? s.vals[(o - a) / s.size] : null
-			const src = loose && a <= o ? fpOff(s.src) : undefined
-			return src === undefined ? null : { k: 'load', size: 8, addr: { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } }
+			if (!loose || a > o) return null
+			const src = fpOff(s.src), k = BigInt.asUintN(64, BigInt(o - a))
+			return { k: 'load', size: 8, addr: src !== undefined ? { k: 'bin', op: 'add', a: { k: 'var', id: fp }, b: { k: 'const', v: BigInt.asUintN(64, BigInt(src + o - a)) } } : k ? { k: 'bin', op: 'add', a: s.src, b: { k: 'const', v: k } } : s.src }
 		}
 		const c = callOf(s)
 		// (a callee may write the structure it gets a pointer to)
