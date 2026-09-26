@@ -1258,7 +1258,8 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 			if (e.k === 'ext') { e = e.a; continue }
 			if (e.k !== 'var') break
 			const y: [Expr, number] | null = defs.has(e.id) ? [defs.get(e.id)!, defPos.get(e.id)!] : multi.has(e.id) ? reaching(e.id, p) : null
-			if (!y || (y[0].k !== 'call' && !(y[0].k === 'ext' && y[0].a.k === 'call'))) break
+			const u = y && y[0].k === 'ext' ? y[0].a : y?.[0]
+			if (!y || (u!.k !== 'call' && u!.k !== 'var')) break
 			e = y[0]
 			p = y[1]
 		}
@@ -1340,7 +1341,15 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		if (r) return r
 		let st = false
 		walkExpr(e, x => { if (fpOff(x) !== undefined) st = true })
-		if (st) { const c = origin(e, p); return c && pdaCall(c.t) ? 'pda' : 'stack' }
+		if (st) {
+			const c = origin(e, p)
+			if (c && pdaCall(c.t)) return 'pda'
+			// (a frame copy of an account's key / data, e.g. a struct a helper read from the account: by its first word)
+			const w = ev({ k: 'load', size: 8, addr: e }, p)
+			const m = w?.k === 'val' ? /^data\[(\d+)\.\.\d+\]$/.exec(w.f) : undefined
+			if (w?.k === 'val' && (m || w.f === 'key' || w.f === 'owner')) return { index: w.i, field: m ? `data[${m[1]}..${Number(m[1]) + 32}]` : w.f }
+			return 'stack'
+		}
 		return e.k === 'const' || (e.k === 'var' && defs.get(e.id)?.k === 'const') ? 'const' : undefined
 	}
 	const sides = (c: Expr, b?: number): [Side, Side] | undefined => {
