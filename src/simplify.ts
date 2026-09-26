@@ -457,12 +457,10 @@ function sizeAtMost(e: Expr, n: number): boolean {
   return go(e);
 }
 
-/** Debug switch: SBPF_DISABLE=prop,inline,... turns passes off (bisecting miscompiles). */
 /** Program image used to fold loads from read-only memory (set per decompilation). */
 let foldImage: Image | null = null;
 export function setFoldImage(img: Image | null) { foldImage = img; }
 
-export const DISABLED = new Set((process.env.SBPF_DISABLE ?? '').split(',').filter(Boolean));
 
 /**
  * mapStmtExprsKeep(s, simplifyExpr), skipping statements already known to be left unchanged by it.
@@ -515,23 +513,22 @@ export function optimizeFunc(f: VarFunc) {
       if (b.term.k === 'br') { const c = simplifyExpr(b.term.c); if (c !== b.term.c) { b.term.c = c; mod(0); } }
       else if (b.term.k === 'ret' && b.term.e) { const c = simplifyExpr(b.term.e); if (c !== b.term.e) { b.term.e = c; mod(0); } }
     }
-    const off = (n: string) => DISABLED.has(n);
     const exact = (c: boolean, i: number) => { if (c) { changed = true; mod(i); } };
     // inlineLocal hands dce the exact use counts after its rewrites (saves a recount)
     let counts: Int32Array | undefined;
     const passes: (() => void)[] = [
       () => {},
-      () => { if (!off('prop')) { const r = { real: false }; changed = propagateGlobal(f, r) || changed; if (r.real) mod(1); } },
-      () => { if (!off('inline')) exact(inlineLocal(f, c => { counts = c; }), 2); },
+      () => { const r = { real: false }; changed = propagateGlobal(f, r) || changed; if (r.real) mod(1); },
+      () => { exact(inlineLocal(f, c => { counts = c; }), 2); },
       () => exact(dce(f, counts), 3),
-      () => { if (!off('lconst')) exact(localConstProp(f), 4); },
-      () => { if (!off('gconst')) exact(globalConstProp(f), 5); },
-      () => { if (!off('copy')) { const r = { real: false }; changed = localCopyProp(f, r) || changed; if (r.real) mod(6); } },
+      () => { exact(localConstProp(f), 4); },
+      () => { exact(globalConstProp(f), 5); },
+      () => { const r = { real: false }; changed = localCopyProp(f, r) || changed; if (r.real) mod(6); },
       () => { if (foldConstBranches(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; mod(7); } },
-      () => { if (!off('thread') && threadJumps(f)) { changed = true; mod(8); } },
-      () => { if (!off('ifconv') && ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; mod(9); } },
-      () => { if (!off('dse')) exact(deadStores(f), 10); },
-      () => { if (!off('taildup') && round < 6 && tailDuplicate(f)) { changed = true; mod(11); } },
+      () => { if (threadJumps(f)) { changed = true; mod(8); } },
+      () => { if (ifConvert(f)) { pruneUnreachable(f); mergeBlocks(f); changed = true; mod(9); } },
+      () => { exact(deadStores(f), 10); },
+      () => { if (round < 6 && tailDuplicate(f)) { changed = true; mod(11); } },
     ];
     for (let i = 1; i < passes.length; i++) {
       if (!st.real && i > prevLast) break; // (see above)

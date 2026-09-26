@@ -75,7 +75,7 @@ function refEval(e: Expr, env: bigint[]): bigint {
 }
 
 test('printer + simplifier are exact on random expressions', () => {
-	for (let seed = 1; seed <= Number(process.env.FUZZ_SEEDS ?? 2); seed++) fuzz(seed)
+	for (let seed = 1; seed <= 2; seed++) fuzz(seed)
 })
 
 function fuzz(seed: number) {

@@ -5,8 +5,7 @@
   "type": "module",
   "bin": {
     "sbpf-decompile": "src/cli.ts",
-    "sbpf-selector": "src/selector.ts",
-    "sbpf-diff": "src/diff.ts"
+    "sbpf-selector": "src/selector.ts"
   },
   "scripts": {
     "decompile": "node src/cli.ts",

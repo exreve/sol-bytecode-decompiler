@@ -3,7 +3,8 @@
 Needs only Node ≥ 23.6. No install step, no configuration.
 
 ```
-node src/cli.ts <program.so | program address> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+node src/cli.ts <program> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+node src/cli.ts <program A> <program B> [-o report.txt] [--rpc <url>]      # compare two programs
 ```
 
 ## Decompile
@@ -76,9 +77,10 @@ node src/selector.ts deposit               # name -> instruction / account / eve
 ## Compare two programs
 
 ```sh
-node src/diff.ts old.so new.so              # upgrade diff: changed/added/removed functions per instruction
-node src/diff.ts fork.so original.so        # fork matching: share of user code identical / near
-node src/diff.ts a.so b.so --idl-a a.json --idl-b b.json --all   # IDL instruction names too; full lists
+node src/cli.ts old.so new.so                         # upgrade diff: changed/added/removed functions per instruction
+node src/cli.ts fork.so original.so                   # fork matching: share of user code identical / near
+node src/cli.ts <addr A> <addr B> --rpc <url>         # deployed programs (on-chain IDLs used when published)
+node src/cli.ts old.so new.so -o report.txt           # complete lists (the terminal shows shortened ones)
 ```
 
 `same code (e.g. redeployed at a new address)` means the same set of function hashes (addresses, call

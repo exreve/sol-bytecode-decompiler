@@ -1,17 +1,15 @@
-#!/usr/bin/env node
 // Program diff from bytecode alone: which functions (and instruction handlers) differ between two
 // builds, or how much code two programs share (fork-family matching).
-//   node src/diff.ts a.so b.so [--idl-a a.json] [--idl-b b.json] [--all]
+//   sbpf-decompile a.so b.so [-o report.txt]   (src/cli.ts)
 // Functions are matched by address-independent hash (src/fingerprint.ts), then by register-renamed
 // hash, instruction name, symbol name, and finally by coarse shape + call-graph neighbourhood.
 // Only the decompiler's first phase runs (lifting, signatures, library recognition, instruction names).
-import { readFileSync } from 'node:fs'
 import { loadProgram, type Program } from './program.ts'
 import { inferSignatures } from './dataflow.ts'
 import { Semantics } from './semantics.ts'
 import { classify } from './library.ts'
 import { signatures, fuzzySim, codeHash, type FnSig } from './fingerprint.ts'
-import { parseIdl, type IdlInfo } from './idl.ts'
+import type { IdlInfo } from './idl.ts'
 import { decompile, type Result } from './decompile.ts'
 import { analyze } from './analysis/report.ts'
 
@@ -229,21 +227,4 @@ export function diff(A: Profile, B: Profile, opts: { all?: boolean; labels?: [st
 	list(added, pc => `  + ${nm(B, pc)}  ${size(B, pc)} insns${ixs(B, pc)}`)
 	list(removed, pc => `  - ${nm(A, pc)}  ${size(A, pc)} insns${ixs(A, pc)}`)
 	return { A, B, m, lines: L }
-}
-
-if (import.meta.main) {
-	const args = process.argv.slice(2)
-	const opt = (n: string) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined }
-	const files = args.filter((a, i) => !a.startsWith('--') && !['--idl-a', '--idl-b'].includes(args[i - 1]))
-	if (files.length !== 2) {
-		console.error('usage: node src/diff.ts a.so b.so [--idl-a a.json] [--idl-b b.json] [--all]')
-		process.exit(1)
-	}
-	const idl = (f?: string) => (f ? parseIdl(JSON.parse(readFileSync(f, 'utf8'))) : undefined)
-	const t0 = performance.now()
-	const A = profile(new Uint8Array(readFileSync(files[0])), idl(opt('--idl-a')))
-	const B = profile(new Uint8Array(readFileSync(files[1])), idl(opt('--idl-b')))
-	const d = diff(A, B, { all: args.includes('--all'), labels: [files[0], files[1]] })
-	console.log(d.lines.join('\n'))
-	console.error(`(${((performance.now() - t0) / 1000).toFixed(2)} s)`)
 }

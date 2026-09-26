@@ -1,7 +1,7 @@
 // End-to-end pipeline: ELF -> functions -> IR -> variables -> simplified -> structured -> TypeScript.
 import { loadProgram, type Program, fnAddr } from './program.ts';
 import { inferSignatures, recoverVars, type VarFunc } from './dataflow.ts';
-import { optimizeFunc, stmtExprs, DISABLED, setFoldImage, isSettled } from './simplify.ts';
+import { optimizeFunc, stmtExprs, setFoldImage, isSettled } from './simplify.ts';
 import { structure, cleanup, type Node } from './structure.ts';
 import { Printer, printBody, keyB58, type PrintCtx } from './print.ts';
 import { type Expr, type Stmt, walkExpr, mapExpr, exprEq, INTRINSICS } from './ir.ts';
@@ -75,7 +75,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const p = loadProgram(bytes, { lazyBlocks: true }); // (blocks formed by inferSignatures, see program.ts)
   inferSignatures(p);
   const sem = new Semantics(p, opts.idl);
-  setFoldImage(DISABLED.has('rofold') ? null : p.image);
+  setFoldImage(p.image);
   const libs: Map<number, LibInfo> = opts.full ? new Map() : classify(p);
   const sigs = signatures(p); // (before the later phases reshape the blocks)
   // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior, see builtins.ts)
@@ -108,21 +108,21 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (isLib(f0.pc)) continue;
     const f = recoverVars(p, f0);
     optimizeFunc(f);
-    if (!opts.exactMemory && !DISABLED.has('promote') && promoteStack(f)) optimizeFunc(f);
+    if (!opts.exactMemory && promoteStack(f)) optimizeFunc(f);
     // (a function whose IR idioms did not actually modify and that optimizeFunc left at a fixpoint
     // would come out of optimizeFunc unchanged: the call is skipped, see isSettled)
     const idi = { real: false };
-    if (!DISABLED.has('idioms') && recognizeIdioms(f, idi) && (idi.real || !isSettled(f))) optimizeFunc(f);
+    if (recognizeIdioms(f, idi) && (idi.real || !isSettled(f))) optimizeFunc(f);
     built.set(f.pc, { f, body: [], irreducible: false });
   }
 
   // ---- SBF stack-passed arguments become ordinary parameters ----
-  if (!opts.exactMemory && !DISABLED.has('stackargs')) rewriteStackArgs(p, built);
+  if (!opts.exactMemory) rewriteStackArgs(p, built);
   for (const bt of built.values()) {
-    if (!DISABLED.has('compact')) compactStores(bt.f);
+    compactStores(bt.f);
     const st = structure(bt.f);
     bt.body = cleanup(st, bt.f.returns);
-    if (!DISABLED.has('stmtidioms')) bt.body = statementIdioms(bt.body, opts.exactMemory ? undefined : bt.f.vars.find(v => v.param === 10)?.id);
+    bt.body = statementIdioms(bt.body, opts.exactMemory ? undefined : bt.f.vars.find(v => v.param === 10)?.id);
     bt.irreducible = st.irreducible;
   }
 

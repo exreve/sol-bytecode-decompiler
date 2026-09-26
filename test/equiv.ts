@@ -64,7 +64,6 @@ export function checkProgram(bytes: Uint8Array, trials = 20, maxFuncs = Infinity
 		const f = fo.f
 		for (let t = 0; t < trials; t++) {
 			const seed = t * 7919 + fo.pc
-			if (process.env.SBPF_TRACE) console.log('TRIAL', seed)
 			const R = rng(seed)
 			const pick = (): bigint => {
 				const k = Number(R() % 6n)

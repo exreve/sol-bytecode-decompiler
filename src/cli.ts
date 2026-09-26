@@ -22,49 +22,64 @@ const { renderProject } = await import('./layout.ts')
 const { parseIdl, fetchIdl } = await import('./idl.ts')
 const { isAddress, fetchProgram } = await import('./rpc.ts')
 
-const USAGE = `usage: sbpf-decompile <program.so | program address> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+const USAGE = `usage: sbpf-decompile <program> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+       sbpf-decompile <program A> <program B> [-o report.txt] [--rpc <url>]
 
-  program.so        a local program binary ("-" reads it from stdin)
-  program address   fetched from the RPC endpoint given with --rpc (its on-chain Anchor IDL is used when published)
+  <program>         a local .so file ("-" reads it from stdin), or a program address fetched with --rpc
+                    (its on-chain Anchor IDL is used when published)
   -o out.ts         write a single file (default: stdout)
   -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, security/
   --idl file.json   Anchor IDL (instruction args/accounts, account layouts, error names)
-  --full            also decompile recognized library code (default: one-line typed stubs)`
+  --full            also decompile recognized library code (default: one-line typed stubs)
+  two programs      compare them (upgrade diff / fork matching); long lists are shortened on the terminal,
+                    complete with -o`
 
 const args = process.argv.slice(2)
 const VALUED = new Set(['-o', '--idl', '--rpc'])
 const opt = (n: string) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined }
 const flag = (n: string) => args.includes(n)
-const input = args.find((a, i) => (!a.startsWith('-') || a === '-') && !VALUED.has(args[i - 1]))
-if (!input || flag('-h') || flag('--help')) {
+const inputs = args.filter((a, i) => (!a.startsWith('-') || a === '-') && !VALUED.has(args[i - 1]))
+if (!inputs.length || inputs.length > 2 || flag('-h') || flag('--help')) {
 	console.error(USAGE)
-	process.exit(input || flag('-h') || flag('--help') ? 0 : 1)
+	process.exit(inputs.length && inputs.length <= 2 ? 0 : 1)
 }
 const fail = (msg: string): never => { console.error(`error: ${msg}`); process.exit(1) }
 const rpc = opt('--rpc')
+const out = opt('-o')
 
-// ---- program bytes ----
-let bytes: Uint8Array
-let programId: string | undefined
-if (input === '-') bytes = new Uint8Array(readFileSync(0))
-else if (existsSync(input)) bytes = new Uint8Array(readFileSync(input))
-else if (isAddress(input)) {
-	if (!rpc) fail(`${input} looks like a program address: pass --rpc <url> to fetch it`)
-	programId = input
-	try { bytes = await fetchProgram(rpc!, input) } catch (e) { fail(String((e as Error).message ?? e)) }
-	console.error(`fetched ${input}: ${bytes!.length} bytes`)
-} else fail(`${input}: no such file, and not a program address`)
-
-// ---- IDL: explicit file, or the on-chain one of a fetched program ----
-let idlJson: any
-if (opt('--idl')) idlJson = JSON.parse(readFileSync(opt('--idl')!, 'utf8'))
-else if (programId && rpc) {
-	try { idlJson = await fetchIdl(programId, rpc) } catch { /* no IDL */ }
-	if (idlJson) console.error(`using on-chain Anchor IDL of ${programId}`)
+/** Program bytes, and the IDL (explicit file, or the on-chain one of a fetched program). */
+async function load(input: string, idlFile?: string): Promise<{ bytes: Uint8Array; idl?: ReturnType<typeof parseIdl> }> {
+	let bytes: Uint8Array
+	let programId: string | undefined
+	if (input === '-') bytes = new Uint8Array(readFileSync(0))
+	else if (existsSync(input)) bytes = new Uint8Array(readFileSync(input))
+	else if (isAddress(input)) {
+		if (!rpc) fail(`${input} looks like a program address: pass --rpc <url> to fetch it`)
+		programId = input
+		try { bytes = await fetchProgram(rpc!, input) } catch (e) { fail(String((e as Error).message ?? e)) }
+		console.error(`fetched ${input}: ${bytes!.length} bytes`)
+	} else fail(`${input}: no such file, and not a program address`)
+	let idlJson: any
+	if (idlFile) idlJson = JSON.parse(readFileSync(idlFile, 'utf8'))
+	else if (programId && rpc) {
+		try { idlJson = await fetchIdl(programId, rpc) } catch { /* no IDL */ }
+		if (idlJson) console.error(`using on-chain Anchor IDL of ${programId}`)
+	}
+	return { bytes: bytes!, idl: idlJson ? parseIdl(idlJson) : undefined }
 }
 
-const res = decompile(bytes!, { full: flag('--full'), idl: idlJson ? parseIdl(idlJson) : undefined })
-const out = opt('-o')
+if (inputs.length === 2) {
+	const { profile, diff } = await import('./diff.ts')
+	const [a, b] = await Promise.all(inputs.map(i => load(i)))
+	const d = diff(profile(a.bytes, a.idl), profile(b.bytes, b.idl), { all: !!out, labels: [inputs[0], inputs[1]] })
+	const text = d.lines.join('\n') + '\n'
+	if (out) writeFileSync(out, text)
+	else process.stdout.write(text)
+	process.exit(0)
+}
+
+const { bytes, idl } = await load(inputs[0], opt('--idl'))
+const res = decompile(bytes, { full: flag('--full'), idl })
 if (out && (out.endsWith('/') || (existsSync(out) && statSync(out).isDirectory()))) {
 	for (const [path, text] of renderProject(res)) {
 		mkdirSync(dirname(join(out, path)), { recursive: true })

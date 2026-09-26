@@ -28,15 +28,19 @@ Output is always the most readable exact form; there are no modes to choose. Rec
 ## Usage
 
 ```
-sbpf-decompile <program.so | program address> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+sbpf-decompile <program> [-o out.ts | -o outdir/] [--rpc <url>] [--idl <file.json>] [--full]
+sbpf-decompile <program A> <program B> [-o report.txt] [--rpc <url>]
 
-  program.so        a local program binary ("-" reads it from stdin)
-  program address   fetched from the RPC endpoint given with --rpc (its on-chain Anchor IDL is used when published)
+  <program>         a local .so file ("-" reads it from stdin), or a program address fetched with --rpc
+                    (its on-chain Anchor IDL is used when published)
   -o out.ts         write a single file (default: stdout)
   -o outdir/        write a project: index.ts, bundle/<ix>.ts, ix/, shared.ts, entrypoint.ts, lib.d.ts, security/
   --idl file.json   Anchor IDL (instruction args/accounts, account layouts, error names)
   --full            also decompile recognized library code (default: one-line typed stubs)
+  two programs      compare them (see Program diff); long lists are shortened on the terminal, complete with -o
 ```
+
+The program analysis (`security/`) is always produced with the decompilation; there is nothing to enable.
 
 Upgradeable programs are resolved through their programdata account; loader v4 and the legacy loaders work too.
 
@@ -45,7 +49,6 @@ Other tools:
 | command | what |
 |---|---|
 | `node src/selector.ts 0xc88775e1919ec6f8` | discriminator → name (`i:swap`); a name → its instruction / account / event discriminators |
-| `node src/diff.ts a.so b.so [--idl-a x.json --idl-b y.json] [--all]` | program diff / fork matching from bytecode (see [Program diff](#program-diff)) |
 | `node --stack-size=65500 test/equiv.ts program.so 3 [--idl x.json]` | check a decompilation against the emulator (expected: `0 failing functions`) |
 | `node bench/run.ts [--verbose]` | score the analysis against ground truth ([bench/README.md](bench/README.md)) |
 
@@ -146,7 +149,7 @@ Computed from the same IR in the same run (a few % of the run time); spec and kn
   vs validated values, arithmetic on value paths, a property checklist per operation; each item linked to
   `bundle/<ix>.ts:<line>`.
 * `analysis.json`: all of it (schema in `src/analysis/report.ts`).
-* `fingerprints.json`: per-function address-independent hashes (used by `diff.ts`).
+* `fingerprints.json`: per-function address-independent hashes (used by the program diff).
 
 Statuses: `found` (dominates every sensitive operation), `partial` (some paths), `not_found` (none recognized —
 not a proof of absence), `runtime` (enforced by Solana). Native programs are split per instruction on their tag
@@ -155,7 +158,7 @@ by [bench/](bench/README.md): small programs compiled from source with known fac
 
 ### Program diff
 
-`node src/diff.ts a.so b.so` works from bytecode only (~0.2 s for 10k instructions, ~2 s for 250k) and prints a
+`sbpf-decompile a.so b.so` (files or addresses) works from bytecode only (~0.2 s for 10k instructions, ~2 s for 250k) and prints a
 verdict (`same code (e.g. redeployed at a new address)`, `same program code; toolchain/library version changed`,
 `same program, modified`, `related programs (fork family / shared code base)`, `different programs`), the share of
 user code identical / near-identical, instruction arms added / removed, library differences as one line, and the

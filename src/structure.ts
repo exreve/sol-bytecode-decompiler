@@ -188,7 +188,7 @@ export function structure(f: VarFunc): Structured {
   let { order, rpo } = computeRpo(f);
   let idom = dominators(f, order, rpo);
   if (irreducibleEdge(f, rpo, idom, order)) {
-    if (process.env.SBPF_DISABLE?.includes('split') || !makeReducible(f)) return dispatcher(f, order);
+    if (!makeReducible(f)) return dispatcher(f, order);
     ({ order, rpo } = computeRpo(f));
     idom = dominators(f, order, rpo);
   }
@@ -588,7 +588,6 @@ function dupPass(ns: Node[]): Node[] {
 
 export function cleanup(s: Structured, returnsValue: boolean): Node[] {
   let body = s.body;
-  if (process.env.SBPF_DISABLE?.includes('cleanup')) return body;
   const top: Cont = { breaks: new Set(), conts: new Set(), ret: !returnsValue };
   for (let i = 0; i < 12; i++) {
     const before = body;
@@ -596,7 +595,7 @@ export function cleanup(s: Structured, returnsValue: boolean): Node[] {
     let refs = new Map<string, number>(); countRefs(body, refs);
     body = labelPass(body, refs);
     body = ifPass(body, top);
-    if (!process.env.SBPF_DISABLE?.includes('dup')) body = dupPass(body);
+    body = dupPass(body);
     body = tailPass(body, top, []);
     refs = new Map(); countRefs(body, refs);
     body = labelPass(body, refs);
