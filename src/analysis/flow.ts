@@ -2113,6 +2113,7 @@ export function ctxResolver(fns: { byPc: Map<number, FuncOut> }, callee: Callee,
 
 const extMemo = new WeakMap<AcctResolver, Map<string, AV>>()
 const classifyMemo = new WeakMap<VarFunc, Map<string, [number, AV][]>>()
+const pdaMemo = new WeakMap<Defs, { full?: Set<number>; eqs: Map<Expr, Map<number, [number, number, Expr][]>> }>()
 /** a callee's parameters bound to the caller's values at a call (see ctxResolver) */
 export function seedFrom(PR: AcctResolver | undefined, pf: FuncOut | undefined, c: ReturnType<typeof callOf>, pos: number, fo: FuncOut, fn: number): Map<number, AcctVal> {
 	const seed = new Map<number, AcctVal>()
@@ -2383,7 +2384,18 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 		return bs.length ? [Math.max(...bs), o - Math.max(...bs)] : undefined
 	}
 	/** the word equalities of a condition between a PDA's output and another value (not another PDA word) */
+	// (pdaWord / pdaEqs / pdaFull read the definitions and the callee's names only: shared by the function's resolvers)
+	let PM = pdaMemo.get(D)
+	if (!PM) pdaMemo.set(D, (PM = { eqs: new Map() }))
+	const pm = PM
 	const pdaEqs = (c: Expr, p: number): [number, number, Expr][] => {
+		let m = pm.eqs.get(c)
+		if (!m) pm.eqs.set(c, (m = new Map()))
+		let y = m.get(p)
+		if (!y) m.set(p, (y = pdaEqs0(c, p)))
+		return y
+	}
+	const pdaEqs0 = (c: Expr, p: number): [number, number, Expr][] => {
 		const out: [number, number, Expr][] = []
 		walkExpr(c, x => {
 			if (x.k !== 'cmp' || (x.op !== 'eq' && x.op !== 'ne')) return
@@ -2394,14 +2406,14 @@ export function accountResolver(fo: { f: VarFunc; names: string[] }, callee?: Ca
 	}
 	/** the PDA outputs (frame buffers) whose 4 words are all compared: a 32-byte comparison split in words, e.g. with
 	 * an account key read word by word */
-	let pdaFull: Set<number> | undefined
 	const pdaChain = (c: Expr, p: number): Expr | undefined => {
+		let pdaFull = pm.full
 		if (!pdaFull) {
 			const seen = new Map<number, Set<number>>()
 			f.blocks.forEach((b, bi) => {
 				if (b.term.k === 'br') for (const [o, w] of pdaEqs(b.term.c, bi << 16 | b.stmts.length)) { let m = seen.get(o); if (!m) seen.set(o, (m = new Set())); m.add(w) }
 			})
-			pdaFull = new Set([...seen].filter(([, m]) => m.size === 4).map(([o]) => o))
+			pdaFull = pm.full = new Set([...seen].filter(([, m]) => m.size === 4).map(([o]) => o))
 		}
 		return pdaFull.size ? pdaEqs(c, p).find(([o]) => pdaFull!.has(o))?.[2] : undefined
 	}

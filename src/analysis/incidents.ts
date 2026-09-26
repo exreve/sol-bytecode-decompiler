@@ -95,53 +95,58 @@ function scope(r: Result, ix: IxOut): Fn[] {
 }
 
 const stmtExprs = (s: Stmt): Expr[] => s.k === 'set' || s.k === 'eval' ? [s.e] : s.k === 'store' ? [s.addr, s.v] : s.k === 'stores' ? [s.addr, ...s.vals] : s.k === 'copy' ? [s.dst, s.src] : s.k === 'call' ? s.args : []
-/** the loads and the divisions of the scope (sub-expressions included), with their function and position */
+/**
+ * A block's expressions the rules read (sub-expressions included, with their position and statement expression): the
+ * loads introSites / pythLoads match by their address' shape, the divisions, the calls (statements and calls nested in
+ * expressions), and whether a branch condition or a statement compares with the Pyth magic; one walk, built once per block
+ */
 type ExprAt = [e: Expr, p: number, top: Expr]
-interface BlockExprs { load: ExprAt[]; div: ExprAt[] }
-const exprMemo = new WeakMap<FuncOut, BlockExprs[]>()
-function exprsOf(fo: FuncOut, b: number): BlockExprs {
-	let m = exprMemo.get(fo)
-	if (!m) exprMemo.set(fo, (m = []))
-	let out = m[b]
-	if (out) return out
-	const o: BlockExprs = out = m[b] = { load: [], div: [] }
-	const add = (x: Expr, p: number, e: Expr) => { if (x.k === 'load') o.load.push([x, p, e]); else if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv')) o.div.push([x, p, e]) }
-	const bl = fo.f.blocks[b]
-	bl.stmts.forEach((s, i) => { for (const e of stmtExprs(s)) walkExpr(e, x => add(x, b << 16 | i, e)) })
-	if (bl.term.k === 'br') { const c = bl.term.c; walkExpr(c, x => add(x, b << 16 | bl.stmts.length, c)) }
-	else if (bl.term.k === 'ret' && bl.term.e) { const c = bl.term.e; walkExpr(c, x => add(x, b << 16 | bl.stmts.length, c)) }
-	return out
-}
-function eachExpr(sc: Fn[], k: keyof BlockExprs, f: (fn: Fn, e: Expr, p: number, top: Expr) => void) {
-	for (const fn of sc) for (const b of fn.blocks) for (const [x, p, e] of exprsOf(fn.fo, b)[k]) f(fn, x, p, e)
-}
-/** the calls of the scope (statements and calls nested in expressions), with their position */
 type CallAt = [name: string, args: Expr[], p: number, pc: number, target: number | undefined]
-const callMemo = new WeakMap<FuncOut, CallAt[][]>()
-function callsOf(fo: FuncOut, b: number, r: Result): CallAt[] {
-	let m = callMemo.get(fo)
-	if (!m) callMemo.set(fo, (m = []))
+interface BlockExprs { intro: ExprAt[]; pyth: ExprAt[]; div: ExprAt[]; calls: CallAt[]; magic: boolean }
+const blockMemo = new WeakMap<FuncOut, BlockExprs[]>()
+const isMagicCmp = (x: Expr) => x.k === 'cmp' && ((x.a.k === 'const' && (x.a.v & 0xffffffffn) === PYTH_MAGIC) || (x.b.k === 'const' && (x.b.v & 0xffffffffn) === PYTH_MAGIC))
+function blockOf(fo: FuncOut, b: number, r: Result): BlockExprs {
+	let m = blockMemo.get(fo)
+	if (!m) blockMemo.set(fo, (m = []))
 	let out = m[b]
 	if (out) return out
-	out = m[b] = []
-	const o = out
+	const o: BlockExprs = out = m[b] = { intro: [], pyth: [], div: [], calls: [], magic: false }
 	const nameOf = (t: Extract<Expr, { k: 'call' }>['t']) => t.k === 'sys' ? t.name : t.k === 'fn' ? r.program.funcs.get(t.pc)?.name ?? '' : ''
+	const add = (x: Expr, p: number, e: Expr) => {
+		if (x.k === 'load') {
+			// (by their address' shape: a u16 at a sum of two terms ± 2 (introSites), a load at a Pyth field offset (pythLoads))
+			const s = sumOf(x.addr)
+			if (x.size === 2 && s.terms.length === 2 && (s.c === M64 - 1n || s.c === 2n)) o.intro.push([x, p, e])
+			if (PYTH_FIELDS.has(Number(s.c > 0xffffn ? -1n : s.c)) && s.terms.length && s.terms.length <= 2) o.pyth.push([x, p, e])
+		} else if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv')) o.div.push([x, p, e])
+	}
 	const bl = fo.f.blocks[b]
 	bl.stmts.forEach((s, i) => {
-		const c = callOf(s)
-		if (s.k === 'call') o.push([nameOf(s.t), s.args, b << 16 | i, s.pc, s.t.k === 'fn' ? s.t.pc : undefined])
-		for (const e of stmtExprs(s)) walkExpr(e, x => { if (x.k === 'call' && x !== (c as unknown)) o.push([nameOf(x.t), x.args, b << 16 | i, s.pc, x.t.k === 'fn' ? x.t.pc : undefined]) })
+		const c = callOf(s), p = b << 16 | i
+		if (s.k === 'call') o.calls.push([nameOf(s.t), s.args, p, s.pc, s.t.k === 'fn' ? s.t.pc : undefined])
+		for (const e of stmtExprs(s)) walkExpr(e, x => {
+			add(x, p, e)
+			if (x.k === 'call' && x !== (c as unknown)) o.calls.push([nameOf(x.t), x.args, p, s.pc, x.t.k === 'fn' ? x.t.pc : undefined])
+			else if (!o.magic && isMagicCmp(x)) o.magic = true
+		})
 	})
-	const t = bl.term.k === 'ret' ? bl.term.e : bl.term.k === 'br' ? bl.term.c : null
-	if (t) walkExpr(t, x => { if (x.k === 'call') o.push([nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined]) })
+	const t = bl.term.k === 'ret' ? bl.term.e : bl.term.k === 'br' ? bl.term.c : null, br = bl.term.k === 'br'
+	if (t) walkExpr(t, x => {
+		add(x, b << 16 | bl.stmts.length, t)
+		if (x.k === 'call') o.calls.push([nameOf(x.t), x.args, b << 16 | bl.stmts.length, -1, x.t.k === 'fn' ? x.t.pc : undefined])
+		else if (br && !o.magic && isMagicCmp(x)) o.magic = true
+	})
 	return out
+}
+function eachExpr(r: Result, sc: Fn[], k: 'intro' | 'pyth' | 'div', f: (fn: Fn, e: Expr, p: number, top: Expr) => void) {
+	for (const fn of sc) for (const b of fn.blocks) for (const [x, p, e] of blockOf(fn.fo, b, r)[k]) f(fn, x, p, e)
 }
 const scopeCalls = new WeakMap<Fn[], [Fn, CallAt][]>()
 function eachCall(sc: Fn[], f: (fn: Fn, name: string, args: Expr[], p: number, pc: number, target?: number) => void, r: Result) {
 	let l = scopeCalls.get(sc)
 	if (!l) {
 		l = []
-		for (const fn of sc) for (const b of fn.blocks) for (const c of callsOf(fn.fo, b, r)) l.push([fn, c])
+		for (const fn of sc) for (const b of fn.blocks) for (const c of blockOf(fn.fo, b, r).calls) l.push([fn, c])
 		scopeCalls.set(sc, l)
 	}
 	for (const [fn, [name, args, p, pc, t]] of l) f(fn, name, args, p, pc, t)
@@ -168,7 +173,15 @@ const locOf = (fn: Fn, p: number): Loc => {
 	return { fn: fn.ff?.name ?? fn.fo.name, line, pc: s?.pc }
 }
 const L = (at: Loc) => `${at.fn}:${at.line}`
-const lineText = (fn: Fn, p: number) => { const at = locOf(fn, p); return (fn.ff?.lines[at.line - 1] ?? '').trim() }
+const lineMemo = new WeakMap<FuncOut, Map<number, string>>()
+/** the printed line of a position (by function: its facts are the function's) */
+const lineText = (fn: Fn, p: number) => {
+	let m = lineMemo.get(fn.fo)
+	if (!m) lineMemo.set(fn.fo, (m = new Map()))
+	let y = m.get(p)
+	if (y === undefined) { const at = locOf(fn, p); m.set(p, (y = (fn.ff?.lines[at.line - 1] ?? '').trim())) }
+	return y
+}
 
 // ---- comparisons: branch conditions (through && / || / ! and variables holding a comparison) and memcmp-like calls ----
 
@@ -210,7 +223,7 @@ const SYSVAR_NAME = /^(instructions?|ixs|ix_sysvar|instructions?_sysvar|sysvar_i
 function introSites(r: Result, ix: IxOut, sc: Fn[]): Intro[] {
 	const out: Intro[] = []
 	const src = srcOf(r, ix)
-	eachExpr(sc, 'load', (fn, x, p) => {
+	eachExpr(r, sc, 'intro', (fn, x, p) => {
 		if (x.k !== 'load' || x.size !== 2) return
 		const s = sumOf(x.addr)
 		if (s.terms.length !== 2) return
@@ -379,15 +392,7 @@ const magicMemo = new WeakMap<Result, boolean>()
 function pythAware(r: Result): boolean {
 	let m = magicMemo.get(r)
 	if (m === undefined) {
-		m = false
-		for (const fo of r.funcs) {
-			for (const b of fo.f.blocks) {
-				const es = [...b.stmts.flatMap(stmtExprs), ...(b.term.k === 'br' ? [b.term.c] : [])]
-				for (const e of es) walkExpr(e, x => { if (x.k === 'cmp' && ((x.a.k === 'const' && (x.a.v & 0xffffffffn) === PYTH_MAGIC) || (x.b.k === 'const' && (x.b.v & 0xffffffffn) === PYTH_MAGIC))) m = true })
-				if (m) break
-			}
-			if (m) break
-		}
+		m = r.funcs.some(fo => fo.f.blocks.some((_, b) => blockOf(fo, b, r).magic))
 		magicMemo.set(r, m)
 	}
 	return m
@@ -397,7 +402,7 @@ interface Access { fn: Fn; p: number; size: number; off: number; base: string; e
 /** loads at the Pyth field offsets, by base (the canonical key of the pointer they are read through) */
 function pythLoads(r: Result, ix: IxOut, sc: Fn[]): Access[] {
 	const I = irOf(r), out: Access[] = []
-	eachExpr(sc, 'load', (fn, x, p) => {
+	eachExpr(r, sc, 'pyth', (fn, x, p) => {
 		if (x.k !== 'load') return
 		const s = sumOf(x.addr)
 		const off = Number(s.c > 0xffffn ? -1n : s.c)
@@ -751,6 +756,21 @@ function token2022Amount(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	return []
 }
 
+/** a function's definitions by variable (set) and its 8-byte frame stores by offset: the value, at its position, in order */
+const defSitesMemo = new WeakMap<FuncOut, { sets: Map<number, [Expr, number][]>; stores: Map<number, [Expr, number][]> }>()
+function defSites(fo: FuncOut, D: NonNullable<ReturnType<typeof defsIn>>) {
+	let m = defSitesMemo.get(fo)
+	if (m) return m
+	m = { sets: new Map(), stores: new Map() }
+	const add = (t: Map<number, [Expr, number][]>, k: number, v: Expr, q: number) => { let l = t.get(k); if (!l) t.set(k, (l = [])); l.push([v, q]) }
+	fo.f.blocks.forEach((b, bi) => b.stmts.forEach((st, i) => {
+		if (st.k === 'set') add(m!.sets, st.dst, st.e, bi << 16 | i)
+		else if (st.k === 'store' && st.size === 8) { const o = D.fpOff(st.addr); if (o !== undefined) add(m!.stores, o, st.v, bi << 16 | i) }
+	}))
+	defSitesMemo.set(fo, m)
+	return m
+}
+
 // ---- rounding direction of share math (experimental) ----
 
 const DIV128 = /^(__udivti3|__divti3|udivti3|u128_div)(_[0-9a-f]+)?$/
@@ -777,7 +797,7 @@ function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
 	}
 	const fromAcct = (fn: Fn, e: Expr, p: number) => src(fn.pc, e, p).some(y => y.kind === 'data')
 	const isCeil = (nk: string, dk: string) => nk.startsWith('(+ ') && / #-1\)$/.test(nk) && keyIn(nk, dk)
-	eachExpr(sc, 'div', (fn, x, p) => {
+	eachExpr(r, sc, 'div', (fn, x, p) => {
 		if (x.k === 'bin' && (x.op === 'udiv' || x.op === 'sdiv') && x.b.k !== 'const' && fromAcct(fn, x.b, p)) {
 			const nk = K(fn, x.a, p), dk = K(fn, x.b, p)
 			if (!product(fn, x.a, p) && !isCeil(nk, dk)) return
@@ -803,10 +823,7 @@ function rounding(r: Result, ix: IxOut, sc: Fn[]): F[] {
 		// (the quotient in a stored value, directly or through a variable one of whose definitions holds it (a branch's result))
 		const has = (k: string, depth = 0): boolean => d.q.some(q => keyIn(k, q)) || (depth < 3 && [...k.matchAll(/\b(v|fs)(\d+)[.@](-?\d+)\b/g)].some(([, kind, f, id]) => {
 			const fo = I.byPc.get(Number(f)), D = defsIn(I, Number(f))
-			return !!fo && !!D && fo.f.blocks.some((b, bi) => b.stmts.some((st, i) => {
-				const v = kind === 'v' ? (st.k === 'set' && st.dst === Number(id) ? st.e : undefined) : st.k === 'store' && st.size === 8 && D.fpOff(st.addr) === Number(id) ? st.v : undefined
-				return !!v && has(valueKey(I, ix.ctx, Number(f), v, bi << 16 | i), depth + 1)
-			}))
+			return !!fo && !!D && (defSites(fo, D)[kind === 'v' ? 'sets' : 'stores'].get(Number(id)) ?? []).some(([v, q]) => has(valueKey(I, ix.ctx, Number(f), v, q), depth + 1))
 		}))
 		const uses = writes.filter(w => has(w.k))
 		// (the quotient paid out (a lamport debit, a transfer's amount): an asset amount, rounded down in the program's favor)
