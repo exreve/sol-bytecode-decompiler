@@ -12,7 +12,8 @@ also scores the eval pairs (`eval/analyze.ts`, below); `node bench/run.ts pairs`
 
 ## Generated programs (bench/gen)
 
-`node bench/gen/gen.ts` writes 7 programs from instruction templates (`bench/gen/anchor.ts`, `bench/gen/native.ts`):
+`node bench/gen/gen.ts` writes 9 programs from instruction templates (`bench/gen/anchor.ts`, `bench/gen/native.ts`,
+`bench/gen/risk.ts`; the two `*_risk` programs are described under Incident classes below):
 `g_a31_vault`, `g_a31_pool` (Anchor 0.31.1), `g_a29_vault`, `g_a29_pool` (the same templates under Anchor 0.29.0 /
 solana-program 1.16.27), `g_n_bank`, `g_n_amm` (solana-program 2.2.1, spl-token), `g_p_jar` (pinocchio 0.8.4). Each
 template instruction is clean as written and names the properties its `v_<id>` features remove (signer, has_one /
@@ -28,6 +29,30 @@ rules is reported at its instruction (`~consistency`: a validation_consistency i
 generated base is a false finding (inconsistencies on a base are counted as informational noise); findings a variant
 adds besides its expected ones are listed as unexpected (`--verbose`).
 
+### Incident classes (g_a31_risk, g_n_risk)
+
+`bench/gen/risk.ts`: a lending reserve (vault PDA authority, ledger per user, TransferChecked through the token
+interface, so SPL Token and Token-2022 mints) under Anchor 0.31 (`g_a31_risk`) and solana-program 2.2.1 (`g_n_risk`,
+token CPIs built by hand, tags 0-7). The Instructions sysvar is read by a hand-written parser (both programs, so the
+key check is the only difference) and the Pyth v2 price account by a hand-written layout (magic @0, type @8, expo @20,
+timestamp @96, price @208, conf @216, status @224). Rule ids marked * do not exist yet (pseudo ids: misses until a
+rule reports them):
+
+| class | instruction | variants (both programs unless noted) | accepted rules |
+|---|---|---|---|
+| introspection | flash_borrow | `ix_sysvar_unchecked` (sysvar key), `ix_program_unchecked` (repay's program id), `ix_absolute_index` (caller's absolute index instead of current + 1), `ix_repay_unbound` (repay's reserve / amount not compared) | `introspection-unchecked`*, `flash-repay-unbound`* (repay), `sysvar-account-unchecked` (sysvar) |
+| stale after CPI | withdraw | `no_reload` (Anchor: vault.amount after the transfer without reload()), `stale_copy` (native: balance read before the CPI) | `stale-after-cpi`* |
+| Token-2022 amount | deposit | `nominal_amount` (credits the argument, not the vault balance delta) | `token2022-amount-assumed`* |
+| oracle | borrow | `oracle_no_status`, `oracle_no_conf` (conf <= 2 %), `oracle_no_staleness` (Clock - timestamp <= 60 s) | `oracle-unvalidated`* |
+| signer forwarding | route / swap_user | `signer_untrusted_pda` (vault PDA signs for an unchecked program), `user_signer_untrusted` (the caller's signature forwarded) | `signer-to-untrusted-program`*, `cpi-unchecked-program` |
+| rounding | deposit / withdraw | `round_mint_ceil` (shares minted rounded up), `round_burn_floor` (shares burned rounded down) | `rounding-favors-user`* |
+| admin drain | admin_sweep | none: informational | `fund_movers` |
+
+`fund_movers` (expected file): `[{ ix, authority, from, index? }]`, an authority-only instruction that can move user
+funds to a destination of its choosing. It must not be a finding (every base finding is false) and is expected in
+analysis.json as `fund_movers: [{ instruction, authority, ... }]` (authority: the account name, or `account[index]`
+for native); `bench/run.ts` prints `fund movers listed n/m` (missing section: all NOT LISTED).
+
 ## Eval pairs
 
 `eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
@@ -35,6 +60,13 @@ signal at `ground_truth.target` (instruction + account names as the analysis nam
 only an informational one (`informational`: a finding of confidence info, a validation_consistency inconsistency, a
 stored-key gap or a program account no stored field of which is compared); `missed` otherwise. `fixed` is `clean` when
 no such signal is left at the target in @fixed. `--verbose` lists the signals.
+
+Incident-class pairs: `spl_lending_oracle_status` (SPL #2618, Pyth aggregate status) and `solend_oracle_conf` (Solend
+#52, Pyth status + confidence), target refresh_reserve / init_reserve with `rules: ["oracle-unvalidated"]`. Not added:
+introspection (no small public fix pair found; wormhole_bridge already covers the unchecked Instructions sysvar; the
+marginfi 2025 flash-loan bug is a flag missing in transfer_to_new_account, in a large Anchor workspace), stale after
+CPI (the only fix commits found are self-described no-ops or bundled audit fixes of unaudited hobby programs),
+Token-2022 received amount (no single-property program fix found; the public fixes are SDK-side quote code).
 
 ## Contents
 
