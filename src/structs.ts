@@ -64,6 +64,8 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 
 	// ---- phase 1: nodes and accesses per function ----
 	const edges: [number, number][] = []
+	const direct = new Set<string>() // `${pc}:${var}`: locals typed directly (not through a typed pointer field)
+	const fieldEdges: [number, number, number][] = [] // node, callee * 256 + parameter register, offset: the node is what that field points to
 	const arithVars: [Map<number, number | null>, number][] = [] // (variables in arithmetic: marked once their nodes are known)
 	for (const [pc, { f }] of cfg.built) {
 		if (cfg.skip(pc) || f.isEntry || f.noreturn) continue
@@ -81,7 +83,26 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 				if (!defs.has(v) && (info.param >= 1 && info.param <= 5 || info.param >= 100)) { n = fresh(); cls[n].members.push({ pc, v }) }
 			} else {
 				const d = defs.get(v)
-				if (d?.length === 1 && d[0].k === 'set') {
+				// (several definitions: when each is a pointer variable or a pointer field, one object)
+				if (d && d.length > 1 && d.length <= 16 && d.every(x => x.k === 'set' && (x.e.k === 'var' || (x.e.k === 'load' && x.e.size === 8)))) {
+					busy.add(v)
+					const ns: number[] = []
+					for (const x of d) {
+						const e = (x as Stmt & { k: 'set' }).e
+						let dn: number | undefined
+						if (e.k === 'var') dn = node(e.id)
+						else if (e.k === 'load') {
+							const b = base(e.addr); const bn = b && node(b.v)
+							if (bn !== undefined) dn = pointee(bn, b!.off)
+							else if (fo(e.addr) !== undefined) { const r = resultField(x, fo(e.addr)!); if (r) { dn = fresh(); fieldEdges.push([dn, r.cpc * 256 + r.reg, r.rel]) } }
+						}
+						if (dn === undefined) { ns.length = 0; break }
+						ns.push(dn)
+					}
+					busy.delete(v)
+					if (ns.length) { n = fresh(); for (const x of ns) edges.push([n, x]); direct.add(`${pc}:${v}`) }
+				}
+				else if (d?.length === 1 && d[0].k === 'set') {
 					const e = d[0].e
 					busy.add(v)
 					if (e.k === 'load' && e.size === 8) {
@@ -89,13 +110,54 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 						if (bn !== undefined) n = pointee(bn, b!.off)
 						// (an account's data pointer, loaded from its typed RefCell box: an object of its own)
 						else if (cfg.dataPtr?.(pc, e)) { n = fresh(); cls[n].data.push({ pc, v }) }
+						// (a pointer field of a call's result in the frame: the callee's out object's field)
+						else if (fo(e.addr) !== undefined) {
+							const r = resultField(d[0], fo(e.addr)!)
+							if (r) { n = fresh(); fieldEdges.push([n, r.cpc * 256 + r.reg, r.rel]); direct.add(`${pc}:${v}`) }
+						}
 					}
+					// (a heap object: an allocation the bump allocator's code gives inline)
+					else if (e.k === 'sel' && [e.a, e.b].some(x => x.k === 'const' && x.v >= 0x3_0000_0000n && x.v < 0x4_0000_0000n)) { n = fresh(); direct.add(`${pc}:${v}`) }
 					else if (e.k === 'var') n = node(e.id)
 					busy.delete(v)
 				}
 			}
 			memo.set(v, n ?? null)
 			return n
+		}
+		// where a statement is (block, index)
+		const where = new Map<Stmt, [number, number]>()
+		f.blocks.forEach((b, bi) => b.stmts.forEach((s, si) => where.set(s, [bi, si])))
+		/**
+		 * The call whose out object a frame word read by statement st lies in (the last call before it given a
+		 * frame address at most 0x100 below the word, through single-predecessor blocks, with no store over the word
+		 * in between): its user callee, the parameter and the word's offset in the object.
+		 */
+		const resultField = (st: Stmt, off: number): { cpc: number; reg: number; rel: number } | undefined => {
+			let [bi, si] = where.get(st)!
+			for (let depth = 0; depth < 8; depth++) {
+				const ss = f.blocks[bi].stmts
+				for (let k = si - 1; k >= 0; k--) {
+					const s = ss[k]
+					if (s.k === 'store' || s.k === 'stores' || s.k === 'copy') {
+						const D = fo(s.k === 'copy' ? s.dst : s.addr), n = s.k === 'copy' ? s.n : s.k === 'store' ? s.size : s.size * s.vals.length
+						if (D !== undefined && D < off + 8 && D + n > off) return undefined
+						continue
+					}
+					const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
+					if (!c) continue
+					let best: { i: number; O: number } | undefined
+					c.args.forEach((a, i) => { const O = fo(a); if (O !== undefined && O <= off && off - O < 0x100 && (!best || O > best.O)) best = { i, O } })
+					if (!best) { if (c.t.k !== 'fn') return undefined; continue }
+					const { i, O } = best
+					if (c.t.k !== 'fn' || cfg.skip(c.t.pc) || !cfg.built.has(c.t.pc) || cfg.built.get(c.t.pc)!.f.noreturn) return undefined
+					return { cpc: c.t.pc, reg: cfg.paramReg(c.t.pc, i), rel: off - O }
+				}
+				const ps = f.blocks[bi].preds
+				if (ps.length !== 1) return undefined
+				bi = ps[0]; si = f.blocks[bi].stmts.length
+			}
+			return undefined
 		}
 		const access = (addr: Expr, size: number, count = 1) => {
 			const b = base(addr)
@@ -246,6 +308,13 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		if (y === undefined) continue
 		if (agree(x, y, new Set())) merge(x, y)
 	}
+	for (const [x, k, rel] of fieldEdges) {
+		const pn = paramNode.get(k)
+		// (a word the callee accesses as a pointer: not a frame word merely near its object)
+		if (pn === undefined || cls[find(pn)].acc.get(`${rel}:8`) === undefined) continue
+		const y = pointee(pn, rel)
+		if (agree(x, y, new Set())) merge(x, y)
+	}
 	// ---- phase 3: views ----
 	const viewOf = new Map<number, string | null>()
 	const knownCls = new Set<number>() // classes typed with a known view
@@ -368,6 +437,6 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		m.set(v, t)
 	}
 	// (locals: typed through their pointer field, except account data pointers)
-	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 && !cls[find(nodeOf.get(pc)!.get(v)!)].data.some(x => x.pc === pc && x.v === v) }
+	function f0(pc: number, v: number) { return cfg.built.get(pc)!.f.vars[v].param < 0 && !direct.has(`${pc}:${v}`) && !cls[find(nodeOf.get(pc)!.get(v)!)].data.some(x => x.pc === pc && x.v === v) }
 	return { types: out, synth }
 }
