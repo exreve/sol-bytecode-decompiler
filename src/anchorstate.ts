@@ -288,7 +288,7 @@ function decodeCopies(run: (f: (i: number) => number) => Uint8Array | undefined,
  * natural alignment (8 bytes at most), named after their offset in the account data (`shift`: the input's
  * offset in it): d0x21_u64.
  */
-function copyLeaves(map: Map<number, number>, shift: number): Map<string, SampleLeaf & { mem: number }> {
+export function copyLeaves(map: Map<number, number>, shift: number): Map<string, SampleLeaf & { mem: number }> {
 	const at = new Map<string, SampleLeaf & { mem: number }>()
 	const ms = [...map.keys()].sort((a, b) => a - b)
 	for (let q = 0; q < ms.length;) {
@@ -310,9 +310,10 @@ const deserMemo = new WeakMap<Program, Map<number, Map<number, number> | null>>(
 /**
  * A native program's deserializer of account data, x(out, data, len) (Borsh try_from_slice, Pack unpack, …): its
  * output bytes that copy data bytes (output offset -> data offset; see decodeCopies), from runs on data of the
- * length a run on 10 KiB of zeros reads (try_from_slice wants every byte read), else of 10 KiB.
+ * length a run on 10 KiB of zeros reads (try_from_slice wants every byte read), else of one it compares the length
+ * with (`lens`, e.g. Pack's LEN), else of 10 KiB.
  */
-export function probeDeserializer(p: Program, x: number): Map<number, number> | undefined {
+export function probeDeserializer(p: Program, x: number, lens: number[] = []): Map<number, number> | undefined {
 	let memo = deserMemo.get(p)
 	if (!memo) deserMemo.set(p, (memo = new Map()))
 	if (memo.has(x)) return memo.get(x) ?? undefined
@@ -335,10 +336,12 @@ export function probeDeserializer(p: Program, x: number): Map<number, number> | 
 		return mem.read(OUT, SIZE)
 	}
 	let res: Map<number, number> | undefined
-	if (runN(N, () => 0, true)) for (const n of [...new Set([read, N])]) {
-		if (n < 1) continue
-		const m = decodeCopies(f => runN(n, f), n)
-		if (m && m.size >= 4) { res = m; break }
+	// (and with the first byte 1 throughout: a version or is_initialized byte the deserializer requires)
+	if (runN(N, () => 0, true)) for (const first of [false, true]) for (const n of [...new Set([read, ...lens, N])]) {
+		if (n < 1 || res) continue
+		const m = decodeCopies(f => runN(n, first ? i => (i === 0 ? 1 : f(i)) : f), n)
+		if (first) for (const [o, i] of m ?? []) if (i === 0) m!.delete(o)
+		if (m && m.size >= 4) res = m
 	}
 	memo.set(x, res ?? null)
 	return res

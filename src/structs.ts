@@ -440,6 +440,9 @@ export function inferStructs(cfg: StructCfg, views: Views): { types: Map<number,
 		const c = cls[root]
 		// (an AccountInfo: its accesses and those through its pointers fit the view, 3+ fields, one of them a pointer followed)
 		if (views.map.has('AccountInfo') && c.ptr.size && infoEvidence(root) && matches(root, 'AccountInfo', new Set()) >= 3) { known(root, 'AccountInfo'); knownCls.add(root); return 'AccountInfo' }
+		// (an AccountInfo's data RefCell box on its own: its borrow flag, data pointer and length accessed, nothing else)
+		const at = (o: number) => c.acc.has(`${o}:8`)
+		if (views.map.has('DataCell') && at(0x10) && at(0x18) && at(0x20) && matches(root, 'DataCell', new Set()) >= 3) { known(root, 'DataCell'); knownCls.add(root); return 'DataCell' }
 		viewOf.set(root, null)
 		if (c.opaque) return undefined
 		// fields: the most used access at each place, when it does not overlap one chosen before

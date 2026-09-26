@@ -25,7 +25,7 @@ import { inferStructs } from './structs.ts';
 import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, LEGACY_INFO_VIEW, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
-import { accountObjects, loaderWord, probeDeserializer, type AccountObjs } from './anchorstate.ts';
+import { accountObjects, loaderWord, probeDeserializer, copyLeaves, type AccountObjs } from './anchorstate.ts';
 import { frameRegions, innermost, type Region, type Regions } from './frameregions.ts';
 import { instructionTaint, exprTainted } from './taint.ts';
 import { functionFacts, calleeChecks, type FnFacts, type SiteNote } from './analysis/facts.ts';
@@ -743,9 +743,11 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const baseTypes = new Map<number, Map<number, string>>();
   const structTypes = new Map<number, Map<number, string>>(); // inferred struct views of parameters (structs.ts)
   // the view type of a (user) function's parameter (register reg), when it is never reassigned
+  const libOut = new Map<number, string>(); // library deserializer -> the view of its out object (see the deserializers below)
   const paramVars = new Map<number, Map<number, VarInfo>>();
   const paramView = (cpc: number, reg: number): string | undefined => {
     const cb = built.get(cpc);
+    if (reg === 1 && libOut.has(cpc)) return libOut.get(cpc);
     if (!cb || isLib(cpc)) return undefined;
     let pm = paramVars.get(cpc);
     if (!pm) { pm = new Map(); for (const v of cb.f.vars) if (v.param >= 0 && !pm.has(v.param)) pm.set(v.param, v); paramVars.set(cpc, pm); }
@@ -970,16 +972,39 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       const tried = new Set<number>();
       for (const [pc, bt] of built) for (const b of bt.f.blocks) for (const st of b.stmts) {
         const c = st.k === 'call' ? st : st.k === 'set' && st.e.k === 'call' ? st.e : undefined;
-        if (!c || c.t.k !== 'fn' || isLib(c.t.pc) || tried.has(c.t.pc) || c.args.length < 3 || !outParams.has(c.t.pc)) continue;
+        // (a user function writing only its out parameter, or a library deserializer: Pack::unpack, try_from_slice, …)
+        const lib = !!c && c.t.k === 'fn' && isLib(c.t.pc);
+        if (!c || c.t.k !== 'fn' || tried.has(c.t.pc) || c.args.length < 3 || !(lib ? /unpack|from_slice|deserialize/i.test(fnName(c.t.pc)) : outParams.has(c.t.pc))) continue;
         if (!cellField(pc, bt.f, c.args[1], 0x18n) || !cellField(pc, bt.f, c.args[2], 0x20n)) continue;
         tried.add(c.t.pc);
-        const m = probeDeserializer(p, c.t.pc);
+        // (lengths the deserializer may require exactly: constants its length parameter is compared with)
+        const lens: number[] = [];
+        { const cf = built.get(c.t.pc)?.f, lv = cf?.vars.find(v => v.param === 3)?.id;
+          if (cf && lv !== undefined) for (const b2 of cf.blocks) for (const e of [...b2.stmts.flatMap(stmtExprs), ...(b2.term.k === 'br' ? [b2.term.c] : [])]) walkExpr(e, x => {
+            if (x.k === 'cmp' && ((x.a.k === 'var' && x.a.id === lv && x.b.k === 'const') || (x.b.k === 'var' && x.b.id === lv && x.a.k === 'const'))) { const k = Number((x.a.k === 'const' ? x.a : x.b as { v: bigint }).v); if (k > 0 && k <= 0x10000 && !lens.includes(k) && lens.length < 4) lens.push(k); }
+          }); }
+        const m = probeDeserializer(p, c.t.pc, lens);
+        if (m && lib) {
+          // (a library function: a view of its out object from the run alone, fields at the copied bytes' natural alignment)
+          const fields = [...copyLeaves(m, 0).values()].map(l => ({ name: l.path, off: l.mem, t: { k: 'scalar' as const, size: l.size as 1 | 2 | 4 | 8 } }));
+          const name = `Deser_${fnName(c.t.pc)}`;
+          if (fields.length >= 2 && !views.map.has(name)) { views.add({ name, doc: `[heur] the out object of ${fnName(c.t.pc)} (a library deserializer of account data): the data bytes a run on bit-pattern data copies there (dN_uS: the bytes at offset N of the account data, at their natural alignment; other bytes not described)`, fields }); libOut.set(c.t.pc, name); }
+          continue;
+        }
         const v = m && paramView(c.t.pc, 1);
         if (!v || !synthViews.has(v)) continue;
         // (its out object's inferred view: fields that are data bytes copied in order named after their offset in the data)
         const view = views.map.get(v)!;
+        // (not the words its error path writes constants to: the Result's tag / error overlapping the data fields)
+        const constAt = new Set<number>();
+        { const cf = built.get(c.t.pc)!.f, rv = cf.vars.find(x => x.param === 1)?.id;
+          for (const b2 of cf.blocks) for (const s2 of b2.stmts) if ((s2.k === 'store' || s2.k === 'stores') && rv !== undefined) {
+            const a = s2.addr, o = a.k === 'var' && a.id === rv ? 0 : a.k === 'bin' && a.op === 'add' && a.a.k === 'var' && a.a.id === rv && a.b.k === 'const' ? Number(a.b.v) : undefined;
+            if (o !== undefined) (s2.k === 'store' ? [s2.v] : s2.vals).forEach((x, i) => { if (x.k === 'const') constAt.add(o + i * s2.size); });
+          } }
         let n = 0;
         for (const fd of view.fields) {
+          if (constAt.has(fd.off)) continue;
           const size = fd.t.k === 'scalar' ? fd.t.size : 0, d = m.get(fd.off);
           if (!size || d === undefined || Array.from({ length: size - 1 }, (_, i) => m.get(fd.off + i + 1) === d + i + 1).includes(false)) continue;
           const nm = `d0x${d.toString(16)}_u${size * 8}`;
@@ -1281,7 +1306,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
           const cn = fnName(t.pc).replace(/_[0-9a-f]{3,}$/, '');
           const rn = /^fn$|^fn_/.test(cn) || cn.length > 20 ? 'res' : `${cn}_res`;
           if (tag !== undefined || outParams.has(t.pc)) return { name: rn, copyName: `${rn}_copy`, type: paramView(t.pc, 1) ?? (tag !== undefined ? `Tagged${tag * 8}` : undefined), why: 'out parameter of the call writing it (per call where the slot is reused)', reused: true };
-          if (isLib(t.pc) && _args.length > 1) return { name: 'res', copyName: 'res_copy', type: 'Result64', why: 'the result of the library call writing it (per call where the slot is reused)', reused: true };
+          if (isLib(t.pc) && _args.length > 1) return { name: 'res', copyName: 'res_copy', type: libOut.get(t.pc) ?? 'Result64', why: 'the result of the library call writing it (per call where the slot is reused)', reused: true };
           return undefined;
         },
       });
@@ -1450,7 +1475,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     if (opts.sugar !== false) setupFrame(frameRoles(f, siteList, fnName, p.image, outTags, pc => isLib(pc) || outParams.has(pc), (cpc, i) => {
       const reg = built.get(cpc)?.f.stackArgs ? (i < 4 ? i + 1 : 100 + (i - 4)) : i + 1;
       const t = paramView(cpc, reg);
-      return t ? { type: t, out: reg === 1 && outParams.has(cpc) } : undefined;
+      return t ? { type: t, out: reg === 1 && (outParams.has(cpc) || libOut.has(cpc)) } : undefined;
     }));
     const { decls, hoisted } = declarations(f, body);
     const params: string[] = [];
