@@ -2,7 +2,9 @@
 //   stN(p, a); stN(p+N, b); ...            -> stN(p, a, b, ...)   (values pure)
 //   st64(d, ld64(s)); st64(d+8, ld64(s+8)) -> copy(d, s, 16)      (ascending word copies)
 //   st64(d+8, ld64(s+8)); st64(d, ld64(s)) -> copyr(d, s, 16)     (descending word copies)
-// preceded by sinkFrameLoads (loads of the own frame moved to their one use, see below).
+// preceded by sinkFrameLoads (loads of the own frame moved to their one use, see below); frame stores that
+// extend one range are first gathered (gatherFrame), e.g. a key copied as st64(s40, ld64(q)) after
+// copyr(s38, q + 8, 0x18) with other frame stores in between becomes one copyr(s40, q, 0x20).
 // Runs into the stack frame (fp + const) may appear in any order: frame stores cannot fault and
 // stores to disjoint addresses commute; for copies the source and destination ranges must be
 // disjoint frame ranges (then order is irrelevant too).
@@ -118,7 +120,7 @@ export function compactStores(f: VarFunc) {
 			let j = i + 1
 			while (j < st.length && st[j].k === 'store' && exprEq(baseOff((st[j] as Store).addr)[0], db)) j++
 			const win = st.slice(i, j) as Store[]
-			const done = compactWindow(win, isFp(db))
+			const done = compactWindow(isFp(db) ? gatherFrame(win, fp!) : win, isFp(db))
 			out.push(...done)
 			i = j - 1
 		}
@@ -144,6 +146,53 @@ function firstLoad(e: Expr): Extract<Expr, { k: 'load' }> | null {
 			return null
 		default: return null
 	}
+}
+
+/**
+ * Frame stores reordered so that stores extending one contiguous range come together (they then compact
+ * into one run): a later store moves before the stores it skips when both write disjoint frame bytes, neither
+ * value reads the bytes the other writes, no value calls, and at most one of the two can fault (a load
+ * outside the frame): frame stores cannot fault, and the frame is only observable at calls.
+ */
+function gatherFrame(win: Store[], fp: number): Store[] {
+	if (win.length < 3) return win
+	const info = win.map(s => {
+		const o = baseOff(s.addr)[1]
+		const fx = hasSideEffectsOrMem(s.v)
+		const reads: [bigint, bigint][] = []
+		let far = false
+		walkExpr(s.v, x => {
+			if (x.k !== 'load') return
+			const [b, lo] = baseOff(x.addr)
+			if (b.k === 'var' && b.id === fp && lo >= -0x1000n && lo + BigInt(x.size) <= 0n) reads.push([lo, lo + BigInt(x.size)])
+			else far = true
+		})
+		// (only the own frame [fp - 0x1000, fp) is unobservable between calls: fp + 0 and above are the caller's)
+		const own = o >= -0x1000n && o + BigInt(s.size) <= 0n
+		return { o, hi: o + BigInt(s.size), call: fx.call, fault: far || (fx.trap && !fx.load), reads, own }
+	})
+	const overlaps = (r: [bigint, bigint][], lo: bigint, hi: bigint) => r.some(([a, b]) => a < hi && lo < b)
+	const movable = (j: number, m: number) => {
+		const a = info[j], b = info[m]
+		return a.own && b.own && !a.call && !b.call && !(a.fault && b.fault) && (a.hi <= b.o || b.hi <= a.o) && !overlaps(a.reads, b.o, b.hi) && !overlaps(b.reads, a.o, a.hi)
+	}
+	const used = new Array<boolean>(win.length).fill(false)
+	const out: Store[] = []
+	for (let k = 0; k < win.length; k++) {
+		if (used[k]) continue
+		const cl = [k], skipped: number[] = []
+		let lo = info[k].o, hi = info[k].hi
+		for (let j = k + 1; j < win.length; j++) {
+			if (used[j]) continue
+			const x = info[j]
+			if (win[j].size === win[k].size && (x.o === hi || x.hi === lo) && skipped.every(m => movable(j, m))) {
+				cl.push(j); lo = x.o < lo ? x.o : lo; hi = x.hi > hi ? x.hi : hi
+			} else skipped.push(j)
+		}
+		if (cl.length < 2 || !tryRun(cl.map(i => win[i]), true)) { used[k] = true; out.push(win[k]); continue }
+		for (const i of cl) { used[i] = true; out.push(win[i]) }
+	}
+	return out
 }
 
 /** Compact a window of consecutive stores that share a base address expression. */

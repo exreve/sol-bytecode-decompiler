@@ -1730,7 +1730,15 @@ function fitsAccess(V: Views, type: string, d: number, size: number, copy: boole
 const ARRAY_VIEWS = new Set(['SolAccountMeta', 'AccountMeta', 'Slice', 'SeedList', 'FmtArg']);
 
 /** Frame offsets used in a function: `bases` = addresses that escape or start a copy/store run. */
+const frameOffsetsMemo = new WeakMap<VarFunc, { bases: Set<number>; all: Set<number> }>();
 function frameOffsets(f: VarFunc, fp: number): { bases: Set<number>; all: Set<number> } {
+  const m = frameOffsetsMemo.get(f);
+  if (m) return { bases: new Set(m.bases), all: m.all };
+  const r = frameOffsets0(f, fp);
+  frameOffsetsMemo.set(f, r);
+  return { bases: new Set(r.bases), all: r.all };
+}
+function frameOffsets0(f: VarFunc, fp: number): { bases: Set<number>; all: Set<number> } {
   const bases = new Set<number>(), all = new Set<number>();
   const off = (e: Expr): number | null => (e.k === 'bin' && e.op === 'add' && e.a.k === 'var' && e.a.id === fp && e.b.k === 'const') ? Number(BigInt.asIntN(64, e.b.v)) : null;
   const visit = (e: Expr, addr: boolean) => {
