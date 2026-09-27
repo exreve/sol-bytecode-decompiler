@@ -3134,12 +3134,13 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
 
 /// callsOf: direct callees and function-address constants.
 fn calls_of(d: &Dx, f: &Func) -> Vec<i64> {
-    let pc_by_addr: HashMap<u64, i64> =
+    let pc_by_addr = d.pc_by_addr.get_or_init(|| {
         d.p.funcs
             .keys()
             .map(|&pc| (sbpf_program::fn_addr(d.p, pc), pc))
-            .collect();
-    calls_of_with(f, &pc_by_addr)
+            .collect()
+    });
+    calls_of_with(f, pc_by_addr)
 }
 
 /// callsOf with the function-address table given.

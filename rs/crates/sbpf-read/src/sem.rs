@@ -457,7 +457,8 @@ fn vocab() -> &'static Vec<(u64, u32)> {
             }
         });
         let mut all: Vec<(u64, u32)> = parts.concat();
-        all.sort_by_key(|x| x.0);
+        // (indices are unique and were pushed in order: the same order as a stable sort by hash)
+        all.sort_unstable();
         all
     })
 }
@@ -990,28 +991,7 @@ impl SemR {
 
 /// Buffer.indexOf of a needle (the empty needle is found at 0).
 pub fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > hay.len() {
-        return None;
-    }
-    let first = needle[0];
-    let last = hay.len() - needle.len();
-    let mut i = 0;
-    while i <= last {
-        match hay[i..=last].iter().position(|&c| c == first) {
-            None => return None,
-            Some(k) => {
-                i += k;
-                if &hay[i..i + needle.len()] == needle {
-                    return Some(i);
-                }
-                i += 1;
-            }
-        }
-    }
-    None
+    memchr::memmem::find(hay, needle)
 }
 
 #[cfg(test)]

@@ -621,6 +621,7 @@ name = "sbpf-read"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "memchr",
  "miniz_oxide",
  "regex",
  "sbpf-dataflow",

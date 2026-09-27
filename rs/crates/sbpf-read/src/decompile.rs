@@ -344,6 +344,8 @@ pub struct Dx<'p> {
     var_acc: RefCell<HashMap<usize, HashMap<u32, Vec<(N, u8)>>>>,
     spill: RefCell<HashMap<usize, HashMap<K, E>>>,
     frame_offs: RefCell<HashMap<usize, (IndexSet<K>, IndexSet<K>)>>,
+    /// function entry address -> pc (callsOf's table), built once
+    pub pc_by_addr: std::sync::OnceLock<HashMap<u64, i64>>,
 }
 
 pub const RESERVED_TS: &[&str] = &[
@@ -861,6 +863,7 @@ fn new_dx<'p>(
         var_acc: RefCell::new(HashMap::new()),
         spill: RefCell::new(HashMap::new()),
         frame_offs: RefCell::new(HashMap::new()),
+        pc_by_addr: std::sync::OnceLock::new(),
     }
 }
 
