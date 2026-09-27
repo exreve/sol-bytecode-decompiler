@@ -13,6 +13,8 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-program` | `src/program.ts`, `src/murmur.ts`, `src/syscalls.ts` | decode, lifter, function discovery, CFG (full and lazy) |
 | `sbpf-dataflow` | `src/dataflow.ts`, `src/stack.ts`, `src/stackargs.ts` | signatures (lazy block materialization), variable recovery, stack slot promotion, stack arguments |
 | `sbpf-opt` | `src/simplify.ts`, `src/cfgopt.ts`, `src/ifconv.ts`, `src/idioms.ts`, `src/compact.ts`, decompile's phase 2 | per-function optimizer (`Fx`: arena + per-id caches), `phase2`, `finish` |
+| `sbpf-struct` | `src/structure.ts`, `src/stmtidioms.ts` | structured statement trees (`Tree`: `SNode`s + statement table), stackifier, node splitting, dispatcher, clean-up passes, Rc idioms |
+| `sbpf-print` | `src/print.ts`, decompile's raw printing path, `layout.ts` renderSingle | printer, declarations, function naming (instruction logs, thunks, symbols), `decompile_raw`, `render_single` |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
 Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order) and `serde_json` (string
@@ -27,6 +29,7 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump prog.so out_dir            # stage dumps (as scripts/dump.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time --iters 5 a.so b.so # stage timings (as scripts/stagetime.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time3 --iters 5 a.so     # stage 3 timings (as stagetime.ts --stage3)
+/tmp/claude-1000/rs-target/release/sbpf-dump --time4 --iters 5 a.so     # stage 4 timings (as stagetime.ts --stage4)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
@@ -34,7 +37,7 @@ node scripts/parity.ts samples/token.so compat/bin                       # given
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir`
 (the IDL is accepted for the later stages; the stages so far do not read it).
 
 ## Stage dump format (format 1)
@@ -182,6 +185,24 @@ stage 7), with read-only memory folding on the program image (`setFoldImage`):
   `{"t":"func","pc"[,"stackArgs"][,"argAreaElided"],"vars"}` + its block lines.
 
 A recoverVars error is an `opt` error line (later stage 3 dumps absent).
+
+### `struct.jsonl`, `text.jsonl`, `rawfile.jsonl` — structuring and printing (stage 4)
+
+The raw decompiler output: `decompile(bytes, { sugar: false, full: true })` (the form `test/equiv.ts
+--raw` evaluates; no library classification, no readable-mode names / views / comments / outlining),
+per function in `p.funcs` order:
+
+- `struct`: `{"t":"func","pc","irreducible","nvars","body":[<Node>...]}` — the body after `structure`,
+  `cleanup` and `statementIdioms`; `nvars` counts the dispatcher's state variable. Nodes (`src/structure.ts`
+  `Node`, keys in declaration order): `{"k":"stmt","s":<Stmt>}`, `{"k":"if","c","then","else"}`,
+  `{"k":"block","label","body"}`, `{"k":"loop","label"(null),"body","form"[,"c"]}`,
+  `{"k":"break"|"continue","label"(null)}`, `{"k":"return","e"(null)}`, `{"k":"trap","msg"}`,
+  `{"k":"switch","v","cases":[{"vals","body"}]}`, `{"k":"setstate","v","val"}`.
+- `text`: `{"t":"func","pc","name","text"}` — the function's printed text, verbatim.
+- `rawfile`: `{"text"}` — the single-file rendering (`renderSingle`) without the analysis summary block
+  (`// security summary …` up to the blank line after it: stage 8).
+
+A `decompile` error is a `struct` error line (later stage 4 dumps absent).
 
 ### Later stages (planned)
 

@@ -553,26 +553,36 @@ fn dispatcher(f: &mut Func, order: &[usize], tree: &mut Tree) {
 
 // ======================= clean-up =======================
 
-/// Continuation: the jumps equivalent to falling off the end at a position.
-#[derive(Clone, Default)]
-struct Cont {
-    breaks: Vec<Label>,
-    conts: Vec<Label>,
+/// A set of break labels, as a chain through the enclosing frames (JS `new Set([...c.breaks, label])`).
+struct Link<'a> {
+    l: Label,
+    next: Option<&'a Link<'a>>,
+}
+
+/// Continuation: the jumps equivalent to falling off the end at a position (`cont` holds the one
+/// continue label a loop body has).
+#[derive(Clone, Copy, Default)]
+struct Cont<'a> {
+    breaks: Option<&'a Link<'a>>,
+    cont: Option<Label>,
     ret: bool,
 }
 
-impl Cont {
-    fn with_break(&self, l: Label) -> Cont {
-        let mut c = self.clone();
-        if !c.breaks.contains(&l) {
-            c.breaks.push(l);
+impl Cont<'_> {
+    fn has_break(&self, l: Label) -> bool {
+        let mut x = self.breaks;
+        while let Some(k) = x {
+            if k.l == l {
+                return true;
+            }
+            x = k.next;
         }
-        c
+        false
     }
-    fn loop_body(l: Option<Label>) -> Cont {
+    fn loop_body(l: Option<Label>) -> Cont<'static> {
         Cont {
-            breaks: Vec::new(),
-            conts: l.into_iter().collect(),
+            breaks: None,
+            cont: l,
             ret: false,
         }
     }
@@ -628,12 +638,38 @@ fn has_break_to(ns: &[SNode], label: Option<Label>, innermost: bool) -> bool {
     false
 }
 
-type Refs = std::collections::HashMap<Label, u32>;
+/// Reference counts of labels (break / continue targets).
+#[derive(Default)]
+struct Refs {
+    v: Vec<u32>,
+    disp: u32,
+}
+
+impl Refs {
+    fn slot(&mut self, l: Label) -> &mut u32 {
+        let i = match l {
+            Label::L(b) => 2 * b as usize,
+            Label::B(b) => 2 * b as usize + 1,
+            Label::Disp => return &mut self.disp,
+        };
+        if i >= self.v.len() {
+            self.v.resize(i + 1, 0);
+        }
+        &mut self.v[i]
+    }
+    fn get(&self, l: Label) -> u32 {
+        match l {
+            Label::L(b) => self.v.get(2 * b as usize).copied().unwrap_or(0),
+            Label::B(b) => self.v.get(2 * b as usize + 1).copied().unwrap_or(0),
+            Label::Disp => self.disp,
+        }
+    }
+}
 
 fn count_refs(ns: &[SNode], m: &mut Refs) {
     for n in ns {
         match n {
-            SNode::Break(Some(l)) | SNode::Continue(Some(l)) => *m.entry(*l).or_insert(0) += 1,
+            SNode::Break(Some(l)) | SNode::Continue(Some(l)) => *m.slot(*l) += 1,
             SNode::If { then, els, .. } => {
                 count_refs(then, m);
                 count_refs(els, m);
@@ -646,118 +682,100 @@ fn count_refs(ns: &[SNode], m: &mut Refs) {
 }
 
 fn refs_of(ns: &[SNode]) -> Refs {
-    let mut m = Refs::new();
+    let mut m = Refs::default();
     count_refs(ns, &mut m);
     m
 }
 
 fn is_jump_in(n: &SNode, c: &Cont) -> bool {
     match n {
-        SNode::Break(Some(l)) => c.breaks.contains(l),
-        SNode::Continue(Some(l)) => c.conts.contains(l),
+        SNode::Break(Some(l)) => c.has_break(*l),
+        SNode::Continue(Some(l)) => c.cont == Some(*l),
         SNode::Return(None) => c.ret,
         _ => false,
     }
 }
 
-/// Remove tail jumps equal to the natural continuation; rewrite breaks out of loops.
-fn tail_pass(ns: &[SNode], cont: &Cont, ls: &mut Vec<(Option<Label>, Cont)>) -> Vec<SNode> {
-    let none = Cont::default();
-    let mut out = Vec::with_capacity(ns.len());
-    for (i, n) in ns.iter().enumerate() {
-        let last = i == ns.len() - 1;
-        let c = if last { cont } else { &none };
-        if last && is_jump_in(n, c) {
-            continue;
-        }
-        let n = match n {
-            SNode::If { c: cc, then, els } => SNode::If {
-                c: *cc,
-                then: tail_pass(then, c, ls),
-                els: tail_pass(els, c, ls),
-            },
-            SNode::Block { label, body } => {
-                let bc = c.with_break(*label);
-                SNode::Block {
-                    label: *label,
-                    body: tail_pass(body, &bc, ls),
-                }
-            }
-            SNode::Loop {
-                label,
-                body,
-                form,
-                c: lc,
-            } => {
-                ls.push((*label, c.clone()));
-                let body = tail_pass(body, &Cont::loop_body(*label), ls);
-                ls.pop();
-                SNode::Loop {
-                    label: *label,
-                    body,
-                    form: *form,
-                    c: *lc,
-                }
-            }
-            SNode::Switch { v, cases } => SNode::Switch {
-                v: *v,
-                cases: cases
-                    .iter()
-                    .map(|(vals, b)| (vals.clone(), tail_pass(b, &none, ls)))
-                    .collect(),
-            },
-            SNode::Break(Some(l)) => match ls.last() {
-                Some((tl, exit)) if !l.is_l() && exit.breaks.contains(l) => SNode::Break(*tl),
-                _ => n.clone(),
-            },
-            _ => n.clone(),
-        };
-        out.push(n);
+/// Remove tail jumps equal to the natural continuation; rewrite breaks out of loops (`top`: the
+/// innermost enclosing loop's label and exit continuation). In place.
+fn tail_pass<'a>(ns: &mut Vec<SNode>, cont: Cont<'a>, top: Option<(Option<Label>, Cont<'a>)>) {
+    let len = ns.len();
+    if len > 0 && is_jump_in(&ns[len - 1], &cont) {
+        ns.pop();
     }
-    out
+    for (i, n) in ns.iter_mut().enumerate() {
+        let c = if i == len - 1 { cont } else { Cont::default() };
+        match n {
+            SNode::If { then, els, .. } => {
+                tail_pass(then, c, top);
+                tail_pass(els, c, top);
+            }
+            SNode::Block { label, body } => {
+                let link = Link {
+                    l: *label,
+                    next: c.breaks,
+                };
+                let bc = Cont {
+                    breaks: Some(&link),
+                    ..c
+                };
+                tail_pass(body, bc, top);
+            }
+            SNode::Loop { label, body, .. } => {
+                tail_pass(body, Cont::loop_body(*label), Some((*label, c)));
+            }
+            SNode::Switch { cases, .. } => {
+                for (_, b) in cases.iter_mut() {
+                    tail_pass(b, Cont::default(), top);
+                }
+            }
+            SNode::Break(Some(l)) => {
+                if let Some((tl, exit)) = top {
+                    if !l.is_l() && exit.has_break(*l) {
+                        *n = SNode::Break(tl);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-/// Splice unreferenced blocks (loop labels are kept here).
-fn label_pass(ns: Vec<SNode>, refs: &Refs) -> Vec<SNode> {
-    let mut out = Vec::with_capacity(ns.len());
-    for n in ns {
+/// Splice unreferenced blocks (loop labels are kept here). In place.
+fn label_pass(ns: &mut Vec<SNode>, refs: &Refs) {
+    let mut splice = false;
+    for n in ns.iter_mut() {
         match n {
             SNode::Block { label, body } => {
-                let body = label_pass(body, refs);
-                if refs.get(&label).copied().unwrap_or(0) == 0 {
-                    out.extend(body);
-                } else {
-                    out.push(SNode::Block { label, body });
+                label_pass(body, refs);
+                splice |= refs.get(*label) == 0;
+            }
+            SNode::Loop { body, .. } => label_pass(body, refs),
+            SNode::If { then, els, .. } => {
+                label_pass(then, refs);
+                label_pass(els, refs);
+            }
+            SNode::Switch { cases, .. } => {
+                for (_, b) in cases.iter_mut() {
+                    label_pass(b, refs);
                 }
             }
-            SNode::Loop {
-                label,
-                body,
-                form,
-                c,
-            } => out.push(SNode::Loop {
-                label,
-                body: label_pass(body, refs),
-                form,
-                c,
-            }),
-            SNode::If { c, then, els } => out.push(SNode::If {
-                c,
-                then: label_pass(then, refs),
-                els: label_pass(els, refs),
-            }),
-            SNode::Switch { v, cases } => out.push(SNode::Switch {
-                v,
-                cases: cases
-                    .into_iter()
-                    .map(|(vals, b)| (vals, label_pass(b, refs)))
-                    .collect(),
-            }),
-            n => out.push(n),
+            _ => {}
         }
     }
-    out
+    if splice {
+        let old = std::mem::take(ns);
+        for n in old {
+            match n {
+                SNode::Block { label, body } if refs.get(label) == 0 => ns.extend(body),
+                n => ns.push(n),
+            }
+        }
+    }
 }
+
+/// Placeholder left where a node was moved out of a list being rebuilt.
+const TAKEN: SNode = SNode::Break(None);
 
 struct Cx<'a, 'i> {
     fx: &'a mut Fx<'i>,
@@ -765,18 +783,28 @@ struct Cx<'a, 'i> {
 }
 
 impl Cx<'_, '_> {
-    fn if_pass(&mut self, ns: &[SNode], cont: &Cont) -> Vec<SNode> {
-        let none = Cont::default();
-        let mut out = Vec::with_capacity(ns.len());
-        for i in 0..ns.len() {
-            let last = i == ns.len() - 1;
-            let c = if last { cont } else { &none };
-            let n = match &ns[i] {
+    fn if_pass(&mut self, mut ns: Vec<SNode>, cont: Cont) -> Vec<SNode> {
+        let len = ns.len();
+        let mut out = Vec::with_capacity(len);
+        // endsInJump(ns) (pure; its last node is only moved out last)
+        let mut ends: Option<bool> = None;
+        for i in 0..len {
+            let last = i == len - 1;
+            let c = if last { cont } else { Cont::default() };
+            let n = std::mem::replace(&mut ns[i], TAKEN);
+            let n = match n {
                 SNode::Block { label, body } => {
-                    let bc = c.with_break(*label);
+                    let link = Link {
+                        l: label,
+                        next: c.breaks,
+                    };
+                    let bc = Cont {
+                        breaks: Some(&link),
+                        ..c
+                    };
                     SNode::Block {
-                        label: *label,
-                        body: self.if_pass(body, &bc),
+                        label,
+                        body: self.if_pass(body, bc),
                     }
                 }
                 SNode::Loop {
@@ -785,22 +813,22 @@ impl Cx<'_, '_> {
                     form,
                     c: lc,
                 } => SNode::Loop {
-                    label: *label,
-                    body: self.if_pass(body, &Cont::loop_body(*label)),
-                    form: *form,
-                    c: *lc,
+                    label,
+                    body: self.if_pass(body, Cont::loop_body(label)),
+                    form,
+                    c: lc,
                 },
                 SNode::Switch { v, cases } => SNode::Switch {
-                    v: *v,
+                    v,
                     cases: cases
-                        .iter()
-                        .map(|(vals, b)| (vals.clone(), self.if_pass(b, &none)))
+                        .into_iter()
+                        .map(|(vals, b)| (vals, self.if_pass(b, Cont::default())))
                         .collect(),
                 },
                 SNode::If { c: c0, then, els } => {
                     let mut th = self.if_pass(then, c);
                     let mut el = self.if_pass(els, c);
-                    let mut cond = *c0;
+                    let mut cond = c0;
                     if th.is_empty() && !el.is_empty() {
                         th = std::mem::take(&mut el);
                         cond = self.fx.negate(cond);
@@ -809,12 +837,13 @@ impl Cx<'_, '_> {
                         th.len() == 1 && matches!(th[0], SNode::Break(Some(l)) if l.is_b());
                     if el.is_empty()
                         && th.len() == 1
-                        && i + 1 < ns.len()
-                        && is_jump_in(&th[0], cont)
-                        && (!ends_in_jump(ns, self.stmts) || to_block)
+                        && i + 1 < len
+                        && is_jump_in(&th[0], &cont)
+                        && (!*ends.get_or_insert_with(|| ends_in_jump(&ns, self.stmts)) || to_block)
                     {
                         let nc = self.fx.negate(cond);
-                        let then = self.if_pass(&ns[i + 1..], cont);
+                        let rest: Vec<SNode> = ns.drain(i + 1..).collect();
+                        let then = self.if_pass(rest, cont);
                         out.push(SNode::If {
                             c: nc,
                             then,
@@ -825,11 +854,12 @@ impl Cx<'_, '_> {
                     if el.is_empty()
                         && th.len() > 1
                         && matches!(th.last(), Some(SNode::Break(Some(l))) if l.is_b())
-                        && is_jump_in(th.last().unwrap(), cont)
+                        && is_jump_in(th.last().unwrap(), &cont)
                         && !ends_in_jump(&th[..th.len() - 1], self.stmts)
                     {
                         th.pop();
-                        let els = self.if_pass(&ns[i + 1..], cont);
+                        let rest: Vec<SNode> = ns.drain(i + 1..).collect();
+                        let els = self.if_pass(rest, cont);
                         out.push(SNode::If {
                             c: cond,
                             then: th,
@@ -865,27 +895,23 @@ impl Cx<'_, '_> {
                         continue;
                     }
                     // merge `if (a) { if (b) { X } }`
-                    if el.is_empty() && th.len() == 1 {
-                        if let SNode::If {
-                            els: ie,
-                            c: ic,
-                            then: _,
-                        } = &th[0]
-                        {
-                            if ie.is_empty() {
-                                let ic = *ic;
-                                let Some(SNode::If { then: it, .. }) = th.pop() else {
-                                    unreachable!()
-                                };
-                                let land = self.fx.ir.mk(Node::Land(cond, ic));
-                                out.push(SNode::If {
-                                    c: land,
-                                    then: it,
-                                    els: Vec::new(),
-                                });
-                                continue;
-                            }
-                        }
+                    if el.is_empty()
+                        && th.len() == 1
+                        && matches!(&th[0], SNode::If { els: ie, .. } if ie.is_empty())
+                    {
+                        let Some(SNode::If {
+                            c: ic, then: it, ..
+                        }) = th.pop()
+                        else {
+                            unreachable!()
+                        };
+                        let land = self.fx.ir.mk(Node::Land(cond, ic));
+                        out.push(SNode::If {
+                            c: land,
+                            then: it,
+                            els: Vec::new(),
+                        });
+                        continue;
                     }
                     SNode::If {
                         c: cond,
@@ -893,52 +919,48 @@ impl Cx<'_, '_> {
                         els: el,
                     }
                 }
-                n => n.clone(),
+                n => n,
             };
             out.push(n);
         }
         out
     }
 
-    fn same_arms_pass(&mut self, ns: Vec<SNode>) -> Vec<SNode> {
-        let mut out = Vec::with_capacity(ns.len());
-        for n in ns {
+    /// `if (c) { A } else { A }` (the same statements, c without effects) -> A. In place.
+    fn same_arms_pass(&mut self, ns: &mut Vec<SNode>) {
+        let mut splice: Vec<usize> = Vec::new();
+        for (i, n) in ns.iter_mut().enumerate() {
             match n {
                 SNode::If { c, then, els } => {
-                    let t = self.same_arms_pass(then);
-                    let e = self.same_arms_pass(els);
-                    if !t.is_empty() && inert(self.fx, c) && self.same_list(&t, &e, false) {
-                        out.extend(t);
-                    } else {
-                        out.push(SNode::If { c, then: t, els: e });
+                    self.same_arms_pass(then);
+                    self.same_arms_pass(els);
+                    if !then.is_empty() && inert(self.fx, *c) && self.same_list(then, els, false) {
+                        splice.push(i);
                     }
                 }
-                SNode::Block { label, body } => out.push(SNode::Block {
-                    label,
-                    body: self.same_arms_pass(body),
-                }),
-                SNode::Loop {
-                    label,
-                    body,
-                    form,
-                    c,
-                } => out.push(SNode::Loop {
-                    label,
-                    body: self.same_arms_pass(body),
-                    form,
-                    c,
-                }),
-                SNode::Switch { v, cases } => out.push(SNode::Switch {
-                    v,
-                    cases: cases
-                        .into_iter()
-                        .map(|(vals, b)| (vals, self.same_arms_pass(b)))
-                        .collect(),
-                }),
-                n => out.push(n),
+                SNode::Block { body, .. } | SNode::Loop { body, .. } => self.same_arms_pass(body),
+                SNode::Switch { cases, .. } => {
+                    for (_, b) in cases.iter_mut() {
+                        self.same_arms_pass(b);
+                    }
+                }
+                _ => {}
             }
         }
-        out
+        if !splice.is_empty() {
+            let old = std::mem::take(ns);
+            let mut k = 0;
+            for (i, n) in old.into_iter().enumerate() {
+                if k < splice.len() && splice[k] == i {
+                    k += 1;
+                    if let SNode::If { then, .. } = n {
+                        ns.extend(then);
+                    }
+                } else {
+                    ns.push(n);
+                }
+            }
+        }
     }
 
     /// sameTree (with_pc) / samePcFree (statement pcs ignored) on node lists.
@@ -1103,12 +1125,14 @@ impl Cx<'_, '_> {
     }
 
     /// `B: { … break B … } rest` with a short rest ending in a jump: every `break B` becomes a copy of rest.
-    fn dup_pass(&mut self, ns: &[SNode]) -> Vec<SNode> {
-        let mut out = Vec::with_capacity(ns.len());
-        for i in 0..ns.len() {
-            let n = match &ns[i] {
+    fn dup_pass(&mut self, mut ns: Vec<SNode>) -> Vec<SNode> {
+        let len = ns.len();
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let n = std::mem::replace(&mut ns[i], TAKEN);
+            let n = match n {
                 SNode::If { c, then, els } => SNode::If {
-                    c: *c,
+                    c,
                     then: self.dup_pass(then),
                     els: self.dup_pass(els),
                 },
@@ -1118,56 +1142,53 @@ impl Cx<'_, '_> {
                     form,
                     c,
                 } => SNode::Loop {
-                    label: *label,
+                    label,
                     body: self.dup_pass(body),
-                    form: *form,
-                    c: *c,
+                    form,
+                    c,
                 },
                 SNode::Switch { v, cases } => SNode::Switch {
-                    v: *v,
+                    v,
                     cases: cases
-                        .iter()
-                        .map(|(vals, b)| (vals.clone(), self.dup_pass(b)))
+                        .into_iter()
+                        .map(|(vals, b)| (vals, self.dup_pass(b)))
                         .collect(),
                 },
                 SNode::Block { label, body } => {
                     let mut body = self.dup_pass(body);
-                    let rest_len = ns.len() - i - 1;
-                    let rest = if rest_len > 0 && rest_len <= 4 && ends_in_jump(ns, self.stmts) {
-                        Some(&ns[i + 1..])
+                    // (checked cheapest first, as in TS; the rest nodes are still in place)
+                    let rest_len = len - i - 1;
+                    let has_rest = rest_len > 0 && rest_len <= 4 && ends_in_jump(&ns, self.stmts);
+                    let sz = if has_rest {
+                        node_size(&ns[i + 1..])
                     } else {
-                        None
+                        usize::MAX
                     };
-                    let sz = rest.map_or(usize::MAX, node_size);
                     let mut k = 0usize;
                     if sz <= 4 {
-                        k = refs_of(&body).get(label).copied().unwrap_or(0) as usize;
+                        k = refs_of(&body).get(label) as usize;
                     }
-                    if let Some(rest) = rest {
-                        if sz <= 4
-                            && k * sz <= 8
-                            && !rest.iter().any(|x| {
-                                matches!(
-                                    x,
-                                    SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }
-                                )
-                            })
-                        {
-                            body = self.rep(body, *label, rest);
-                            let ends = ends_in_jump(&body, self.stmts);
-                            out.extend(body);
-                            if ends {
-                                return out;
-                            }
-                            continue;
+                    if has_rest
+                        && sz <= 4
+                        && k * sz <= 8
+                        && !ns[i + 1..].iter().any(|x| {
+                            matches!(
+                                x,
+                                SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }
+                            )
+                        })
+                    {
+                        body = self.rep(body, label, &ns[i + 1..]);
+                        let ends = ends_in_jump(&body, self.stmts);
+                        out.extend(body);
+                        if ends {
+                            return out;
                         }
+                        continue;
                     }
-                    SNode::Block {
-                        label: *label,
-                        body,
-                    }
+                    SNode::Block { label, body }
                 }
-                n => n.clone(),
+                n => n,
             };
             out.push(n);
         }
@@ -1324,41 +1345,31 @@ fn node_size(ns: &[SNode]) -> usize {
         .sum()
 }
 
-/// for(;;) { if (c) break; body } -> while (!c) body; trailing exit test -> do-while.
-fn loop_pass(fx: &mut Fx, ns: Vec<SNode>) -> Vec<SNode> {
-    ns.into_iter()
-        .map(|n| match n {
-            SNode::If { c, then, els } => SNode::If {
-                c,
-                then: loop_pass(fx, then),
-                els: loop_pass(fx, els),
-            },
-            SNode::Block { label, body } => SNode::Block {
-                label,
-                body: loop_pass(fx, body),
-            },
-            SNode::Switch { v, cases } => SNode::Switch {
-                v,
-                cases: cases
-                    .into_iter()
-                    .map(|(vals, b)| (vals, loop_pass(fx, b)))
-                    .collect(),
-            },
+/// for(;;) { if (c) break; body } -> while (!c) body; trailing exit test -> do-while. In place.
+fn loop_pass(fx: &mut Fx, ns: &mut [SNode]) {
+    for n in ns.iter_mut() {
+        match n {
+            SNode::If { then, els, .. } => {
+                loop_pass(fx, then);
+                loop_pass(fx, els);
+            }
+            SNode::Block { body, .. } => loop_pass(fx, body),
+            SNode::Switch { cases, .. } => {
+                for (_, b) in cases.iter_mut() {
+                    loop_pass(fx, b);
+                }
+            }
             SNode::Loop {
                 label,
                 body,
                 form,
                 c,
             } => {
-                let mut body = loop_pass(fx, body);
-                if form != Form::For {
-                    return SNode::Loop {
-                        label,
-                        body,
-                        form,
-                        c,
-                    };
+                loop_pass(fx, body);
+                if *form != Form::For {
+                    continue;
                 }
+                let label = *label;
                 let is_exit =
                     |x: &SNode| matches!(x, SNode::Break(l) if l.is_none() || *l == label);
                 let first = match body.first() {
@@ -1370,14 +1381,10 @@ fn loop_pass(fx: &mut Fx, ns: Vec<SNode>) -> Vec<SNode> {
                     _ => None,
                 };
                 if let Some(fc) = first {
-                    let nc = fx.negate(fc);
+                    *c = Some(fx.negate(fc));
                     body.remove(0);
-                    return SNode::Loop {
-                        label,
-                        body,
-                        form: Form::While,
-                        c: Some(nc),
-                    };
+                    *form = Form::While;
+                    continue;
                 }
                 // 1: trailing `if (c) break` -> do-while (!c); 2: `if (c) continue; else break` -> do-while (c)
                 let last = match body.last() {
@@ -1385,7 +1392,7 @@ fn loop_pass(fx: &mut Fx, ns: Vec<SNode>) -> Vec<SNode> {
                         if els.is_empty()
                             && then.len() == 1
                             && is_exit(&then[0])
-                            && !has_continue_to(&body, label)
+                            && !has_continue_to(body, label)
                         {
                             Some((1, *c))
                         } else if then.len() == 1
@@ -1402,25 +1409,14 @@ fn loop_pass(fx: &mut Fx, ns: Vec<SNode>) -> Vec<SNode> {
                     _ => None,
                 };
                 if let Some((kind, lc)) = last {
-                    let nc = if kind == 1 { fx.negate(lc) } else { lc };
+                    *c = Some(if kind == 1 { fx.negate(lc) } else { lc });
                     body.pop();
-                    return SNode::Loop {
-                        label,
-                        body,
-                        form: Form::Do,
-                        c: Some(nc),
-                    };
-                }
-                SNode::Loop {
-                    label,
-                    body,
-                    form,
-                    c,
+                    *form = Form::Do;
                 }
             }
-            n => n,
-        })
-        .collect()
+            _ => {}
+        }
+    }
 }
 
 fn has_continue_to(ns: &[SNode], label: Option<Label>) -> bool {
@@ -1452,85 +1448,58 @@ fn has_continue_to(ns: &[SNode], label: Option<Label>) -> bool {
     false
 }
 
-/// `break L` / `continue L` of the innermost loop L become unlabeled.
-fn unlabel(ns: Vec<SNode>, inner: Option<Label>, in_switch: bool) -> Vec<SNode> {
-    ns.into_iter()
-        .map(|n| match n {
-            SNode::Break(Some(l)) if Some(l) == inner && !in_switch => SNode::Break(None),
-            SNode::Continue(Some(l)) if Some(l) == inner => SNode::Continue(None),
-            SNode::If { c, then, els } => SNode::If {
-                c,
-                then: unlabel(then, inner, in_switch),
-                els: unlabel(els, inner, in_switch),
-            },
-            SNode::Block { label, body } => SNode::Block {
-                label,
-                body: unlabel(body, inner, in_switch),
-            },
-            SNode::Loop {
-                label,
-                body,
-                form,
-                c,
-            } => SNode::Loop {
-                label,
-                body: unlabel(body, label, false),
-                form,
-                c,
-            },
-            SNode::Switch { v, cases } => SNode::Switch {
-                v,
-                cases: cases
-                    .into_iter()
-                    .map(|(vals, b)| (vals, unlabel(b, inner, true)))
-                    .collect(),
-            },
-            n => n,
-        })
-        .collect()
+/// `break L` / `continue L` of the innermost loop L become unlabeled. In place.
+fn unlabel(ns: &mut [SNode], inner: Option<Label>, in_switch: bool) {
+    for n in ns.iter_mut() {
+        match n {
+            SNode::Break(l) if l.is_some() && *l == inner && !in_switch => *l = None,
+            SNode::Continue(l) if l.is_some() && *l == inner => *l = None,
+            SNode::If { then, els, .. } => {
+                unlabel(then, inner, in_switch);
+                unlabel(els, inner, in_switch);
+            }
+            SNode::Block { body, .. } => unlabel(body, inner, in_switch),
+            SNode::Loop { label, body, .. } => unlabel(body, *label, false),
+            SNode::Switch { cases, .. } => {
+                for (_, b) in cases.iter_mut() {
+                    unlabel(b, inner, true);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-fn drop_loop_labels(ns: Vec<SNode>, refs: &Refs) -> Vec<SNode> {
-    ns.into_iter()
-        .map(|n| match n {
-            SNode::If { c, then, els } => SNode::If {
-                c,
-                then: drop_loop_labels(then, refs),
-                els: drop_loop_labels(els, refs),
-            },
-            SNode::Block { label, body } => SNode::Block {
-                label,
-                body: drop_loop_labels(body, refs),
-            },
-            SNode::Loop {
-                label,
-                body,
-                form,
-                c,
-            } => SNode::Loop {
-                label: label.filter(|l| refs.get(l).copied().unwrap_or(0) != 0),
-                body: drop_loop_labels(body, refs),
-                form,
-                c,
-            },
-            SNode::Switch { v, cases } => SNode::Switch {
-                v,
-                cases: cases
-                    .into_iter()
-                    .map(|(vals, b)| (vals, drop_loop_labels(b, refs)))
-                    .collect(),
-            },
-            n => n,
-        })
-        .collect()
+fn drop_loop_labels(ns: &mut [SNode], refs: &Refs) {
+    for n in ns.iter_mut() {
+        match n {
+            SNode::If { then, els, .. } => {
+                drop_loop_labels(then, refs);
+                drop_loop_labels(els, refs);
+            }
+            SNode::Block { body, .. } => drop_loop_labels(body, refs),
+            SNode::Loop { label, body, .. } => {
+                if label.is_some_and(|l| refs.get(l) == 0) {
+                    *label = None;
+                }
+                drop_loop_labels(body, refs);
+            }
+            SNode::Switch { cases, .. } => {
+                for (_, b) in cases.iter_mut() {
+                    drop_loop_labels(b, refs);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// cleanup(s, returnsValue): the clean-up rounds (at most 12, until a round leaves the tree
 /// structurally unchanged), then unlabeling.
 pub fn cleanup(fx: &mut Fx, tree: &mut Tree, returns_value: bool) {
     let top = Cont {
-        breaks: Vec::new(),
-        conts: Vec::new(),
+        breaks: None,
+        cont: None,
         ret: !returns_value,
     };
     let mut body = std::mem::take(&mut tree.body);
@@ -1540,22 +1509,23 @@ pub fn cleanup(fx: &mut Fx, tree: &mut Tree, returns_value: bool) {
     };
     for _ in 0..12 {
         let before = body.clone();
-        body = tail_pass(&body, &top, &mut Vec::new());
+        tail_pass(&mut body, top, None);
         let refs = refs_of(&body);
-        body = label_pass(body, &refs);
-        body = cx.if_pass(&body, &top);
-        body = cx.same_arms_pass(body);
-        body = cx.dup_pass(&body);
-        body = tail_pass(&body, &top, &mut Vec::new());
+        label_pass(&mut body, &refs);
+        body = cx.if_pass(body, top);
+        cx.same_arms_pass(&mut body);
+        body = cx.dup_pass(body);
+        tail_pass(&mut body, top, None);
         let refs = refs_of(&body);
-        body = label_pass(body, &refs);
-        body = loop_pass(cx.fx, body);
+        label_pass(&mut body, &refs);
+        loop_pass(cx.fx, &mut body);
         if cx.same_list(&body, &before, true) {
             break;
         }
     }
-    body = unlabel(body, None, false);
+    unlabel(&mut body, None, false);
     let refs = refs_of(&body);
-    body = drop_loop_labels(label_pass(body, &refs), &refs);
+    label_pass(&mut body, &refs);
+    drop_loop_labels(&mut body, &refs);
     tree.body = body;
 }

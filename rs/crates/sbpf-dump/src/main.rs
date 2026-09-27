@@ -332,6 +332,15 @@ fn main() {
 
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("--time4") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        time4(files, iters);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--time3") {
         let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
             (args[2].parse().unwrap(), &args[3..])
@@ -383,6 +392,42 @@ fn real_main() {
             text,
         )
         .expect("write");
+    }
+}
+
+/// Stage 4 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage4
+/// (struct = structure + cleanup + statementIdioms, print = names + declarations + text, summed over
+/// all functions), single-threaded, then the same on worker threads (wall time).
+fn time4(files: &[String], iters: usize) {
+    use sbpf_print::raw::{prepare, print_all, structure_all};
+    println!("file\tstruct\tprint\ttotal\tstruct_par\tprint_par\ttotal_par");
+    let n = stage3::threads();
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = [f64::MAX; 6];
+        for _ in 0..iters {
+            let mut v = [0f64; 6];
+            for (k, th) in [(0, 1), (3, n)] {
+                let mut pr = prepare(&bytes, n).unwrap();
+                let t = Instant::now();
+                let trees = structure_all(&mut pr, th);
+                let t1 = Instant::now();
+                let funcs = print_all(&mut pr, trees, th);
+                v[k] = (t1 - t).as_secs_f64() * 1e3;
+                v[k + 1] = t1.elapsed().as_secs_f64() * 1e3;
+                v[k + 2] = v[k] + v[k + 1];
+                drop(funcs);
+            }
+            for k in 0..6 {
+                best[k] = best[k].min(v[k]);
+            }
+        }
+        let name = std::path::Path::new(f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let cols: Vec<String> = best.iter().map(|x| format!("{x:.2}")).collect();
+        println!("{name}\t{}", cols.join("\t"));
     }
 }
 

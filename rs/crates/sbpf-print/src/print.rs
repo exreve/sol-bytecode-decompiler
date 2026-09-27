@@ -4,18 +4,41 @@
 //! Only the plain (raw) rendering is ported so far: no typed views, frame objects, string / key
 //! literals, comments or outlining (the `PrintCtx` hooks the readable output sets).
 
-use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E, L};
+use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E};
 use sbpf_program::Func;
 use sbpf_struct::{Form, SNode, Tree};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A fast hasher for integer keys (lookups only: no iteration order depends on it).
+#[derive(Default)]
+pub struct IntHasher(u64);
+
+impl Hasher for IntHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    fn write_i64(&mut self, x: i64) {
+        self.write_u64(x as u64);
+    }
+}
+
+pub type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
 use std::fmt::Write;
-use std::rc::Rc;
 
 /// Program-level names the printer looks up (PrintCtx fnName / fnAddrName / sysName).
 #[derive(Clone, Debug, Default)]
 pub struct ProgNames {
-    pub by_pc: HashMap<i64, String>,
-    pub by_addr: HashMap<u64, String>,
+    pub by_pc: IntMap<i64, String>,
+    pub by_addr: IntMap<u64, String>,
     /// syscall name -> alias (registered syscalls)
     pub sys: HashMap<String, String>,
     /// p.elf.text.addr (fallback names `fn_<addr>`)
@@ -173,12 +196,20 @@ fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
 
+/// The expression printer. Text is written into one buffer; a subexpression that needs parentheses
+/// (its precedence below the context's, or one of the TS-ambiguity rules looking at its text) is
+/// wrapped in place after it is written.
 pub struct Printer<'a> {
     pub ir: &'a Ir,
     pub names: &'a ProgNames,
     pub vars: &'a [Option<String>],
     addr_depth: u32,
     shl_call: bool,
+}
+
+fn wrap_at(o: &mut String, start: usize) {
+    o.insert(start, '(');
+    o.push(')');
 }
 
 impl<'a> Printer<'a> {
@@ -192,11 +223,17 @@ impl<'a> Printer<'a> {
         }
     }
 
-    pub fn var_name(&self, id: u32) -> String {
+    pub fn var_name_to(&self, id: u32, o: &mut String) {
         match self.vars.get(id as usize) {
-            Some(Some(n)) => n.clone(),
-            _ => format!("u{id}"),
+            Some(Some(n)) => o.push_str(n),
+            _ => write!(o, "u{id}").unwrap(),
         }
+    }
+
+    pub fn var_name(&self, id: u32) -> String {
+        let mut s = String::new();
+        self.var_name_to(id, &mut s);
+        s
     }
 
     fn fn_addr_name(&self, v: u64) -> Option<&'a str> {
@@ -264,90 +301,141 @@ impl<'a> Printer<'a> {
     }
 
     pub fn expr(&mut self, e: E, prec: u8) -> String {
-        let (t, p) = self.expr0(e);
+        let mut o = String::new();
+        self.expr_to(e, prec, &mut o);
+        o
+    }
+
+    /// expr(e, prec): parenthesized when its precedence is below `prec`.
+    pub fn expr_to(&mut self, e: E, prec: u8, o: &mut String) {
+        let start = o.len();
+        let p = self.expr0(e, o);
         if p < prec {
-            format!("({t})")
-        } else {
-            t
+            wrap_at(o, start);
         }
     }
 
-    fn const0(&self, v: u64) -> (String, u8) {
+    fn const0(&self, v: u64, o: &mut String) -> u8 {
         if let Some(f) = self.fn_addr_name(v) {
-            return (f.to_string(), P::PRIM);
+            o.push_str(f);
+            return P::PRIM;
         }
-        let t = fmt_const(v);
-        let p = if t.starts_with('-') {
+        let s = v as i64;
+        if s < 0 && s > -0x10000 {
+            o.push('-');
+            fmt_pos(s.unsigned_abs(), o);
             P::UNARY
         } else {
+            fmt_pos(v, o);
             P::PRIM
-        };
-        (t, p)
+        }
     }
 
-    fn expr0(&mut self, e: E) -> (String, u8) {
+    /// Arguments joined as joinArgs does (written, then the rare `<`…`>` case rewritten).
+    fn args_to(&mut self, items: &[(E, u8, bool)], o: &mut String) {
+        let mut spans = Vec::with_capacity(items.len());
+        for (i, &(x, prec, s_ok)) in items.iter().enumerate() {
+            if i > 0 {
+                o.push_str(", ");
+            }
+            let s = o.len();
+            self.u_to(x, prec, s_ok, o);
+            spans.push((s, o.len()));
+        }
+        fix_args(o, &spans);
+    }
+
+    fn expr0(&mut self, e: E, o: &mut String) -> u8 {
         match self.ir.get(e) {
-            Node::Const(v) => self.const0(v),
-            Node::Var(id) => (self.var_name(id), P::PRIM),
-            Node::Reg(r) => (format!("r{r}"), P::PRIM),
-            Node::Undef => ("undef".into(), P::PRIM),
-            Node::Bin(op, a, b) => self.bin(op, a, b),
+            Node::Const(v) => self.const0(v, o),
+            Node::Var(id) => {
+                self.var_name_to(id, o);
+                P::PRIM
+            }
+            Node::Reg(r) => {
+                write!(o, "r{r}").unwrap();
+                P::PRIM
+            }
+            Node::Undef => {
+                o.push_str("undef");
+                P::PRIM
+            }
+            Node::Bin(op, a, b) => self.bin(op, a, b, o),
             Node::Neg(a) => {
                 if let Node::Const(v) = self.ir.get(a) {
-                    return self.const0(v.wrapping_neg());
+                    return self.const0(v.wrapping_neg(), o);
                 }
-                let t = self.u(a, P::UNARY + 1, true);
-                if t.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) {
-                    (format!("-({t})"), P::UNARY)
+                let s = o.len();
+                self.u_to(a, P::UNARY + 1, true, o);
+                if o.as_bytes().get(s).is_some_and(|c| c.is_ascii_digit()) {
+                    o.insert_str(s, "-(");
+                    o.push(')');
                 } else {
-                    (format!("-{t}"), P::UNARY)
+                    o.insert(s, '-');
                 }
+                P::UNARY
             }
-            Node::Not(a) => (format!("~{}", self.u(a, P::UNARY + 1, true)), P::UNARY),
-            Node::Ext { signed, bits, a } => (
-                format!(
-                    "{} as {}{}",
-                    self.expr(a, P::UNARY),
-                    if signed { 'i' } else { 'u' },
-                    bits
-                ),
-                P::AS,
-            ),
-            Node::Bswap { bits, a } => (format!("bswap{bits}({})", self.u(a, 0, true)), P::CALL),
+            Node::Not(a) => {
+                o.push('~');
+                self.u_to(a, P::UNARY + 1, true, o);
+                P::UNARY
+            }
+            Node::Ext { signed, bits, a } => {
+                self.expr_to(a, P::UNARY, o);
+                write!(o, " as {}{}", if signed { 'i' } else { 'u' }, bits).unwrap();
+                P::AS
+            }
+            Node::Bswap { bits, a } => {
+                write!(o, "bswap{bits}(").unwrap();
+                self.u_to(a, 0, true, o);
+                o.push(')');
+                P::CALL
+            }
             Node::Load { size, addr } => {
+                write!(o, "ld{}(", size as u32 * 8).unwrap();
                 self.addr_depth += 1;
-                let a = self.u(addr, 0, true);
+                self.u_to(addr, 0, true, o);
                 self.addr_depth -= 1;
-                (format!("ld{}({a})", size as u32 * 8), P::CALL)
+                o.push(')');
+                P::CALL
             }
-            Node::Cmp(op, a, b) => self.cmp(e, op, a, b),
-            Node::Lnot(a) => (format!("!{}", self.expr(a, P::UNARY)), P::UNARY),
-            Node::Land(a, b) => (
-                format!("{} && {}", self.expr(a, P::LAND), self.expr(b, P::LAND + 1)),
-                P::LAND,
-            ),
-            Node::Lor(a, b) => (
-                format!("{} || {}", self.expr(a, P::LOR), self.expr(b, P::LOR + 1)),
-                P::LOR,
-            ),
-            Node::Sel(c, a, b) => (
-                format!(
-                    "{} ? {} : {}",
-                    self.expr(c, P::COND + 1),
-                    self.u(a, P::ASSIGN, false),
-                    self.u(b, P::ASSIGN, false)
-                ),
-                P::COND,
-            ),
+            Node::Cmp(op, a, b) => self.cmp(e, op, a, b, o),
+            Node::Lnot(a) => {
+                o.push('!');
+                self.expr_to(a, P::UNARY, o);
+                P::UNARY
+            }
+            Node::Land(a, b) => {
+                self.expr_to(a, P::LAND, o);
+                o.push_str(" && ");
+                self.expr_to(b, P::LAND + 1, o);
+                P::LAND
+            }
+            Node::Lor(a, b) => {
+                self.expr_to(a, P::LOR, o);
+                o.push_str(" || ");
+                self.expr_to(b, P::LOR + 1, o);
+                P::LOR
+            }
+            Node::Sel(c, a, b) => {
+                self.expr_to(c, P::COND + 1, o);
+                o.push_str(" ? ");
+                self.u_to(a, P::ASSIGN, false, o);
+                o.push_str(" : ");
+                self.u_to(b, P::ASSIGN, false, o);
+                P::COND
+            }
             Node::Call(t, args) => {
                 let t = self.ir.target(t);
                 let args = self.ir.to_vec(args);
-                (self.call_text(&t, &args), P::CALL)
+                self.call_to(&t, &args, o);
+                P::CALL
             }
             Node::Fn(n, args) => {
-                let name = self.ir.name(n);
-                if &*name == "keyeq" {
-                    let a0 = self.u(self.ir.at(args, 0), P::ASSIGN, true);
+                let is_key = self.ir.with_name(n, |x| x == "keyeq");
+                if is_key {
+                    o.push_str("keyeq(");
+                    self.u_to(self.ir.at(args, 0), P::ASSIGN, true, o);
                     let mut b = [0u8; 32];
                     for i in 1..args.len as usize {
                         if let Node::Const(v) = self.ir.get(self.ir.at(args, i as u32)) {
@@ -357,59 +445,68 @@ impl<'a> Printer<'a> {
                             }
                         }
                     }
-                    return (format!("keyeq({a0}, {})", json_str(&b58(&b))), P::CALL);
+                    o.push_str(", ");
+                    o.push_str(&json_str(&b58(&b)));
+                    o.push(')');
+                    return P::CALL;
                 }
-                let a: Vec<String> = (0..args.len)
-                    .map(|k| self.u(self.ir.at(args, k), P::ASSIGN, true))
-                    .collect();
-                (format!("{name}({})", join_args(&a)), P::CALL)
+                self.ir.with_name(n, |x| o.push_str(x));
+                o.push('(');
+                let items: Vec<(E, u8, bool)> =
+                    self.ir.items(args).map(|x| (x, P::ASSIGN, true)).collect();
+                self.args_to(&items, o);
+                o.push(')');
+                P::CALL
             }
             Node::Item(_) => unreachable!("list item"),
         }
     }
 
-    fn bin(&mut self, op: BinOp, a: E, b: E) -> (String, u8) {
+    fn bin(&mut self, op: BinOp, a: E, b: E, o: &mut String) -> u8 {
         if op == BinOp::Add {
             if let Node::Const(bv) = self.ir.get(b) {
                 let s = bv as i64;
                 if s < 0 && s > -0x1_0000_0000 && self.fn_addr_name(bv).is_none() {
-                    let mut t = self.u(a, P::ADD, true);
-                    t.push_str(" - ");
-                    fmt_pos(s.unsigned_abs(), &mut t);
-                    return (t, P::ADD);
+                    self.u_to(a, P::ADD, true, o);
+                    o.push_str(" - ");
+                    fmt_pos(s.unsigned_abs(), o);
+                    return P::ADD;
                 }
             }
         }
         if op == BinOp::Shl && self.shl_call {
             let amt = self.shift_amt(b);
-            let x = [self.u(a, 0, false), self.u(amt, 0, false)];
-            return (format!("shl({})", join_args(&x)), P::CALL);
+            o.push_str("shl(");
+            self.args_to(&[(a, 0, false), (amt, 0, false)], o);
+            o.push(')');
+            return P::CALL;
         }
         if op == BinOp::Shl || op == BinOp::Lshr {
-            let (o, p) = if op == BinOp::Shl {
-                ("<<", P::SHIFT)
-            } else {
-                (">>", P::SHIFT)
-            };
             let amt = self.shift_amt(b);
-            let l = self.u(a, p, false);
-            let r = self.u(amt, p + 1, false);
+            let start = o.len();
+            self.u_to(a, P::SHIFT, false, o);
+            let mut r = String::new();
+            self.u_to(amt, P::SHIFT + 1, false, &mut r);
+            // `x << (… > (…))` can be misread by TypeScript as a generic call: the function form
             if op == BinOp::Shl && r.contains(['<', '>']) {
-                return (
-                    format!(
-                        "shl({}, {})",
-                        self.u(a, P::ASSIGN, false),
-                        self.u(amt, P::ASSIGN, false)
-                    ),
-                    P::CALL,
-                );
+                o.truncate(start);
+                o.push_str("shl(");
+                self.u_to(a, P::ASSIGN, false, o);
+                o.push_str(", ");
+                self.u_to(amt, P::ASSIGN, false, o);
+                o.push(')');
+                return P::CALL;
             }
-            return (format!("{l} {o} {r}"), p);
+            o.push_str(if op == BinOp::Shl { " << " } else { " >> " });
+            o.push_str(&r);
+            return P::SHIFT;
         }
         if op == BinOp::Ashr {
             let amt = self.shift_amt(b);
-            let x = [self.u(a, 0, true), self.u(amt, 0, true)];
-            return (format!("sar({})", join_args(&x)), P::CALL);
+            o.push_str("sar(");
+            self.args_to(&[(a, 0, true), (amt, 0, true)], o);
+            o.push(')');
+            return P::CALL;
         }
         let fname = match op {
             BinOp::Sdiv => Some("sdiv"),
@@ -421,46 +518,47 @@ impl<'a> Printer<'a> {
             _ => None,
         };
         if let Some(fname) = fname {
-            let x = [self.u(a, 0, true), self.u(b, 0, true)];
-            return (format!("{fname}({})", join_args(&x)), P::CALL);
+            o.push_str(fname);
+            o.push('(');
+            self.args_to(&[(a, 0, true), (b, 0, true)], o);
+            o.push(')');
+            return P::CALL;
         }
-        let (o, p) = match op {
-            BinOp::Add => ("+", P::ADD),
-            BinOp::Sub => ("-", P::ADD),
-            BinOp::Mul => ("*", P::MUL),
-            BinOp::Udiv => ("/", P::MUL),
-            BinOp::Urem => ("%", P::MUL),
-            BinOp::And => ("&", P::BAND),
-            BinOp::Or => ("|", P::BOR),
-            BinOp::Xor => ("^", P::BXOR),
+        let (op_s, p) = match op {
+            BinOp::Add => (" + ", P::ADD),
+            BinOp::Sub => (" - ", P::ADD),
+            BinOp::Mul => (" * ", P::MUL),
+            BinOp::Udiv => (" / ", P::MUL),
+            BinOp::Urem => (" % ", P::MUL),
+            BinOp::And => (" & ", P::BAND),
+            BinOp::Or => (" | ", P::BOR),
+            BinOp::Xor => (" ^ ", P::BXOR),
             _ => unreachable!("binary operator {op:?}"),
         };
         let s_ok = op != BinOp::Udiv && op != BinOp::Urem;
-        let l = self.operand(a, p, s_ok);
-        let r = self.operand(b, p + 1, s_ok);
-        (format!("{l} {o} {r}"), p)
+        self.operand(a, p, s_ok, o);
+        o.push_str(op_s);
+        self.operand(b, p + 1, s_ok, o);
+        p
     }
 
     /// A binary operand; a `<<` operand is parenthesized (TS could read `<1 | (b>` as type arguments).
-    fn operand(&mut self, x: E, pp: u8, s_ok: bool) -> String {
-        let t = self.u(x, pp, s_ok);
-        if matches!(self.ir.get(x), Node::Bin(BinOp::Shl, ..)) && !wrapped(&t) {
-            format!("({t})")
-        } else {
-            t
+    fn operand(&mut self, x: E, pp: u8, s_ok: bool, o: &mut String) {
+        let start = o.len();
+        self.u_to(x, pp, s_ok, o);
+        if matches!(self.ir.get(x), Node::Bin(BinOp::Shl, ..)) && !wrapped(&o[start..]) {
+            wrap_at(o, start);
         }
     }
 
-    fn cmp(&mut self, e: E, op: CmpOp, a: E, b: E) -> (String, u8) {
+    fn cmp(&mut self, e: E, op: CmpOp, a: E, b: E, o: &mut String) -> u8 {
         if op == CmpOp::Set {
-            return (
-                format!(
-                    "({} & {}) != 0",
-                    self.u(a, P::BAND, true),
-                    self.u(b, P::BAND + 1, true)
-                ),
-                P::EQ,
-            );
+            o.push('(');
+            self.u_to(a, P::BAND, true, o);
+            o.push_str(" & ");
+            self.u_to(b, P::BAND + 1, true, o);
+            o.push_str(") != 0");
+            return P::EQ;
         }
         let (mut op, mut a, mut b) = (op, a, b);
         let sw = match op {
@@ -482,45 +580,51 @@ impl<'a> Printer<'a> {
                 std::mem::swap(&mut a, &mut b);
             }
         }
-        let signed = op.as_str().starts_with('s');
-        let o = match op {
-            CmpOp::Eq => "==",
-            CmpOp::Ne => "!=",
-            CmpOp::Ugt | CmpOp::Sgt => ">",
-            CmpOp::Uge | CmpOp::Sge => ">=",
-            CmpOp::Ult | CmpOp::Slt => "<",
-            CmpOp::Ule | CmpOp::Sle => "<=",
+        let signed = matches!(op, CmpOp::Sgt | CmpOp::Sge | CmpOp::Slt | CmpOp::Sle);
+        let op_s = match op {
+            CmpOp::Eq => " == ",
+            CmpOp::Ne => " != ",
+            CmpOp::Ugt | CmpOp::Sgt => " > ",
+            CmpOp::Uge | CmpOp::Sge => " >= ",
+            CmpOp::Ult | CmpOp::Slt => " < ",
+            CmpOp::Ule | CmpOp::Sle => " <= ",
             CmpOp::Set => unreachable!(),
         };
-        let p = if o == "==" || o == "!=" {
+        let p = if matches!(op, CmpOp::Eq | CmpOp::Ne) {
             P::EQ
         } else {
             P::REL
         };
-        let l = self.side(a, p, signed, p == P::EQ);
-        let r = self.side(b, p + 1, signed, p == P::EQ);
-        (format!("{l} {o} {r}"), p)
+        self.side(a, p, signed, p == P::EQ, o);
+        o.push_str(op_s);
+        self.side(b, p + 1, signed, p == P::EQ, o);
+        p
     }
 
-    fn side(&mut self, x: E, pp: u8, signed: bool, s_ok: bool) -> String {
-        let t = if signed {
-            self.signed_operand(x)
+    fn side(&mut self, x: E, pp: u8, signed: bool, s_ok: bool, o: &mut String) {
+        let start = o.len();
+        if signed {
+            self.signed_operand(x, o);
         } else {
-            self.u(x, pp, s_ok)
-        };
+            self.u_to(x, pp, s_ok, o);
+        }
         let risky = matches!(
             self.ir.get(x),
             Node::Bin(BinOp::Shl | BinOp::Lshr, ..) | Node::Cmp(..)
         );
-        if risky && !wrapped(&t) {
-            format!("({t})")
-        } else {
-            t
+        if risky && !wrapped(&o[start..]) {
+            wrap_at(o, start);
         }
     }
 
-    /// An operand in an unsigned context: signed-typed intermediates are re-normalized.
     pub fn u(&mut self, e: E, prec: u8, signed_ok: bool) -> String {
+        let mut o = String::new();
+        self.u_to(e, prec, signed_ok, &mut o);
+        o
+    }
+
+    /// An operand in an unsigned context: signed-typed intermediates are re-normalized.
+    pub fn u_to(&mut self, e: E, prec: u8, signed_ok: bool, o: &mut String) {
         let mut e = e;
         if let Node::Neg(a) = self.ir.get(e) {
             if let Node::Const(v) = self.ir.get(a) {
@@ -530,53 +634,81 @@ impl<'a> Printer<'a> {
         if !signed_ok {
             match self.ir.get(e) {
                 Node::Ext { signed: true, .. } => {
-                    return format!("({} as u64)", self.expr(e, P::UNARY));
+                    o.push('(');
+                    self.expr_to(e, P::UNARY, o);
+                    o.push_str(" as u64)");
+                    return;
                 }
                 Node::Const(v) if (v as i64) < 0 && self.fn_addr_name(v).is_none() => {
-                    let mut o = String::new();
-                    fmt_pos(v, &mut o);
-                    return o;
+                    fmt_pos(v, o);
+                    return;
                 }
                 _ => {}
             }
         }
-        self.expr(e, prec)
+        self.expr_to(e, prec, o)
     }
 
-    fn signed_operand(&mut self, e: E) -> String {
+    fn signed_operand(&mut self, e: E, o: &mut String) {
         match self.ir.get(e) {
             Node::Const(v) => {
                 let s = v as i64;
-                let mut o = String::new();
                 if s < 0 {
                     o.push('-');
                 }
-                fmt_pos(s.unsigned_abs(), &mut o);
-                o
+                fmt_pos(s.unsigned_abs(), o);
             }
-            Node::Ext { signed: true, .. } => self.expr(e, P::REL + 1),
-            _ => format!("({} as i64)", self.expr(e, P::UNARY)),
+            Node::Ext { signed: true, .. } => self.expr_to(e, P::REL + 1, o),
+            _ => {
+                o.push('(');
+                self.expr_to(e, P::UNARY, o);
+                o.push_str(" as i64)");
+            }
         }
     }
 
-    pub fn call_text(&mut self, t: &CallTarget, args: &[E]) -> String {
-        let a: Vec<String> = args.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
+    pub fn call_to(&mut self, t: &CallTarget, args: &[E], o: &mut String) {
+        let mut items: Vec<(E, u8, bool)> = Vec::with_capacity(args.len() + 1);
         match t {
-            CallTarget::Fn { pc } => format!("{}({})", self.names.fn_name(*pc), join_args(&a)),
-            CallTarget::Sys { name, .. } => {
-                format!("{}({})", self.names.sys_name(name), join_args(&a))
-            }
+            CallTarget::Fn { pc } => match self.names.by_pc.get(pc) {
+                Some(n) => o.push_str(n),
+                None => o.push_str(&self.names.fn_name(*pc)),
+            },
+            CallTarget::Sys { name, .. } => o.push_str(self.names.sys_name(name)),
             CallTarget::Ind { e } => {
-                let mut x = vec![self.u(*e, P::ASSIGN, true)];
-                x.extend(a);
-                format!("callx({})", join_args(&x))
+                o.push_str("callx");
+                items.push((*e, P::ASSIGN, true));
             }
         }
+        o.push('(');
+        // (callText renders the arguments before an indirect target; the order does not change the text)
+        items.extend(args.iter().map(|&x| (x, P::ASSIGN, true)));
+        self.args_to(&items, o);
+        o.push(')');
     }
 }
 
-/// Declaration keyword of the statements that declare a variable (by statement index in the tree).
-pub type Decls = HashMap<u32, &'static str>;
+/// joinArgs on arguments already written at `spans` (joined with ", "): when some argument contains
+/// `<` and some `>`, the ones containing either (and not of the form `f(…)`) are parenthesized.
+fn fix_args(o: &mut String, spans: &[(usize, usize)]) {
+    if spans.len() < 2 {
+        return;
+    }
+    let lt = spans.iter().any(|&(s, e)| o[s..e].contains('<'));
+    let gt = spans.iter().any(|&(s, e)| o[s..e].contains('>'));
+    if !lt || !gt {
+        return;
+    }
+    let base = spans[0].0;
+    let parts: Vec<String> = spans.iter().map(|&(s, e)| o[s..e].to_string()).collect();
+    o.truncate(base);
+    let joined = join_args(&parts);
+    o.push_str(&joined);
+}
+
+/// Declaration keyword of the statements that declare a variable, by statement index in the tree
+/// (0: none, else "const" / "let").
+pub type Decls = Vec<Option<&'static str>>;
 
 /// printBody: the structured body as lines (indent = one tab per level below `indent`).
 pub fn print_body(
@@ -594,8 +726,15 @@ pub fn print_body(
         out: Vec::new(),
     };
     if !hoisted.is_empty() {
-        let names: Vec<String> = hoisted.iter().map(|&v| b.pr.var_name(v)).collect();
-        let l = format!("{}let {}: u64", b.ind(0), names.join(", "));
+        let mut l = b.line(0);
+        l.push_str("let ");
+        for (i, &v) in hoisted.iter().enumerate() {
+            if i > 0 {
+                l.push_str(", ");
+            }
+            b.pr.var_name_to(v, &mut l);
+        }
+        l.push_str(": u64");
         b.out.push(l);
     }
     b.rec(&tree.body, 0);
@@ -611,20 +750,21 @@ struct BodyPrinter<'p, 'a> {
 }
 
 impl BodyPrinter<'_, '_> {
-    fn ind(&self, d: usize) -> String {
-        let mut s = String::with_capacity(self.indent.len() + d);
+    /// A new line holding the indentation of depth d.
+    fn line(&self, d: usize) -> String {
+        let mut s = String::with_capacity(self.indent.len() + d + 96);
         s.push_str(self.indent);
         for _ in 0..d {
             s.push('\t');
         }
         s
     }
-    fn decl_name(&self, v: i32, kw: Option<&str>) -> String {
-        let n = self.pr.var_name(v as u32);
-        match kw {
-            Some(k) => format!("{k} {n}"),
-            None => n,
+    fn decl_to(&self, si: u32, v: i32, o: &mut String) {
+        if let Some(Some(k)) = self.decls.get(si as usize) {
+            o.push_str(k);
+            o.push(' ');
         }
+        self.pr.var_name_to(v as u32, o);
     }
     fn stmt(&mut self, si: u32, d: usize) {
         let n0 = self.out.len();
@@ -643,19 +783,26 @@ impl BodyPrinter<'_, '_> {
     }
     fn stmt0(&mut self, si: u32, d: usize) {
         let s = self.tree.stmt(si);
-        let i = self.ind(d);
-        let line = match s {
+        let mut o = self.line(d);
+        match s {
             Stmt::Set { dst, e, .. } => {
-                let kw = self.decls.get(&si).copied();
-                let dn = self.decl_name(*dst, kw);
-                format!("{i}{dn} = {}", self.pr.u(*e, P::ASSIGN, true))
+                self.decl_to(si, *dst, &mut o);
+                o.push_str(" = ");
+                self.pr.u_to(*e, P::ASSIGN, true, &mut o);
             }
             Stmt::Store { size, addr, v, .. } => {
+                write!(o, "st{}(", *size as u32 * 8).unwrap();
+                let s0 = o.len();
                 self.pr.addr_depth += 1;
-                let a = self.pr.u(*addr, P::ASSIGN, true);
+                self.pr.u_to(*addr, P::ASSIGN, true, &mut o);
                 self.pr.addr_depth -= 1;
-                let x = [a, self.pr.u(*v, P::ASSIGN, true)];
-                format!("{i}st{}({})", *size as u32 * 8, join_args(&x))
+                let s1 = o.len();
+                o.push_str(", ");
+                let s2 = o.len();
+                self.pr.u_to(*v, P::ASSIGN, true, &mut o);
+                let s3 = o.len();
+                fix_args(&mut o, &[(s0, s1), (s2, s3)]);
+                o.push(')');
             }
             Stmt::Call {
                 dst,
@@ -664,70 +811,94 @@ impl BodyPrinter<'_, '_> {
                 extra,
                 ..
             } => {
-                let kw = self.decls.get(&si).copied();
                 let mut all = self.pr.ir.to_vec(*args);
                 if let Some(x) = extra {
                     all.extend(self.pr.ir.items(*x));
                 }
-                let txt = self.pr.call_text(t, &all);
                 if *dst >= 0 {
-                    format!("{i}{} = {txt}", self.decl_name(*dst, kw))
-                } else {
-                    format!("{i}{txt}")
+                    self.decl_to(si, *dst, &mut o);
+                    o.push_str(" = ");
                 }
+                self.pr.call_to(t, &all, &mut o);
             }
             Stmt::Eval { e, .. } => {
                 let bare = match self.pr.ir.get(*e) {
                     Node::Fn(n, _) => self.pr.ir.with_name(n, |x| x == "rc_inc" || x == "rc_dec"),
                     _ => false,
                 };
-                format!(
-                    "{i}{}{}",
-                    if bare { "" } else { "void " },
-                    self.pr.u(*e, P::UNARY, true)
-                )
+                if !bare {
+                    o.push_str("void ");
+                }
+                self.pr.u_to(*e, P::UNARY, true, &mut o);
             }
             Stmt::Stores {
                 size, addr, vals, ..
             } => {
+                write!(o, "st{}(", *size as u32 * 8).unwrap();
+                let mut spans = Vec::new();
+                let s0 = o.len();
                 self.pr.addr_depth += 1;
-                let a = self.pr.u(*addr, P::ASSIGN, true);
+                self.pr.u_to(*addr, P::ASSIGN, true, &mut o);
                 self.pr.addr_depth -= 1;
-                let mut x = vec![a];
-                for v in self.pr.ir.to_vec(*vals) {
-                    x.push(self.pr.u(v, P::ASSIGN, true));
+                spans.push((s0, o.len()));
+                for v in self.pr.ir.items(*vals) {
+                    o.push_str(", ");
+                    let s = o.len();
+                    self.pr.u_to(v, P::ASSIGN, true, &mut o);
+                    spans.push((s, o.len()));
                 }
-                format!("{i}st{}({})", *size as u32 * 8, join_args(&x))
+                fix_args(&mut o, &spans);
+                o.push(')');
             }
             Stmt::Copy {
                 dst, src, n, rev, ..
             } => {
-                let x = [
-                    self.pr.u(*dst, P::ASSIGN, true),
-                    self.pr.u(*src, P::ASSIGN, true),
-                    fmt_const(*n),
-                ];
-                format!(
-                    "{i}copy{}({})",
-                    if *rev == Some(true) { "r" } else { "" },
-                    join_args(&x)
-                )
+                o.push_str(if *rev == Some(true) {
+                    "copyr("
+                } else {
+                    "copy("
+                });
+                let s0 = o.len();
+                self.pr.u_to(*dst, P::ASSIGN, true, &mut o);
+                let s1 = o.len();
+                o.push_str(", ");
+                let s2 = o.len();
+                self.pr.u_to(*src, P::ASSIGN, true, &mut o);
+                let s3 = o.len();
+                o.push_str(", ");
+                let s4 = o.len();
+                o.push_str(&fmt_const(*n));
+                let s5 = o.len();
+                fix_args(&mut o, &[(s0, s1), (s2, s3), (s4, s5)]);
+                o.push(')');
             }
-            Stmt::Trap { msg, .. } => format!("{i}trap({})", json_str(msg)),
-        };
-        self.out.push(line);
+            Stmt::Trap { msg, .. } => {
+                o.push_str("trap(");
+                o.push_str(&json_str(msg));
+                o.push(')');
+            }
+        }
+        self.out.push(o);
     }
     fn rec(&mut self, ns: &[SNode], d: usize) {
         for n in ns {
             self.node(n, d);
         }
     }
+    fn push_label(o: &mut String, l: Option<sbpf_struct::Label>) {
+        if let Some(l) = l {
+            o.push(' ');
+            l.write(o);
+        }
+    }
     fn node(&mut self, n: &SNode, d: usize) {
-        let i = self.ind(d);
         match n {
             SNode::Stmt(s) => self.stmt(*s, d),
             SNode::If { c, then, els } => {
-                let l = format!("{i}if ({}) {{", self.pr.expr(*c, 0));
+                let mut l = self.line(d);
+                l.push_str("if (");
+                self.pr.expr_to(*c, 0, &mut l);
+                l.push_str(") {");
                 self.out.push(l);
                 self.rec(then, d + 1);
                 let mut el = els;
@@ -735,21 +906,33 @@ impl BodyPrinter<'_, '_> {
                     let SNode::If { c, then, els } = &el[0] else {
                         break;
                     };
-                    let l = format!("{i}}} else if ({}) {{", self.pr.expr(*c, 0));
+                    let mut l = self.line(d);
+                    l.push_str("} else if (");
+                    self.pr.expr_to(*c, 0, &mut l);
+                    l.push_str(") {");
                     self.out.push(l);
                     self.rec(then, d + 1);
                     el = els;
                 }
                 if !el.is_empty() {
-                    self.out.push(format!("{i}}} else {{"));
+                    let mut l = self.line(d);
+                    l.push_str("} else {");
+                    self.out.push(l);
                     self.rec(el, d + 1);
                 }
-                self.out.push(format!("{i}}}"));
+                let mut l = self.line(d);
+                l.push('}');
+                self.out.push(l);
             }
             SNode::Block { label, body } => {
-                self.out.push(format!("{i}{}: {{", label.text()));
+                let mut l = self.line(d);
+                label.write(&mut l);
+                l.push_str(": {");
+                self.out.push(l);
                 self.rec(body, d + 1);
-                self.out.push(format!("{i}}}"));
+                let mut l = self.line(d);
+                l.push('}');
+                self.out.push(l);
             }
             SNode::Loop {
                 label,
@@ -757,56 +940,91 @@ impl BodyPrinter<'_, '_> {
                 form,
                 c,
             } => {
-                let lbl = label.map_or(String::new(), |l| format!("{}: ", l.text()));
-                let l = match form {
-                    Form::For => format!("{i}{lbl}while (true) {{"),
-                    Form::While => format!("{i}{lbl}while ({}) {{", self.pr.expr(c.unwrap(), 0)),
-                    Form::Do => format!("{i}{lbl}do {{"),
-                };
+                let mut l = self.line(d);
+                if let Some(lb) = label {
+                    lb.write(&mut l);
+                    l.push_str(": ");
+                }
+                match form {
+                    Form::For => l.push_str("while (true) {"),
+                    Form::While => {
+                        l.push_str("while (");
+                        self.pr.expr_to(c.unwrap(), 0, &mut l);
+                        l.push_str(") {");
+                    }
+                    Form::Do => l.push_str("do {"),
+                }
                 self.out.push(l);
                 self.rec(body, d + 1);
-                let l = if *form == Form::Do {
-                    format!("{i}}} while ({})", self.pr.expr(c.unwrap(), 0))
-                } else {
-                    format!("{i}}}")
-                };
+                let mut l = self.line(d);
+                l.push('}');
+                if *form == Form::Do {
+                    l.push_str(" while (");
+                    self.pr.expr_to(c.unwrap(), 0, &mut l);
+                    l.push(')');
+                }
                 self.out.push(l);
             }
-            SNode::Break(l) => self.out.push(match l {
-                Some(l) => format!("{i}break {}", l.text()),
-                None => format!("{i}break"),
-            }),
-            SNode::Continue(l) => self.out.push(match l {
-                Some(l) => format!("{i}continue {}", l.text()),
-                None => format!("{i}continue"),
-            }),
+            SNode::Break(lb) => {
+                let mut l = self.line(d);
+                l.push_str("break");
+                Self::push_label(&mut l, *lb);
+                self.out.push(l);
+            }
+            SNode::Continue(lb) => {
+                let mut l = self.line(d);
+                l.push_str("continue");
+                Self::push_label(&mut l, *lb);
+                self.out.push(l);
+            }
             SNode::Return(e) => {
-                let l = match e {
-                    Some(e) => format!("{i}return {}", self.pr.u(*e, P::ASSIGN, true)),
-                    None => format!("{i}return"),
-                };
+                let mut l = self.line(d);
+                l.push_str("return");
+                if let Some(e) = e {
+                    l.push(' ');
+                    self.pr.u_to(*e, P::ASSIGN, true, &mut l);
+                }
                 self.out.push(l);
             }
             SNode::Trap(msg) => {
                 if !msg.is_empty() {
-                    self.out.push(format!("{i}trap({})", json_str(msg)));
+                    let mut l = self.line(d);
+                    l.push_str("trap(");
+                    l.push_str(&json_str(msg));
+                    l.push(')');
+                    self.out.push(l);
                 }
             }
             SNode::SetState { v, val } => {
-                let l = format!("{i}{} = {val}", self.pr.var_name(*v));
+                let mut l = self.line(d);
+                self.pr.var_name_to(*v, &mut l);
+                write!(l, " = {val}").unwrap();
                 self.out.push(l);
             }
             SNode::Switch { v, cases } => {
-                let l = format!("{i}switch ({}) {{", self.pr.var_name(*v));
+                let mut l = self.line(d);
+                l.push_str("switch (");
+                self.pr.var_name_to(*v, &mut l);
+                l.push_str(") {");
                 self.out.push(l);
-                let i1 = self.ind(d + 1);
                 for (vals, body) in cases {
-                    let cs: Vec<String> = vals.iter().map(|v| format!("case {v}:")).collect();
-                    self.out.push(format!("{i1}{} {{", cs.join(" ")));
+                    let mut l = self.line(d + 1);
+                    for (i, v) in vals.iter().enumerate() {
+                        if i > 0 {
+                            l.push(' ');
+                        }
+                        write!(l, "case {v}:").unwrap();
+                    }
+                    l.push_str(" {");
+                    self.out.push(l);
                     self.rec(body, d + 2);
-                    self.out.push(format!("{i1}}}"));
+                    let mut l = self.line(d + 1);
+                    l.push('}');
+                    self.out.push(l);
                 }
-                self.out.push(format!("{i}}}"));
+                let mut l = self.line(d);
+                l.push('}');
+                self.out.push(l);
             }
         }
     }
@@ -814,136 +1032,9 @@ impl BodyPrinter<'_, '_> {
 
 // ---------------- declarations (decompile.ts) ----------------
 
-struct Ref {
-    /// id of the list holding the node
-    list: u32,
-    path: Rc<Vec<u32>>,
-    is_def: bool,
-    s: Option<u32>,
-}
-
-struct DeclWalk<'a> {
-    ir: &'a Ir,
-    tree: &'a Tree,
-    refs: indexmap::IndexMap<u32, Vec<Ref>>,
-    def_count: HashMap<u32, u32>,
-    next_list: u32,
-    scratch: Vec<E>,
-}
-
-impl DeclWalk<'_> {
-    fn add(&mut self, v: u32, r: Ref) {
-        self.refs.entry(v).or_default().push(r);
-    }
-    fn use_e(&mut self, e: E, list: u32, path: &Rc<Vec<u32>>) {
-        let mut vs = Vec::new();
-        self.ir.walk(e, &mut |_, n| {
-            if let Node::Var(v) = n {
-                vs.push(v);
-            }
-        });
-        for v in vs {
-            self.add(
-                v,
-                Ref {
-                    list,
-                    path: path.clone(),
-                    is_def: false,
-                    s: None,
-                },
-            );
-        }
-    }
-    fn walk(&mut self, ns: &[SNode], path: &[u32]) {
-        let id = self.next_list;
-        self.next_list += 1;
-        let mut p2v = path.to_vec();
-        p2v.push(id);
-        let p2 = Rc::new(p2v);
-        for n in ns {
-            match n {
-                SNode::Stmt(si) => {
-                    let s = self.tree.stmt(*si);
-                    let mut es = std::mem::take(&mut self.scratch);
-                    stmt_exprs(self.ir, s, &mut es);
-                    for &e in &es {
-                        self.use_e(e, id, &p2);
-                    }
-                    self.scratch = es;
-                    let dst = match s {
-                        Stmt::Set { dst, .. } | Stmt::Call { dst, .. } => *dst,
-                        _ => -1,
-                    };
-                    if dst >= 0 {
-                        let v = dst as u32;
-                        self.add(
-                            v,
-                            Ref {
-                                list: id,
-                                path: p2.clone(),
-                                is_def: true,
-                                s: Some(*si),
-                            },
-                        );
-                        *self.def_count.entry(v).or_insert(0) += 1;
-                    }
-                }
-                SNode::If { c, then, els } => {
-                    self.use_e(*c, id, &p2);
-                    self.walk(then, &p2);
-                    self.walk(els, &p2);
-                }
-                SNode::Block { body, .. } => self.walk(body, &p2),
-                SNode::Loop { form, c, body, .. } => {
-                    if *form == Form::While {
-                        if let Some(c) = c {
-                            self.use_e(*c, id, &p2);
-                        }
-                    }
-                    self.walk(body, &p2);
-                    if *form == Form::Do {
-                        if let Some(c) = c {
-                            self.use_e(*c, id, &p2);
-                        }
-                    }
-                }
-                SNode::Return(Some(e)) => self.use_e(*e, id, &p2),
-                SNode::Switch { v, cases } => {
-                    self.add(
-                        *v,
-                        Ref {
-                            list: id,
-                            path: p2.clone(),
-                            is_def: false,
-                            s: None,
-                        },
-                    );
-                    for c in cases {
-                        self.walk(&c.1, &p2);
-                    }
-                }
-                SNode::SetState { v, .. } => {
-                    self.add(
-                        *v,
-                        Ref {
-                            list: id,
-                            path: p2.clone(),
-                            is_def: true,
-                            s: None,
-                        },
-                    );
-                    self.def_count.insert(*v, 2);
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 /// stmtExprs (simplify.ts)
 pub fn stmt_exprs(ir: &Ir, s: &Stmt, out: &mut Vec<E>) {
     out.clear();
-    let items = |l: &L, out: &mut Vec<E>| out.extend(ir.items(*l));
     match s {
         Stmt::Set { e, .. } | Stmt::Eval { e, .. } => out.push(*e),
         Stmt::Store { addr, v, .. } => {
@@ -951,17 +1042,17 @@ pub fn stmt_exprs(ir: &Ir, s: &Stmt, out: &mut Vec<E>) {
             out.push(*v);
         }
         Stmt::Call { args, t, extra, .. } => {
-            items(args, out);
+            out.extend(ir.items(*args));
             if let CallTarget::Ind { e } = t {
                 out.push(*e);
             }
             if let Some(x) = extra {
-                items(x, out);
+                out.extend(ir.items(*x));
             }
         }
         Stmt::Stores { addr, vals, .. } => {
             out.push(*addr);
-            items(vals, out);
+            out.extend(ir.items(*vals));
         }
         Stmt::Copy { dst, src, .. } => {
             out.push(*dst);
@@ -981,51 +1072,191 @@ fn uses_var(ir: &Ir, e: E, v: u32) -> bool {
     u
 }
 
+/// Per variable: its first reference and the innermost list common to all its references.
+#[derive(Clone, Copy)]
+struct VarRefs {
+    /// list of the first reference (u32::MAX: no reference yet)
+    first_list: u32,
+    first_def: bool,
+    /// the first reference's statement (a definition by a statement)
+    first_s: Option<u32>,
+    common: u32,
+}
+
+/// The references of `declarations`, walked in the TS order. The TS keeps each reference's path of
+/// enclosing lists and takes the longest common prefix; here the lists form a tree (parent, depth)
+/// and the common prefix's last list is the lowest common ancestor.
+struct DeclWalk<'a> {
+    ir: &'a Ir,
+    tree: &'a Tree,
+    refs: Vec<VarRefs>,
+    def_count: Vec<u32>,
+    parent: Vec<u32>,
+    depth: Vec<u32>,
+    scratch: Vec<E>,
+}
+
+impl DeclWalk<'_> {
+    fn lca(&self, mut a: u32, mut b: u32) -> u32 {
+        while self.depth[a as usize] > self.depth[b as usize] {
+            a = self.parent[a as usize];
+        }
+        while self.depth[b as usize] > self.depth[a as usize] {
+            b = self.parent[b as usize];
+        }
+        while a != b {
+            a = self.parent[a as usize];
+            b = self.parent[b as usize];
+        }
+        a
+    }
+    fn add(&mut self, v: u32, list: u32, is_def: bool, s: Option<u32>) {
+        let i = v as usize;
+        if i >= self.refs.len() {
+            self.refs.resize(
+                i + 1,
+                VarRefs {
+                    first_list: u32::MAX,
+                    first_def: false,
+                    first_s: None,
+                    common: 0,
+                },
+            );
+        }
+        let r = self.refs[i];
+        if r.first_list == u32::MAX {
+            self.refs[i] = VarRefs {
+                first_list: list,
+                first_def: is_def,
+                first_s: s,
+                common: list,
+            };
+        } else {
+            self.refs[i].common = self.lca(r.common, list);
+        }
+    }
+    fn count_def(&mut self, v: u32, set2: bool) {
+        let i = v as usize;
+        if i >= self.def_count.len() {
+            self.def_count.resize(i + 1, 0);
+        }
+        if set2 {
+            self.def_count[i] = 2;
+        } else {
+            self.def_count[i] += 1;
+        }
+    }
+    fn use_e(&mut self, e: E, list: u32) {
+        let mut vs = std::mem::take(&mut self.scratch);
+        vs.clear();
+        self.ir.walk(e, &mut |x, n| {
+            if let Node::Var(_) = n {
+                vs.push(x);
+            }
+        });
+        for &x in &vs {
+            if let Node::Var(v) = self.ir.get(x) {
+                self.add(v, list, false, None);
+            }
+        }
+        self.scratch = vs;
+    }
+    fn walk(&mut self, ns: &[SNode], parent: Option<u32>) {
+        let id = self.parent.len() as u32;
+        self.parent.push(parent.unwrap_or(id));
+        self.depth
+            .push(parent.map_or(0, |p| self.depth[p as usize] + 1));
+        let mut es = Vec::new();
+        for n in ns {
+            match n {
+                SNode::Stmt(si) => {
+                    let s = self.tree.stmt(*si);
+                    stmt_exprs(self.ir, s, &mut es);
+                    for &e in &es {
+                        self.use_e(e, id);
+                    }
+                    let dst = match s {
+                        Stmt::Set { dst, .. } | Stmt::Call { dst, .. } => *dst,
+                        _ => -1,
+                    };
+                    if dst >= 0 {
+                        self.add(dst as u32, id, true, Some(*si));
+                        self.count_def(dst as u32, false);
+                    }
+                }
+                SNode::If { c, then, els } => {
+                    self.use_e(*c, id);
+                    self.walk(then, Some(id));
+                    self.walk(els, Some(id));
+                }
+                SNode::Block { body, .. } => self.walk(body, Some(id)),
+                SNode::Loop { form, c, body, .. } => {
+                    if *form == Form::While {
+                        if let Some(c) = c {
+                            self.use_e(*c, id);
+                        }
+                    }
+                    self.walk(body, Some(id));
+                    if *form == Form::Do {
+                        if let Some(c) = c {
+                            self.use_e(*c, id);
+                        }
+                    }
+                }
+                SNode::Return(Some(e)) => self.use_e(*e, id),
+                SNode::Switch { v, cases } => {
+                    self.add(*v, id, false, None);
+                    for c in cases {
+                        self.walk(&c.1, Some(id));
+                    }
+                }
+                SNode::SetState { v, .. } => {
+                    self.add(*v, id, true, None);
+                    self.count_def(*v, true);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// declarations(f, body): `let` / `const` at the first definition when it sits in the innermost list
-/// common to all references (and does not read the variable), else hoisted (sorted ids).
-pub fn declarations(ir: &Ir, f: &Func, tree: &Tree) -> (Decls, Vec<u32>) {
+/// common to all references (and does not read the variable), else hoisted (sorted ids). Also the
+/// variables the body mentions (decompile's `used`: the same references).
+pub fn declarations(ir: &Ir, f: &Func, tree: &Tree) -> (Decls, Vec<u32>, Vec<bool>) {
     let mut w = DeclWalk {
         ir,
         tree,
-        refs: indexmap::IndexMap::new(),
-        def_count: HashMap::new(),
-        next_list: 0,
+        refs: Vec::new(),
+        def_count: Vec::new(),
+        parent: Vec::new(),
+        depth: Vec::new(),
         scratch: Vec::new(),
     };
-    w.walk(&tree.body, &[]);
-    let mut decls = Decls::new();
+    w.walk(&tree.body, None);
+    let mut decls: Decls = vec![None; tree.stmts.len()];
     let mut hoisted = Vec::new();
-    for (&v, rs) in &w.refs {
+    for (v, r) in w.refs.iter().enumerate() {
+        if r.first_list == u32::MAX {
+            continue;
+        }
+        let v = v as u32;
         if f.vars.get(v as usize).is_some_and(|x| x.param >= 0) {
             continue;
         }
-        let first = &rs[0];
-        let mut common = first.path.len();
-        for r in rs {
-            let mut i = 0;
-            while i < common && i < r.path.len() && first.path[i] == r.path[i] {
-                i += 1;
-            }
-            common = i;
-        }
-        let list = if common > 0 {
-            Some(first.path[common - 1])
-        } else {
-            None
-        };
-        let top_def = first.is_def
-            && Some(first.list) == list
-            && first.s.is_some_and(|si| match tree.stmt(si) {
+        let top_def = r.first_def
+            && r.first_list == r.common
+            && r.first_s.is_some_and(|si| match tree.stmt(si) {
                 Stmt::Set { e, .. } => !uses_var(ir, *e, v),
                 _ => true,
             });
         if top_def {
-            let n = w.def_count.get(&v).copied().unwrap_or(0);
-            decls.insert(first.s.unwrap(), if n == 1 { "const" } else { "let" });
+            let n = w.def_count.get(v as usize).copied().unwrap_or(0);
+            decls[r.first_s.unwrap() as usize] = Some(if n == 1 { "const" } else { "let" });
         } else {
             hoisted.push(v);
         }
     }
-    hoisted.sort_unstable();
-    (decls, hoisted)
+    let used = w.refs.iter().map(|r| r.first_list != u32::MAX).collect();
+    (decls, hoisted, used)
 }

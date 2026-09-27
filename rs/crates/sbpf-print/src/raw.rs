@@ -11,7 +11,7 @@ use sbpf_elf::Image;
 use sbpf_ir::{CallTarget, Node, Stmt, Term, E};
 use sbpf_opt::Fx;
 use sbpf_program::{fn_addr, load_program, Func, Program};
-use sbpf_struct::{SNode, Tree};
+use sbpf_struct::Tree;
 use std::collections::{HashMap, HashSet};
 
 /// One decompiled function.
@@ -30,25 +30,32 @@ pub struct Raw {
     pub funcs: Vec<RawFunc>,
 }
 
-/// Timings of the per-function steps (ms, summed per phase), for the stage timer.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Times {
-    pub structure: f64,
-    pub print: f64,
+/// The program after stages 1–3 (through sinkFrameLoads + compactStores), named, with the tables
+/// the printer needs.
+pub struct Prepared {
+    pub p: Program,
+    pub sem: Sem,
+    /// original symbol names of the renamed functions (symNotes)
+    pub sym_notes: IndexMap<i64, String>,
+    pub names: ProgNames,
 }
 
 /// The raw pipeline: load, signatures, naming, variable recovery, the per-function phase, stack
 /// arguments, then per function sinkFrameLoads + compactStores, structuring, clean-up, statement
 /// idioms and printing (per-function work on `threads` worker threads, results in function order).
 pub fn decompile_raw(bytes: &[u8], threads: usize) -> Result<Raw, String> {
-    decompile_raw_timed(bytes, threads, None)
+    let mut pr = prepare(bytes, threads)?;
+    let trees = structure_all(&mut pr, threads);
+    let funcs = print_all(&mut pr, trees, threads);
+    Ok(Raw {
+        p: pr.p,
+        sem: pr.sem,
+        funcs,
+    })
 }
 
-pub fn decompile_raw_timed(
-    bytes: &[u8],
-    threads: usize,
-    times: Option<&mut Times>,
-) -> Result<Raw, String> {
+/// Stages 1–3 of the raw pipeline (the input of structuring).
+pub fn prepare(bytes: &[u8], threads: usize) -> Result<Prepared, String> {
     let mut p = load_program(bytes, true)?;
     sbpf_dataflow::infer_signatures(&mut p);
     let sem = semantics(&p);
@@ -63,17 +70,31 @@ pub fn decompile_raw_timed(
     }
     let built: Vec<usize> = (0..p.funcs.len()).collect();
     sbpf_dataflow::stackargs::rewrite_stack_args(&mut p.funcs, &built);
-    let t0 = std::time::Instant::now();
-    let trees = sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| {
-        sbpf_opt::finish(f, false);
-        structure_func(f)
+    sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| {
+        sbpf_opt::finish(f, false)
     });
-    let t1 = std::time::Instant::now();
-    let pc_by_addr: HashMap<u64, i64> = p.funcs.keys().map(|&pc| (fn_addr(&p, pc), pc)).collect();
+    Ok(Prepared {
+        p,
+        sem,
+        sym_notes,
+        names,
+    })
+}
+
+/// Structuring of every function (structure + cleanup + statementIdioms), in function order.
+pub fn structure_all(pr: &mut Prepared, threads: usize) -> Vec<Tree> {
+    sbpf_opt::par_each(pr.p.funcs.values_mut().collect(), threads, structure_func)
+}
+
+/// Printing of every function (names, declarations, text) and its calls, in function order.
+pub fn print_all(pr: &mut Prepared, trees: Vec<Tree>, threads: usize) -> Vec<RawFunc> {
+    let p = &mut pr.p;
+    let pc_by_addr: HashMap<u64, i64> = p.funcs.keys().map(|&pc| (fn_addr(p, pc), pc)).collect();
+    let (names, sym_notes) = (&pr.names, &pr.sym_notes);
     let items: Vec<(&mut Func, Tree)> = p.funcs.values_mut().zip(trees).collect();
-    let funcs = par_map(items, threads, |(f, tree)| {
+    par_map(items, threads, |(f, tree)| {
         let f = &*f;
-        let text = func_text(f, &tree, &names, sym_notes.get(&f.pc).map(|s| s.as_str()));
+        let text = func_text(f, &tree, names, sym_notes.get(&f.pc).map(|s| s.as_str()));
         let calls = calls_of(f, &pc_by_addr);
         RawFunc {
             pc: f.pc,
@@ -81,12 +102,7 @@ pub fn decompile_raw_timed(
             text,
             calls,
         }
-    });
-    if let Some(t) = times {
-        t.structure += (t1 - t0).as_secs_f64() * 1e3;
-        t.print += t1.elapsed().as_secs_f64() * 1e3;
-    }
-    Ok(Raw { p, sem, funcs })
+    })
 }
 
 /// structure + cleanup + statementIdioms of one function (after compactStores).
@@ -188,56 +204,6 @@ fn calls_of(f: &Func, pc_by_addr: &HashMap<u64, i64>) -> Vec<i64> {
     out.into_iter().collect()
 }
 
-fn note_nodes(ir: &sbpf_ir::Ir, tree: &Tree, ns: &[SNode], used: &mut HashSet<u32>) {
-    let note = |e: E, used: &mut HashSet<u32>| {
-        ir.walk(e, &mut |_, n| {
-            if let Node::Var(v) = n {
-                used.insert(v);
-            }
-        })
-    };
-    let mut es = Vec::new();
-    for n in ns {
-        match n {
-            SNode::Stmt(si) => {
-                let s = tree.stmt(*si);
-                stmt_exprs(ir, s, &mut es);
-                for &e in &es {
-                    note(e, used);
-                }
-                if let Stmt::Set { dst, .. } | Stmt::Call { dst, .. } = s {
-                    if *dst >= 0 {
-                        used.insert(*dst as u32);
-                    }
-                }
-            }
-            SNode::If { c, then, els } => {
-                note(*c, used);
-                note_nodes(ir, tree, then, used);
-                note_nodes(ir, tree, els, used);
-            }
-            SNode::Block { body, .. } => note_nodes(ir, tree, body, used),
-            SNode::Loop { c, body, .. } => {
-                if let Some(c) = c {
-                    note(*c, used);
-                }
-                note_nodes(ir, tree, body, used);
-            }
-            SNode::Return(Some(e)) => note(*e, used),
-            SNode::Switch { v, cases } => {
-                used.insert(*v);
-                for c in cases {
-                    note_nodes(ir, tree, &c.1, used);
-                }
-            }
-            SNode::SetState { v, .. } => {
-                used.insert(*v);
-            }
-            _ => {}
-        }
-    }
-}
-
 const RESERVED: &[&str] = &[
     "do", "if", "in", "as", "of", "fp", "let", "var", "for", "new", "try", "int", "is", "ld", "st",
 ];
@@ -279,12 +245,12 @@ const PARAM_NAME: [&str; 11] = ["r0", "a", "b", "c", "d", "e", "r6", "r7", "r8",
 /// A function's printed text (decompile's phase 4, plain form).
 pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str>) -> String {
     let ir = f.ir.as_ref().expect("variable IR");
-    let mut used = HashSet::new();
-    note_nodes(ir, tree, &tree.body, &mut used);
+    let (decls, hoisted, used) = declarations(ir, f, tree);
+    let used = |v: &u32| used.get(*v as usize).copied().unwrap_or(false);
     let zero_init: Vec<u32> = if f.is_entry {
         f.vars
             .iter()
-            .filter(|v| v.param >= 0 && v.param != 1 && v.param != 10 && used.contains(&v.id))
+            .filter(|v| v.param >= 0 && v.param != 1 && v.param != 10 && used(&v.id))
             .map(|v| v.id)
             .collect()
     } else {
@@ -311,7 +277,7 @@ pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str
     let mut gen = ShortNames { k: 0 };
     for v in &f.vars {
         let i = v.id as usize;
-        if vn[i].is_none() && used.contains(&v.id) {
+        if vn[i].is_none() && used(&v.id) {
             vn[i] = gen.next();
         }
     }
@@ -362,8 +328,7 @@ pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str
             ""
         }
     ));
-    let (decls, hoisted) = declarations(ir, f, tree);
-    let hoisted: Vec<u32> = hoisted.into_iter().filter(|v| used.contains(v)).collect();
+    let hoisted: Vec<u32> = hoisted.into_iter().filter(|v| used(v)).collect();
     let mut pr = Printer::new(ir, names, &vn);
     let body = print_body(&mut pr, tree, "\t", &decls, &hoisted);
     if !zero_init.is_empty() {
@@ -628,6 +593,3 @@ pub fn render_single(r: &Raw) -> String {
     section("helpers used by several instructions", &shared);
     out.join("\n")
 }
-
-#[allow(dead_code)]
-fn _unused(_: &IndexMap<i64, i64>) {}
