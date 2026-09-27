@@ -156,17 +156,36 @@ pub fn liveness(
     f: &Func,
     returns: bool,
     clob: &Clob,
+    mut cache: Option<&mut Vec<Option<(i32, i32)>>>,
 ) -> (Vec<i32>, Vec<i32>) {
     let n = f.blocks.len();
     let mut gen = vec![0i32; n];
     let mut kill = vec![0i32; n];
+    if let Some(c) = cache.as_deref_mut() {
+        c.resize(n, None);
+    }
     for (bi, b) in f.blocks.iter().enumerate() {
-        let (mut g, mut k) = (0i32, 0i32);
-        for i in (0..b.stmts.len()).rev() {
-            let (u, d) = stmt_use_def(cx, sigs, ir, &b.stmts[i], clob_at(clob, bi, i));
-            g = (g & !d) | u;
-            k |= d;
-        }
+        // Folding x -> (x & ~def) | use backwards gives x -> (x & ~K) | G; (G, K) of a block without
+        // calls does not depend on signatures (cached across the fixed point's evaluations)
+        let cached = cache.as_deref().and_then(|c| c[bi]);
+        let (g, k) = match cached {
+            Some(gk) => gk,
+            None => {
+                let (mut g, mut k) = (0i32, 0i32);
+                let mut calls = false;
+                for i in (0..b.stmts.len()).rev() {
+                    let s = &b.stmts[i];
+                    calls |= matches!(s, Stmt::Call { .. });
+                    let (u, d) = stmt_use_def(cx, sigs, ir, s, clob_at(clob, bi, i));
+                    g = (g & !d) | u;
+                    k |= d;
+                }
+                if let (false, Some(c)) = (calls, cache.as_deref_mut()) {
+                    c[bi] = Some((g, k));
+                }
+                (g, k)
+            }
+        };
         gen[bi] = g | (term_use(ir, returns, b) & !k);
         kill[bi] = k;
     }
@@ -426,13 +445,22 @@ pub fn infer_signatures(p: &mut Program) {
         }
     }
     let mut queued = vec![true; n];
+    let mut gks: Vec<Vec<Option<(i32, i32)>>> = vec![vec![]; n];
     let mut qi = 0;
     while qi < queue.len() {
         let fi = queue[qi];
         qi += 1;
         queued[fi] = false;
         let f = funcs[fi];
-        let (live_in, live_out) = liveness(&cx, &sigs, &p.ir, f, sigs[fi].returns, &clobs[fi]);
+        let (live_in, live_out) = liveness(
+            &cx,
+            &sigs,
+            &p.ir,
+            f,
+            sigs[fi].returns,
+            &clobs[fi],
+            Some(&mut gks[fi]),
+        );
         // markUsedResults
         for (bi, b) in f.blocks.iter().enumerate() {
             let mut live = live_out[bi] | term_use(&p.ir, sigs[fi].returns, b);
@@ -551,7 +579,7 @@ pub struct Recovered {
 pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Result<Recovered, String> {
     let f = &cx.funcs[fi];
     let returns = sigs[fi].returns;
-    let (live_in, _) = liveness(cx, sigs, pir, f, returns, &f.ind_clobber);
+    let (live_in, _) = liveness(cx, sigs, pir, f, returns, &f.ind_clobber, None);
     let nb = f.blocks.len();
     let mut next = (nb * 11) as i32;
     let entry_node = |b: usize, r: usize| (b * 11 + r) as i32;
