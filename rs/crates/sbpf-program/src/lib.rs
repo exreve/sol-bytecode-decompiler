@@ -147,6 +147,41 @@ pub struct Lifter {
     pc_by_hash: HashMap<u32, i64>,
     /// lift() memoized per pc (see program.ts liftShared)
     pub memo: Vec<Option<Rc<Lifted>>>,
+    /// control flow of each memoized pc, packed for the discovery walks (Rust-only, derived from memo)
+    steps: Vec<Step>,
+}
+
+/// What the leader walk needs of a lifted instruction: flow and its direct call target.
+#[derive(Clone, Copy)]
+struct Step {
+    kind: u8, // 0: not lifted, 1: next(a), 2: jmp(a), 3: br(a, b), 4: other terminator
+    a: i64,
+    b: i64,
+    call: i64, // direct call target, NO_CALL if none
+}
+const NO_CALL: i64 = i64::MIN;
+
+impl Step {
+    fn of(l: &Lifted) -> Step {
+        let mut call = NO_CALL;
+        for s in &l.stmts {
+            if let Stmt::Call {
+                t: CallTarget::Fn { pc },
+                ..
+            } = &**s
+            {
+                debug_assert!(call == NO_CALL);
+                call = *pc;
+            }
+        }
+        let (kind, a, b) = match &l.flow {
+            Flow::Next(n) => (1, *n, 0),
+            Flow::Term(Term::Jmp { to }) => (2, *to, 0),
+            Flow::Term(Term::Br { t, f, .. }) => (3, *t, *f),
+            Flow::Term(_) => (4, 0, 0),
+        };
+        Step { kind, a, b, call }
+    }
 }
 
 fn register(cx: &mut Cx, sc: &Syscall) -> Rc<str> {
@@ -160,6 +195,15 @@ impl Lifter {
             v: version,
             pc_by_hash: HashMap::new(),
             memo: vec![None; n],
+            steps: vec![
+                Step {
+                    kind: 0,
+                    a: 0,
+                    b: 0,
+                    call: NO_CALL
+                };
+                n
+            ],
         }
     }
 
@@ -207,7 +251,17 @@ impl Lifter {
         }
         let l = Rc::new(self.lift(cx, pc));
         self.memo[pc as usize] = Some(l.clone());
+        self.steps[pc as usize] = Step::of(&l);
         l
+    }
+
+    fn step(&mut self, cx: &mut Cx, pc: i64) -> Step {
+        let st = self.steps[pc as usize];
+        if st.kind != 0 {
+            return st;
+        }
+        self.lift_shared(cx, pc);
+        self.steps[pc as usize]
     }
 
     fn syscall_by_imm(&self, cx: &mut Cx, imm: i32) -> Option<CallTarget> {
@@ -747,32 +801,26 @@ fn find_leaders(cx: &mut Cx, lifter: &mut Lifter, w: &mut Walk, entry: i64, stam
             if w.starts[pc as usize] == 0 {
                 break;
             }
-            let l = lifter.lift_shared(cx, pc);
-            for s in &l.stmts {
-                if let Stmt::Call {
-                    t: CallTarget::Fn { pc },
-                    ..
-                } = &**s
-                {
-                    calls.insert(*pc);
-                }
+            let st = lifter.step(cx, pc);
+            if st.call != NO_CALL {
+                calls.insert(st.call);
             }
-            match &l.flow {
-                Flow::Next(nx) => {
-                    pc = *nx;
+            match st.kind {
+                1 => {
+                    pc = st.a;
                     continue;
                 }
-                Flow::Term(Term::Jmp { to }) => {
-                    add_leader(&mut list, &mut outside, &mut w.lead, *to);
-                    work.push(*to);
+                2 => {
+                    add_leader(&mut list, &mut outside, &mut w.lead, st.a);
+                    work.push(st.a);
                 }
-                Flow::Term(Term::Br { t, f, .. }) => {
-                    add_leader(&mut list, &mut outside, &mut w.lead, *t);
-                    work.push(*t);
-                    add_leader(&mut list, &mut outside, &mut w.lead, *f);
-                    work.push(*f);
+                3 => {
+                    add_leader(&mut list, &mut outside, &mut w.lead, st.a);
+                    work.push(st.a);
+                    add_leader(&mut list, &mut outside, &mut w.lead, st.b);
+                    work.push(st.b);
                 }
-                Flow::Term(_) => {}
+                _ => {}
             }
             break;
         }

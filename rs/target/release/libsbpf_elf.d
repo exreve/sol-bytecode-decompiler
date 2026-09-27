@@ -1,0 +1,1 @@
+/home/user/WinIT-APPS/sol-bytecode-decompiler/.claude/worktrees/agent-aa0bc6cc1788f8d9b/rs/target/release/libsbpf_elf.rlib: /home/user/WinIT-APPS/sol-bytecode-decompiler/.claude/worktrees/agent-aa0bc6cc1788f8d9b/rs/crates/sbpf-elf/src/lib.rs
