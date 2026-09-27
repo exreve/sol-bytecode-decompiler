@@ -432,10 +432,20 @@ fn vocab() -> &'static Vec<(u64, u32)> {
                         let hi = ((t + 1) * chunk).min(n);
                         let mut v = Vec::with_capacity(hi - lo);
                         let mut buf = String::new();
+                        let per = 2 * (db.nouns.len() + 1);
                         for i in lo..hi {
+                            // "global:" + name_at(db, i), without the allocation
                             buf.clear();
                             buf.push_str("global:");
-                            buf.push_str(&name_at(db, i));
+                            buf.push_str(&db.verbs[i / per]);
+                            let r = i % per;
+                            if r >> 1 != 0 && !db.nouns[(r >> 1) - 1].is_empty() {
+                                buf.push('_');
+                                buf.push_str(&db.nouns[(r >> 1) - 1]);
+                            }
+                            if r & 1 != 0 {
+                                buf.push_str("_v2");
+                            }
                             v.push((sha8(buf.as_bytes()), i as u32));
                         }
                         v
