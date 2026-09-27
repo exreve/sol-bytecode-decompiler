@@ -1575,8 +1575,9 @@ impl RegionCfg for RC<'_> {
                 ),
                 shift: None,
                 size: None,
-                why: "the result of the library call writing it (per call where the slot is reused)"
-                    .into(),
+                why:
+                    "the result of the library call writing it (per call where the slot is reused)"
+                        .into(),
                 reused: true,
             });
         }

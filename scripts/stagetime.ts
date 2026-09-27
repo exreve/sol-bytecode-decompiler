@@ -20,7 +20,10 @@
 // With --stage5: the whole readable output (decompile(bytes, { full: true }), the single file included)
 // minus its analysis (analyze(), stage 8: timed separately on the same result and subtracted), and
 // the raw output (sugar: false) the same way: read = readable - raw is what stage 5 adds.
-//   node scripts/stagetime.ts [--iters N] [--stage3 | --stage4 | --stage5] prog.so...
+// With --stage7: the default output (decompile(bytes), library code as stubs) and the --full readable output,
+// each minus its analysis as for --stage5. With --diff a.so b.so: the program diff (profile of both + diff).
+//   node scripts/stagetime.ts [--iters N] [--stage3 | --stage4 | --stage5 | --stage7] prog.so...
+//   node scripts/stagetime.ts [--iters N] --diff a.so b.so
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { parseElf } from '../src/elf.ts'
@@ -36,14 +39,15 @@ import { statementIdioms } from '../src/stmtidioms.ts'
 import { Printer, printBody } from '../src/print.ts'
 import { decompile } from '../src/decompile.ts'
 import { analyze } from '../src/analysis/report.ts'
+import { profile, diff } from '../src/diff.ts'
 import { walkExpr, type Expr, type Stmt } from '../src/ir.ts'
 import { stmtExprs } from '../src/simplify.ts'
 
 const args = process.argv.slice(2)
 let iters = 5
 const files: string[] = []
-let stage3 = false, stage4 = false, stage5 = false
-for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else if (args[i] === '--stage5') stage5 = true; else files.push(args[i]) }
+let stage3 = false, stage4 = false, stage5 = false, stage7 = false, diffMode = false
+for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else if (args[i] === '--stage5') stage5 = true; else if (args[i] === '--stage7') stage7 = true; else if (args[i] === '--diff') diffMode = true; else files.push(args[i]) }
 
 // ---- decompile.ts's raw printing path (script-local copy for timing; checked against decompile's text) ----
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st'])
@@ -129,6 +133,36 @@ function rawText(f: VarFunc, body: Node[], irreducible: boolean, fnName: (pc: nu
 	return lines.join('\n')
 }
 
+if (diffMode) {
+	const [a, b] = files.map(f => new Uint8Array(readFileSync(f)))
+	let best = Infinity
+	for (let it = 0; it < iters + 1; it++) {
+		const t0 = performance.now()
+		diff(profile(a), profile(b), { all: true, labels: [files[0], files[1]] })
+		if (it) best = Math.min(best, performance.now() - t0)
+	}
+	console.log(`diff\t${basename(files[0])}\t${basename(files[1])}\t${best.toFixed(1)}`)
+	process.exit(0)
+}
+if (stage7) {
+	console.log('file\tfull\tdefault')
+	for (const f of files) {
+		const bytes = new Uint8Array(readFileSync(f))
+		const best = [Infinity, Infinity]
+		for (let it = 0; it < iters + 1; it++) {
+			const v = [true, false].map(full => {
+				const t0 = performance.now()
+				const r = decompile(bytes, { full })
+				const t1 = performance.now()
+				analyze(r)
+				return t1 - t0 - (performance.now() - t1)
+			})
+			if (it) for (let k = 0; k < 2; k++) best[k] = Math.min(best[k], v[k]) // (first run: warm-up)
+		}
+		console.log([basename(f), best[0].toFixed(1), best[1].toFixed(1)].join('\t'))
+	}
+	process.exit(0)
+}
 if (stage5) {
 	console.log('file\traw\treadable\tread')
 	for (const f of files) {

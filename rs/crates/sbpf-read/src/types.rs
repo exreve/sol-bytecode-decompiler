@@ -1847,7 +1847,9 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                     || args.len < 3
                     || !(if lib {
                         let n = d.fn_name(cpc).to_lowercase();
-                        n.contains("unpack") || n.contains("from_slice") || n.contains("deserialize")
+                        n.contains("unpack")
+                            || n.contains("from_slice")
+                            || n.contains("deserialize")
                     } else {
                         d.out_params.contains(&cpc)
                     })

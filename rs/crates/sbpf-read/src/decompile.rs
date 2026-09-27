@@ -137,7 +137,10 @@ pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead
     };
     let shapes: Vec<SigShape> = p.funcs.values().map(sig_shape).collect();
     // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior)
-    if libs.values().any(|i| i.lib && i.name.is_none() && i.hint.is_none()) {
+    if libs
+        .values()
+        .any(|i| i.lib && i.name.is_none() && i.hint.is_none())
+    {
         let ctx = ProgCtx::new(&p);
         let mut taken: HashSet<String> = libs.values().filter_map(|i| i.name.clone()).collect();
         let text_addr = p.elf.text().addr;
@@ -194,8 +197,14 @@ pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead
             .map(|x| x.0)
             .collect()
     }
-    sbpf_opt::par_each(user(&mut p, &lib_at), threads, |f| sbpf_opt::finish(f, false));
-    let trees = sbpf_opt::par_each(user(&mut p, &lib_at), threads, sbpf_print::raw::structure_func);
+    sbpf_opt::par_each(user(&mut p, &lib_at), threads, |f| {
+        sbpf_opt::finish(f, false)
+    });
+    let trees = sbpf_opt::par_each(
+        user(&mut p, &lib_at),
+        threads,
+        sbpf_print::raw::structure_func,
+    );
     Ok(PrepRead {
         pr: Prepared {
             p,
@@ -1025,8 +1034,7 @@ pub fn render_fingerprints(r: &ReadOut) -> String {
     // handlerOwners: the handlers (ix_* and inline processors) reaching each function
     let by_pc: HashMap<i64, &ReadFunc> = r.funcs.iter().map(|f| (f.pc, f)).collect();
     let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0.as_str()).collect();
-    let is_root =
-        |f: &ReadFunc| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str());
+    let is_root = |f: &ReadFunc| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str());
     let mut owners: HashMap<i64, IndexSet<i64>> = HashMap::new();
     for h in r.funcs.iter().filter(|f| is_root(f)) {
         let mut seen: HashSet<i64> = HashSet::from([h.pc]);
@@ -1522,13 +1530,14 @@ fn anchor_names(d: &mut Dx) -> (Option<i64>, Vec<i64>) {
                     },
                     _ => continue,
                 };
-                let CallTarget::Fn { pc: t } = t else { continue };
+                let CallTarget::Fn { pc: t } = t else {
+                    continue;
+                };
                 if d.idx.contains_key(&t) || lib_cands.contains(&t) || !d.is_lib(t) {
                     continue;
                 }
                 let Some(&a1) = args.get(1) else { continue };
-                if !matches!(ir.get(a1), Node::Const(v) if v < 0x400) || !is_hex_fn(&d.fn_name(t))
-                {
+                if !matches!(ir.get(a1), Node::Const(v) if v < 0x400) || !is_hex_fn(&d.fn_name(t)) {
                     continue;
                 }
                 lib_cands.push(t);
@@ -1937,7 +1946,9 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
     }
     let lib_pcs: Vec<i64> = d.libs.keys().copied().collect();
     for pc in lib_pcs {
-        let Some(f) = d.p.funcs.get(&pc) else { continue };
+        let Some(f) = d.p.funcs.get(&pc) else {
+            continue;
+        };
         if (f.nparams >= 4 || f.stack_args.is_some_and(|n| n != 0)) && reaches(d, pc, 2) {
             d.invoke_wrappers.insert(pc);
         }

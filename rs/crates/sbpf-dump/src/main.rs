@@ -345,6 +345,36 @@ fn main() {
 
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("--time7") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        time7(files, iters);
+        return;
+    }
+    if args.first().map(|s| s.as_str()) == Some("--timediff") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        let (a, b) = (
+            std::fs::read(&files[0]).unwrap(),
+            std::fs::read(&files[1]).unwrap(),
+        );
+        let mut best = f64::MAX;
+        for _ in 0..iters {
+            let t = Instant::now();
+            std::hint::black_box(
+                sbpf_read::diff::diff_report(&a, &b, true, [&files[0], &files[1]]).unwrap(),
+            );
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("diff\t{}\t{}\t{best:.1}", files[0], files[1]);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--time5") {
         let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
             (args[2].parse().unwrap(), &args[3..])
@@ -559,6 +589,35 @@ fn time3(files: &[String], iters: usize) {
 
 /// Stage 5 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage5 (the whole
 /// raw / readable output, single file included, without the analysis), on 1 thread and on worker threads.
+/// Stage 7 timings (ms, best of `iters`): the --full readable output and the default output (library
+/// code as stubs), single file included, on one thread and on worker threads (as scripts/stagetime.ts --stage7).
+fn time7(files: &[String], iters: usize) {
+    println!("file\tfull\tdefault\tfull_par\tdefault_par");
+    let n = stage3::threads();
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = [f64::MAX; 4];
+        for _ in 0..iters {
+            for (k, th) in [(0, 1), (2, n)] {
+                for (j, full) in [(0, true), (1, false)] {
+                    let t = Instant::now();
+                    let r = sbpf_read::decompile::decompile_read(&bytes, None, th, full).unwrap();
+                    std::hint::black_box(sbpf_read::decompile::render_read(&r));
+                    best[k + j] = best[k + j].min(t.elapsed().as_secs_f64() * 1e3);
+                }
+            }
+        }
+        let name = std::path::Path::new(f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        println!(
+            "{name}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+            best[0], best[1], best[2], best[3]
+        );
+    }
+}
+
 fn time5(files: &[String], iters: usize) {
     println!("file\traw\treadable\tread\traw_par\treadable_par\tread_par");
     let n = stage3::threads();

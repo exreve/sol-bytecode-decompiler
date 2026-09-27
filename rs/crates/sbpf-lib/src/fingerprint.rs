@@ -415,11 +415,7 @@ pub fn shape_signature(p: &Program, img: &Image, f: &SigShape) -> FnSig {
                 match img.region(v, 1) {
                     Some(r) if !r.exec => {
                         imm = "A".into();
-                        let c = constant_at(
-                            img,
-                            p.elf.region_bytes(r),
-                            (v - r.vaddr) as usize,
-                        );
+                        let c = constant_at(img, p.elf.region_bytes(r), (v - r.vaddr) as usize);
                         if !c.is_empty() {
                             consts.push(c);
                         }
@@ -434,7 +430,10 @@ pub fn shape_signature(p: &Program, img: &Image, f: &SigShape) -> FnSig {
         hist[op_class(i.opc, matches!(t, Some(SigTarget::Sys(_))))] += 1;
         n += 1;
         let off = if i.opc == 0x85 { 0 } else { i.off };
-        toks.push(format!("{},{},{},{},{},{}", i.opc, i.dst, i.src, off, imm, hi));
+        toks.push(format!(
+            "{},{},{},{},{},{}",
+            i.opc, i.dst, i.src, off, imm, hi
+        ));
         let mut reg = |r: u8| -> u32 {
             if let Some(&x) = ren.get(&r) {
                 return x;
@@ -531,7 +530,11 @@ pub fn render_fingerprints(
 ) -> String {
     let mut all: Vec<&FnSig> = sigs.values().collect();
     all.sort_by_key(|s| s.pc);
-    let user: Vec<&FnSig> = all.iter().copied().filter(|s| !lib.contains(&s.pc)).collect();
+    let user: Vec<&FnSig> = all
+        .iter()
+        .copied()
+        .filter(|s| !lib.contains(&s.pc))
+        .collect();
     let about = format!("address-independent function hashes (bytecode only): hash = code with call targets, text/rodata addresses normalized; regfree = same, registers renamed; data = constants the code refers to in rodata (texts, 32-byte keys/tables; absent: none); fuzzy = \"<insns>i <blocks>b <edges>e <opcode-class histogram: {}>\"; codeHash = hash of the set of (hash, data). Compare programs with src/diff.ts", OP_CLASSES.join("."));
     let head = format!(
         "{{\"sbpf\":{},\"functions\":{},\"library\":{},\"codeHash\":{},\"userCodeHash\":{},\"about\":{}}}",

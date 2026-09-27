@@ -100,13 +100,7 @@ pub fn builtin_name(ctx: &ProgCtx, pc: i64) -> Result<Option<(String, String)>, 
         let _ = mem.store(OUT, 8, 0x1111);
         let _ = mem.store(OUT + 8, 8, 0x2222);
         let mut e = Exec::new(ctx, mem, 20_000, false);
-        let args = [
-            OUT,
-            a as u64,
-            (a >> 64) as u64,
-            b as u64,
-            (b >> 64) as u64,
-        ];
+        let args = [OUT, a as u64, (a >> 64) as u64, b as u64, (b >> 64) as u64];
         let r = e.run(&mut NoHooks, pc, &args, 0x2_0000_3000, None, &[])?;
         let got = if r.abort.is_some() || r.limit {
             None

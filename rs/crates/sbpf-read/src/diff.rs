@@ -90,7 +90,9 @@ pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
     }
     if arms.is_empty() {
         // (native programs: the per-instruction split of the security analysis, stage 8)
-        return Err("unsupported: native instruction arms (the analysis' tag-dispatch split)".into());
+        return Err(
+            "unsupported: native instruction arms (the analysis' tag-dispatch split)".into(),
+        );
     }
     let mut callers: HashMap<i64, Vec<i64>> = HashMap::new();
     for s in sigs.values() {
@@ -131,7 +133,11 @@ fn handler_reach(
                 o.insert(ix.clone());
             }
             for &t in sigs.get(&x).map_or(&[][..], |s| &s.calls[..]) {
-                if !seen.contains(&t) && !lib.contains(&t) && !roots.contains_key(&t) && sigs.contains_key(&t) {
+                if !seen.contains(&t)
+                    && !lib.contains(&t)
+                    && !roots.contains_key(&t)
+                    && sigs.contains_key(&t)
+                {
                     seen.insert(t);
                     q.push(t);
                 }
@@ -163,19 +169,32 @@ struct Match {
 }
 
 fn is_fn_hex(n: &str) -> bool {
-    n.strip_prefix("fn_")
-        .is_some_and(|h| !h.is_empty() && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+    n.strip_prefix("fn_").is_some_and(|h| {
+        !h.is_empty()
+            && h.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    })
 }
 
 fn match_fns(a: &Profile, b: &Profile) -> IndexMap<i64, Match> {
     let mut m: IndexMap<i64, Match> = IndexMap::new();
     let mut used: HashSet<i64> = HashSet::new();
-    fn pair(m: &mut IndexMap<i64, Match>, used: &mut HashSet<i64>, x: i64, y: i64, kind: Kind, sim: f64) {
+    fn pair(
+        m: &mut IndexMap<i64, Match>,
+        used: &mut HashSet<i64>,
+        x: i64,
+        y: i64,
+        kind: Kind,
+        sim: f64,
+    ) {
         m.insert(x, Match { b: y, kind, sim });
         used.insert(y);
     }
     // 1-3: identical code (and constants), identical code, identical up to register allocation
-    let by_key = |m: &mut IndexMap<i64, Match>, used: &mut HashSet<i64>, kind: Kind, key: &dyn Fn(&FnSig) -> String| {
+    let by_key = |m: &mut IndexMap<i64, Match>,
+                  used: &mut HashSet<i64>,
+                  kind: Kind,
+                  key: &dyn Fn(&FnSig) -> String| {
         let mut idx: HashMap<String, std::collections::VecDeque<i64>> = HashMap::new();
         for s in b.sigs.values() {
             if !used.contains(&s.pc) {
@@ -191,7 +210,9 @@ fn match_fns(a: &Profile, b: &Profile) -> IndexMap<i64, Match> {
             }
         }
     };
-    by_key(&mut m, &mut used, Kind::Same, &|s| format!("{}:{}", s.hash, s.data));
+    by_key(&mut m, &mut used, Kind::Same, &|s| {
+        format!("{}:{}", s.hash, s.data)
+    });
     by_key(&mut m, &mut used, Kind::Data, &|s| s.hash.clone());
     by_key(&mut m, &mut used, Kind::Regs, &|s| s.regfree.clone());
     // 4: same instruction handler / symbol name (user code)
@@ -294,7 +315,8 @@ fn changed_insns(a: &[String], b: &[String]) -> usize {
     while pre < a.len() && pre < b.len() && a[pre] == b[pre] {
         pre += 1;
     }
-    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf]
+    {
         suf += 1;
     }
     let mut d = a.len().max(b.len()) - pre - suf;
@@ -339,7 +361,13 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
     let m = match_fns(a, b);
     let matched_b: HashSet<i64> = m.values().map(|x| x.b).collect();
     let size = |pp: &Profile, pc: i64| pp.sigs[&pc].insns;
-    let user = |pp: &Profile| -> Vec<i64> { pp.sigs.keys().copied().filter(|pc| !pp.lib.contains(pc)).collect() };
+    let user = |pp: &Profile| -> Vec<i64> {
+        pp.sigs
+            .keys()
+            .copied()
+            .filter(|pc| !pp.lib.contains(pc))
+            .collect()
+    };
     let total = |pp: &Profile, pcs: &[i64]| -> usize { pcs.iter().map(|&pc| size(pp, pc)).sum() };
     let delta = |pc: i64, x: &Match| changed_insns(&a.sigs[&pc].toks, &b.sigs[&x.b].toks);
     let weight = |pc: i64, x: &Match| -> f64 {
@@ -365,7 +393,12 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
         }
     }
     let tt = (ta + tb) as f64;
-    let pct = |x: f64| format!("{}%", to_fixed1(if ta + tb > 0 { (100.0 * x) / tt } else { 100.0 }));
+    let pct = |x: f64| {
+        format!(
+            "{}%",
+            to_fixed1(if ta + tb > 0 { (100.0 * x) / tt } else { 100.0 })
+        )
+    };
     let (la, lb) = ("a", "b");
     let mut l: Vec<String> = Vec::new();
     let desc = |pp: &Profile, lab: &str| {
@@ -400,12 +433,19 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
         lib_only_b += n.saturating_sub(*ha.get(h).unwrap_or(&0));
     }
     let user_same = ua.len() == ub.len()
-        && ua.iter().all(|pc| m.get(pc).is_some_and(|x| x.kind == Kind::Same && !b.lib.contains(&x.b)));
+        && ua.iter().all(|pc| {
+            m.get(pc)
+                .is_some_and(|x| x.kind == Kind::Same && !b.lib.contains(&x.b))
+        });
     let score = if ta + tb > 0 { (same + near) / tt } else { 1.0 };
     if a.code_hash == b.code_hash {
         l.push(format!(
             "verdict: same code (e.g. redeployed at a new address){}",
-            if a.p.elf.bytes == b.p.elf.bytes { "; identical files" } else { "" }
+            if a.p.elf.bytes == b.p.elf.bytes {
+                "; identical files"
+            } else {
+                ""
+            }
         ));
     } else if user_same {
         l.push(format!("verdict: same program code; toolchain/library version changed (library functions: {lib_only_a} only in {la}, {lib_only_b} only in {lb})"));
@@ -440,9 +480,17 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
     // instruction arms
     let arms_a: Vec<&String> = a.arms.keys().collect();
     let arms_b: Vec<&String> = b.arms.keys().collect();
-    let mut add_arms: Vec<&String> = arms_b.iter().copied().filter(|x| !a.arms.contains_key(*x)).collect();
+    let mut add_arms: Vec<&String> = arms_b
+        .iter()
+        .copied()
+        .filter(|x| !a.arms.contains_key(*x))
+        .collect();
     add_arms.sort_by(|x, y| js_str_cmp(x, y));
-    let mut del_arms: Vec<&String> = arms_a.iter().copied().filter(|x| !b.arms.contains_key(*x)).collect();
+    let mut del_arms: Vec<&String> = arms_a
+        .iter()
+        .copied()
+        .filter(|x| !b.arms.contains_key(*x))
+        .collect();
     del_arms.sort_by(|x, y| js_str_cmp(x, y));
     if !add_arms.is_empty() || !del_arms.is_empty() {
         l.push(format!(
@@ -492,12 +540,23 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
     let mut changed: Vec<i64> = ua
         .iter()
         .copied()
-        .filter(|pc| m.get(pc).is_some_and(|x| x.kind != Kind::Same && !b.lib.contains(&x.b)))
+        .filter(|pc| {
+            m.get(pc)
+                .is_some_and(|x| x.kind != Kind::Same && !b.lib.contains(&x.b))
+        })
         .collect();
     changed.sort_by(|x, y| size(a, *y).cmp(&size(a, *x)));
-    let mut removed: Vec<i64> = ua.iter().copied().filter(|pc| !m.contains_key(pc)).collect();
+    let mut removed: Vec<i64> = ua
+        .iter()
+        .copied()
+        .filter(|pc| !m.contains_key(pc))
+        .collect();
     removed.sort_by(|x, y| size(a, *y).cmp(&size(a, *x)));
-    let mut added: Vec<i64> = ub.iter().copied().filter(|pc| !matched_b.contains(pc)).collect();
+    let mut added: Vec<i64> = ub
+        .iter()
+        .copied()
+        .filter(|pc| !matched_b.contains(pc))
+        .collect();
     added.sort_by(|x, y| size(b, *y).cmp(&size(b, *x)));
     l.push(format!(
         "functions: {} identical, {} changed, {} added, {} removed (user code)",
@@ -515,7 +574,12 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
             l.push(format!("    … {} more (--all)", xs.len() - n));
         }
     };
-    let nm = |pp: &Profile, pc: i64| pp.names.get(&pc).cloned().unwrap_or_else(|| format!("fn_{pc}"));
+    let nm = |pp: &Profile, pc: i64| {
+        pp.names
+            .get(&pc)
+            .cloned()
+            .unwrap_or_else(|| format!("fn_{pc}"))
+    };
     list(&mut l, &changed, &|pc| {
         let x = m[&pc];
         let (an, bn) = (nm(a, pc), nm(b, x.b));
@@ -541,7 +605,11 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
                 why.push_str(&format!(
                     ": {}{}",
                     v.join(", "),
-                    if d.len() > 2 { format!(", +{}", d.len() - 2) } else { String::new() }
+                    if d.len() > 2 {
+                        format!(", +{}", d.len() - 2)
+                    } else {
+                        String::new()
+                    }
                 ));
             }
         }
@@ -555,13 +623,21 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
         };
         format!(
             "  ~ {}  {} -> {} insns, {why}{own}",
-            if an == bn { an.clone() } else { format!("{an} -> {bn}") },
+            if an == bn {
+                an.clone()
+            } else {
+                format!("{an} -> {bn}")
+            },
             size(a, pc),
             size(b, x.b)
         )
     });
-    list(&mut l, &added, &|pc| format!("  + {}  {} insns{}", nm(b, pc), size(b, pc), ixs(b, pc)));
-    list(&mut l, &removed, &|pc| format!("  - {}  {} insns{}", nm(a, pc), size(a, pc), ixs(a, pc)));
+    list(&mut l, &added, &|pc| {
+        format!("  + {}  {} insns{}", nm(b, pc), size(b, pc), ixs(b, pc))
+    });
+    list(&mut l, &removed, &|pc| {
+        format!("  - {}  {} insns{}", nm(a, pc), size(a, pc), ixs(a, pc))
+    });
     l
 }
 
