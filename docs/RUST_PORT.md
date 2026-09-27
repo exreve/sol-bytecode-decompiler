@@ -29,8 +29,8 @@ stages are at 100% parity.
 | 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state`, `outline`, `taint` (+ decompile's phases 3–4, readable renderSingle) | `types`, `rtext`, `readfile` (done: readable output, with and without IDL) |
 | 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (done with stage 7: only used on library functions) | (covered by `rtext` / `readfile`, `library`) |
 | 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `library`, `fingerprint`, `readfile` (default output line), `diff` (done; native-arm diffs wait for stage 8) |
-| 8 | `src/analysis/*` (8a foundation: `facts`, `flow`, `paths`, `sources`; 8b report layer: `report`, `phase2`, `phase3`, `audit`, `consistency`, `libcpi`; 8c incidents, rendering) | `facts`, `flow` (8a done); `analysis` (8b done: the analysis before the incident rules; 8c: `security/analysis.json` itself) |
-| 9 | `layout`, `budget`, `rpc`, `cli` | whole CLI output (`-o dir/`) byte-compared |
+| 8 | `src/analysis/*` (8a foundation: `facts`, `flow`, `paths`, `sources`; 8b report layer: `report`, `phase2`, `phase3`, `audit`, `consistency`, `libcpi`; 8c incidents, rendering, + `layout`, `budget`) | `facts`, `flow` (8a done); `analysis` (8b / 8c done); `project`, `readfile` with the summary (8c done: whole CLI output) |
+| 9 | `rpc`, `cli` (the binary) | whole CLI output (`-o dir/`) byte-compared through the binary |
 
 Until stage 9 the Rust code is a library plus `sbpf-dump`; the TS CLI stays the product. A stage's
 Rust output feeds the next stage's Rust code only; the TS pipeline is never fed from Rust.
@@ -864,7 +864,119 @@ of a function's text, whose regex scan per instruction dominated). Targets for t
 regexes run over printed lines per operation / check (`anchorClose`, `rentTest`, the rule regexes), `String` value keys,
 per-call `Vec`s of walked nodes (`ir.walk` collects before visiting), cloned `OpCpi`s on every read.
 
+## Stage 8c results (incidents, rendering, whole output)
+
+Ported:
+
+- `analysis/incidents.rs` ← `incidents.ts`: the instruction's scope (handler + parents, allowed reachable blocks), the
+  per-block expression index (`blockOf`: intro / Pyth / division sites, calls incl. nested ones but not a `set` of a call,
+  the Pyth magic), comparisons (branch conditions through `&& || !` and single definitions, memcmp-like calls),
+  introspection / flash-repay, oracle, signer-to-untrusted-program (`keyAcct` through the Anchor evaluators, `callAt`,
+  invoke calls the facts did not decode), stale-after-cpi (`visit` over conditions after the CPI, `callOut`, `copyAcct`,
+  `reloaded`), token2022-amount-assumed, rounding-favors-user (`defSites`, `has` through value keys), `fundMovers`,
+  `libHasSysvarId` (memo pre-set to false, as the TS). The incident rules mutate the rule engine's findings in place
+  (`cpi-unchecked-program`: confidence, evidence, accounts). The TS per-rule `try/catch` has no Rust counterpart (no rule
+  throws on the binaries and mutants swept).
+- `phase2.rs`: the rest of phase2 — incident findings, the dispatcher grouping (`matched in X`, one finding per place,
+  from 2 arms inside the dispatcher, 3 elsewhere), fund movers, the ranking (`rank * 10 + weight`, then `localeCompare`).
+  `Analysis` keeps `rule_findings` (the pre-incident list, for the dump) and `fund_movers`.
+- `analysis/json.rs`: an ordered JSON value (`Jv`) with `JSON.stringify` compact / indent-1 output and UTF-16 lengths.
+- `analysis/render.rs` ← `renderJson` (all objects the TS serializes as-is rebuilt with their key orders: `expected`,
+  enablers, relations, stored keys, trust, sources, CPI account metas), `budgetJson` (on the `Jv`: duplicate findings,
+  the 8 cut steps, `<key>_omitted`, `budget`), `renderSummary`, `renderIx`, `renderSummaryComment`, `failText`,
+  `budgetMarkdown` (sections / items / kids, the rank-staggered cut plan).
+- CPI account metas carry their TS key order (`PartAcc::ord`: `{ role, text, w, s }` from cpi.ts, `{ text, w, s }` for
+  undecoded programs, `{ ...x, role }` of knownIx appends `role`, `{ s, role, text }` of the CpiContext pass).
+- `layout.rs` ← `layout.ts` renderProject (stage 9's layout, done here): handler owners, groups (DFS order), modules with
+  imports, `outlined.ts`, `lib.d.ts`, `index.ts`, the bundles (BFS by call depth, error-path callees last, outlined tails
+  at the caller's depth, the 30 000-line budget, other handlers declared), the inline-processor bundles (`slice`: line
+  marks computed in the analysis from the facts' pc / condition lines and the dispatch part's allowed blocks, then the
+  brace-balanced runs of other instructions' lines), the `where` line mapping (bundle line maps, module lines),
+  `security/*`. `budget.ts` is in `render.rs`.
+- The analysis now runs in every `decompile_read` without a dump hook (`ReadOut::analysis`: the owned `Analysis` and the
+  dispatch parts' marks), so `render_read` (the single file) carries the `// security summary` block.
+- `diff.rs`: native instruction arms from the analysis' tag-dispatch split (`native_arms`), the `unsupported` error is gone.
+
+Dumps / drivers: `analysis` gains `ranked` and `fundMover` lines; `readfile` now includes the summary block (the
+`withoutAnalysis` exclusion is gone for `readfile`; it stays for `rawfile`: the raw mode is a dev mode, not a CLI output, and
+the Rust raw printer collects no analysis facts); new stage `project` (every file of `-o dir/`, `{"path","text"}` in the
+map's order). `sbpf-dump --cli prog.so [--idl] [--full] [-o out.ts | -o dir/]` writes the CLI's output; `scripts/cliparity.ts`
+runs the TS CLI and `--cli` on each binary and compares the project and the single file with `diff -r`;
+`sbpf-dump --timecli` times the whole output.
+
+### Parity
+
+- `analysis` (with ranked findings and fund movers): **615 / 615 identical**; with IDL **184 / 184**.
+- `readfile,project` (the single file with the summary block for `--full` and the default; every project file,
+  `security/analysis.json` budget cuts and markdown budgets included, e.g. jup): **615 / 615 identical**; with IDL
+  **184 / 184**.
+- `scripts/cliparity.ts` (the real TS CLI vs `sbpf-dump --cli`, `diff -r` of `-o dir/` and `-o out.ts`): samples,
+  regress, compat, eval, bench **213 / 213**; bench with IDL **98 / 98**; samples `--full` single file **8 / 8** (the
+  corpus is covered by the `project` / `readfile` dumps, which hold exactly what the CLI writes).
+- Program diff (`diff.jsonl`), the 199 pairs of stage 7: **199 / 199 identical** (the 81 native-arm pairs included).
+- Fuzz (`analysis,readfile,project`, 1000 mutants each): **4000 / 4000 identical** (seeds 1, 7, 11 on samples + compat,
+  seed 3 on corpus + bench + eval; 832 reach the analysis without an error).
+- Found on the way: nothing Rust-only; the sweeps' Node processes OOM on `project` chunks of 25 (big outputs held in
+  memory): re-run the chunks without a `parity:` line 5 files per process.
+
+Residual differences: none on the CLI outputs. Not modeled: a TS exception inside an incident rule (caught, the rule
+reports nothing) and inside the analysis (the TS `decompile` fails; Rust: `An::set_err` → `decompile_read` error, same
+message for the modeled case).
+
+### Speed
+
+The whole CLI output from the bytes: decompile (single file text with the analysis summary) + renderProject; TS:
+`decompile(bytes)` + `renderProject(r)` in one process, best of 2 after a warm-up (Node 26, no process start); Rust:
+`sbpf-dump --timecli --iters 3`, 1 thread / 8 threads, ms:
+
+| program | TS single | TS project | Rust single (1 / 8 thr) | Rust project (1 / 8 thr) | speedup project (1 / 8 thr) |
+|---|---:|---:|---:|---:|---:|
+| jup | 6045.6 | 6344.5 | 3274.6 / 2913.9 | 3619.3 / 3207.6 | 1.8× / 2.0× |
+| whirlpool | 3336.2 | 3609.0 | 2401.2 / 2244.2 | 2808.8 / 2634.1 | 1.3× / 1.4× |
+| token22 | 1462.8 | 1547.9 | 1010.5 / 904.9 | 1096.4 / 992.1 | 1.4× / 1.6× |
+| svault_v3 | 6638.8 | 7079.5 | 5233.8 / 5018.2 | 5709.1 / 5485.4 | 1.2× / 1.3× |
+| token | 380.6 | 453.9 | 327.3 / 313.5 | 419.9 / 415.4 | 1.1× / 1.1× |
+
+(The TS CLI adds ~0.3 s of process / worker start per run.) The analysis itself is small on the Rust side (jup: 335 ms for
+`analysis_out`, of which 72 ms incident rules; rendering the project ~350 ms). **The gap is a regression of the readable
+printing since stage 8a**: the stage 5 / 7 tables measured jup's default output at 1309 ms (991 ms on 8 threads); the same
+`--time7` today (binary before the 8c changes too) gives 3068 ms (2678 ms): the facts collected while printing
+(`function_facts`, `node_lines`, the site notes, `SugarSnap`, the `FlowCtx` built before printing and the per-function
+regexes over printed lines of `facts.rs`) cost ~2 s and run on one thread. First target of the performance pass: profile
+`print_func` + `function_facts` (no `perf` on this box: use a sampling profiler or `--time5` splits), move the facts
+extraction into the per-function parallel printing, and cache the `jsre` regexes.
+
 ## Plan changes
+
+- **Stage 8c is done** (above): incidents, ranking, `security/*`, the single-file summary block, the project layout and
+  the diff's native arms; the whole CLI output is byte-identical (615 / 615, IDL 184 / 184, fuzz 4000 / 4000, TS CLI
+  `diff -r` 311 / 311, diff pairs 199 / 199). Next, **stage 9** (the `sbpf-decompile` binary, a new `rs/crates/sbpf-cli`):
+  1. Argument parsing identical to `src/cli.ts`: `VALUED` (`-o`, `--idl`, `--rpc`) consume the next argument; known flags
+     `--full`, `-h`, `--help`; unknown options rejected with `error: unknown option(s) a, b` + USAGE, exit 1; inputs are the
+     non-option arguments (`-` = stdin); 0 or > 2 inputs or `-h` → USAGE (exit 0 when 1–2 inputs, else 1); the same
+     stderr texts (`error: <input>: no such file, and not a program address`, `... looks like a program address: pass --rpc`,
+     `fetched <addr>: N bytes`, `using on-chain Anchor IDL of <addr>`, the invalid-opcode warning, `wrote project to <dir>`).
+     `-o` ending in `/` or an existing directory → project (mkdir -p per file), else the single file; stdout otherwise
+     (EPIPE → exit 0).
+  2. `--rpc`: port `src/rpc.ts` (`isAddress`: base58 32 bytes; `getAccountInfo` of the program, the upgradeable loader's
+     ProgramData account, the loader-v4 layout, base64 decoding) and `idl.ts fetchIdl` (the Anchor IDL account: address
+     `create_with_seed(base, "anchor:idl", program)`, zlib-inflated JSON; `miniz_oxide` is already a dependency).
+     HTTP: a minimal blocking HTTPS client is the only new dependency class (e.g. `ureq` with rustls); JSON-RPC request
+     bodies as the TS sends them.
+  3. Two inputs: `diff::diff_report` with `all = !!out`, labels = the two input strings, each profile with its IDL
+     (`profile(bytes, idl)`: add the IDL arms, `arms.set(ix.name, 'idl')`, missing in `diff.rs` today) and
+     `native_arms(bytes, idl)`.
+  4. Threads from `std::thread::available_parallelism()`; no environment variables in the shipped binary (the dumps'
+     `SBPF_THREADS` stays in `sbpf-dump` only); a 1 GiB main-thread stack as in `sbpf-dump` (deep recursion).
+  5. `sbpf-dump --cli` becomes a thin wrapper of the library entry the binary uses; `scripts/cliparity.ts --bin` then
+     runs the real binary (arguments passed through unchanged).
+  - **Frozen TS fixtures** (before removing the TS): per binary of every set (615 + IDL runs), the TS CLI's `-o dir/` and
+    single file (default and `--full`), compressed per set (~1–2 GB uncompressed for the corpus: kept out of the repository,
+    e.g. a release asset), plus the stage dumps; a Rust test runner compares `sbpf-decompile` against them (`diff -r`) and
+    the dumps against `sbpf-dump`, replacing `parity.ts` / `cliparity.ts`. The 199 diff pairs' reports and the fuzz seeds
+    (mutants regenerable from the seed) go with them.
+  - Sweep notes: `project` chunks of 25 files per Node process get OOM-killed (3 in parallel on 19 GB): re-run the chunks
+    without a `parity:` line with 5 files per process (2 in parallel).
 
 - **Stage 8b is done** (above): the report layer, byte-identical `analysis` / `flow` dumps. Next, **8c**, in order:
   1. `incidents.ts` (`incidentFindings`: introspection, rounding, token2022Amount, staleAfterCpi, signerForward, oracle

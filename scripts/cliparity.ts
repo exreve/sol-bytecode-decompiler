@@ -8,7 +8,7 @@
 // scripts/parity.ts), both given it. --full: the single file with --full (library code decompiled) instead of the
 // project. --keep dir: keep the outputs of differing binaries there. Exit status 1 when any output differs.
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
@@ -49,6 +49,7 @@ for (const f of files) {
 	const opts = [...idl, ...(full ? ['--full'] : [])]
 	const outs = full ? ['single.ts'] : ['project/', 'single.ts']
 	const errs: string[] = []
+	for (const x of ['ts', 'rs']) mkdirSync(join(d, x))
 	for (const o of outs) {
 		const te = run('node', [cli, f, ...opts, '-o', join(d, 'ts', o)].map(String))
 		const re = run(bin, ['--cli', f, ...opts, '-o', join(d, 'rs', o)])
