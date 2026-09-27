@@ -290,6 +290,48 @@ call returns it on success: after a failed call the same bytes hold the error. A
 (`acc.data.ptr`, also of an AccountInfo or RefCell box recognized by its accesses) held in a variable or passed to a
 call gets an inferred view `Data_<function>` of its fixed-offset accesses (`f0x2d_u8`: the byte at data offset 0x2d).
 
+**Field names from use** (`[heur]`, `src/fieldnames.ts`): once the views are known (before anything is printed),
+generated field names (`f0x18_u64`, `f0x10_ref`, `d0x49_u64`) are replaced by what the program does with the field,
+through typed variables and through frame copies of a call's out object (the last copy / call over those bytes,
+along single-predecessor blocks). The offset stays in the field's comment (`+0x18`, `data +0x49` for account data)
+with the evidence:
+
+| use | name |
+|---|---|
+| a 32-byte key (in place, or a pointer field holding its address) compared (`memeq` / `memcmp` / `keyeq`) with a signer's key (an account whose `is_signer` the function reads) | `authority` (`owner_key` / `admin` when the failure message says owner / admin) |
+| … with the key of an account the Accounts struct names | that name (has_one) |
+| … with a well-known program id | its name: `token_program` |
+| … with anything, a message logged on the failing side | its subject: "Invalid mint" → `mint`, "Obligation lending market does not match …" → `obligation_lending_market`, "Reserve provided is not owned by …" → `reserve_owner` |
+| a value compared, a message on failure | "Borrow fee must be in range …" → `borrow_fee`, "Insufficient X" → `x`, "X must be a signer" → `x_is_signer` |
+| a u64 stored from / compared with / subtracted from Clock.unix_timestamp (the syscall's or `Clock::get`'s out object) | `updated_ts` / `deadline` / `start_ts` (slot: `updated_slot` / `slot`) |
+| a byte copied into a 1-byte seed of a PDA derivation or a signed CPI; another seed | `bump`; `seed` |
+| offset 0, only written and compared constants | `kind` (a variant tag) |
+| a byte tested against 0 only, written 0 / 1 where tested (or next to an "initialized" message) | `is_initialized` |
+| a word updated in place by ± 1; by another amount; passed to a `cpi_token_transfer…` wrapper | `count`; `balance`; `amount` |
+| copied from / to a named field (`x.f = y.g`) | the same name |
+
+A key in place in an inferred view with no field there gets one (`authority: at<0x78, Pubkey>`: its address); a key
+over four u64 words (a run cut it so) names them `x_w0` … `x_w3`. Names are per view, so one type has the same names
+in every function; the most specific evidence wins (has_one, signer, message, program id, clock, seed, …), then the
+most frequent. A name taken twice in a view gets a suffix (`lending_market_owner_2`); names the analysis reads as
+`AccountInfo` fields (`owner`, `key`, `data`, …) get `_key`. Layouts shared by unrelated objects (`S_u64_u64`) are not
+named (what one object holds says nothing about the others). The view's comment counts them (`; 3 fields named after
+their use [heur]`):
+
+```ts
+// SPL Token (no IDL)
+interface S_ebd8_local { // [heur] layout from the fixed-offset accesses through … (…); 1 field named after their use [heur]
+	f0x50_u64: at<0x50, u64>
+	authority: at<0x78, Pubkey> // +0x78 [heur: compared with the key of a signer in fn_ebd8]
+// Solend (no IDL)
+	lending_market_owner: at<0xe0, u64> // +0xe0 [heur: a key compared; "Lending market provided is not owned by the lending program" on failure in ix_repay_obligation_liquidity]
+	borrow_fee:           at<0x20, u64> // +0x20 [heur: compared; "Borrow fee must be in range [0, 1_000_000_000_000_000_000)" on failure in ix_update_reserve_config]
+```
+
+Small unnamed functions get a role name the same way (`// name [heur]: …`): `keys_eq` (two pointer parameters, the
+32 bytes they point to compared word by word or with `memeq`, nothing else), `require_signer` (an `AccountInfo`
+parameter's `is_signer` read and branched on, error constants written, nothing else loaded or called but a log).
+
 **Instruction arguments (IDL).** With an IDL, the argument list of each instruction becomes a view of its
 Borsh layout (the fixed-offset prefix, up to the first variable-size field), and the handler's variable
 holding the instruction data (a parameter, or a copy of one, whose constant-offset loads all fit the fields)

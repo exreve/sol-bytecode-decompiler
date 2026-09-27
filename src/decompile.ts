@@ -22,6 +22,7 @@ import { findCpiSites, cpiDesc, formatIx, siteObjects, type CpiEnv, type CpiSite
 import { describeByExec, type ExecSiteKind } from './cpiexec.ts';
 import { callTargetName } from './emu.ts';
 import { inferStructs } from './structs.ts';
+import { nameFields, roleNames, type FieldNameCfg } from './fieldnames.ts';
 import { Views, exprType, BUILTIN_VIEWS, UNALIGNED_VIEWS, LEGACY_INFO_VIEW, type View } from './views.ts';
 import { findNameFn, anchorFn, accountsLayout, type AnchorFn } from './anchor.ts';
 import { accountViews, accountDataVars } from './state.ts';
@@ -1021,6 +1022,22 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
         }
         if (n) view.doc += `; ${n} named after the account data bytes a run of ${p.funcs.get(c.t.pc)!.name} (a deserializer) copies there on bit-pattern data (dN_uS: the bytes at offset N of the account data)`;
       }
+    }
+    // generated field names (f0x18_u64, d0x49_u64) renamed after their use, small functions named by role (see fieldnames.ts)
+    {
+      const funcs = new Map<number, VarFunc>();
+      for (const [pc, bt] of built) if (!isLib(pc)) funcs.set(pc, bt.f);
+      const fcfg: FieldNameCfg = { funcs, types: pc => baseTypes.get(pc) ?? new Map(), views, fnName, strAt: (ptr, len) => sem.strAt(ptr, len, true) };
+      const taken = new Set([...p.funcs.values()].map(x => x.name));
+      for (const [pc, { name, why }] of roleNames(fcfg)) {
+        let nm = name, k = 2;
+        while (taken.has(nm)) nm = `${name}_${k++}`;
+        const fn = p.funcs.get(pc)!;
+        heurNames.set(pc, `name [heur]: ${why} (was ${fn.name})`);
+        fn.name = nm; taken.add(nm);
+        fnByAddr.set(fnAddr(p, pc), nm);
+      }
+      nameFields(fcfg);
     }
   }
   /**
