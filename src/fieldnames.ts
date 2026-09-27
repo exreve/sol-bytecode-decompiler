@@ -42,19 +42,24 @@ interface Vote { name: string; rank: number; why: string }
 // (rank: the more specific the evidence, the lower)
 
 /** A snake_case name for the thing a failure message is about (undefined: none clear). */
-export function msgSubject(msg: string): string | undefined {
+export function msgSubject(msg: string, value = false): string | undefined {
 	const m0 = msg.trim().replace(/[.!]+$/, '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()
 	if (m0.length > 120) return undefined
 	const pats: [RegExp, string][] = [
+		[/^(?:the )?([a-z][a-z0-9 _]*?) (?:provided |account )?(?:must be|is not|was not) (?:a )?signer\b/, '_is_signer'],
+		[/^(?:the )?([a-z][a-z0-9 _]*?) (?:provided |account )?(?:must be|is not|was not) writable\b/, '_is_writable'],
 		[/^(?:the )?([a-z][a-z0-9 _]*?) (?:provided |account )?(?:is )?not owned by\b/, '_owner'],
 		[/^(?:invalid|incorrect|wrong|unexpected|mismatched) ([a-z][a-z0-9 _]*?)(?: provided| account| key| address| pubkey)?(?:$|[,:;(]| for\b| in\b| on\b)/, ''],
 		[/^(?:the )?([a-z][a-z0-9 _]*?) (?:provided |account |key |address |pubkey )?(?:does not match|doesn't match|do not match|mismatch|is invalid|is incorrect|must match|must be)\b/, ''],
 	]
+	// (a value: not what an account is owned by, but a flag or what is short / wrong about it; a key: not a flag)
+	if (!value) pats.splice(0, 2)
+	else { pats.splice(2, 1); pats.push([/^(?:insufficient|not enough) ([a-z][a-z0-9 _]*?)(?:$|[,:;(]| for\b| in\b| to\b)/, '']) }
 	for (const [re, suf] of pats) {
 		const m = re.exec(m0)
 		if (!m) continue
 		const w = m[1].split(/[ _]+/).filter(x => x && !['the', 'a', 'an', 'provided', 'given'].includes(x))
-		if (!w.length || w.length > 4 || w.some(x => !/^[a-z][a-z0-9]*$/.test(x))) return undefined
+		if (!w.length || w.length > 4 || w.some(x => !/^[a-z][a-z0-9]*$/.test(x) || /^(is|are|was|and|or|must|not|be|has|have|should|cannot|can)$/.test(x))) return undefined
 		return w.join('_') + suf
 	}
 	return undefined
@@ -461,7 +466,8 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 	let pda = false
 	for (const b of f.blocks) for (const s of b.stmts) {
 		const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
-		if (c && ((c.t.k === 'sys' && /program_address/.test(c.t.name)) || (c.t.k === 'fn' && /program_address/.test(cfg.fnName(c.t.pc))))) pda = true
+		// (deriving an address, or signing a CPI with seeds)
+		if (c && ((c.t.k === 'sys' && /program_address|invoke_signed/.test(c.t.name)) || (c.t.k === 'fn' && /program_address|invoke_signed|^cpi_/.test(cfg.fnName(c.t.pc))))) pda = true
 	}
 	const byteCopies = new Map<number, Loc>() // frame byte -> the u8 field copied there
 	if (pda) for (const [bi, b] of f.blocks.entries()) for (const [si, s] of b.stmts.entries()) {
@@ -529,6 +535,11 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 				if (!l || l.field!.t.k !== 'scalar') continue
 				const ck = hasClock(q)
 				if (ck && l.field!.t.size === 8) vote(l, ck === 'ts' ? 'deadline' : 'slot', 4, `compared with Clock.${ck === 'ts' ? 'unix_timestamp' : 'slot'} in ${fnm}`)
+				// (a value checked, a message naming it on failure: "Invalid X", "X mismatch", "Insufficient X")
+				else if (!loadLoc(q)) {
+					const m = msgFor(x), sub = m ? msgSubject(m, true) : undefined
+					if (sub) vote(l, sub, 2, `compared; "${m}" on failure in ${fnm}`)
+				}
 			}
 		} else if (x.k === 'bin' && x.op === 'sub' && hasClock(x.a)) {
 			const l = loadLoc(x.b, 8)
