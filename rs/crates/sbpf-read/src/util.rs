@@ -769,3 +769,12 @@ mod tests {
         assert_eq!(strip_hex_suffix("foo_1a2b", 1), "foo");
     }
 }
+
+/// JS `Math.max(a, b)`: NaN when either is NaN.
+pub fn jmax(a: N, b: N) -> N {
+    if a.is_nan() || b.is_nan() {
+        N::NAN
+    } else {
+        a.max(b)
+    }
+}

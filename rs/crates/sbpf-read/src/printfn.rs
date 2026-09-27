@@ -1608,7 +1608,7 @@ impl RegionCfg for RC<'_> {
         }
         let mut n: N = 0.0;
         for x in &v.fields {
-            n = n.max(x.off + views.width(&x.t) * x.count.unwrap_or(1.0));
+            n = crate::util::jmax(n, x.off + views.width(&x.t) * x.count.unwrap_or(1.0));
         }
         if n.is_finite() && n > 0.0 {
             Some((to_int32(n + 7.0) & !7) as N)

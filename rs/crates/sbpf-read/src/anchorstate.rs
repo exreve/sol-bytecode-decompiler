@@ -879,7 +879,7 @@ fn build_views(
     let name = view_name(views, top);
     let mut end: N = 0.0;
     for f in &fields {
-        end = end.max(f.off + views.width(&f.t) * f.count.unwrap_or(1.0));
+        end = crate::util::jmax(end, f.off + views.width(&f.t) * f.count.unwrap_or(1.0));
     }
     views.add(View {
         name: name.clone(),
@@ -1618,7 +1618,13 @@ pub fn account_objects(
                             .get(&format!("{}Account", pascal(t.unwrap())))
                             .and_then(|v| v.size)
                             .unwrap_or(0.0);
-                        (vs + 256.0).max(1024.0).min(262144.0) as usize
+                        // (JS Math.max / min: NaN propagates; a length of NaN is 0)
+                        let n = vs + 256.0;
+                        if n.is_nan() {
+                            0
+                        } else {
+                            n.max(1024.0).min(262144.0) as usize
+                        }
                     }
                     None => 0x400,
                 };
@@ -1648,7 +1654,7 @@ pub fn account_objects(
             }
             let mut n: N = 0.0;
             for f in &view.fields {
-                n = n.max(f.off + env.views.width(&f.t) * f.count.unwrap_or(1.0));
+                n = crate::util::jmax(n, f.off + env.views.width(&f.t) * f.count.unwrap_or(1.0));
             }
             (to_int32(n + 7.0) & !7) as N
         };
