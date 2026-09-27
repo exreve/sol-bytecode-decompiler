@@ -1,5 +1,5 @@
 // Whole-output parity of the Rust port: runs the TypeScript CLI (`node src/cli.ts`) and the Rust driver
-// (`sbpf-dump --cli`) on each binary, writing the project (`-o dir/`) and the single file (`-o out.ts`), and
+// (`sbpf-dump --cli`, or the `sbpf-decompile` binary given with --bin) on each binary, writing the project (`-o dir/`) and the single file (`-o out.ts`), and
 // compares them with `diff -r` (dev tool, read-only).
 //
 //   node scripts/cliparity.ts [--bin rs-dump-binary] [--idl] [--full] [--keep dir] paths...
@@ -52,7 +52,7 @@ for (const f of files) {
 	for (const x of ['ts', 'rs']) mkdirSync(join(d, x))
 	for (const o of outs) {
 		const te = run('node', [cli, f, ...opts, '-o', join(d, 'ts', o)].map(String))
-		const re = run(bin, ['--cli', f, ...opts, '-o', join(d, 'rs', o)])
+		const re = run(bin, [...(basename(bin) === 'sbpf-decompile' ? [] : ['--cli']), f, ...opts, '-o', join(d, 'rs', o)])
 		if (te || re) { if (te !== re) errs.push(`${o}: ts ${te ?? 'ok'} / rs ${re ?? 'ok'}`) }
 	}
 	let diff = ''
