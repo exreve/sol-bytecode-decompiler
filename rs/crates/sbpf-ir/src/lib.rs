@@ -362,10 +362,7 @@ impl Ir {
         l: L,
         leaf: &mut impl FnMut(&Ir, E, Node) -> Option<E>,
     ) -> L {
-        let v: Vec<E> = from
-            .items(l)
-            .map(|e| self.import(from, e, leaf))
-            .collect();
+        let v: Vec<E> = from.items(l).map(|e| self.import(from, e, leaf)).collect();
         self.list(v)
     }
 
@@ -374,10 +371,7 @@ impl Ir {
         let n = self.get(e);
         f(e, n);
         match n {
-            Node::Bin(_, a, b)
-            | Node::Cmp(_, a, b)
-            | Node::Land(a, b)
-            | Node::Lor(a, b) => {
+            Node::Bin(_, a, b) | Node::Cmp(_, a, b) | Node::Land(a, b) | Node::Lor(a, b) => {
                 self.walk(a, f);
                 self.walk(b, f);
             }

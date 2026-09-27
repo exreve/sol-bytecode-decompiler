@@ -304,9 +304,7 @@ impl Lifter {
                 ir.bin(BinOp::Add, base, ir.c(off as i64 as u64))
             }
         };
-        let load = |size: u8| {
-            set(ir.load(size, addr(s())))
-        };
+        let load = |size: u8| set(ir.load(size, addr(s())));
         let store = |size: u8, val: E| Lifted {
             stmt: Some(Stmt::Store {
                 size,
@@ -422,8 +420,20 @@ impl Lifter {
             0xac => return set(z32(ir.bin(Xor, d(), s()))),
             0xb4 => return set(imm_u32()),
             0xbc => return set(if sx { ir.ext(true, 32, s()) } else { z32(s()) }),
-            0xc4 => return set(z32(ir.bin(Ashr, ir.ext(true, 32, d()), ir.c((imm & 31) as u64)))),
-            0xcc => return set(z32(ir.bin(Ashr, ir.ext(true, 32, d()), ir.bin(And, s(), ir.c(31))))),
+            0xc4 => {
+                return set(z32(ir.bin(
+                    Ashr,
+                    ir.ext(true, 32, d()),
+                    ir.c((imm & 31) as u64),
+                )))
+            }
+            0xcc => {
+                return set(z32(ir.bin(
+                    Ashr,
+                    ir.ext(true, 32, d()),
+                    ir.bin(And, s(), ir.c(31)),
+                )))
+            }
             0xd4 if !no_le => {
                 return match imm {
                     16 => set(ir.ext(false, 16, d())),
@@ -526,11 +536,7 @@ impl Lifter {
             if jmp32 && opc & 0x07 == 0x06 {
                 let signed = matches!(jc, CmpOp::Sgt | CmpOp::Sge | CmpOp::Slt | CmpOp::Sle);
                 let w = |e: E| ir.ext(signed, 32, e);
-                return jmp(ir.cmp(
-                    jc,
-                    w(d()),
-                    w(if opc & 0x08 != 0 { s() } else { imm_s() }),
-                ));
+                return jmp(ir.cmp(jc, w(d()), w(if opc & 0x08 != 0 { s() } else { imm_s() })));
             }
         }
         if opc == 0x85 {

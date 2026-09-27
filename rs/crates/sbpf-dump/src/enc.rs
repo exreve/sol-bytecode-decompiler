@@ -350,7 +350,11 @@ pub fn stmt(ir: &Ir, s: &Stmt, o: &mut String) {
             list(ir, *x, o);
         }
         Stmt::Copy { rev: Some(r), .. } => {
-            o.push_str(if *r { ",\"rev\":true" } else { ",\"rev\":false" });
+            o.push_str(if *r {
+                ",\"rev\":true"
+            } else {
+                ",\"rev\":false"
+            });
         }
         _ => {}
     }
