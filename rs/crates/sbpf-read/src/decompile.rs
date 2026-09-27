@@ -112,7 +112,7 @@ fn reg_facts(p: &Program) -> RegFacts {
     }
 }
 
-/// The raw pipeline's stages 1–4 with the register-level facts read before variable recovery.
+/// The raw pipeline's stages 1–4, with the facts the TS reads of the built functions in phase 4.
 pub fn prepare_read(
     bytes: &[u8],
     threads: usize,
@@ -122,7 +122,6 @@ pub fn prepare_read(
     let sem = semantics(&p);
     let sym_notes = name_functions(&mut p, &sem);
     let names = prog_names(&p);
-    let facts = reg_facts(&p);
     sbpf_dataflow::recover_all(&mut p)?;
     {
         let img = sbpf_elf::Image::new(&p.elf);
@@ -142,6 +141,8 @@ pub fn prepare_read(
         names,
     };
     let trees = structure_all(&mut pr, threads);
+    // (read in phase 4 of the TS, where p.funcs are the built functions: recoverVars works in place)
+    let facts = reg_facts(&pr.p);
     Ok((pr, facts, trees))
 }
 
