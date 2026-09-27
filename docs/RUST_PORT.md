@@ -27,8 +27,8 @@ stages are at 100% parity.
 | 3 | `simplify`, `cfgopt`, `ifconv`, `idioms`, `compact` (+ decompile's phase 2) | `opt`, `optir`, `compact` (done) |
 | 4 | `structure`, `stmtidioms`, `print` (+ decompile's raw printing path, renderSingle) | `struct`, `text`, `rawfile` (done: raw output) |
 | 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state`, `outline`, `taint` (+ decompile's phases 3–4, readable renderSingle) | `types`, `rtext`, `readfile` (done: readable output, with and without IDL) |
-| 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (with stage 7: only used on library functions) | (covered by `rtext` / `readfile`) |
-| 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `fingerprint`, `semantics` |
+| 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (done with stage 7: only used on library functions) | (covered by `rtext` / `readfile`, `library`) |
+| 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `library`, `fingerprint`, `readfile` (default output line), `diff` (done; native-arm diffs wait for stage 8) |
 | 8 | `src/analysis/*` | `analysis` (analysis JSON, canonical key order) |
 | 9 | `layout`, `budget`, `rpc`, `cli` | whole CLI output (`-o dir/`) byte-compared |
 
@@ -601,7 +601,92 @@ now the larger half of the Rust run. The TS side also keeps memory across `decom
 process timing token22, whirlpool, jup and svault_v3 in a row runs out of its 4 GB heap), which the
 Rust side does not.
 
+## Stage 7 results
+
+Ported: `src/fingerprint.ts` (library fingerprints with the v2 / v3 normalized `alt` hash, string previews;
+the diff signatures: hash, regfree, data, fuzzy; `codeHash`, `renderFingerprints`), `src/library.ts` (classification
+against `data/libsigs.json` / `data/libnames.json`, the crate-aware policy for crates the program *is*, behavioral
+names, hints, duplicate-name suffixes; `crateOf` of `src/demangle.ts`), `src/builtins.ts` (u128 builtins named by
+concrete runs on `sbpf-exec`) → `sbpf-lib` (+ a local SHA-1); `src/diff.ts` (profile, the five matching steps, the
+report), `src/selector.ts`'s `lookup` → `sbpf-read`; the rest of `decompile.ts` that library classification touches
+(phase 1 naming, building user functions only, the library error-constructor candidates built in place, library
+stubs, library CPI wrappers, library deserializer views `Deser_*`, library results in frame roles, the selector
+dispatcher and struct inference skipping library callees) and `renderSingle`'s stub block and library count.
+The data files are compiled in (`include_str!`, `include_bytes!`); no new dependency (`regex` for the library name
+patterns, already used by `sbpf-read`; `miniz_oxide` for `selectors.json.gz` was already there). `semantics.ts` was
+already complete from stages 4–5 (instruction logs in `sbpf-print::names`, the rest in `sbpf-read::sem`).
+
+Dumps: `library` (classification per function, then the default output's library names, stubs and counts),
+`fingerprint` (`security/fingerprints.json`), a third `readfile` line (the default single file), and `diff.jsonl`
+from `--diff a.so b.so out_dir` on both dumpers. Format in [`rs/README.md`](../rs/README.md). `layout.ts` now
+exports `fingerprints` (read-only exposure for the dump).
+
+Design notes:
+
+- **Library functions stay register-level.** The TS never builds them, so later phases read them in their
+  `inferSignatures` form (`Func::ir` is `None`: their expressions live in the program arena). `Dx::fs` / `Dx::idx`
+  are the built (user) functions, `d.p.funcs` is TS `p.funcs`.
+- **Error-constructor candidates.** For Anchor programs the TS runs `recoverVars` + `optimizeFunc` on library
+  functions user code calls with a small constant second argument, in place, after the error-helper renames; later
+  phases (invoke thunks, PDA wrappers, stubs' `uses` hints) read them in that form. The Rust side runs phase 3 and
+  the Anchor naming once to find them, builds them in `p.funcs`, then runs the whole phase 3–4 (the first pass
+  only reads).
+- **Corrupt inputs.** The TS fingerprint of a block whose pcs fall outside the instructions (negative or past the
+  end) throws `Cannot read properties of undefined (reading 'opc')`; `check_pcs` returns that error (found by
+  fuzzing).
+- **Diff of native programs.** When neither instruction logs nor Anchor discriminators name any instruction, the
+  TS profile runs the whole decompiler *and the security analysis* (`analyze(r).ixs`, stage 8) to split the tag
+  dispatch. The Rust profile returns `unsupported: native instruction arms …` there until stage 8.
+
+### Parity
+
+- Default output (`readfile` line 3), `library`, `fingerprint` without IDL, all binary sets: **615 / 615 identical**
+  (samples + regress + compat + bench + eval 213, corpus 402); the `--full` lines (`readfile` line 2) stay identical.
+- With IDL (`--idl`, the 183 binaries that have one): **183 / 183 identical**.
+- Fuzz: **4000 / 4000 identical** on `readfile,library,fingerprint` (seeds 1, 7, 11 on samples + compat, seed 3 on
+  corpus + bench + eval; 1000 each). Seed 7 found the only divergence class (113 mutants: out-of-range block pcs
+  panicked in Rust instead of the TS TypeError), fixed and re-checked.
+- Program diff (`diff.jsonl`), 199 pairs: bench variants against their base (136), corpus fork-family pairs (55,
+  found by Jaccard similarity of user-function hashes ≥ 0.2), samples (token / token22, memo / ata, whirlpool /
+  svault_v3) and bench cross pairs (5): **118 / 118 identical where supported**; the other 81 pairs involve a native
+  program without named instruction arms (see above: stage 8), e.g. token / token22 and memo / ata.
+- `selector.ts` lookup: unit test against `node src/selector.ts` (dataset names, both byte orders, vocabulary).
+
+Residual differences: only the unsupported native-arm diff profiles (stage 8), and the analysis summary block,
+excluded from `readfile` as before.
+
+### Speed
+
+Best of 5 (Rust) / 3 after warm-up (TS, Node 26), ms, same machine (`sbpf-dump --time7`, `scripts/stagetime.ts
+--stage7`): the whole readable output from the bytes, single file included, minus the analysis (TS: timed
+separately and subtracted); `default` = the CLI default (library code as stubs), `full` = `--full`; `parallel` =
+8 worker threads (wall time).
+
+| program | | full | default | default, parallel |
+|---|---|---:|---:|---:|
+| token22 | TS | 1648.0 | 1550.5 | |
+| | Rust | 347.9 | 317.7 | 242.3 |
+| | speedup | 4.7× | **4.9×** | **6.4×** |
+| whirlpool | TS | 3428.0 | 3018.5 | |
+| | Rust | 964.1 | 870.2 | 708.7 |
+| | speedup | 3.6× | **3.5×** | **4.3×** |
+| jup | TS | 5367.6 | 5077.2 | |
+| | Rust | 1326.8 | 1308.8 | 991.5 |
+| | speedup | 4.0× | **3.9×** | **5.1×** |
+| svault_v3 | TS | 5680.5 | 5595.0 | |
+| | Rust | 1351.3 | 1419.1 | 1132.1 |
+| | speedup | 4.2× | **3.9×** | **4.9×** |
+
+Program diff (`--timediff` / `stagetime.ts --diff`: both profiles + the report, best of 5 / 5): whirlpool vs svault_v3
+1432.7 → 720.4 ms (2.0×), a_vault vs a_vault@no_signer 129.4 → 56.3 (2.3×), a corpus fork pair 51.0 → 23.2 (2.2×).
+The diff is a straight port (signature token strings per instruction, a `Set` per candidate pair in step 5, and
+`SemR::new` per profile, as in the TS) and has not been profiled yet: a target for the performance pass.
+
 ## Plan changes
+
+- **Stage 7 is done** (above): the CLI default output (library stubs), `security/fingerprints.json`, the program
+  diff (except native programs without named instructions, whose arms come from the analysis) and the selector
+  lookup. Next: stage 8 (`src/analysis/*`: the summary block of `rawfile` / `readfile`, the diff's native arms).
 
 - **Stage 5 is done** (above), with `exec` / `cpiexec` / `cpi` of stage 6; `builtins` moves to stage 7
   (u128 builtin names are only given to library functions, i.e. with classification). Next: stage 7
