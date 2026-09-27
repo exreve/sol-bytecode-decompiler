@@ -295,6 +295,14 @@ export function analysisLines(a: Analysis, findings: Finding[]): string[] {
 	return out
 }
 
+/** The analysis' final findings (incident rules merged, dispatcher grouping, ranked) and fund movers (8c). */
+export function finalLines(a: Analysis): string[] {
+	const out: string[] = []
+	for (const f of a.findings) out.push(line({ t: 'ranked', rule: f.rule, ix: f.ix, confidence: f.confidence, weight: f.weight, title: f.title, accounts: f.accounts, path: f.path, evidence: f.evidence }))
+	for (const m of a.fundMovers ?? []) out.push(line(obj([['t', 'fundMover'], ['instruction', m.instruction], ['authority', m.authority], ['kind', m.kind], ['from', m.from], ['at', m.at]])))
+	return out
+}
+
 /**
  * Stage 8: `facts` = the per-function facts of the default output (library classification), as printing
  * collected them (before the single file's analysis adds to them); `flow` = flowLines.
@@ -318,7 +326,8 @@ export function dumpStage8(bytes: Uint8Array, stages: readonly string[], res: Ma
 		res.set('flow', header('flow') + fl)
 	}
 	if (stages.includes('analysis')) {
-		if (!an) { try { analyze(r) } catch (e) { an = [line({ error: errMsg(e) })] } }
-		res.set('analysis', header('analysis') + (an ?? []).join(''))
+		let fin: string[] = []
+		try { fin = finalLines(analyze(r)) } catch (e) { an = [line({ error: errMsg(e) })] }
+		res.set('analysis', header('analysis') + (an ?? []).join('') + fin.join(''))
 	}
 }

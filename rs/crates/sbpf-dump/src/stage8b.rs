@@ -279,7 +279,7 @@ pub fn analysis_lines(an: &An, a: &Analysis) -> String {
             .raw("writtenBy", &sarr(wb));
         j.line(&mut out);
     }
-    for f in &a.findings {
+    for f in &a.rule_findings {
         let mut j = J::obj();
         j.s("t", "finding")
             .s("rule", f.rule)
@@ -343,6 +343,29 @@ pub fn analysis_lines(an: &An, a: &Analysis) -> String {
     }
     for o in &a.unattributed {
         op_line(o, "unattr", false, &mut out);
+    }
+    for f in &a.findings {
+        let mut j = J::obj();
+        j.s("t", "ranked")
+            .s("rule", f.rule)
+            .s("ix", &f.ix)
+            .s("confidence", f.confidence)
+            .f("weight", f.weight)
+            .s("title", f.title)
+            .raw("accounts", &sarr(&f.accounts))
+            .raw("path", &sarr(&f.path))
+            .raw("evidence", &sarr(&f.evidence));
+        j.line(&mut out);
+    }
+    for m in a.fund_movers.iter().flatten() {
+        let mut j = J::obj();
+        j.s("t", "fundMover")
+            .s("instruction", &m.instruction)
+            .s("authority", &m.authority)
+            .s("kind", &m.kind)
+            .os("from", m.from.as_deref())
+            .s("at", &m.at);
+        j.line(&mut out);
     }
     out
 }

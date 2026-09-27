@@ -7,7 +7,7 @@ use super::ixctx::IxCtx;
 use super::report::{CheckOut, Loc, OpOut};
 use super::An;
 use sbpf_ir::CallTarget;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct TrustRow {
@@ -194,6 +194,84 @@ impl<'a> An<'a> {
             let fs = self.rules(a, xi, &infos[a.ixs[xi].info]);
             findings.extend(fs);
         }
+        a.rule_findings = findings.clone();
+        let memo = super::incidents::IncMemo::default();
+        let inc = self.incident_findings(a, infos, srcs, &mut findings, &memo);
+        findings.extend(inc);
+        // (native: one finding at one place found by several arms of a dispatcher: the first instruction's, naming the
+        // others; inside the dispatcher itself from two arms on, elsewhere from three)
+        let mut arm_of: HashMap<&str, Option<String>> = HashMap::new();
+        for ix in &a.ixs {
+            let d = ix.dispatch.as_deref().unwrap_or("");
+            arm_of.insert(
+                ix.name.as_str(),
+                crate::jre!(r"matched in (\w+)")
+                    .captures(d)
+                    .map(|m| m[1].to_string()),
+            );
+        }
+        let mut groups: IndexMap<String, Vec<usize>> = IndexMap::new();
+        for (i, f) in findings.iter().enumerate() {
+            let Some(Some(d)) = arm_of.get(f.ix.as_str()) else {
+                continue;
+            };
+            if f.path.is_empty() {
+                continue;
+            }
+            groups
+                .entry(format!("{}|{}|{}", f.rule, f.path.join(","), d))
+                .or_default()
+                .push(i);
+        }
+        let mut drop: HashSet<usize> = HashSet::new();
+        for (k, g) in &groups {
+            let d = &k[k.rfind('|').unwrap() + 1..];
+            let pre = format!("{d}:");
+            let min = if findings[g[0]].path.iter().all(|p| p.starts_with(&pre)) {
+                2
+            } else {
+                3
+            };
+            if g.len() < min {
+                continue;
+            }
+            for &i in &g[1..] {
+                drop.insert(i);
+            }
+            let names: Vec<&str> = g[1..g.len().min(6)]
+                .iter()
+                .map(|&i| findings[i].ix.as_str())
+                .collect();
+            let e = format!(
+                "the same place in {} instructions of the dispatcher: {}{}",
+                g.len(),
+                names.join(", "),
+                if g.len() > 6 { ", …" } else { "" }
+            );
+            let names_owned = e;
+            findings[g[0]].evidence.push(names_owned);
+        }
+        let mut findings: Vec<Finding> = findings
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop.contains(i))
+            .map(|x| x.1)
+            .collect();
+        a.fund_movers = Some(self.fund_movers(a, infos));
+        let rank = |c: &str| match c {
+            "high" => 3.0,
+            "medium" => 2.0,
+            "low" => 1.0,
+            _ => 0.0,
+        };
+        findings.sort_by(|x, y| {
+            let d = (rank(y.confidence) * 10.0 + y.weight) - (rank(x.confidence) * 10.0 + x.weight);
+            if d != 0.0 && !d.is_nan() {
+                d.partial_cmp(&0.0).unwrap()
+            } else {
+                super::locale_cmp(&x.ix, &y.ix)
+            }
+        });
         a.findings = findings;
     }
 

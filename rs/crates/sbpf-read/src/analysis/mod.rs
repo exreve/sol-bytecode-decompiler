@@ -10,6 +10,7 @@ pub mod consistency;
 pub mod dispatch;
 pub mod facts;
 pub mod flow;
+pub mod incidents;
 pub mod ixctx;
 pub mod libcpi;
 pub mod paths;

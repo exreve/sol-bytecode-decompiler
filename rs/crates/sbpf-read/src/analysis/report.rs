@@ -209,8 +209,11 @@ pub struct Analysis {
     pub state_writes: Vec<(String, Vec<WriteOut>)>,
     pub deps: Vec<(String, Vec<String>, Vec<String>)>,
     pub unattributed: Vec<OpOut>,
-    /// phase 2's rule findings (before the incident rules, the dispatcher grouping and the ranking: 8c)
+    /// the ranked findings (rule engine + incident rules, grouped by dispatcher)
     pub findings: Vec<Finding>,
+    /// the rule engine's findings as they were before the incident rules (the `analysis` dump)
+    pub rule_findings: Vec<Finding>,
+    pub fund_movers: Option<Vec<super::incidents::FundMover>>,
     pub authority_fields: Option<Vec<(String, Vec<String>)>>,
     pub states: Option<Vec<StateField>>,
     pub consistency: Option<Vec<RoleView>>,
@@ -939,6 +942,8 @@ impl<'a> An<'a> {
             deps,
             unattributed,
             findings: vec![],
+            rule_findings: vec![],
+            fund_movers: None,
             authority_fields: None,
             states: None,
             consistency: None,
