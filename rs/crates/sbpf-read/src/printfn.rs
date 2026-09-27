@@ -1735,9 +1735,12 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         Callee::new(Box::new(move |pc| idx.get(&pc).map(|&i| fs[i])), Box::new(move |pc| pn.fn_name(pc)), d.legacy)
     };
     let fl = FlowCtx::new(callee);
+    let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
     for i in 0..n {
         let v = add_args_view(&mut dm, i);
-        funcs.push(print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl));
+        let (rf, sn) = print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl);
+        funcs.push(rf);
+        snaps.push(sn);
     }
     let d = &dm;
     // the analysis facts; Anchor try-call checks: what the callee whose result they test checks
@@ -1855,7 +1858,7 @@ fn print_func<'p>(
     helper_names: &HashSet<String>,
     args_view: Option<String>,
     fl: &FlowCtx<'p>,
-) -> ReadFunc {
+) -> (ReadFunc, SugarSnap) {
     let f = d.fs[fi];
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
@@ -2905,7 +2908,18 @@ fn print_func<'p>(
         }
         ff
     };
-    ReadFunc {
+    let snap = SugarSnap {
+        fi,
+        var_types: sugar.var_types.clone(),
+        input_var: sugar.input_var,
+        in_addr: sugar.in_addr.get(),
+        frame: sugar.frame.borrow_mut().take(),
+        ok_at: sugar.ok_at.clone(),
+        stored: sugar.stored.clone(),
+        arg_notes: sugar.arg_notes,
+        names: names_final.clone(),
+    };
+    let rf = ReadFunc {
         pc,
         name,
         text: lines.join("\n"),
@@ -2914,7 +2928,8 @@ fn print_func<'p>(
         var_types: var_types.into_iter().collect(),
         names,
         facts: Some(facts),
-    }
+    };
+    (rf, snap)
 }
 
 /// seedsAt: a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
@@ -3271,4 +3286,52 @@ fn add_args_view(d: &mut Dx, fi: usize) -> Option<String> {
         &idl.types,
         0.0,
     )
+}
+
+/// A Dx reference with its lifetime shortened (Dx is covariant).
+pub fn shorten_dx<'a, 'p: 'a>(d: &'a Dx<'p>) -> &'a Dx<'a> {
+    d
+}
+
+/// A function's printing hooks as they are once it is printed (the analysis prints expressions of the function
+/// afterwards: facts' `expr`, the printer of the function with its hooks).
+pub struct SugarSnap {
+    fi: usize,
+    var_types: IndexMap<u32, String>,
+    input_var: Option<u32>,
+    in_addr: bool,
+    frame: Option<Frame>,
+    ok_at: Vec<E>,
+    stored: HashMap<u32, String>,
+    arg_notes: bool,
+    names: Vec<Option<String>>,
+}
+
+/// The expression printer of the printed functions (by function pc), as each one's printer left it.
+pub fn expr_printer<'a>(d: &'a Dx<'a>, snaps: Vec<SugarSnap>) -> Box<dyn Fn(i64, E) -> Option<String> + 'a> {
+    let mut by_pc: HashMap<i64, (FnSugar<'a>, Vec<Option<String>>)> = HashMap::new();
+    for sn in snaps {
+        let f = d.fs[sn.fi];
+        let sugar = FnSugar {
+            d,
+            var_types: sn.var_types,
+            input_var: sn.input_var,
+            acc_typed: Some(&d.account_infos[sn.fi]),
+            in_addr: Cell::new(sn.in_addr),
+            frame: RefCell::new(sn.frame),
+            ok_at: sn.ok_at,
+            stored: sn.stored,
+            outl: HashMap::new(),
+            note: RefCell::new(None),
+            arg_notes: sn.arg_notes,
+            ir: f.ir.as_ref().unwrap(),
+            spans: RefCell::new(HashMap::new()),
+        };
+        by_pc.insert(f.pc, (sugar, sn.names));
+    }
+    Box::new(move |pc: i64, e: E| {
+        let (sugar, names) = by_pc.get(&pc)?;
+        let mut pr = Printer::new(sugar.ir, &d.pn, names).with_sugar(sugar);
+        Some(pr.u(e, 0, true))
+    })
 }

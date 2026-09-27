@@ -6,6 +6,9 @@
 pub mod acct;
 pub mod anchor;
 pub mod dispatch;
+pub mod ixctx;
+pub mod paths;
+pub mod sources;
 pub mod facts;
 pub mod flow;
 
@@ -236,6 +239,9 @@ pub struct An<'a> {
     pub acct_layouts: IndexMap<i64, Vec<Field>>,
     cfgs: RefCell<HashMap<i64, Rc<Cfg<'a>>>>,
     pub memo: anchor::AnchorMemo<'a>,
+    pub paths: paths::PathMemo,
+    /// the printer of a function's expressions (facts' expr: names as printed)
+    pub expr: Box<dyn Fn(i64, sbpf_ir::E) -> Option<String> + 'a>,
 }
 
 impl<'a> An<'a> {
@@ -253,6 +259,7 @@ impl<'a> An<'a> {
         legacy: bool,
         try_of: IndexMap<i64, i64>,
         acct_layouts: IndexMap<i64, Vec<Field>>,
+        expr: Box<dyn Fn(i64, sbpf_ir::E) -> Option<String> + 'a>,
     ) -> Self {
         let by_pc = funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
         An {
@@ -271,6 +278,8 @@ impl<'a> An<'a> {
             acct_layouts,
             cfgs: RefCell::new(HashMap::new()),
             memo: Default::default(),
+            paths: Default::default(),
+            expr,
         }
     }
     pub fn fo(&self, pc: i64) -> Option<&FnRef<'a>> {
