@@ -38,6 +38,12 @@ const args = process.argv.slice(2)
 const VALUED = new Set(['-o', '--idl', '--rpc'])
 const opt = (n: string) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined }
 const flag = (n: string) => args.includes(n)
+const KNOWN = new Set([...VALUED, '--full', '-h', '--help'])
+const unknown = args.filter((a, i) => a.startsWith('-') && a !== '-' && !KNOWN.has(a) && !VALUED.has(args[i - 1]))
+if (unknown.length) {
+	console.error(`error: unknown option${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}\n\n${USAGE}`)
+	process.exit(1)
+}
 const inputs = args.filter((a, i) => (!a.startsWith('-') || a === '-') && !VALUED.has(args[i - 1]))
 if (!inputs.length || inputs.length > 2 || flag('-h') || flag('--help')) {
 	console.error(USAGE)
