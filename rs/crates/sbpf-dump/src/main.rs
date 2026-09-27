@@ -435,6 +435,11 @@ fn real_main() {
         time(&files, iters);
         return;
     }
+    #[cfg(feature = "prof")]
+    if args.first().map(|s| s.as_str()) == Some("--prof") {
+        prof(&args[1..]);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--cli") {
         cli(&args[1..]);
         return;
@@ -499,6 +504,36 @@ fn real_main() {
 /// `SBPF_THREADS`).
 fn cli(args: &[String]) {
     std::process::exit(sbpf_cli::run(args, stage3::threads()));
+}
+
+/// `--prof out.folded [--hz N] <cli args>`: runs the CLI under a SIGPROF sampler (all threads' CPU time) and writes
+/// folded stacks (`frame;frame;... count`, root first) for flame graphs / hotspot tables.
+#[cfg(feature = "prof")]
+fn prof(args: &[String]) {
+    let out = &args[0];
+    let (hz, rest) = if args.get(1).map(|s| s.as_str()) == Some("--hz") {
+        (args[2].parse().unwrap(), &args[3..])
+    } else {
+        (1000, &args[1..])
+    };
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(hz)
+        .build()
+        .expect("profiler");
+    let code = sbpf_cli::run(rest, stage3::threads());
+    let report = guard.report().build().expect("report");
+    let mut s = String::new();
+    for (frames, count) in report.data.iter() {
+        let mut names: Vec<String> = vec![];
+        for f in frames.frames.iter().rev() {
+            for sym in f.iter().rev() {
+                names.push(sym.name().replace(';', ":"));
+            }
+        }
+        s.push_str(&format!("{};{} {count}\n", frames.thread_name, names.join(";")));
+    }
+    std::fs::write(out, s).expect("write");
+    std::process::exit(code);
 }
 
 /// Whole CLI output timings (ms, best of `iters`): decompile + analysis + the single file + the project

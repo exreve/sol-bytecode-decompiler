@@ -16,3 +16,8 @@ sbpf-print.workspace = true
 sbpf-read.workspace = true
 sbpf-lib.workspace = true
 sbpf-cli.workspace = true
+pprof = { version = "0.15", optional = true, default-features = false }
+
+[features]
+# `--prof out.folded <cli args>`: sampling profile (SIGPROF) of a CLI run, folded stacks (dev tool)
+prof = ["dep:pprof"]
