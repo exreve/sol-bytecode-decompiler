@@ -353,7 +353,7 @@ impl<'a> An<'a> {
                         }
                         let s = kk(x);
                         if let Some(inner) = s.strip_prefix("(+ ") {
-                            let inner = &inner[..inner.len() - 1];
+                            let inner = &inner[..inner.char_indices().last().map_or(0, |x| x.0)];
                             let parts: Vec<&str> = inner.split(' ').collect();
                             if parts.iter().all(|t| !t.contains('(')) {
                                 for t in parts {

@@ -38,7 +38,7 @@ pub struct SourceCtx<'a, 'x> {
 
 fn terms_of(k: &str) -> String {
     match k.strip_prefix("(+ ") {
-        Some(inner) => inner[..inner.len() - 1].split(' ').filter(|t| !t.starts_with('#')).collect::<Vec<_>>().join(" "),
+        Some(inner) => inner[..inner.char_indices().last().map_or(0, |x| x.0)].split(' ').filter(|t| !t.starts_with('#')).collect::<Vec<_>>().join(" "),
         None => k.to_string(),
     }
 }
