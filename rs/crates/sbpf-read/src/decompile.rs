@@ -52,7 +52,9 @@ pub fn pda_abi(name: &str) -> Option<SiteKind> {
         name.strip_prefix(p).is_some_and(|r| {
             r.is_empty()
                 || r.strip_prefix('_').is_some_and(|h| {
-                    !h.is_empty() && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    !h.is_empty()
+                        && h.bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
                 })
         })
     };
@@ -111,7 +113,10 @@ fn reg_facts(p: &Program) -> RegFacts {
 }
 
 /// The raw pipeline's stages 1–4 with the register-level facts read before variable recovery.
-pub fn prepare_read(bytes: &[u8], threads: usize) -> Result<(Prepared, RegFacts, Vec<Tree>), String> {
+pub fn prepare_read(
+    bytes: &[u8],
+    threads: usize,
+) -> Result<(Prepared, RegFacts, Vec<Tree>), String> {
     let mut p = load_program(bytes, true)?;
     sbpf_dataflow::infer_signatures(&mut p);
     let sem = semantics(&p);
@@ -127,7 +132,9 @@ pub fn prepare_read(bytes: &[u8], threads: usize) -> Result<(Prepared, RegFacts,
     }
     let built: Vec<usize> = (0..p.funcs.len()).collect();
     sbpf_dataflow::stackargs::rewrite_stack_args(&mut p.funcs, &built);
-    sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| sbpf_opt::finish(f, false));
+    sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| {
+        sbpf_opt::finish(f, false)
+    });
     let mut pr = Prepared {
         p,
         sem,
@@ -170,7 +177,8 @@ pub struct ReadOut {
     pub anchor: bool,
 }
 
-pub const GENERIC_RESULT: &str = "the result of the one (library / out-parameter) call they are passed to";
+pub const GENERIC_RESULT: &str =
+    "the result of the one (library / out-parameter) call they are passed to";
 
 /// A role of a stack object (FrameClaim).
 #[derive(Clone, Debug)]
@@ -232,13 +240,72 @@ pub struct Dx<'p> {
 }
 
 pub const RESERVED_TS: &[&str] = &[
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
-    "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import", "in",
-    "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try",
-    "typeof", "var", "void", "while", "with", "as", "implements", "interface", "let", "package",
-    "private", "protected", "public", "static", "yield", "any", "boolean", "constructor", "declare",
-    "get", "module", "require", "number", "set", "string", "symbol", "type", "from", "of", "async",
-    "await", "input", "fp", "undef", "state",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "as",
+    "implements",
+    "interface",
+    "let",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
+    "yield",
+    "any",
+    "boolean",
+    "constructor",
+    "declare",
+    "get",
+    "module",
+    "require",
+    "number",
+    "set",
+    "string",
+    "symbol",
+    "type",
+    "from",
+    "of",
+    "async",
+    "await",
+    "input",
+    "fp",
+    "undef",
+    "state",
 ];
 
 impl<'p> Dx<'p> {
@@ -259,14 +326,35 @@ impl<'p> Dx<'p> {
         self.pn.by_addr.insert(fn_addr(self.p, pc), nm.to_string());
     }
     pub fn def_count(&self, pc: i64, v: u32) -> u32 {
-        self.def_counts[self.idx[&pc]].get(v as usize).copied().unwrap_or(0)
+        self.def_counts[self.idx[&pc]]
+            .get(v as usize)
+            .copied()
+            .unwrap_or(0)
     }
     pub fn global_idents(&self) -> std::cell::Ref<'_, Option<HashSet<String>>> {
         if self.global_idents.borrow().is_none() {
-            let mut ids: HashSet<String> = sbpf_print::names::HELPERS.iter().map(|s| s.to_string()).collect();
+            let mut ids: HashSet<String> = sbpf_print::names::HELPERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             for n in [
-                "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "at", "ref", "sized", "Pubkey", "bytes",
-                "AccountInfo", "AccountRecord", "UnalignedAccount", "Input",
+                "u8",
+                "u16",
+                "u32",
+                "u64",
+                "i8",
+                "i16",
+                "i32",
+                "i64",
+                "at",
+                "ref",
+                "sized",
+                "Pubkey",
+                "bytes",
+                "AccountInfo",
+                "AccountRecord",
+                "UnalignedAccount",
+                "Input",
             ] {
                 ids.insert(n.into());
             }
@@ -277,7 +365,8 @@ impl<'p> Dx<'p> {
                 ids.insert(sc.alias.clone());
             }
             for n in [
-                "ld8", "ld16", "ld32", "ld64", "st8", "st16", "st32", "st64", "bswap16", "bswap32", "bswap64",
+                "ld8", "ld16", "ld32", "ld64", "st8", "st16", "st32", "st64", "bswap16", "bswap32",
+                "bswap64",
             ] {
                 ids.insert(n.into());
             }
@@ -296,7 +385,10 @@ impl<'p> Dx<'p> {
         self.sem.read_ro(a, n)
     }
     /// varAccesses: loads and stores through `v + c`, per variable: [c, size]
-    pub fn var_accesses(&self, fi: usize) -> std::cell::Ref<'_, HashMap<usize, HashMap<u32, Vec<(N, u8)>>>> {
+    pub fn var_accesses(
+        &self,
+        fi: usize,
+    ) -> std::cell::Ref<'_, HashMap<usize, HashMap<u32, Vec<(N, u8)>>>> {
         if !self.var_acc.borrow().contains_key(&fi) {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
@@ -318,7 +410,9 @@ impl<'p> Dx<'p> {
                 for st in &b.stmts {
                     match st {
                         Stmt::Store { addr, size, .. } => acc(*addr, *size, 0.0, &mut r),
-                        Stmt::Stores { addr, size, vals, .. } => {
+                        Stmt::Stores {
+                            addr, size, vals, ..
+                        } => {
                             for i in 0..vals.len {
                                 acc(*addr, *size, (i * *size as u32) as N, &mut r);
                             }
@@ -359,11 +453,20 @@ impl<'p> Dx<'p> {
                             spans.push((o, *size as N));
                             if *size == 8 {
                                 let k = K::of(o);
-                                let nv = if vals.contains_key(&k) { None } else { Some(*v) };
+                                let nv = if vals.contains_key(&k) {
+                                    None
+                                } else {
+                                    Some(*v)
+                                };
                                 vals.insert(k, nv);
                             }
                         }
-                        Stmt::Stores { addr, size, vals: vs, .. } => {
+                        Stmt::Stores {
+                            addr,
+                            size,
+                            vals: vs,
+                            ..
+                        } => {
                             let Some(o) = fo(*addr) else { continue };
                             spans.push((o, (*size as u32 * vs.len) as N));
                             if *size == 8 {
@@ -387,7 +490,12 @@ impl<'p> Dx<'p> {
             for (k, v) in vals {
                 let o = k.get();
                 if let Some(v) = v {
-                    if spans.iter().filter(|(a, n)| *a < o + 8.0 && o < a + n).count() == 1 {
+                    if spans
+                        .iter()
+                        .filter(|(a, n)| *a < o + 8.0 && o < a + n)
+                        .count()
+                        == 1
+                    {
                         r.insert(k, v);
                     }
                 }
@@ -403,7 +511,14 @@ impl<'p> Dx<'p> {
             let ir = f.ir.as_ref().unwrap();
             let mut bases = IndexSet::new();
             let mut all = IndexSet::new();
-            fn visit(ir: &Ir, fp: u32, e: E, addr: bool, bases: &mut IndexSet<K>, all: &mut IndexSet<K>) {
+            fn visit(
+                ir: &Ir,
+                fp: u32,
+                e: E,
+                addr: bool,
+                bases: &mut IndexSet<K>,
+                all: &mut IndexSet<K>,
+            ) {
                 if let Some(o) = fo_add(ir, e, Some(fp)) {
                     all.insert(K::of(o));
                     if !addr {
@@ -412,13 +527,18 @@ impl<'p> Dx<'p> {
                     return;
                 }
                 match ir.get(e) {
-                    Node::Bin(_, a, b) | Node::Cmp(_, a, b) | Node::Land(a, b) | Node::Lor(a, b) => {
+                    Node::Bin(_, a, b)
+                    | Node::Cmp(_, a, b)
+                    | Node::Land(a, b)
+                    | Node::Lor(a, b) => {
                         visit(ir, fp, a, false, bases, all);
                         visit(ir, fp, b, false, bases, all);
                     }
-                    Node::Neg(a) | Node::Not(a) | Node::Ext { a, .. } | Node::Bswap { a, .. } | Node::Lnot(a) => {
-                        visit(ir, fp, a, false, bases, all)
-                    }
+                    Node::Neg(a)
+                    | Node::Not(a)
+                    | Node::Ext { a, .. }
+                    | Node::Bswap { a, .. }
+                    | Node::Lnot(a) => visit(ir, fp, a, false, bases, all),
                     Node::Load { addr, .. } => visit(ir, fp, addr, true, bases, all),
                     Node::Sel(c, a, b) => {
                         visit(ir, fp, c, false, bases, all);
@@ -492,7 +612,11 @@ impl<'p> Dx<'p> {
         let acc = self.var_accesses(fi);
         let mut hit: HashSet<String> = HashSet::new();
         for &(o, size) in acc[&fi].get(&v).map_or(&[][..], |x| x.as_slice()) {
-            let r = if o < 0.0 { None } else { self.views.resolve(ty, o) };
+            let r = if o < 0.0 {
+                None
+            } else {
+                self.views.resolve(ty, o)
+            };
             let Some(r) = r else { return false };
             let bad = match &r.last {
                 FT::Scalar(s) => r.rest != 0.0 || *s != size,
@@ -535,7 +659,9 @@ impl<'p> Dx<'p> {
         if t.is_some() {
             return t;
         }
-        let Node::Load { size: 8, addr } = ir.get(e) else { return None };
+        let Node::Load { size: 8, addr } = ir.get(e) else {
+            return None;
+        };
         let o = fo_add(ir, addr, fp_var(f))?;
         let v = self.spill_slot(fi, o)?;
         self.etype(ir, v, ty)
@@ -559,7 +685,11 @@ pub fn pascal_ix(ix: &str) -> String {
 }
 
 /// decompile(bytes, { full: true, idl }): the readable output.
-pub fn decompile_read(bytes: &[u8], idl: Option<&IdlInfo>, threads: usize) -> Result<ReadOut, String> {
+pub fn decompile_read(
+    bytes: &[u8],
+    idl: Option<&IdlInfo>,
+    threads: usize,
+) -> Result<ReadOut, String> {
     let (pr, facts, trees) = prepare_read(bytes, threads)?;
     let p = &pr.p;
     let ctx = ProgCtx::new(p);
@@ -674,7 +804,8 @@ fn phase3(d: &mut Dx) {
                         if bv > NICHE && bv < NICHE + 0x40 {
                             *niche.entry(bv).or_default() += 1;
                         }
-                        if matches!(ir.get(a), Node::Load { size: 4, .. }) && OK_TAGS.contains(&bv) {
+                        if matches!(ir.get(a), Node::Load { size: 4, .. }) && OK_TAGS.contains(&bv)
+                        {
                             *tags.entry(bv).or_default() += 1;
                         }
                     }
@@ -777,7 +908,13 @@ fn result_out_params(d: &Dx, ok: u64) -> IndexSet<i64> {
         };
         for b in &f.blocks {
             for s in &b.stmts {
-                if let (Some(a), Stmt::Store { size: 4, v, addr, .. }) = (a, s) {
+                if let (
+                    Some(a),
+                    Stmt::Store {
+                        size: 4, v, addr, ..
+                    },
+                ) = (a, s)
+                {
                     if ir.get(*v) == Node::Const(ok) && ir.get(*addr) == Node::Var(a) {
                         out.insert(f.pc);
                     }
@@ -803,7 +940,9 @@ fn result_out_params(d: &Dx, ok: u64) -> IndexSet<i64> {
         changed = false;
         for pc in out.clone() {
             let Some(bt) = d.f(pc) else { continue };
-            let Some(a) = param1_unassigned(bt) else { continue };
+            let Some(a) = param1_unassigned(bt) else {
+                continue;
+            };
             let ir = bt.ir.as_ref().unwrap();
             for (t, args) in direct_calls(bt) {
                 if args.first().is_some_and(|&x| ir.get(x) == Node::Var(a)) && !out.contains(&t) {
@@ -826,7 +965,9 @@ fn pure_out_params(d: &Dx) -> IndexSet<i64> {
         }
         let base = |e: E| match ir.get(e) {
             Node::Var(v) => v == a,
-            Node::Bin(BinOp::Add, x, c) => ir.get(x) == Node::Var(a) && matches!(ir.get(c), Node::Const(_)),
+            Node::Bin(BinOp::Add, x, c) => {
+                ir.get(x) == Node::Var(a) && matches!(ir.get(c), Node::Const(_))
+            }
             _ => false,
         };
         let mut writes = 0;
@@ -945,12 +1086,21 @@ fn out_param_tags(d: &Dx) -> IndexMap<i64, u32> {
         for b in &f.blocks {
             for s in &b.stmts {
                 match s {
-                    Stmt::Store { addr, size: sz, v, .. } if at0(*addr) => {
+                    Stmt::Store {
+                        addr, size: sz, v, ..
+                    } if at0(*addr) => {
                         note(&mut size, *sz as u32, matches!(ir.get(*v), Node::Const(_)))
                     }
-                    Stmt::Stores { addr, size: sz, vals, .. } if at0(*addr) => {
-                        note(&mut size, *sz as u32, matches!(ir.get(ir.at(*vals, 0)), Node::Const(_)))
-                    }
+                    Stmt::Stores {
+                        addr,
+                        size: sz,
+                        vals,
+                        ..
+                    } if at0(*addr) => note(
+                        &mut size,
+                        *sz as u32,
+                        matches!(ir.get(ir.at(*vals, 0)), Node::Const(_)),
+                    ),
                     Stmt::Copy { dst, .. } if at0(*dst) => size = None,
                     _ => {}
                 }
@@ -964,7 +1114,14 @@ fn out_param_tags(d: &Dx) -> IndexMap<i64, u32> {
                 }
             }
         }
-        tag.insert(pc, if size == Some(None) && to.is_empty() { None } else { size });
+        tag.insert(
+            pc,
+            if size == Some(None) && to.is_empty() {
+                None
+            } else {
+                size
+            },
+        );
         fwd.insert(pc, to);
     }
     let mut changed = true;
@@ -1016,15 +1173,23 @@ fn anchor_names(d: &mut Dx) -> Option<i64> {
         find_name_fn(&d.fs, &sa)
     };
     let rename = |d: &mut Dx, pc: i64, nm: &str, why: &str| {
-        let Some(old) = d.pn.by_pc.get(&pc).cloned() else { return };
+        let Some(old) = d.pn.by_pc.get(&pc).cloned() else {
+            return;
+        };
         if !is_hex_fn(&old) || d.name_taken(nm) {
             return;
         }
-        d.heur_names.insert(pc, format!("name [heur]: {why} (was {old})"));
+        d.heur_names
+            .insert(pc, format!("name [heur]: {why} (was {old})"));
         d.rename(pc, nm);
     };
     if let Some(nf) = name_fn {
-        rename(d, nf, "Error_with_account_name", "the callee most often given an account-name string as its last argument pair");
+        rename(
+            d,
+            nf,
+            "Error_with_account_name",
+            "the callee most often given an account-name string as its last argument pair",
+        );
     }
     let mut count: IndexMap<i64, u32> = IndexMap::new();
     for f in &d.fs {
@@ -1113,7 +1278,11 @@ fn selector_dispatch(d: &mut Dx) {
     for (v, dd) in &d.sem.disc {
         if dd.starts_with("ix:") {
             let k = v & !0xff;
-            let nv = if disc_high.contains_key(&k) { String::new() } else { dd.clone() };
+            let nv = if disc_high.contains_key(&k) {
+                String::new()
+            } else {
+                dd.clone()
+            };
             disc_high.insert(k, nv);
         }
     }
@@ -1126,21 +1295,37 @@ fn selector_dispatch(d: &mut Dx) {
         let ir = f.ir.as_ref().unwrap();
         let mut br: IndexMap<usize, (String, usize)> = IndexMap::new();
         for b in &f.blocks {
-            let Term::Br { c, t, f: fl } = &b.term else { continue };
-            let Node::Cmp(op, a, cb) = ir.get(*c) else { continue };
+            let Term::Br { c, t, f: fl } = &b.term else {
+                continue;
+            };
+            let Node::Cmp(op, a, cb) = ir.get(*c) else {
+                continue;
+            };
             if op != CmpOp::Eq && op != CmpOp::Ne {
                 continue;
             }
             let Node::Const(v) = ir.get(cb) else { continue };
             let dd = d.sem.disc.get(&v).cloned().or_else(|| match ir.get(a) {
-                Node::Bin(BinOp::And, _, m) if ir.get(m) == Node::Const(0xffff_ffff_ffff_ff00) && v & 0xff == 0 => {
+                Node::Bin(BinOp::And, _, m)
+                    if ir.get(m) == Node::Const(0xffff_ffff_ffff_ff00) && v & 0xff == 0 =>
+                {
                     disc_high.get(&v).cloned().filter(|x| !x.is_empty())
                 }
                 _ => None,
             });
             if let Some(dd) = dd {
                 if dd.starts_with("ix:") && v >> 32 != 0 {
-                    br.insert(b.id, (dd[3..].to_string(), if op == CmpOp::Eq { *t as usize } else { *fl as usize }));
+                    br.insert(
+                        b.id,
+                        (
+                            dd[3..].to_string(),
+                            if op == CmpOp::Eq {
+                                *t as usize
+                            } else {
+                                *fl as usize
+                            },
+                        ),
+                    );
                 }
             }
         }
@@ -1201,7 +1386,9 @@ fn selector_dispatch(d: &mut Dx) {
         let mut taken: HashSet<String> = d.sem.ix_names.values().cloned().collect();
         for (ix, pcs) in &order {
             let hpc = pcs.iter().copied().find(|x| {
-                seen.get(x).is_some_and(|s| s.len() == 1) && d.idx.contains_key(x) && !d.sem.ix_names.contains_key(x)
+                seen.get(x).is_some_and(|s| s.len() == 1)
+                    && d.idx.contains_key(x)
+                    && !d.sem.ix_names.contains_key(x)
             });
             let Some(hpc) = hpc else { continue };
             if taken.contains(ix) {
@@ -1210,7 +1397,14 @@ fn selector_dispatch(d: &mut Dx) {
             d.sem.ix_names.insert(hpc, ix.clone());
             taken.insert(ix.clone());
             let old = d.fn_name(hpc);
-            let idl_tag = if d.idl.is_some_and(|i| i.instructions.iter().any(|x| &x.name == ix)) { " [idl]" } else { "" };
+            let idl_tag = if d
+                .idl
+                .is_some_and(|i| i.instructions.iter().any(|x| &x.name == ix))
+            {
+                " [idl]"
+            } else {
+                ""
+            };
             let msg = format!(
                 "name [heur]: called on the side where {} matches the discriminator of instruction {ix}{idl_tag} (was {old})",
                 d.fn_name(dpc)
@@ -1218,7 +1412,10 @@ fn selector_dispatch(d: &mut Dx) {
             d.heur_names.insert(hpc, msg);
             d.rename(hpc, &format!("ix_{ix}"));
         }
-        if !d.sem.ix_names.is_empty() && is_hex_fn(&d.fn_name(dpc)) && !d.name_taken("selector_dispatch") {
+        if !d.sem.ix_names.is_empty()
+            && is_hex_fn(&d.fn_name(dpc))
+            && !d.name_taken("selector_dispatch")
+        {
             let old = d.fn_name(dpc);
             d.heur_names.insert(
                 dpc,
@@ -1233,29 +1430,56 @@ fn selector_dispatch(d: &mut Dx) {
 // ---------------- Anchor dispatcher ----------------
 
 fn anchor_dispatch(d: &mut Dx) {
-    let handler_of: HashMap<String, i64> = d.sem.ix_names.iter().map(|(pc, ix)| (ix.clone(), *pc)).collect();
+    let handler_of: HashMap<String, i64> = d
+        .sem
+        .ix_names
+        .iter()
+        .map(|(pc, ix)| (ix.clone(), *pc))
+        .collect();
     let set_name = |d: &mut Dx, pc: i64, v: u32, nm: &str| {
         let m = d.abi_names.entry(pc).or_default();
         m.entry(v).or_insert_with(|| nm.to_string());
     };
-    const ABI: [&str; 6] = ["", "program_id", "accounts", "accounts_len", "ix_args", "ix_args_len"];
+    const ABI: [&str; 6] = [
+        "",
+        "program_id",
+        "accounts",
+        "accounts_len",
+        "ix_args",
+        "ix_args_len",
+    ];
     let pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
     for dpc in pcs {
         let f = d.f(dpc).unwrap();
         let ir = f.ir.as_ref().unwrap();
         let mut hits: Vec<(u32, i64, Vec<E>)> = Vec::new();
         for b in &f.blocks {
-            let Term::Br { c, t, f: fl } = &b.term else { continue };
-            let Node::Cmp(op, a, cb) = ir.get(*c) else { continue };
+            let Term::Br { c, t, f: fl } = &b.term else {
+                continue;
+            };
+            let Node::Cmp(op, a, cb) = ir.get(*c) else {
+                continue;
+            };
             if op != CmpOp::Eq && op != CmpOp::Ne {
                 continue;
             }
             let Node::Const(v) = ir.get(cb) else { continue };
-            let Node::Load { size: 8, addr } = ir.get(a) else { continue };
+            let Node::Load { size: 8, addr } = ir.get(a) else {
+                continue;
+            };
             let Node::Var(x) = ir.get(addr) else { continue };
-            let hpc = d.sem.disc.get(&v).filter(|s| s.starts_with("ix:")).and_then(|s| handler_of.get(&s[3..]).copied());
+            let hpc = d
+                .sem
+                .disc
+                .get(&v)
+                .filter(|s| s.starts_with("ix:"))
+                .and_then(|s| handler_of.get(&s[3..]).copied());
             let Some(hpc) = hpc else { continue };
-            let next = f.blocks.get(if op == CmpOp::Eq { *t as usize } else { *fl as usize });
+            let next = f.blocks.get(if op == CmpOp::Eq {
+                *t as usize
+            } else {
+                *fl as usize
+            });
             let call = next.and_then(|n| {
                 n.stmts.iter().find_map(|s| match s {
                     Stmt::Call {
@@ -1340,7 +1564,11 @@ fn anchor_dispatch(d: &mut Dx) {
 
 fn wrappers(d: &mut Dx, facts: &RegFacts) {
     for (pc, nparams, nblocks, sys) in &facts.pda_info {
-        if *nparams < 4 || *nblocks > 40 || d.invoke_thunks.contains_key(pc) || pda_abi(&d.fn_name(*pc)).is_some() {
+        if *nparams < 4
+            || *nblocks > 40
+            || d.invoke_thunks.contains_key(pc)
+            || pda_abi(&d.fn_name(*pc)).is_some()
+        {
             continue;
         }
         let pda: Vec<&String> = sys
@@ -1378,21 +1606,30 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
                 }
             };
             let mut spills: Option<IndexMap<(u32, i128), Vec<E>>> = None;
-            let mut spilled = || -> &IndexMap<(u32, i128), Vec<E>> {
+            let mut spilled = |key: (u32, i128)| -> Option<Vec<E>> {
                 if spills.is_none() {
                     let mut m: IndexMap<(u32, i128), Vec<E>> = IndexMap::new();
                     for b in &f.blocks {
                         for st in &b.stmts {
                             match st {
-                                Stmt::Store { size: 8, addr, v, .. } => {
+                                Stmt::Store {
+                                    size: 8, addr, v, ..
+                                } => {
                                     if let Some((v0, o)) = slot(*addr) {
                                         m.entry((v0, o as i128)).or_default().push(*v);
                                     }
                                 }
-                                Stmt::Stores { size: 8, addr, vals, .. } => {
+                                Stmt::Stores {
+                                    size: 8,
+                                    addr,
+                                    vals,
+                                    ..
+                                } => {
                                     for (i, v) in ir.items(*vals).enumerate() {
                                         if let Some((v0, o)) = slot(*addr) {
-                                            m.entry((v0, o as i128 + 8 * i as i128)).or_default().push(v);
+                                            m.entry((v0, o as i128 + 8 * i as i128))
+                                                .or_default()
+                                                .push(v);
                                         }
                                     }
                                 }
@@ -1402,15 +1639,17 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
                     }
                     spills = Some(m);
                 }
-                spills.as_ref().unwrap()
+                spills.as_ref().unwrap().get(&key).cloned()
             };
             let mut par = |e: Option<E>, r: i32| -> bool {
                 let Some(e) = e else { return false };
                 match ir.get(e) {
                     Node::Var(v) => f.vars.get(v as usize).is_some_and(|x| x.param == r),
                     Node::Load { size: 8, addr } => {
-                        let Some((v0, o)) = slot(addr) else { return false };
-                        let vs = spilled().get(&(v0, o as i128)).cloned();
+                        let Some((v0, o)) = slot(addr) else {
+                            return false;
+                        };
+                        let vs = spilled((v0, o as i128));
                         vs.is_some_and(|vs| {
                             vs.len() == 1 && matches!(ir.get(vs[0]), Node::Var(id) if f.vars.get(id as usize).is_some_and(|x| x.param == r))
                         })
@@ -1427,7 +1666,9 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
                             && par(args.get(2).copied(), 4)
                     }
                     CallTarget::Fn { pc } => {
-                        iw.contains(pc) && par(args.get(2).copied(), 3) && par(args.get(3).copied(), 4)
+                        iw.contains(pc)
+                            && par(args.get(2).copied(), 3)
+                            && par(args.get(3).copied(), 4)
                     }
                     _ => false,
                 }
@@ -1476,7 +1717,9 @@ fn user_invoke(d: &mut Dx) {
                 d.invoke_wrappers.contains(pc)
                     || matches!(d.invoke_thunks.get(pc), Some(SiteKind::Rust | SiteKind::C))
             }
-            CallTarget::Sys { name, .. } => &**name == "sol_invoke_signed_c" || &**name == "sol_invoke_signed_rust",
+            CallTarget::Sys { name, .. } => {
+                &**name == "sol_invoke_signed_c" || &**name == "sol_invoke_signed_rust"
+            }
             _ => false,
         };
         for b in &f.blocks {

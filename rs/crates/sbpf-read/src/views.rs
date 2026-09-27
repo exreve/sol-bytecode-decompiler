@@ -199,10 +199,15 @@ pub fn builtin_views() -> Vec<View> {
         fld("val2", 16.0, s(8), None),
         fld("val3", 24.0, s(8), None),
     ]));
-    v.push(view("Input", None, "program input (entrypoint parameter): account count, then the first serialized account", vec![
-        fld("num_accounts", 0.0, s(8), None),
-        fld("acc0", 8.0, em("AccountRecord"), None),
-    ]));
+    v.push(view(
+        "Input",
+        None,
+        "program input (entrypoint parameter): account count, then the first serialized account",
+        vec![
+            fld("num_accounts", 0.0, s(8), None),
+            fld("acc0", 8.0, em("AccountRecord"), None),
+        ],
+    ));
     for x in v.iter_mut() {
         x.builtin = true;
     }
@@ -253,6 +258,7 @@ pub struct Resolved {
     pub last: FT,
 }
 
+#[derive(Clone)]
 pub struct Views {
     pub map: IndexMap<String, View>,
     pub opaque: IndexMap<String, Opaque>,
@@ -440,7 +446,13 @@ impl Views {
                 }
                 if let Some(fs) = struct_fields(ty, types) {
                     let ok = self
-                        .borsh_view(&nm, &format!("IDL type {ty} (Borsh layout)"), &fs, types, 0.0)
+                        .borsh_view(
+                            &nm,
+                            &format!("IDL type {ty} (Borsh layout)"),
+                            &fs,
+                            types,
+                            0.0,
+                        )
                         .and_then(|n| self.map.get(&n).and_then(|v| v.size))
                         == Some(f.size);
                     if ok {
@@ -618,7 +630,12 @@ pub const VIEW_NOTATION: [&str; 3] = [
 ];
 
 /// exprType: the view type of an expression, given the variables' types.
-pub fn expr_type(v: &Views, ir: &Ir, e: E, var_type: &dyn Fn(u32) -> Option<String>) -> Option<String> {
+pub fn expr_type(
+    v: &Views,
+    ir: &Ir,
+    e: E,
+    var_type: &dyn Fn(u32) -> Option<String>,
+) -> Option<String> {
     let field = |addr: E| -> Option<Resolved> {
         let (b, off) = match ir.get(addr) {
             Node::Bin(BinOp::Add, a, c) => match ir.get(c) {

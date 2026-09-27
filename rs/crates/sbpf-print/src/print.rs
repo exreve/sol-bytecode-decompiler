@@ -568,7 +568,8 @@ impl<'a> Printer<'a> {
                 let is_memeq = self.ir.with_name(n, |x| x == "memeq");
                 if is_memeq && self.sugar.is_some_and(|s| s.has_key_at()) {
                     let argv = self.ir.to_vec(args);
-                    let mut a: Vec<String> = argv.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
+                    let mut a: Vec<String> =
+                        argv.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
                     self.key_args(&argv, &mut a);
                     o.push_str("memeq(");
                     o.push_str(&join_args(&a));
@@ -798,11 +799,16 @@ impl<'a> Printer<'a> {
             return;
         };
         for i in 0..args.len() {
-            let Node::Const(x) = self.ir.get(args[i]) else { continue };
+            let Node::Const(x) = self.ir.get(args[i]) else {
+                continue;
+            };
             if a[i].contains("/*") || a[i].starts_with('"') {
                 continue;
             }
-            let is32 = |k: usize| args.get(k).is_some_and(|&y| self.ir.get(y) == Node::Const(32));
+            let is32 = |k: usize| {
+                args.get(k)
+                    .is_some_and(|&y| self.ir.get(y) == Node::Const(32))
+            };
             if !is32(i + 1) && !is32(i + 2) {
                 continue;
             }
@@ -824,14 +830,17 @@ impl<'a> Printer<'a> {
         let mut a: Vec<String> = args.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
         if sg.has_str() {
             for i in 0..args.len().saturating_sub(1) {
-                if let (Node::Const(x), Node::Const(y)) = (self.ir.get(args[i]), self.ir.get(args[i + 1])) {
+                if let (Node::Const(x), Node::Const(y)) =
+                    (self.ir.get(args[i]), self.ir.get(args[i + 1]))
+                {
                     let is_ptr = i == 0
                         && matches!(t, CallTarget::Sys { name, .. } if &**name == "sol_log_" || &**name == "sol_panic_");
                     if let Some(st) = sg.str_lit(x, y, is_ptr) {
                         a[i] = json_str(&st);
                     } else if let Some(nt) = sg.str_note(x, y, is_ptr) {
                         if !a[i].contains("/*") {
-                            a[i] = format!("{} /* {} */", a[i], json_str(&nt).replace("*/", "*\\/"));
+                            a[i] =
+                                format!("{} /* {} */", a[i], json_str(&nt).replace("*/", "*\\/"));
                         }
                     }
                 }
@@ -839,7 +848,9 @@ impl<'a> Printer<'a> {
         }
         self.key_args(args, &mut a);
         for (i, &x) in args.iter().enumerate() {
-            let Node::Const(v) = self.ir.get(x) else { continue };
+            let Node::Const(v) = self.ir.get(x) else {
+                continue;
+            };
             if a[i].contains("/*") {
                 continue;
             }
@@ -946,7 +957,11 @@ pub fn print_nodes(
     };
     let sg = b.pr.sugar;
     let vt = |v: u32| sg.and_then(|s| s.var_type(v));
-    let plain: Vec<u32> = hoisted.iter().copied().filter(|&v| vt(v).is_none()).collect();
+    let plain: Vec<u32> = hoisted
+        .iter()
+        .copied()
+        .filter(|&v| vt(v).is_none())
+        .collect();
     if !plain.is_empty() {
         let mut l = b.line(0);
         l.push_str("let ");
@@ -1100,8 +1115,12 @@ impl BodyPrinter<'_, '_> {
                         } else {
                             let d = (i * *size as usize) as u64;
                             match ir.get(*addr) {
-                                Node::Bin(BinOp::Add, a, b) if matches!(ir.get(b), Node::Const(_)) => {
-                                    let Node::Const(c) = ir.get(b) else { unreachable!() };
+                                Node::Bin(BinOp::Add, a, b)
+                                    if matches!(ir.get(b), Node::Const(_)) =>
+                                {
+                                    let Node::Const(c) = ir.get(b) else {
+                                        unreachable!()
+                                    };
                                     let c2 = ir.c(c.wrapping_add(d));
                                     ir.bin(BinOp::Add, a, c2)
                                 }
@@ -1116,7 +1135,11 @@ impl BodyPrinter<'_, '_> {
                     if lvs.iter().all(|x| x.is_some()) && !is_key {
                         let tail = self.tail(si);
                         for (i, &v) in vs.iter().enumerate() {
-                            let mut l = if i == 0 { std::mem::take(&mut o) } else { self.line(d) };
+                            let mut l = if i == 0 {
+                                std::mem::take(&mut o)
+                            } else {
+                                self.line(d)
+                            };
                             l.push_str(lvs[i].as_ref().unwrap());
                             l.push_str(" = ");
                             self.pr.u_to(v, P::ASSIGN, true, &mut l);
@@ -1137,7 +1160,9 @@ impl BodyPrinter<'_, '_> {
                 let key = if is_key {
                     let mut b = [0u8; 32];
                     for (i, &x) in vs.iter().enumerate() {
-                        let Node::Const(c) = ir.get(x) else { unreachable!() };
+                        let Node::Const(c) = ir.get(x) else {
+                            unreachable!()
+                        };
                         b[i * 8..i * 8 + 8].copy_from_slice(&c.to_le_bytes());
                     }
                     format!(" // key {}", b58(&b))
@@ -1167,7 +1192,11 @@ impl BodyPrinter<'_, '_> {
                 ];
                 let nc = ir.c(*n);
                 self.pr.key_args(&[*dst, *src, nc], &mut a);
-                o.push_str(if *rev == Some(true) { "copyr(" } else { "copy(" });
+                o.push_str(if *rev == Some(true) {
+                    "copyr("
+                } else {
+                    "copy("
+                });
                 o.push_str(&join_args(&a));
                 o.push(')');
             }
@@ -1277,7 +1306,10 @@ impl BodyPrinter<'_, '_> {
                     l.push_str(&note);
                     self.out.push(l);
                 }
-                let a: Vec<String> = args.iter().map(|&x| self.pr.u(x, P::ASSIGN, true)).collect();
+                let a: Vec<String> = args
+                    .iter()
+                    .map(|&x| self.pr.u(x, P::ASSIGN, true))
+                    .collect();
                 let call = format!("{name}({})", join_args(&a));
                 let mut l = self.line(d);
                 if value {

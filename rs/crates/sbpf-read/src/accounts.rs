@@ -1,9 +1,7 @@
 //! `src/accounts.ts`: account recognition (AccountInfo / serialized input records), the legacy
 //! AccountInfo field order, the deprecated loader's unaligned input.
 
-use crate::util::{
-    dst_of, jkey, n_s, stmt_exprs, term_br, term_ret, var_of, N,
-};
+use crate::util::{dst_of, jkey, n_s, stmt_exprs, term_br, term_ret, var_of, N};
 use indexmap::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_program::Func;
@@ -91,10 +89,7 @@ fn layout(kind: Kind, legacy: bool) -> &'static Layout {
     }
 }
 fn load_at(l: &Layout, o: N) -> Option<(u8, &'static str)> {
-    l.loads
-        .iter()
-        .find(|x| x.0 as N == o)
-        .map(|x| (x.1, x.2))
+    l.loads.iter().find(|x| x.0 as N == o).map(|x| (x.1, x.2))
 }
 
 const STRIDE: i128 = 0x30;
@@ -246,7 +241,12 @@ fn kind_of(typed: &Typed, s: &Split) -> Option<Kind> {
     }
 }
 
-fn local(fi: &mut FnInfo, typed_params: Option<&IndexMap<i32, Kind>>, kinds: &[Kind; 2], legacy: bool) -> bool {
+fn local(
+    fi: &mut FnInfo,
+    typed_params: Option<&IndexMap<i32, Kind>>,
+    kinds: &[Kind; 2],
+    legacy: bool,
+) -> bool {
     let f = fi.f;
     let n0 = fi.typed.len();
     if let Some(st) = &fi.st {
@@ -345,7 +345,13 @@ fn local(fi: &mut FnInfo, typed_params: Option<&IndexMap<i32, Kind>>, kinds: &[K
         let (b, o) = split(ir, single(e));
         wide.insert(off_key(&key(ir, b), o));
     };
-    let mut visit = |x: E, n: Node, scan: bool, do_calls: bool, loads: &mut IndexMap<String, IndexMap<crate::util::K, u8>>, wide: &mut HashSet<String>, calls: &mut Vec<(i64, Vec<Option<Split>>)>| {
+    let mut visit = |x: E,
+                     n: Node,
+                     scan: bool,
+                     do_calls: bool,
+                     loads: &mut IndexMap<String, IndexMap<crate::util::K, u8>>,
+                     wide: &mut HashSet<String>,
+                     calls: &mut Vec<(i64, Vec<Option<Split>>)>| {
         let _ = x;
         match n {
             Node::Load { size, addr } => {
@@ -388,13 +394,21 @@ fn local(fi: &mut FnInfo, typed_params: Option<&IndexMap<i32, Kind>>, kinds: &[K
                 call(&mut calls, *pc, &ir.to_vec(*args));
             }
             for e in stmt_exprs(ir, s) {
-                ir.walk(e, &mut |x, n| visit(x, n, true, true, &mut loads, &mut wide, &mut calls));
+                ir.walk(e, &mut |x, n| {
+                    visit(x, n, true, true, &mut loads, &mut wide, &mut calls)
+                });
             }
-            if let Stmt::Copy { n: 32, src, dst, .. } = s {
+            if let Stmt::Copy {
+                n: 32, src, dst, ..
+            } = s
+            {
                 use32(&mut wide, *src);
                 use32(&mut wide, *dst);
             }
-            if let Stmt::Store { size: 8, addr, v, .. } = s {
+            if let Stmt::Store {
+                size: 8, addr, v, ..
+            } = s
+            {
                 let (x, o) = split(ir, *v);
                 let cur = ir.load(8, *addr);
                 if o == STRIDE && key(ir, single(x)) == key(ir, cur) {
@@ -404,9 +418,13 @@ fn local(fi: &mut FnInfo, typed_params: Option<&IndexMap<i32, Kind>>, kinds: &[K
             }
         }
         if let Some(c) = term_br(&b.term) {
-            ir.walk(c, &mut |x, n| visit(x, n, true, false, &mut loads, &mut wide, &mut calls));
+            ir.walk(c, &mut |x, n| {
+                visit(x, n, true, false, &mut loads, &mut wide, &mut calls)
+            });
         } else if let Some(e) = term_ret(&b.term) {
-            ir.walk(e, &mut |x, n| visit(x, n, false, false, &mut loads, &mut wide, &mut calls));
+            ir.walk(e, &mut |x, n| {
+                visit(x, n, false, false, &mut loads, &mut wide, &mut calls)
+            });
         }
     }
     fi.st = Some(Static {
@@ -422,14 +440,19 @@ fn local(fi: &mut FnInfo, typed_params: Option<&IndexMap<i32, Kind>>, kinds: &[K
                 .map(|(o, sz)| (o.get(), *sz))
                 .filter(|(o, sz)| load_at(l, *o).is_some_and(|x| x.0 == *sz))
                 .collect();
-            if !fit.iter().any(|(o, _)| l.flags.iter().any(|&fl| fl as N == *o)) {
+            if !fit
+                .iter()
+                .any(|(o, _)| l.flags.iter().any(|&fl| fl as N == *o))
+            {
                 continue;
             }
             let keyed = l
                 .key_ptrs
                 .iter()
                 .any(|&o| wide.contains(&format!("L8({})", off_key(bk, o as i128))))
-                || l.key_addrs.iter().any(|&o| wide.contains(&off_key(bk, o as i128)));
+                || l.key_addrs
+                    .iter()
+                    .any(|&o| wide.contains(&off_key(bk, o as i128)));
             let mget = |o: N| m.get(&crate::util::K::of(o)).copied();
             let many = match kind {
                 Kind::Info => fit.len() >= 4,
@@ -655,9 +678,7 @@ pub fn legacy_account_info(funcs: &HashMap<i64, &Func>, entry_pc: i64) -> bool {
             }
             e
         };
-        let key_addr = |e: E| {
-            matches!(ir.get(one(e)), Node::Bin(BinOp::Add, _, b) if ir.get(b) == Node::Const(8))
-        };
+        let key_addr = |e: E| matches!(ir.get(one(e)), Node::Bin(BinOp::Add, _, b) if ir.get(b) == Node::Const(8));
         let mut flags: IndexMap<String, HashSet<crate::util::K>> = IndexMap::new();
         let mut words: HashMap<String, HashMap<crate::util::K, E>> = HashMap::new();
         for b in &f.blocks {
@@ -683,7 +704,10 @@ pub fn legacy_account_info(funcs: &HashMap<i64, &Func>, entry_pc: i64) -> bool {
                 for (i, v) in vals.iter().enumerate() {
                     let off = o as i64 as N + (i * size as usize) as N;
                     if size == 1 {
-                        flags.entry(bk.clone()).or_default().insert(crate::util::K::of(off));
+                        flags
+                            .entry(bk.clone())
+                            .or_default()
+                            .insert(crate::util::K::of(off));
                     }
                     if size == 8 && (off == 0.0 || off == 8.0) {
                         words

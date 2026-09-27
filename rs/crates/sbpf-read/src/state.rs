@@ -13,14 +13,17 @@ use serde_json::Value;
 pub fn account_views(idl: &IdlInfo, views: &mut Views) -> IndexMap<u64, String> {
     let mut out = IndexMap::new();
     for (name, disc) in &idl.accounts {
-        let Some(def) = idl.types.get(name) else { continue };
+        let Some(def) = idl.types.get(name) else {
+            continue;
+        };
         if get(def, "kind").and_then(|k| k.as_str()) != Some("struct") {
             continue;
         }
         let Some(Value::Array(fs)) = get(def, "fields") else {
             continue;
         };
-        let mut fields: Vec<(String, Value)> = vec![("discriminator".into(), Value::String("u64".into()))];
+        let mut fields: Vec<(String, Value)> =
+            vec![("discriminator".into(), Value::String("u64".into()))];
         for f in fs {
             if f.is_object() && truthy(get(f, "name")) {
                 fields.push((
@@ -97,7 +100,11 @@ pub fn account_data_vars(
     for (pc, f, defs) in &info {
         let ir = f.ir.as_ref().unwrap();
         let single = |v: u32| defs.get(&v).map_or(0, |d| d.len()) <= 1;
-        let mut note = |e: E, local: &IndexMap<u32, E>, res: &mut IndexMap<i64, IndexMap<u32, String>>, slices: &mut IndexMap<i64, IndexMap<u32, String>>, views: &mut Views| {
+        let mut note = |e: E,
+                        local: &IndexMap<u32, E>,
+                        res: &mut IndexMap<i64, IndexMap<u32, String>>,
+                        slices: &mut IndexMap<i64, IndexMap<u32, String>>,
+                        views: &mut Views| {
             ir.walk(e, &mut |_, x| {
                 let Node::Cmp(op, a, b) = x else { return };
                 if op != CmpOp::Eq && op != CmpOp::Ne {

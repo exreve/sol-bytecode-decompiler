@@ -2,7 +2,7 @@
 //! straight-line code), their one-line descriptions, and the frame objects they show the role of.
 
 use crate::sem::known_key;
-use crate::util::{b58, expr_eq, fo_any, has_call, json_str, js_num, N};
+use crate::util::{b58, expr_eq, fo_any, has_call, js_num, json_str, N};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_struct::{SNode, Tree};
 use std::collections::HashMap;
@@ -242,7 +242,9 @@ pub fn find_cpi_sites<'t>(
                                     }
                                 }
                             }
-                            Stmt::Copy { dst, src, n: cn, .. } => {
+                            Stmt::Copy {
+                                dst, src, n: cn, ..
+                            } => {
                                 let o = self.fo(*dst);
                                 let so = self.fo(*src);
                                 let cn = *cn as N;
@@ -297,7 +299,9 @@ pub fn find_cpi_sites<'t>(
                         }
                         self.run(then, facts.clone());
                         self.run(els, facts.clone());
-                        if !((Self::exits(then) && els.is_empty()) || (Self::exits(els) && then.is_empty())) {
+                        if !((Self::exits(then) && els.is_empty())
+                            || (Self::exits(els) && then.is_empty()))
+                        {
                             facts = Vec::new();
                         }
                     }
@@ -381,95 +385,384 @@ enum Fam {
 }
 const AMOUNT: &[(&str, u32, Sz)] = &[("amount", 1, Sz::N(8))];
 const CHECKED: &[(&str, u32, Sz)] = &[("amount", 1, Sz::N(8)), ("decimals", 9, Sz::N(1))];
-const ATA_ACCOUNTS: &[&str] = &["payer", "associated_token_account", "wallet", "mint", "system_program", "token_program"];
+const ATA_ACCOUNTS: &[&str] = &[
+    "payer",
+    "associated_token_account",
+    "wallet",
+    "mint",
+    "system_program",
+    "token_program",
+];
 
 macro_rules! lay {
     ($n:expr, $a:expr) => {
-        IxLayout { name: $n, accounts: $a, fields: &[], len: None }
+        IxLayout {
+            name: $n,
+            accounts: $a,
+            fields: &[],
+            len: None,
+        }
     };
     ($n:expr, $a:expr, $f:expr) => {
-        IxLayout { name: $n, accounts: $a, fields: $f, len: None }
+        IxLayout {
+            name: $n,
+            accounts: $a,
+            fields: $f,
+            len: None,
+        }
     };
     ($n:expr, $a:expr, $f:expr, $l:expr) => {
-        IxLayout { name: $n, accounts: $a, fields: $f, len: Some($l) }
+        IxLayout {
+            name: $n,
+            accounts: $a,
+            fields: $f,
+            len: Some($l),
+        }
     };
 }
 
 fn fam_ix(f: Fam, tag: u64) -> Option<IxLayout> {
     Some(match f {
         Fam::Token => match tag {
-            0 => lay!("InitializeMint", &["mint", "rent_sysvar"], &[("decimals", 1, Sz::N(1)), ("mint_authority", 2, Sz::Key)]),
-            1 => lay!("InitializeAccount", &["account", "mint", "owner", "rent_sysvar"], &[], 1),
-            2 => lay!("InitializeMultisig", &["multisig", "rent_sysvar"], &[("m", 1, Sz::N(1))], 2),
-            3 => lay!("Transfer", &["source", "destination", "authority"], AMOUNT, 9),
+            0 => lay!(
+                "InitializeMint",
+                &["mint", "rent_sysvar"],
+                &[("decimals", 1, Sz::N(1)), ("mint_authority", 2, Sz::Key)]
+            ),
+            1 => lay!(
+                "InitializeAccount",
+                &["account", "mint", "owner", "rent_sysvar"],
+                &[],
+                1
+            ),
+            2 => lay!(
+                "InitializeMultisig",
+                &["multisig", "rent_sysvar"],
+                &[("m", 1, Sz::N(1))],
+                2
+            ),
+            3 => lay!(
+                "Transfer",
+                &["source", "destination", "authority"],
+                AMOUNT,
+                9
+            ),
             4 => lay!("Approve", &["source", "delegate", "owner"], AMOUNT, 9),
             5 => lay!("Revoke", &["source", "owner"], &[], 1),
-            6 => lay!("SetAuthority", &["account", "current_authority"], &[("authority_type", 1, Sz::N(1)), ("new_authority_is_some", 2, Sz::N(1)), ("new_authority", 3, Sz::Key)]),
+            6 => lay!(
+                "SetAuthority",
+                &["account", "current_authority"],
+                &[
+                    ("authority_type", 1, Sz::N(1)),
+                    ("new_authority_is_some", 2, Sz::N(1)),
+                    ("new_authority", 3, Sz::Key)
+                ]
+            ),
             7 => lay!("MintTo", &["mint", "destination", "authority"], AMOUNT, 9),
             8 => lay!("Burn", &["account", "mint", "authority"], AMOUNT, 9),
-            9 => lay!("CloseAccount", &["account", "destination", "authority"], &[], 1),
+            9 => lay!(
+                "CloseAccount",
+                &["account", "destination", "authority"],
+                &[],
+                1
+            ),
             10 => lay!("FreezeAccount", &["account", "mint", "authority"], &[], 1),
             11 => lay!("ThawAccount", &["account", "mint", "authority"], &[], 1),
-            12 => lay!("TransferChecked", &["source", "mint", "destination", "authority"], CHECKED, 10),
-            13 => lay!("ApproveChecked", &["source", "mint", "delegate", "owner"], CHECKED, 10),
-            14 => lay!("MintToChecked", &["mint", "destination", "authority"], CHECKED, 10),
-            15 => lay!("BurnChecked", &["account", "mint", "authority"], CHECKED, 10),
-            16 => lay!("InitializeAccount2", &["account", "mint", "rent_sysvar"], &[("owner", 1, Sz::Key)], 33),
+            12 => lay!(
+                "TransferChecked",
+                &["source", "mint", "destination", "authority"],
+                CHECKED,
+                10
+            ),
+            13 => lay!(
+                "ApproveChecked",
+                &["source", "mint", "delegate", "owner"],
+                CHECKED,
+                10
+            ),
+            14 => lay!(
+                "MintToChecked",
+                &["mint", "destination", "authority"],
+                CHECKED,
+                10
+            ),
+            15 => lay!(
+                "BurnChecked",
+                &["account", "mint", "authority"],
+                CHECKED,
+                10
+            ),
+            16 => lay!(
+                "InitializeAccount2",
+                &["account", "mint", "rent_sysvar"],
+                &[("owner", 1, Sz::Key)],
+                33
+            ),
             17 => lay!("SyncNative", &["account"], &[], 1),
-            18 => lay!("InitializeAccount3", &["account", "mint"], &[("owner", 1, Sz::Key)], 33),
-            19 => lay!("InitializeMultisig2", &["multisig"], &[("m", 1, Sz::N(1))], 2),
-            20 => lay!("InitializeMint2", &["mint"], &[("decimals", 1, Sz::N(1)), ("mint_authority", 2, Sz::Key)]),
+            18 => lay!(
+                "InitializeAccount3",
+                &["account", "mint"],
+                &[("owner", 1, Sz::Key)],
+                33
+            ),
+            19 => lay!(
+                "InitializeMultisig2",
+                &["multisig"],
+                &[("m", 1, Sz::N(1))],
+                2
+            ),
+            20 => lay!(
+                "InitializeMint2",
+                &["mint"],
+                &[("decimals", 1, Sz::N(1)), ("mint_authority", 2, Sz::Key)]
+            ),
             21 => lay!("GetAccountDataSize", &["mint"]),
             22 => lay!("InitializeImmutableOwner", &["account"], &[], 1),
             23 => lay!("AmountToUiAmount", &["mint"], AMOUNT, 9),
-            25 => lay!("InitializeMintCloseAuthority", &["mint"], &[("close_authority_is_some", 1, Sz::N(1)), ("close_authority", 2, Sz::Key)]),
-            38 => lay!("WithdrawExcessLamports", &["source", "destination", "authority"], &[], 1),
-            45 => lay!("UnwrapLamports", &["source", "destination", "authority"], &[("amount_is_some", 1, Sz::N(1)), ("amount", 2, Sz::N(8))]),
+            25 => lay!(
+                "InitializeMintCloseAuthority",
+                &["mint"],
+                &[
+                    ("close_authority_is_some", 1, Sz::N(1)),
+                    ("close_authority", 2, Sz::Key)
+                ]
+            ),
+            38 => lay!(
+                "WithdrawExcessLamports",
+                &["source", "destination", "authority"],
+                &[],
+                1
+            ),
+            45 => lay!(
+                "UnwrapLamports",
+                &["source", "destination", "authority"],
+                &[("amount_is_some", 1, Sz::N(1)), ("amount", 2, Sz::N(8))]
+            ),
             _ => return None,
         },
         Fam::System => match tag {
-            0 => lay!("CreateAccount", &["funder", "new_account"], &[("lamports", 4, Sz::N(8)), ("space", 12, Sz::N(8)), ("owner", 20, Sz::Key)], 52),
+            0 => lay!(
+                "CreateAccount",
+                &["funder", "new_account"],
+                &[
+                    ("lamports", 4, Sz::N(8)),
+                    ("space", 12, Sz::N(8)),
+                    ("owner", 20, Sz::Key)
+                ],
+                52
+            ),
             1 => lay!("Assign", &["account"], &[("owner", 4, Sz::Key)], 36),
-            2 => lay!("Transfer", &["from", "to"], &[("lamports", 4, Sz::N(8))], 12),
-            3 => lay!("CreateAccountWithSeed", &["funder", "new_account", "base"], &[("base", 4, Sz::Key)]),
-            4 => lay!("AdvanceNonceAccount", &["nonce_account", "recent_blockhashes_sysvar", "nonce_authority"], &[], 4),
-            5 => lay!("WithdrawNonceAccount", &["nonce_account", "to", "recent_blockhashes_sysvar", "rent_sysvar", "nonce_authority"], &[("lamports", 4, Sz::N(8))], 12),
+            2 => lay!(
+                "Transfer",
+                &["from", "to"],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
+            3 => lay!(
+                "CreateAccountWithSeed",
+                &["funder", "new_account", "base"],
+                &[("base", 4, Sz::Key)]
+            ),
+            4 => lay!(
+                "AdvanceNonceAccount",
+                &[
+                    "nonce_account",
+                    "recent_blockhashes_sysvar",
+                    "nonce_authority"
+                ],
+                &[],
+                4
+            ),
+            5 => lay!(
+                "WithdrawNonceAccount",
+                &[
+                    "nonce_account",
+                    "to",
+                    "recent_blockhashes_sysvar",
+                    "rent_sysvar",
+                    "nonce_authority"
+                ],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
             8 => lay!("Allocate", &["account"], &[("space", 4, Sz::N(8))], 12),
-            11 => lay!("TransferWithSeed", &["from", "base", "to"], &[("lamports", 4, Sz::N(8))]),
+            11 => lay!(
+                "TransferWithSeed",
+                &["from", "base", "to"],
+                &[("lamports", 4, Sz::N(8))]
+            ),
             _ => return None,
         },
         Fam::Ata => match tag {
             0 => lay!("Create", ATA_ACCOUNTS, &[], 1),
             1 => lay!("CreateIdempotent", ATA_ACCOUNTS, &[], 1),
-            2 => lay!("RecoverNested", &["nested", "nested_mint", "destination", "owner_associated_token_account", "owner_mint", "wallet", "token_program"], &[], 1),
+            2 => lay!(
+                "RecoverNested",
+                &[
+                    "nested",
+                    "nested_mint",
+                    "destination",
+                    "owner_associated_token_account",
+                    "owner_mint",
+                    "wallet",
+                    "token_program"
+                ],
+                &[],
+                1
+            ),
             _ => return None,
         },
         Fam::ComputeBudget => match tag {
             1 => lay!("RequestHeapFrame", &[], &[("bytes", 1, Sz::N(4))], 5),
             2 => lay!("SetComputeUnitLimit", &[], &[("units", 1, Sz::N(4))], 5),
-            3 => lay!("SetComputeUnitPrice", &[], &[("micro_lamports", 1, Sz::N(8))], 9),
-            4 => lay!("SetLoadedAccountsDataSizeLimit", &[], &[("bytes", 1, Sz::N(4))], 5),
+            3 => lay!(
+                "SetComputeUnitPrice",
+                &[],
+                &[("micro_lamports", 1, Sz::N(8))],
+                9
+            ),
+            4 => lay!(
+                "SetLoadedAccountsDataSizeLimit",
+                &[],
+                &[("bytes", 1, Sz::N(4))],
+                5
+            ),
             _ => return None,
         },
         Fam::Stake => match tag {
-            0 => lay!("Initialize", &["stake", "rent_sysvar"], &[("staker", 4, Sz::Key), ("withdrawer", 36, Sz::Key), ("lockup_unix_timestamp", 68, Sz::N(8)), ("lockup_epoch", 76, Sz::N(8)), ("lockup_custodian", 84, Sz::Key)], 116),
-            1 => lay!("Authorize", &["stake", "clock_sysvar", "authority"], &[("new_authority", 4, Sz::Key), ("stake_authorize", 36, Sz::N(4))], 40),
-            2 => lay!("DelegateStake", &["stake", "vote", "clock_sysvar", "stake_history_sysvar", "stake_config", "stake_authority"], &[], 4),
-            3 => lay!("Split", &["stake", "split_stake", "stake_authority"], &[("lamports", 4, Sz::N(8))], 12),
-            4 => lay!("Withdraw", &["stake", "recipient", "clock_sysvar", "stake_history_sysvar", "withdraw_authority"], &[("lamports", 4, Sz::N(8))], 12),
-            5 => lay!("Deactivate", &["stake", "clock_sysvar", "stake_authority"], &[], 4),
+            0 => lay!(
+                "Initialize",
+                &["stake", "rent_sysvar"],
+                &[
+                    ("staker", 4, Sz::Key),
+                    ("withdrawer", 36, Sz::Key),
+                    ("lockup_unix_timestamp", 68, Sz::N(8)),
+                    ("lockup_epoch", 76, Sz::N(8)),
+                    ("lockup_custodian", 84, Sz::Key)
+                ],
+                116
+            ),
+            1 => lay!(
+                "Authorize",
+                &["stake", "clock_sysvar", "authority"],
+                &[
+                    ("new_authority", 4, Sz::Key),
+                    ("stake_authorize", 36, Sz::N(4))
+                ],
+                40
+            ),
+            2 => lay!(
+                "DelegateStake",
+                &[
+                    "stake",
+                    "vote",
+                    "clock_sysvar",
+                    "stake_history_sysvar",
+                    "stake_config",
+                    "stake_authority"
+                ],
+                &[],
+                4
+            ),
+            3 => lay!(
+                "Split",
+                &["stake", "split_stake", "stake_authority"],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
+            4 => lay!(
+                "Withdraw",
+                &[
+                    "stake",
+                    "recipient",
+                    "clock_sysvar",
+                    "stake_history_sysvar",
+                    "withdraw_authority"
+                ],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
+            5 => lay!(
+                "Deactivate",
+                &["stake", "clock_sysvar", "stake_authority"],
+                &[],
+                4
+            ),
             6 => lay!("SetLockup", &["stake", "authority"]),
-            7 => lay!("Merge", &["destination_stake", "source_stake", "clock_sysvar", "stake_history_sysvar", "stake_authority"], &[], 4),
-            8 => lay!("AuthorizeWithSeed", &["stake", "authority_base", "clock_sysvar"], &[("new_authority", 4, Sz::Key), ("stake_authorize", 36, Sz::N(4))]),
-            9 => lay!("InitializeChecked", &["stake", "rent_sysvar", "stake_authority", "withdraw_authority"], &[], 4),
-            10 => lay!("AuthorizeChecked", &["stake", "clock_sysvar", "authority", "new_authority"], &[("stake_authorize", 4, Sz::N(4))], 8),
-            11 => lay!("AuthorizeCheckedWithSeed", &["stake", "authority_base", "clock_sysvar", "new_authority"], &[("stake_authorize", 4, Sz::N(4))]),
+            7 => lay!(
+                "Merge",
+                &[
+                    "destination_stake",
+                    "source_stake",
+                    "clock_sysvar",
+                    "stake_history_sysvar",
+                    "stake_authority"
+                ],
+                &[],
+                4
+            ),
+            8 => lay!(
+                "AuthorizeWithSeed",
+                &["stake", "authority_base", "clock_sysvar"],
+                &[
+                    ("new_authority", 4, Sz::Key),
+                    ("stake_authorize", 36, Sz::N(4))
+                ]
+            ),
+            9 => lay!(
+                "InitializeChecked",
+                &[
+                    "stake",
+                    "rent_sysvar",
+                    "stake_authority",
+                    "withdraw_authority"
+                ],
+                &[],
+                4
+            ),
+            10 => lay!(
+                "AuthorizeChecked",
+                &["stake", "clock_sysvar", "authority", "new_authority"],
+                &[("stake_authorize", 4, Sz::N(4))],
+                8
+            ),
+            11 => lay!(
+                "AuthorizeCheckedWithSeed",
+                &["stake", "authority_base", "clock_sysvar", "new_authority"],
+                &[("stake_authorize", 4, Sz::N(4))]
+            ),
             12 => lay!("SetLockupChecked", &["stake", "authority"]),
             13 => lay!("GetMinimumDelegation", &[], &[], 4),
-            14 => lay!("DeactivateDelinquent", &["stake", "delinquent_vote", "reference_vote"], &[], 4),
-            15 => lay!("Redelegate", &["stake", "uninitialized_stake", "vote", "stake_config", "stake_authority"], &[], 4),
-            16 => lay!("MoveStake", &["source_stake", "destination_stake", "stake_authority"], &[("lamports", 4, Sz::N(8))], 12),
-            17 => lay!("MoveLamports", &["source_stake", "destination_stake", "stake_authority"], &[("lamports", 4, Sz::N(8))], 12),
+            14 => lay!(
+                "DeactivateDelinquent",
+                &["stake", "delinquent_vote", "reference_vote"],
+                &[],
+                4
+            ),
+            15 => lay!(
+                "Redelegate",
+                &[
+                    "stake",
+                    "uninitialized_stake",
+                    "vote",
+                    "stake_config",
+                    "stake_authority"
+                ],
+                &[],
+                4
+            ),
+            16 => lay!(
+                "MoveStake",
+                &["source_stake", "destination_stake", "stake_authority"],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
+            17 => lay!(
+                "MoveLamports",
+                &["source_stake", "destination_stake", "stake_authority"],
+                &[("lamports", 4, Sz::N(8))],
+                12
+            ),
             _ => return None,
         },
     })
@@ -569,7 +862,10 @@ pub struct IxModel<'d> {
 
 /// `/^[\w.]+$/.test(t) ? t : (t)`
 pub fn wrap(t: &str) -> String {
-    if !t.is_empty() && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.') {
+    if !t.is_empty()
+        && t.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
+    {
         t.to_string()
     } else {
         format!("({t})")
@@ -609,14 +905,19 @@ fn at_facts(ir: &Ir, facts: &[Fact], o: N, size: u8, cover: bool) -> Option<E> {
         return Some(f.e);
     }
     if cover {
-        if let Some(c) = facts
-            .iter()
-            .find(|x| x.off <= o && o + sz <= x.off + x.size && matches!(ir.get(x.e), Node::Const(_)))
-        {
-            let Node::Const(v) = ir.get(c.e) else { unreachable!() };
+        if let Some(c) = facts.iter().find(|x| {
+            x.off <= o && o + sz <= x.off + x.size && matches!(ir.get(x.e), Node::Const(_))
+        }) {
+            let Node::Const(v) = ir.get(c.e) else {
+                unreachable!()
+            };
             let sh = (o - c.off) as u32 * 8;
             let x = if sh >= 64 { 0 } else { v >> sh };
-            let m = if size >= 8 { u64::MAX } else { (1u64 << (size as u32 * 8)) - 1 };
+            let m = if size >= 8 {
+                u64::MAX
+            } else {
+                (1u64 << (size as u32 * 8)) - 1
+            };
             return Some(ir.c(x & m));
         }
     }
@@ -626,7 +927,9 @@ fn at_facts(ir: &Ir, facts: &[Fact], o: N, size: u8, cover: bool) -> Option<E> {
         let b = facts
             .iter()
             .find(|x| x.off <= p && p < x.off + x.size && matches!(ir.get(x.e), Node::Const(_)))?;
-        let Node::Const(bv) = ir.get(b.e) else { unreachable!() };
+        let Node::Const(bv) = ir.get(b.e) else {
+            unreachable!()
+        };
         let sh = (p - b.off) as u32 * 8;
         let byte = if sh >= 64 { 0 } else { (bv >> sh) & 0xff };
         v = (v << 8) | byte;
@@ -752,7 +1055,10 @@ pub fn cpi_desc(site: &CpiSite, env: &mut CpiEnv) -> Option<CpiDesc> {
                 return kt_known(key_name(&k));
             }
             if let Some(read) = env.read {
-                if [0u128, 8, 16, 24].iter().all(|&i| read(v as u128 + i, 8) == Some(0)) {
+                if [0u128, 8, 16, 24]
+                    .iter()
+                    .all(|&i| read(v as u128 + i, 8) == Some(0))
+                {
                     return kt_known("SYSTEM_PROGRAM".into());
                 }
             }
@@ -999,14 +1305,23 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
             accounts.iter().map(acc_text).collect::<Vec<_>>().join(", ")
         ));
     } else if let Some(n) = n_acc {
-        parts.push(format!("{} account{}", js_num(n), if n == 1.0 { "" } else { "s" }));
+        parts.push(format!(
+            "{} account{}",
+            js_num(n),
+            if n == 1.0 { "" } else { "s" }
+        ));
     }
     if let Some(dl) = dl {
         let dd = match data.as_deref_mut() {
             Some(d) => describe_data(d, dl, env),
             None => String::new(),
         };
-        parts.push(format!("data {} byte{}{}", js_num(dl), if dl == 1.0 { "" } else { "s" }, dd));
+        parts.push(format!(
+            "data {} byte{}{}",
+            js_num(dl),
+            if dl == 1.0 { "" } else { "s" },
+            dd
+        ));
     } else if let Some(t) = data_text {
         if !t.is_empty() {
             parts.push(format!("data {t}"));
@@ -1059,7 +1374,11 @@ fn describe_data(data: &mut dyn DataAt, len: N, env: &mut CpiEnv) -> String {
             "EVENT_IX_TAG".to_string()
         } else {
             let x = env.ex(e);
-            format!("u{} {x}{}", size as u32 * 8, if env.taint(e) { IXD } else { "" })
+            format!(
+                "u{} {x}{}",
+                size as u32 * 8,
+                if env.taint(e) { IXD } else { "" }
+            )
         };
         if first && is_const && size == 8 {
             if let Node::Const(v) = env.ir.get(e) {
@@ -1099,13 +1418,15 @@ fn seed_text(p: E, l: E, fa: &FactsAt, env: &mut CpiEnv) -> String {
         if lv == 32 {
             if let Some(w0) = fa.get(ir, o, 8) {
                 if let Node::Load { addr: a0, .. } = ir.get(w0) {
-                    if (1..4).all(|i| match fa.get(ir, o + 8.0 * i as N, 8).map(|w| ir.get(w)) {
-                        Some(Node::Load { addr, .. }) => {
-                            let x = add_off(ir, a0, 8.0 * i as N);
-                            expr_eq(ir, addr, x)
-                        }
-                        _ => false,
-                    }) {
+                    if (1..4).all(
+                        |i| match fa.get(ir, o + 8.0 * i as N, 8).map(|w| ir.get(w)) {
+                            Some(Node::Load { addr, .. }) => {
+                                let x = add_off(ir, a0, 8.0 * i as N);
+                                expr_eq(ir, addr, x)
+                            }
+                            _ => false,
+                        },
+                    ) {
                         let t = env.ex(a0);
                         return format!("*{}{}", wrap(&t), if env.taint(a0) { IXD } else { "" });
                     }
@@ -1119,7 +1440,11 @@ fn seed_text(p: E, l: E, fa: &FactsAt, env: &mut CpiEnv) -> String {
             }
         }
     }
-    let mark = if env.taint(p) || env.taint(l) { IXD } else { "" };
+    let mark = if env.taint(p) || env.taint(l) {
+        IXD
+    } else {
+        ""
+    };
     let t = if ir.get(l) == Node::Const(32) {
         let x = env.ex(p);
         format!("*{}", wrap(&x))
@@ -1134,7 +1459,9 @@ fn seed_text(p: E, l: E, fa: &FactsAt, env: &mut CpiEnv) -> String {
 fn seed_list(ptr: E, n: E, fa: &FactsAt, env: &mut CpiEnv) -> Option<String> {
     let ir = env.ir;
     let o = fo_any(ir, ptr, env.fp)?;
-    let Node::Const(nv) = ir.get(n) else { return None };
+    let Node::Const(nv) = ir.get(n) else {
+        return None;
+    };
     if nv > 16 {
         return None;
     }
@@ -1182,7 +1509,9 @@ fn describe_pda(site: &CpiSite, env: &mut CpiEnv) -> Option<String> {
 fn describe_seeds(ptr: Option<E>, n: Option<E>, fa: &FactsAt, env: &mut CpiEnv) -> Option<String> {
     let ir = env.ir;
     let n = n?;
-    let Node::Const(nv) = ir.get(n) else { return None };
+    let Node::Const(nv) = ir.get(n) else {
+        return None;
+    };
     if nv == 0 {
         return Some("no signer seeds".into());
     }
@@ -1230,7 +1559,9 @@ fn describe_fmt(site: &CpiSite, env: &mut CpiEnv) -> Option<String> {
     };
     let ir = env.ir;
     for &a in &site.args {
-        let Some(o) = fo_any(ir, a, env.fp) else { continue };
+        let Some(o) = fo_any(ir, a, env.fp) else {
+            continue;
+        };
         let (Some(p), Some(n)) = (word(site, o), word(site, o + 8.0)) else {
             continue;
         };
@@ -1244,11 +1575,17 @@ fn describe_fmt(site: &CpiSite, env: &mut CpiEnv) -> Option<String> {
         for i in 0..nv {
             let sp = read(pv as u128 + 16 * i as u128, 8);
             let sl = read(pv as u128 + 16 * i as u128 + 8, 8);
-            let (Some(sp), Some(sl)) = (sp, sl) else { break };
+            let (Some(sp), Some(sl)) = (sp, sl) else {
+                break;
+            };
             if sl > 200 {
                 break;
             }
-            let s = if sl == 0 { Some(String::new()) } else { str_at(sp, sl) };
+            let s = if sl == 0 {
+                Some(String::new())
+            } else {
+                str_at(sp, sl)
+            };
             let Some(s) = s else { break };
             pieces.push(s);
         }
@@ -1275,12 +1612,20 @@ fn describe_fmt(site: &CpiSite, env: &mut CpiEnv) -> Option<String> {
             return Some(format!(
                 "fmt {}{}",
                 json_str(&s),
-                if l2.is_empty() { String::new() } else { format!(" {l2}") }
+                if l2.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {l2}")
+                }
             ));
         }
         return Some(format!(
             "fmt pieces {pj} (with placeholder specs), arguments: {}",
-            if list.is_empty() { "(none)".to_string() } else { list.join(", ") }
+            if list.is_empty() {
+                "(none)".to_string()
+            } else {
+                list.join(", ")
+            }
         ));
     }
     None
@@ -1296,7 +1641,11 @@ fn fmt_args(site: &CpiSite, o: N, env: &mut CpiEnv) -> Option<(Vec<String>, bool
             Some(Node::Const(v)) if v <= 16 => v,
             _ => continue,
         };
-        let a = if anv == 0 { None } else { fo_any(ir, ap, env.fp) };
+        let a = if anv == 0 {
+            None
+        } else {
+            fo_any(ir, ap, env.fp)
+        };
         if anv != 0 && a.is_none() {
             continue;
         }
@@ -1414,7 +1763,11 @@ pub fn site_objects(
             out.push(SiteObject {
                 off: ix,
                 name: "ix",
-                ty: Some(if c { "SolInstruction" } else { "StableInstruction" }),
+                ty: Some(if c {
+                    "SolInstruction"
+                } else {
+                    "StableInstruction"
+                }),
             });
             if let Some(m) = metas {
                 out.push(SiteObject {
@@ -1440,7 +1793,12 @@ pub fn site_objects(
                         ty: Some("SeedList"),
                     });
                     for j in 0..snv {
-                        seed_arr(&mut out, at(so + 16.0 * j as N, 8), at(so + 16.0 * j as N + 8.0, 8), "seeds");
+                        seed_arr(
+                            &mut out,
+                            at(so + 16.0 * j as N, 8),
+                            at(so + 16.0 * j as N + 8.0, 8),
+                            "seeds",
+                        );
                     }
                 }
             }
@@ -1449,7 +1807,12 @@ pub fn site_objects(
         k if k.is_pda() => {
             let o = matches!(k, SiteKind::PdaFindOut | SiteKind::PdaCreateOut);
             let (s0, n0) = if o { (1, 2) } else { (0, 1) };
-            seed_arr(&mut out, site.args.get(s0).copied(), site.args.get(n0).copied(), "seeds");
+            seed_arr(
+                &mut out,
+                site.args.get(s0).copied(),
+                site.args.get(n0).copied(),
+                "seeds",
+            );
             let res = fo(site.args.get(if o { 0 } else { 3 }).copied());
             if let Some(r) = res {
                 out.push(SiteObject {
@@ -1502,7 +1865,10 @@ pub fn site_objects(
                     for i in 0..anv {
                         let a2 = aa.unwrap();
                         if word(site, a2 + 16.0 * i as N).is_none()
-                            || !matches!(word(site, a2 + 16.0 * i as N + 8.0).map(|x| ir.get(x)), Some(Node::Const(_)))
+                            || !matches!(
+                                word(site, a2 + 16.0 * i as N + 8.0).map(|x| ir.get(x)),
+                                Some(Node::Const(_))
+                            )
                         {
                             ok = false;
                             break;
@@ -1514,7 +1880,11 @@ pub fn site_objects(
                     out.push(SiteObject {
                         off: o,
                         name: "fmt",
-                        ty: Some(if k == 16.0 { "FmtArguments" } else { "FmtArgumentsSpecsFirst" }),
+                        ty: Some(if k == 16.0 {
+                            "FmtArguments"
+                        } else {
+                            "FmtArgumentsSpecsFirst"
+                        }),
                     });
                     if anv != 0 {
                         out.push(SiteObject {

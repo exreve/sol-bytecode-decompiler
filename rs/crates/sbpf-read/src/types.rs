@@ -39,7 +39,11 @@ pub fn declared_id(d: &Dx) -> Option<String> {
                 }
                 let pair = match x {
                     Node::Fn(n, args) if ir.with_name(n, |s| s == "memeq") => Some(args),
-                    Node::Call(_, args) if args.len >= 3 && ir.get(ir.at(args, 2)) == Node::Const(32) => Some(args),
+                    Node::Call(_, args)
+                        if args.len >= 3 && ir.get(ir.at(args, 2)) == Node::Const(32) =>
+                    {
+                        Some(args)
+                    }
                     _ => None,
                 };
                 if let Some(args) = pair {
@@ -83,7 +87,10 @@ pub fn declared_id(d: &Dx) -> Option<String> {
     if keys.len() == 1 {
         return keys.first().cloned();
     }
-    let own: Vec<&String> = keys.iter().filter(|k| crate::sem::known_key(k).is_none()).collect();
+    let own: Vec<&String> = keys
+        .iter()
+        .filter(|k| crate::sem::known_key(k).is_none())
+        .collect();
     if own.len() == 1 {
         Some(own[0].clone())
     } else {
@@ -126,13 +133,20 @@ pub fn key_compares(d: &Dx, f: &Func, ptr: E) -> Vec<String> {
     let visit = |e: E, out: &mut IndexSet<String>| {
         ir.walk(e, &mut |_, x| {
             if let Node::Fn(n, args) = x {
-                if ir.with_name(n, |s| s == "keyeq") && args.len > 0 && expr_eq(ir, ir.at(args, 0), ptr) {
+                if ir.with_name(n, |s| s == "keyeq")
+                    && args.len > 0
+                    && expr_eq(ir, ir.at(args, 0), ptr)
+                {
                     out.insert(name(&key_b58(ir, args, 1)));
                 }
             }
             let pair = match x {
                 Node::Fn(n, args) if ir.with_name(n, |s| s == "memeq") => Some(args),
-                Node::Call(_, args) if args.len >= 3 && ir.get(ir.at(args, 2)) == Node::Const(32) => Some(args),
+                Node::Call(_, args)
+                    if args.len >= 3 && ir.get(ir.at(args, 2)) == Node::Const(32) =>
+                {
+                    Some(args)
+                }
                 _ => None,
             };
             if let Some(args) = pair {
@@ -173,14 +187,35 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
     // IDL: accounts and arguments of each handler
     if let Some(idl) = d.idl {
         for (hpc, ix) in d.sem.ix_names.clone() {
-            let Some(dd) = idl.instructions.iter().find(|i| i.name == ix) else { continue };
+            let Some(dd) = idl.instructions.iter().find(|i| i.name == ix) else {
+                continue;
+            };
             if !d.idx.contains_key(&hpc) {
                 continue;
             }
             let l = d.fn_notes.entry(hpc).or_default();
-            let acc: Vec<String> = dd.accounts.iter().enumerate().map(|(i, x)| format!("{i} {x}")).collect();
-            l.push(format!("accounts [idl]: {}", if acc.is_empty() { "(none)".into() } else { acc.join(", ") }));
-            l.push(format!("args [idl]: {}", if dd.args.is_empty() { "(none)".into() } else { dd.args.join(", ") }));
+            let acc: Vec<String> = dd
+                .accounts
+                .iter()
+                .enumerate()
+                .map(|(i, x)| format!("{i} {x}"))
+                .collect();
+            l.push(format!(
+                "accounts [idl]: {}",
+                if acc.is_empty() {
+                    "(none)".into()
+                } else {
+                    acc.join(", ")
+                }
+            ));
+            l.push(format!(
+                "args [idl]: {}",
+                if dd.args.is_empty() {
+                    "(none)".into()
+                } else {
+                    dd.args.join(", ")
+                }
+            ));
         }
     }
     if d.sem.anchor {
@@ -217,7 +252,8 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
                             SNode::Stmt(si) => {
                                 let s = tree.stmt(*si);
                                 if let Stmt::Call {
-                                    t: CallTarget::Fn { pc }, ..
+                                    t: CallTarget::Fn { pc },
+                                    ..
                                 } = s
                                 {
                                     hit(*pc);
@@ -261,7 +297,10 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
                     ));
                 }
                 let accs = d.anchor_info[&tpc].accounts.clone();
-                if !d.idl.is_some_and(|i| i.instructions.iter().any(|x| x.name == ix)) {
+                if !d
+                    .idl
+                    .is_some_and(|i| i.instructions.iter().any(|x| x.name == ix))
+                {
                     d.fn_notes.entry(hpc).or_default().push(format!(
                         "accounts [str: the program's account-error strings, in order of first use]: {}",
                         accs.join(", ")
@@ -272,7 +311,10 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
         }
     }
     // boxed accounts deserialized by try_accounts
-    let idl_addr = d.idl.and_then(|i| i.address.clone()).filter(|a| !a.is_empty());
+    let idl_addr = d
+        .idl
+        .and_then(|i| i.address.clone())
+        .filter(|a| !a.is_empty());
     let state_addr: Option<String> = match d.idl {
         Some(_) if idl_addr.is_none() => declared_id(d),
         Some(_) => idl_addr.clone(),
@@ -348,7 +390,12 @@ fn accounts_views(d: &mut Dx) {
         }
         let obj_view: IndexMap<String, crate::anchorstate::AccountObj> = objs
             .as_ref()
-            .map(|o| o.boxes.values().map(|a| (a.name.clone(), a.clone())).collect())
+            .map(|o| {
+                o.boxes
+                    .values()
+                    .map(|a| (a.name.clone(), a.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let layout = accounts_layout(d.f(tpc).unwrap(), &named);
         let mut fields: Vec<Field> = Vec::new();
@@ -358,8 +405,10 @@ fn accounts_views(d: &mut Dx) {
             .unwrap_or_default();
         let views = &d.views;
         let covered = |off: N| {
-            inl.iter()
-                .any(|(o, a)| off >= o.get() && off < o.get() + views.map.get(&a.view).and_then(|v| v.size).unwrap_or(8.0))
+            inl.iter().any(|(o, a)| {
+                off >= o.get()
+                    && off < o.get() + views.map.get(&a.view).and_then(|v| v.size).unwrap_or(8.0)
+            })
         };
         if let Some(o) = &objs {
             for (off, a) in &o.refs {
@@ -385,8 +434,14 @@ fn accounts_views(d: &mut Dx) {
                     id: fid(),
                     name: nm.clone(),
                     off,
-                    t: FT::Ref(obj_view.get(nm).map_or("AccountInfo".to_string(), |o| o.view.clone())),
-                    doc: obj_view.get(nm).map(|o| format!("Box<Account<{}>>", o.rust)),
+                    t: FT::Ref(
+                        obj_view
+                            .get(nm)
+                            .map_or("AccountInfo".to_string(), |o| o.view.clone()),
+                    ),
+                    doc: obj_view
+                        .get(nm)
+                        .map(|o| format!("Box<Account<{}>>", o.rust)),
                     count: None,
                 });
             }
@@ -415,7 +470,9 @@ fn accounts_views(d: &mut Dx) {
                         t: FT::Embed("AccountInfo".into()),
                         doc: Some(format!(
                             "the AccountInfo (a copy in place){}",
-                            ty.as_ref().map_or(String::new(), |t| format!(" of an account of type {t} (data not deserialized here)"))
+                            ty.as_ref().map_or(String::new(), |t| format!(
+                                " of an account of type {t} (data not deserialized here)"
+                            ))
                         )),
                         count: None,
                     });
@@ -482,8 +539,16 @@ fn accounts_views(d: &mut Dx) {
                 } = st
                 {
                     if *pc == tpc {
-                        r_ = fo(if args.len > 0 { Some(hir.at(*args, 0)) } else { None });
-                        s_ = fo(if args.len > 2 { Some(hir.at(*args, 2)) } else { None });
+                        r_ = fo(if args.len > 0 {
+                            Some(hir.at(*args, 0))
+                        } else {
+                            None
+                        });
+                        s_ = fo(if args.len > 2 {
+                            Some(hir.at(*args, 2))
+                        } else {
+                            None
+                        });
                     }
                 }
             }
@@ -493,7 +558,10 @@ fn accounts_views(d: &mut Dx) {
         if let Some(ss) = s_ {
             for b in &hf.blocks {
                 for st in &b.stmts {
-                    if let Stmt::Copy { n: 16, src, dst, .. } = st {
+                    if let Stmt::Copy {
+                        n: 16, src, dst, ..
+                    } = st
+                    {
                         if fo(Some(*src)) == Some(ss) {
                             if let Some(dd) = fo(Some(*dst)) {
                                 copies_s.insert(K::of(dd));
@@ -542,13 +610,19 @@ fn accounts_views(d: &mut Dx) {
                     }
                     continue;
                 }
-                let Some((t, args)) = call_of(hir, st) else { continue };
+                let Some((t, args)) = call_of(hir, st) else {
+                    continue;
+                };
                 if args.len < 3 {
                     continue;
                 }
-                let Node::Const(n) = hir.get(hir.at(args, 2)) else { continue };
+                let Node::Const(n) = hir.get(hir.at(args, 2)) else {
+                    continue;
+                };
                 let is_copy = match &t {
-                    CallTarget::Sys { name, .. } => &**name == "sol_memcpy_" || &**name == "sol_memmove_",
+                    CallTarget::Sys { name, .. } => {
+                        &**name == "sol_memcpy_" || &**name == "sol_memmove_"
+                    }
                     CallTarget::Fn { pc } => is_memcpy_name(&d.fn_name(*pc)),
                     _ => false,
                 };
@@ -578,15 +652,25 @@ fn accounts_views(d: &mut Dx) {
         for b in &hf.blocks {
             for st in &b.stmts {
                 match st {
-                    Stmt::Store { size: 8, addr, v, .. } => {
+                    Stmt::Store {
+                        size: 8, addr, v, ..
+                    } => {
                         if let Some(o) = fo(Some(*addr)) {
                             slot_vals.entry(K::of(o)).or_default().push(*v);
                         }
                     }
-                    Stmt::Stores { size: 8, addr, vals, .. } => {
+                    Stmt::Stores {
+                        size: 8,
+                        addr,
+                        vals,
+                        ..
+                    } => {
                         if let Some(o) = fo(Some(*addr)) {
                             for (i, v) in hir.items(*vals).enumerate() {
-                                slot_vals.entry(K::of(o + 8.0 * i as N)).or_default().push(v);
+                                slot_vals
+                                    .entry(K::of(o + 8.0 * i as N))
+                                    .or_default()
+                                    .push(v);
                             }
                         }
                     }
@@ -596,7 +680,9 @@ fn accounts_views(d: &mut Dx) {
         }
         let is_prog = |e: Option<E>| -> bool {
             let Some(e) = e else { return false };
-            let Node::Var(id) = hir.get(e) else { return false };
+            let Node::Var(id) = hir.get(e) else {
+                return false;
+            };
             if id == prog {
                 return true;
             }
@@ -605,12 +691,18 @@ fn accounts_views(d: &mut Dx) {
             }) {
                 return true;
             }
-            let Some(dd) = defs.get(&id) else { return false };
+            let Some(dd) = defs.get(&id) else {
+                return false;
+            };
             if dd.len() != 1 {
                 return false;
             }
-            let Node::Load { size: 8, addr } = hir.get(dd[0]) else { return false };
-            let Some(o) = fo(Some(addr)) else { return false };
+            let Node::Load { size: 8, addr } = hir.get(dd[0]) else {
+                return false;
+            };
+            let Some(o) = fo(Some(addr)) else {
+                return false;
+            };
             match slot_vals.get(&K::of(o)) {
                 Some(vs) => vs.len() == 1 && hir.get(vs[0]) == Node::Var(prog),
                 None => false,
@@ -619,10 +711,18 @@ fn accounts_views(d: &mut Dx) {
         let trees: &[Tree] = d.trees;
         let htree = &trees[hi];
         let dref: &Dx = d;
-        let sites = find_cpi_sites(hir, htree, &htree.body, Some(fpv), &|t: &CallTarget| match t {
-            CallTarget::Fn { pc } if *pc != tpc && dref.idx.contains_key(pc) => Some(SiteKind::Call),
-            _ => None,
-        });
+        let sites = find_cpi_sites(
+            hir,
+            htree,
+            &htree.body,
+            Some(fpv),
+            &|t: &CallTarget| match t {
+                CallTarget::Fn { pc } if *pc != tpc && dref.idx.contains_key(pc) => {
+                    Some(SiteKind::Call)
+                }
+                _ => None,
+            },
+        );
         let mut new_param_types: Vec<(i64, u32)> = Vec::new();
         let mut accounts_view_calls: Vec<N> = Vec::new();
         let mut ctx_calls: Vec<(N, N, Option<N>, N)> = Vec::new();
@@ -637,7 +737,11 @@ fn accounts_views(d: &mut Dx) {
         let mut views_added: Vec<View> = Vec::new();
         let mut afv: Vec<((String, K), (String, bool))> = Vec::new();
         {
-            let accounts_view = |shift: N, views_added: &mut Vec<View>, afv: &mut Vec<((String, K), (String, bool))>, acct_shift_set: &mut Option<N>| -> bool {
+            let accounts_view = |shift: N,
+                                 views_added: &mut Vec<View>,
+                                 afv: &mut Vec<((String, K), (String, bool))>,
+                                 acct_shift_set: &mut Option<N>|
+             -> bool {
                 let mut afs: Vec<Field> = fields
                     .iter()
                     .filter(|x| x.off >= shift)
@@ -669,7 +773,14 @@ fn accounts_views(d: &mut Dx) {
                 *acct_shift_set = Some(shift);
                 true
             };
-            let mut ctx_view = |op: N, oa: N, or: Option<N>, shift: N, views_added: &mut Vec<View>, afv: &mut Vec<((String, K), (String, bool))>, acct_shift_set: &mut Option<N>| -> bool {
+            let mut ctx_view = |op: N,
+                                oa: N,
+                                or: Option<N>,
+                                shift: N,
+                                views_added: &mut Vec<View>,
+                                afv: &mut Vec<((String, K), (String, bool))>,
+                                acct_shift_set: &mut Option<N>|
+             -> bool {
                 let key = format!(
                     "{}:{}:{}:{}",
                     js_num(op),
@@ -708,7 +819,9 @@ fn accounts_views(d: &mut Dx) {
                         name: "remaining_accounts".into(),
                         off: or,
                         t: FT::Ref("AccountInfo".into()),
-                        doc: Some("&[AccountInfo]: the accounts after the instruction's own".into()),
+                        doc: Some(
+                            "&[AccountInfo]: the accounts after the instruction's own".into(),
+                        ),
                         count: None,
                     });
                     fs.push(Field {
@@ -735,12 +848,19 @@ fn accounts_views(d: &mut Dx) {
                 true
             };
             for (_, (_, site)) in &sites {
-                let Some(CallTarget::Fn { pc: cpc }) = &site.t else { continue };
+                let Some(CallTarget::Fn { pc: cpc }) = &site.t else {
+                    continue;
+                };
                 let cpc = *cpc;
                 let Some(callee) = dref.f(cpc) else { continue };
                 for (i, &arg) in site.args.iter().enumerate() {
                     let Some(ff) = fo(Some(arg)) else { continue };
-                    let word = |k: N| site.facts.iter().find(|x| x.off == ff + k && x.size == 8.0).map(|x| x.e);
+                    let word = |k: N| {
+                        site.facts
+                            .iter()
+                            .find(|x| x.off == ff + k && x.size == 8.0)
+                            .map(|x| x.e)
+                    };
                     let (mut op, mut oa, mut shift): (Option<N>, Option<N>, N) = (None, None, 0.0);
                     let mut k = 0.0;
                     while k < 64.0 && (op.is_none() || oa.is_none()) {
@@ -756,10 +876,12 @@ fn accounts_views(d: &mut Dx) {
                             continue;
                         }
                         let g = g.unwrap();
-                        let fact = site
-                            .facts
-                            .iter()
-                            .find(|x| x.size == 8.0 && x.off >= g && x.off < g + 2048.0 && from_r(x.e).is_some());
+                        let fact = site.facts.iter().find(|x| {
+                            x.size == 8.0
+                                && x.off >= g
+                                && x.off < g + 2048.0
+                                && from_r(x.e).is_some()
+                        });
                         let sh = match fact {
                             Some(x) => Some(from_r(x.e).unwrap() - (x.off - g)),
                             None => copy_of_r(&fcopies, rr, g, 0),
@@ -772,24 +894,37 @@ fn accounts_views(d: &mut Dx) {
                         }
                         k += 8.0;
                     }
-                    let (Some(op), Some(oa)) = (op, oa) else { continue };
+                    let (Some(op), Some(oa)) = (op, oa) else {
+                        continue;
+                    };
                     let mut or: Option<N> = None;
                     let mut k = 0.0;
                     while k < 64.0 && or.is_none() {
                         if k != op
                             && k != oa
-                            && ((loads_s(word(k), 0.0) && loads_s(word(k + 8.0), 8.0)) || copies_s.contains(&K::of(ff + k)))
+                            && ((loads_s(word(k), 0.0) && loads_s(word(k + 8.0), 8.0))
+                                || copies_s.contains(&K::of(ff + k)))
                         {
                             or = Some(k);
                         }
                         k += 8.0;
                     }
                     let reg = arg_reg(callee, i);
-                    let Some(pv) = callee.vars.iter().find(|v| v.param == reg) else { continue };
+                    let Some(pv) = callee.vars.iter().find(|v| v.param == reg) else {
+                        continue;
+                    };
                     if dref.def_count(cpc, pv.id) != 0 {
                         continue;
                     }
-                    if !ctx_view(op, oa, or, shift, &mut views_added, &mut afv, &mut acct_shift_set) {
+                    if !ctx_view(
+                        op,
+                        oa,
+                        or,
+                        shift,
+                        &mut views_added,
+                        &mut afv,
+                        &mut acct_shift_set,
+                    ) {
                         continue;
                     }
                     new_param_types.push((cpc, pv.id));
@@ -797,7 +932,11 @@ fn accounts_views(d: &mut Dx) {
             }
             if ctx_layout.is_none() {
                 accounts_view(
-                    if fields.iter().any(|x| x.off == 0.0) { 0.0 } else { 8.0 },
+                    if fields.iter().any(|x| x.off == 0.0) {
+                        0.0
+                    } else {
+                        8.0
+                    },
                     &mut views_added,
                     &mut afv,
                     &mut acct_shift_set,
@@ -850,11 +989,13 @@ fn cpi_naming(d: &mut Dx) {
         let dref: &Dx = d;
         let sites = find_cpi_sites(ir, tree, &tree.body, Some(fpv), &|t: &CallTarget| match t {
             CallTarget::Sys { name, .. } => cpi_only(invoke_abi(name)),
-            CallTarget::Fn { pc } => cpi_only(dref.invoke_thunks.get(pc).copied()).or(if dref.invoke_wrappers.contains(pc) {
-                Some(SiteKind::Invoke)
-            } else {
-                None
-            }),
+            CallTarget::Fn { pc } => cpi_only(dref.invoke_thunks.get(pc).copied()).or(
+                if dref.invoke_wrappers.contains(pc) {
+                    Some(SiteKind::Invoke)
+                } else {
+                    None
+                },
+            ),
             _ => None,
         });
         if sites.len() != 1 {
@@ -878,7 +1019,11 @@ fn cpi_naming(d: &mut Dx) {
             named: None,
             tainted: None,
         };
-        let mut dd = if site.abi == SiteKind::Invoke { None } else { cpi_desc(site, &mut env) };
+        let mut dd = if site.abi == SiteKind::Invoke {
+            None
+        } else {
+            cpi_desc(site, &mut env)
+        };
         let mut ran = false;
         if dd.as_ref().is_none_or(|x| x.ix.is_none()) {
             let kind = match &site.t {
@@ -900,7 +1045,9 @@ fn cpi_naming(d: &mut Dx) {
                 _ => None,
             };
             let at = match node {
-                SNode::Stmt(si) if matches!(tree.stmt(*si), Stmt::Call { .. }) => Some(stmt_pc(tree.stmt(*si))),
+                SNode::Stmt(si) if matches!(tree.stmt(*si), Stmt::Call { .. }) => {
+                    Some(stmt_pc(tree.stmt(*si)))
+                }
                 _ => match &t {
                     Some(t) => {
                         let l = call_insns(dref, pc, t);
@@ -915,7 +1062,9 @@ fn cpi_naming(d: &mut Dx) {
             };
             if let (Some(kind), Some(at)) = (kind, at) {
                 if name_budget.steps > 0 {
-                    if let Some(m) = describe_model(dref.ctx, f, at, kind, &mut env, &mut name_budget) {
+                    if let Some(m) =
+                        describe_model(dref.ctx, f, at, kind, &mut env, &mut name_budget)
+                    {
                         if let Some(x) = m.format(&mut env) {
                             if x.ix.is_some() && !x.guessed {
                                 dd = Some(x);
@@ -926,9 +1075,15 @@ fn cpi_naming(d: &mut Dx) {
                 }
             }
         }
-        let Some(dd) = dd.filter(|x| x.ix.is_some()) else { continue };
+        let Some(dd) = dd.filter(|x| x.ix.is_some()) else {
+            continue;
+        };
         let ixn = dd.ix.clone().unwrap();
-        let base = format!("cpi_{}_{}", dd.family.clone().unwrap_or_default(), camel_us(&ixn).to_lowercase());
+        let base = format!(
+            "cpi_{}_{}",
+            dd.family.clone().unwrap_or_default(),
+            camel_us(&ixn).to_lowercase()
+        );
         let mut nm = base.clone();
         let mut k = 2;
         while taken.contains(&nm) {
@@ -948,7 +1103,11 @@ fn cpi_naming(d: &mut Dx) {
             format!(
                 "name [known{}]: makes the CPI {ixn} of a well-known program{} (was {old})",
                 if ran { ", exec" } else { "" },
-                if ran { " (the instruction a run of it builds)" } else { "" }
+                if ran {
+                    " (the instruction a run of it builds)"
+                } else {
+                    ""
+                }
             )
         };
         d.fn_notes.entry(pc).or_default().push(note);
@@ -965,7 +1124,10 @@ fn data_view(views: &mut Views, ty: &str) -> Option<String> {
     if views.map.contains_key(&name) {
         return Some(name);
     }
-    let acc = views.map.get(&format!("{}Account", pascal_name(ty)))?.clone();
+    let acc = views
+        .map
+        .get(&format!("{}Account", pascal_name(ty)))?
+        .clone();
     let fs: Vec<Field> = acc
         .fields
         .iter()
@@ -990,7 +1152,11 @@ fn data_view(views: &mut Views, ty: &str) -> Option<String> {
 }
 
 /// computeTypes: the view types of one function's variables.
-pub fn compute_types(d: &mut Dx, pc: i64, struct_types: &IndexMap<i64, IndexMap<u32, String>>) -> IndexMap<u32, String> {
+pub fn compute_types(
+    d: &mut Dx,
+    pc: i64,
+    struct_types: &IndexMap<i64, IndexMap<u32, String>>,
+) -> IndexMap<u32, String> {
     let fi = d.idx[&pc];
     let f = d.fs[fi];
     let mut t: IndexMap<u32, String> = IndexMap::new();
@@ -1040,7 +1206,9 @@ pub fn compute_types(d: &mut Dx, pc: i64, struct_types: &IndexMap<i64, IndexMap<
         grew = false;
         for b in &f.blocks {
             for st in &b.stmts {
-                let Stmt::Set { dst, e, .. } = st else { continue };
+                let Stmt::Set { dst, e, .. } = st else {
+                    continue;
+                };
                 let dv = *dst as u32;
                 if t.contains_key(&dv) || is_param(f, dv) || d.def_count(pc, dv) != 1 {
                     continue;
@@ -1144,7 +1312,9 @@ fn loader_pass(d: &mut Dx, fi: usize, t: &mut IndexMap<u32, String>) -> bool {
             } else {
                 let (o, n) = match st {
                     Stmt::Store { addr, size, .. } => (fo(*addr), *size as N),
-                    Stmt::Stores { addr, size, vals, .. } => (fo(*addr), (*size as u32 * vals.len) as N),
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => (fo(*addr), (*size as u32 * vals.len) as N),
                     Stmt::Copy { dst, n, .. } => (fo(*dst), *n as N),
                     _ => (None, 0.0),
                 };
@@ -1229,7 +1399,8 @@ fn only_reached_by(f: &Func, v: u32, defs: &IndexSet<(usize, usize)>) -> bool {
                 }
             }
             let old = out.get(&b.id);
-            let same = old.is_some_and(|o| o.len() == cur.len() && cur.iter().all(|x| o.contains(x)));
+            let same =
+                old.is_some_and(|o| o.len() == cur.len() && cur.iter().all(|x| o.contains(x)));
             if !same {
                 out.insert(b.id, cur);
                 changed = true;
@@ -1240,10 +1411,15 @@ fn only_reached_by(f: &Func, v: u32, defs: &IndexSet<(usize, usize)>) -> bool {
     let mut uses = 0;
     let based = |a: E| match ir.get(a) {
         Node::Var(x) => x == v,
-        Node::Bin(BinOp::Add, x, c) => ir.get(x) == Node::Var(v) && matches!(ir.get(c), Node::Const(_)),
+        Node::Bin(BinOp::Add, x, c) => {
+            ir.get(x) == Node::Var(v) && matches!(ir.get(c), Node::Const(_))
+        }
         _ => false,
     };
-    let good = |cur: &IndexSet<Df>| cur.iter().all(|x| matches!(x, Df::S(b, s) if defs.contains(&(*b, *s))));
+    let good = |cur: &IndexSet<Df>| {
+        cur.iter()
+            .all(|x| matches!(x, Df::S(b, s) if defs.contains(&(*b, *s))))
+    };
     for (bi, b) in f.blocks.iter().enumerate() {
         let mut cur = in_of(bi, &out);
         for (si, s) in b.stmts.iter().enumerate() {
@@ -1316,7 +1492,10 @@ impl StructCfg for SCfg<'_, '_> {
         false
     }
     fn typed(&self, pc: i64, v: u32) -> bool {
-        self.d.base_types.get(&pc).is_some_and(|m| m.contains_key(&v))
+        self.d
+            .base_types
+            .get(&pc)
+            .is_some_and(|m| m.contains_key(&v))
     }
     fn fn_name(&self, pc: i64) -> String {
         self.d.fn_name(pc)
@@ -1328,25 +1507,38 @@ impl StructCfg for SCfg<'_, '_> {
         arg_reg(self.d.f(callee).unwrap(), i)
     }
     fn data_ptr(&self, pc: i64, e: E, ir: &Ir, views: &Views) -> bool {
-        let Node::Load { addr: a, .. } = ir.get(e) else { return false };
-        let Node::Bin(BinOp::Add, x, c) = ir.get(a) else { return false };
+        let Node::Load { addr: a, .. } = ir.get(e) else {
+            return false;
+        };
+        let Node::Bin(BinOp::Add, x, c) = ir.get(a) else {
+            return false;
+        };
         if ir.get(c) != Node::Const(0x18) {
             return false;
         }
         let bt = self.d.base_types.get(&pc);
-        expr_type(views, ir, x, &|id| bt.and_then(|m| m.get(&id).cloned())).as_deref() == Some("DataCell")
+        expr_type(views, ir, x, &|id| bt.and_then(|m| m.get(&id).cloned())).as_deref()
+            == Some("DataCell")
     }
     fn field_hints(&self, pc: i64, reg: i32) -> Option<(IndexMap<K, Field>, String)> {
         if reg != 1 {
             return None;
         }
-        let hpc = self.d.try_of.iter().find(|(_, t)| **t == pc).map(|(h, _)| *h)?;
+        let hpc = self
+            .d
+            .try_of
+            .iter()
+            .find(|(_, t)| **t == pc)
+            .map(|(h, _)| *h)?;
         let fs = self.d.acct_layouts.get(&hpc)?;
         let mut m = IndexMap::new();
         for x in fs {
             m.insert(K::of(x.off), x.clone());
         }
-        Some((m, "the account fields of the Accounts struct it returns".into()))
+        Some((
+            m,
+            "the account fields of the Accounts struct it returns".into(),
+        ))
     }
 }
 
@@ -1369,7 +1561,9 @@ fn view_types(d: &mut Dx) {
             }
             for (i, &a) in args.iter().enumerate() {
                 let reg = arg_reg(callee, i);
-                let Some(pv) = callee.vars.iter().find(|v| v.param == reg) else { continue };
+                let Some(pv) = callee.vars.iter().find(|v| v.param == reg) else {
+                    continue;
+                };
                 if d.def_count(cpc, pv.id) != 0 || matches!(ir.get(a), Node::Const(_)) {
                     continue;
                 }
@@ -1407,7 +1601,11 @@ fn view_types(d: &mut Dx) {
     d.views = views;
     let synth = sres.synth.clone();
     for (pc, m) in &sres.types {
-        let filtered: IndexMap<u32, String> = m.iter().filter(|(_, t)| synth.contains(*t)).map(|(v, t)| (*v, t.clone())).collect();
+        let filtered: IndexMap<u32, String> = m
+            .iter()
+            .filter(|(_, t)| synth.contains(*t))
+            .map(|(v, t)| (*v, t.clone()))
+            .collect();
         struct_types.insert(*pc, filtered);
         for (v, t) in m {
             if !synth.contains(t) {
@@ -1453,7 +1651,8 @@ fn view_types(d: &mut Dx) {
         drop(cfg);
         for (pc, nm, why) in renames {
             let old = d.fn_name(pc);
-            d.heur_names.insert(pc, format!("name [heur]: {why} (was {old})"));
+            d.heur_names
+                .insert(pc, format!("name [heur]: {why} (was {old})"));
             d.rename(pc, &nm);
         }
         let funcs: IndexMap<i64, &Func> = d.fs.iter().map(|f| (f.pc, *f)).collect();
@@ -1476,7 +1675,11 @@ fn view_types(d: &mut Dx) {
     }
 }
 
-fn propagate(d: &mut Dx, call_args: &IndexMap<i64, Vec<(i64, u32, E)>>, struct_types: &IndexMap<i64, IndexMap<u32, String>>) {
+fn propagate(
+    d: &mut Dx,
+    call_args: &IndexMap<i64, Vec<(i64, u32, E)>>,
+    struct_types: &IndexMap<i64, IndexMap<u32, String>>,
+) {
     const BAD: [&str; 3] = ["AccountRecord", "UnalignedAccount", "Input"];
     for _round in 0..6 {
         let mut changed: Vec<i64> = Vec::new();
@@ -1510,11 +1713,19 @@ fn propagate(d: &mut Dx, call_args: &IndexMap<i64, Vec<(i64, u32, E)>>, struct_t
             let ir = f.ir.as_ref().unwrap();
             for (u, (ty, callees)) in m {
                 let Some(ty) = ty else { continue };
-                if d.base_types[pc].contains_key(u) || !d.views.map.contains_key(ty) || BAD.contains(&ty.as_str()) {
+                if d.base_types[pc].contains_key(u)
+                    || !d.views.map.contains_key(ty)
+                    || BAD.contains(&ty.as_str())
+                {
                     continue;
                 }
-                let Some(pv) = f.vars.get(*u as usize) else { continue };
-                if pv.param == 10 || d.def_count(*pc, *u) != if pv.param >= 0 { 0 } else { 1 } || !d.fits_view(*pc, *u, ty, 0) {
+                let Some(pv) = f.vars.get(*u as usize) else {
+                    continue;
+                };
+                if pv.param == 10
+                    || d.def_count(*pc, *u) != if pv.param >= 0 { 0 } else { 1 }
+                    || !d.fits_view(*pc, *u, ty, 0)
+                {
                     continue;
                 }
                 if pv.param < 0
@@ -1546,7 +1757,8 @@ fn propagate(d: &mut Dx, call_args: &IndexMap<i64, Vec<(i64, u32, E)>>, struct_t
             }
         }
         for (cpc, sites) in call_args {
-            let mut seen: IndexMap<u32, (Option<Option<String>>, u32, u32, Vec<String>)> = IndexMap::new();
+            let mut seen: IndexMap<u32, (Option<Option<String>>, u32, u32, Vec<String>)> =
+                IndexMap::new();
             for (caller, v, a) in sites {
                 let cf = d.f(*caller).unwrap();
                 let ir = cf.ir.as_ref().unwrap();
@@ -1571,7 +1783,9 @@ fn propagate(d: &mut Dx, call_args: &IndexMap<i64, Vec<(i64, u32, E)>>, struct_t
                 if !d.views.map.contains_key(&ty) || BAD.contains(&ty.as_str()) {
                     continue;
                 }
-                if d.param_types.get(cpc).is_some_and(|m| m.contains_key(&v)) || d.base_types[cpc].contains_key(&v) {
+                if d.param_types.get(cpc).is_some_and(|m| m.contains_key(&v))
+                    || d.base_types[cpc].contains_key(&v)
+                {
                     continue;
                 }
                 if n * 2 < of && !d.fits_view(*cpc, v, &ty, 3) {
@@ -1585,7 +1799,11 @@ fn propagate(d: &mut Dx, call_args: &IndexMap<i64, Vec<(i64, u32, E)>>, struct_t
                     } else {
                         format!(
                             "{n} of {of} calls pass one, the others an untyped value{}",
-                            if n * 2 < of { "; its loads and stores through it all hit fields of the view" } else { "" }
+                            if n * 2 < of {
+                                "; its loads and stores through it all hit fields of the view"
+                            } else {
+                                ""
+                            }
                         )
                     },
                     list.join(", "),
@@ -1617,8 +1835,12 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
         let ir = f.ir.as_ref().unwrap();
         for b in &f.blocks {
             for st in &b.stmts {
-                let Some((t, args)) = call_of(ir, st) else { continue };
-                let CallTarget::Fn { pc: cpc } = t else { continue };
+                let Some((t, args)) = call_of(ir, st) else {
+                    continue;
+                };
+                let CallTarget::Fn { pc: cpc } = t else {
+                    continue;
+                };
                 if tried.contains(&cpc) || args.len < 3 || !d.out_params.contains(&cpc) {
                     continue;
                 }
@@ -1626,19 +1848,27 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                     let mut e = e;
                     if let Node::Var(id) = ir.get(e) {
                         if d.def_count(pc, id) == 1 {
-                            let dd = f.blocks.iter().flat_map(|b| b.stmts.iter()).find(|s| matches!(s, Stmt::Set { dst, .. } if *dst == id as i32));
+                            let dd =
+                                f.blocks.iter().flat_map(|b| b.stmts.iter()).find(
+                                    |s| matches!(s, Stmt::Set { dst, .. } if *dst == id as i32),
+                                );
                             if let Some(Stmt::Set { e: x, .. }) = dd {
                                 e = *x;
                             }
                         }
                     }
-                    let Node::Load { size: 8, addr } = ir.get(e) else { return false };
-                    let Node::Bin(BinOp::Add, a, c) = ir.get(addr) else { return false };
+                    let Node::Load { size: 8, addr } = ir.get(e) else {
+                        return false;
+                    };
+                    let Node::Bin(BinOp::Add, a, c) = ir.get(addr) else {
+                        return false;
+                    };
                     if ir.get(c) != Node::Const(off) {
                         return false;
                     }
                     let bt = &d.base_types[&pc];
-                    expr_type(&d.views, ir, a, &|id| bt.get(&id).cloned()).as_deref() == Some("DataCell")
+                    expr_type(&d.views, ir, a, &|id| bt.get(&id).cloned()).as_deref()
+                        == Some("DataCell")
                 };
                 if !cell_field(ir.at(args, 1), 0x18) || !cell_field(ir.at(args, 2), 0x20) {
                     continue;
@@ -1666,7 +1896,11 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                                         };
                                         if let Some(k) = k {
                                             let k = k as N;
-                                            if k > 0.0 && k <= 65536.0 && !lens.contains(&(k as usize)) && lens.len() < 4 {
+                                            if k > 0.0
+                                                && k <= 65536.0
+                                                && !lens.contains(&(k as usize))
+                                                && lens.len() < 4
+                                            {
                                                 lens.push(k as usize);
                                             }
                                         }
@@ -1679,7 +1913,9 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                 let m = d.state_ctx.probe_deserializer(cpc, &lens);
                 let Some(m) = m else { continue };
                 let v = d.param_view(cpc, 1);
-                let Some(v) = v.filter(|v| synth.contains(v)) else { continue };
+                let Some(v) = v.filter(|v| synth.contains(v)) else {
+                    continue;
+                };
                 let cf = d.f(cpc).unwrap();
                 let cir = cf.ir.as_ref().unwrap();
                 let rv = param_var(cf, 1);
@@ -1688,7 +1924,9 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                     for s2 in &b2.stmts {
                         let (addr, size, vals): (E, u8, Vec<E>) = match s2 {
                             Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                            Stmt::Stores { addr, size, vals, .. } => (*addr, *size, cir.to_vec(*vals)),
+                            Stmt::Stores {
+                                addr, size, vals, ..
+                            } => (*addr, *size, cir.to_vec(*vals)),
                             _ => continue,
                         };
                         let Some(rv) = rv else { continue };
@@ -1722,8 +1960,15 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                         FT::Scalar(s) => s as usize,
                         _ => 0,
                     };
-                    let Some(&dd) = m.get(&(fd.off as usize)).filter(|_| fd.off >= 0.0 && fd.off.fract() == 0.0) else { continue };
-                    if size == 0 || (1..size).any(|i| m.get(&(fd.off as usize + i)) != Some(&(dd + i))) {
+                    let Some(&dd) = m
+                        .get(&(fd.off as usize))
+                        .filter(|_| fd.off >= 0.0 && fd.off.fract() == 0.0)
+                    else {
+                        continue;
+                    };
+                    if size == 0
+                        || (1..size).any(|i| m.get(&(fd.off as usize + i)) != Some(&(dd + i)))
+                    {
                         continue;
                     }
                     let nm = format!("d0x{dd:x}_u{}", size * 8);

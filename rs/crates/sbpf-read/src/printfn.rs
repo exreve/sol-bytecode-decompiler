@@ -5,7 +5,10 @@
 use crate::accounts::{account_addr, account_field};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, site_objects, CpiEnv, CpiSite, SiteKind};
 use crate::cpiexec::{describe_model, ExecSiteKind};
-use crate::decompile::{call_insns, invoke_abi, pascal_ix, pda_abi, Dx, FrameClaim, IxRow, ReadFunc, ReadOut, GENERIC_RESULT, RESERVED_TS};
+use crate::decompile::{
+    call_insns, invoke_abi, pascal_ix, pda_abi, Dx, FrameClaim, IxRow, ReadFunc, ReadOut,
+    GENERIC_RESULT, RESERVED_TS,
+};
 use crate::frameregions::{frame_regions, innermost, Act, RegionCfg, Regions, Root};
 use crate::outline::{find_outlines, OutlineFn, Outlines};
 use crate::taint::expr_tainted;
@@ -23,11 +26,35 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 const BUILTIN_NAMES: &[&str] = &[
-    "AccountInfo", "LamportsCell", "Lamports", "DataCell", "AccountRecord", "SolInstruction", "SolAccountMeta",
-    "StableInstruction", "AccountMeta", "Slice", "SeedList", "U128", "FmtArguments", "FmtArgumentsSpecsFirst",
-    "FmtArg", "Tagged8", "Tagged16", "Tagged32", "Tagged64", "Result64", "Input",
+    "AccountInfo",
+    "LamportsCell",
+    "Lamports",
+    "DataCell",
+    "AccountRecord",
+    "SolInstruction",
+    "SolAccountMeta",
+    "StableInstruction",
+    "AccountMeta",
+    "Slice",
+    "SeedList",
+    "U128",
+    "FmtArguments",
+    "FmtArgumentsSpecsFirst",
+    "FmtArg",
+    "Tagged8",
+    "Tagged16",
+    "Tagged32",
+    "Tagged64",
+    "Result64",
+    "Input",
 ];
-const ARRAY_VIEWS: &[&str] = &["SolAccountMeta", "AccountMeta", "Slice", "SeedList", "FmtArg"];
+const ARRAY_VIEWS: &[&str] = &[
+    "SolAccountMeta",
+    "AccountMeta",
+    "Slice",
+    "SeedList",
+    "FmtArg",
+];
 
 fn builtin_name(t: &str) -> bool {
     BUILTIN_NAMES.contains(&t)
@@ -37,7 +64,13 @@ fn builtin_name(t: &str) -> bool {
 fn undef_only(ir: &Ir, tree: &Tree, ns: &[SNode], is_param: &dyn Fn(u32) -> bool) -> HashSet<u32> {
     let mut undef: IndexSet<u32> = IndexSet::new();
     let mut other: HashSet<u32> = HashSet::new();
-    fn walk(ir: &Ir, tree: &Tree, xs: &[SNode], undef: &mut IndexSet<u32>, other: &mut HashSet<u32>) {
+    fn walk(
+        ir: &Ir,
+        tree: &Tree,
+        xs: &[SNode],
+        undef: &mut IndexSet<u32>,
+        other: &mut HashSet<u32>,
+    ) {
         for n in xs {
             match n {
                 SNode::Stmt(si) => {
@@ -54,7 +87,9 @@ fn undef_only(ir: &Ir, tree: &Tree, ns: &[SNode], is_param: &dyn Fn(u32) -> bool
                     walk(ir, tree, then, undef, other);
                     walk(ir, tree, els, undef, other);
                 }
-                SNode::Block { body, .. } | SNode::Loop { body, .. } => walk(ir, tree, body, undef, other),
+                SNode::Block { body, .. } | SNode::Loop { body, .. } => {
+                    walk(ir, tree, body, undef, other)
+                }
                 SNode::Switch { cases, .. } => {
                     for c in cases {
                         walk(ir, tree, &c.1, undef, other);
@@ -68,7 +103,10 @@ fn undef_only(ir: &Ir, tree: &Tree, ns: &[SNode], is_param: &dyn Fn(u32) -> bool
         }
     }
     walk(ir, tree, ns, &mut undef, &mut other);
-    undef.into_iter().filter(|v| !other.contains(v) && !is_param(*v)).collect()
+    undef
+        .into_iter()
+        .filter(|v| !other.contains(v) && !is_param(*v))
+        .collect()
 }
 
 fn strip_undef(ir: &Ir, tree: &Tree, ns: &[SNode], only: &HashSet<u32>) -> Vec<SNode> {
@@ -92,7 +130,12 @@ fn strip_undef(ir: &Ir, tree: &Tree, ns: &[SNode], only: &HashSet<u32>) -> Vec<S
                 label: *label,
                 body: strip_undef(ir, tree, body, only),
             }),
-            SNode::Loop { label, body, form, c } => out.push(SNode::Loop {
+            SNode::Loop {
+                label,
+                body,
+                form,
+                c,
+            } => out.push(SNode::Loop {
                 label: *label,
                 body: strip_undef(ir, tree, body, only),
                 form: *form,
@@ -100,7 +143,10 @@ fn strip_undef(ir: &Ir, tree: &Tree, ns: &[SNode], only: &HashSet<u32>) -> Vec<S
             }),
             SNode::Switch { v, cases } => out.push(SNode::Switch {
                 v: *v,
-                cases: cases.iter().map(|c| (c.0.clone(), strip_undef(ir, tree, &c.1, only))).collect(),
+                cases: cases
+                    .iter()
+                    .map(|c| (c.0.clone(), strip_undef(ir, tree, &c.1, only)))
+                    .collect(),
             }),
             x => out.push(x.clone()),
         }
@@ -179,7 +225,9 @@ fn input_field(off: N, size: u8, unaligned: bool) -> Option<String> {
 /// outRole: the stack-object role of the first argument of a call to a function of this name.
 fn out_role(name: &str) -> Option<(String, Option<String>, bool)> {
     let n = strip_hex_suffix(name, 1);
-    let r = |nm: &str, t: Option<&str>, inout: bool| Some((nm.to_string(), t.map(|s| s.to_string()), inout));
+    let r = |nm: &str, t: Option<&str>, inout: bool| {
+        Some((nm.to_string(), t.map(|s| s.to_string()), inout))
+    };
     match n {
         "__multi3" => return r("prod", Some("U128"), false),
         "__udivti3" | "__divti3" => return r("quot", Some("U128"), false),
@@ -187,7 +235,10 @@ fn out_role(name: &str) -> Option<(String, Option<String>, bool)> {
         _ => {}
     }
     let prog_err = n.strip_prefix("program_error_from").is_some_and(|rest| {
-        rest.is_empty() || rest.strip_prefix('_').is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()))
+        rest.is_empty()
+            || rest
+                .strip_prefix('_')
+                .is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c.is_ascii_digit()))
     });
     if n.starts_with("Error_with_") || n == "anchor_error_from" || prog_err {
         return r("err", Some("Result64"), false);
@@ -207,14 +258,26 @@ fn out_role(name: &str) -> Option<(String, Option<String>, bool)> {
     if n == "ErrorCode_name" {
         return r("err_name", None, false);
     }
-    if n == "Pubkey_find_program_address" || n == "Pubkey_try_find_program_address" || n == "Pubkey_create_program_address" {
+    if n == "Pubkey_find_program_address"
+        || n == "Pubkey_try_find_program_address"
+        || n == "Pubkey_create_program_address"
+    {
         return r("pda", None, false);
     }
     if n == "try_accounts" {
         return r("accts", None, false);
     }
     let v = n.strip_prefix("RawVec_").unwrap_or(n);
-    if ["reserve", "reserve_for_push", "grow_one", "reserve_do_reserve_and_handle", "do_reserve_and_handle", "grow_amortized"].contains(&v) {
+    if [
+        "reserve",
+        "reserve_for_push",
+        "grow_one",
+        "reserve_do_reserve_and_handle",
+        "do_reserve_and_handle",
+        "grow_amortized",
+    ]
+    .contains(&v)
+    {
         return r("vec", None, true);
     }
     None
@@ -231,25 +294,37 @@ fn fits_access(v: &Views, ty: &str, d: N, size: N, copy: bool) -> bool {
             };
         }
     }
-    let Some(view) = v.map.get(ty) else { return false };
-    let Some(vs) = view.size.filter(|s| *s != 0.0 && !s.is_nan()) else { return false };
+    let Some(view) = v.map.get(ty) else {
+        return false;
+    };
+    let Some(vs) = view.size.filter(|s| *s != 0.0 && !s.is_nan()) else {
+        return false;
+    };
     if d < 0.0 {
         return false;
     }
     let array = ARRAY_VIEWS.contains(&ty);
     if copy {
-        return if array { d % vs == 0.0 && size % vs == 0.0 } else { d + size <= vs };
+        return if array {
+            d % vs == 0.0 && size % vs == 0.0
+        } else {
+            d + size <= vs
+        };
     }
     if !array && d >= vs {
         return false;
     }
-    let Some(r) = v.resolve(ty, d % vs) else { return false };
+    let Some(r) = v.resolve(ty, d % vs) else {
+        return false;
+    };
     if let FT::Scalar(s) = r.last {
         if r.rest == 0.0 && (s as N) < size {
             let mut o = d % vs;
             let end = o + size;
             while o < end {
-                let Some(g) = v.resolve(ty, o) else { return false };
+                let Some(g) = v.resolve(ty, o) else {
+                    return false;
+                };
                 let FT::Scalar(gs) = g.last else { return false };
                 if g.rest != 0.0 {
                     return false;
@@ -279,7 +354,9 @@ fn fits_loose(v: &Views, ty: &str, d: N, size: N) -> bool {
     if !hit {
         return true;
     }
-    let Some(r) = v.resolve(ty, d) else { return false };
+    let Some(r) = v.resolve(ty, d) else {
+        return false;
+    };
     match r.last {
         FT::Scalar(_) => {
             if r.rest != 0.0 {
@@ -287,7 +364,9 @@ fn fits_loose(v: &Views, ty: &str, d: N, size: N) -> bool {
             }
             let mut o = d;
             while o < d + size {
-                let Some(g) = v.resolve(ty, o) else { return false };
+                let Some(g) = v.resolve(ty, o) else {
+                    return false;
+                };
                 let FT::Scalar(gs) = g.last else { return false };
                 if g.rest != 0.0 {
                     return false;
@@ -342,7 +421,11 @@ impl Frame {
         if !self.used.contains_key(&n) {
             self.used.insert(
                 n.clone(),
-                (b, self.obj_type.get(&K::of(b)).cloned(), self.obj_why.get(&K::of(b)).cloned()),
+                (
+                    b,
+                    self.obj_type.get(&K::of(b)).cloned(),
+                    self.obj_why.get(&K::of(b)).cloned(),
+                ),
             );
         }
         n
@@ -351,8 +434,13 @@ impl Frame {
         let r = &self.rg.as_ref().unwrap().list[ri];
         let name = r.name.clone();
         if !self.used.contains_key(&name) {
-            let t = if r.ty.is_some() && !r.bad { r.ty.clone() } else { None };
-            self.used.insert(name.clone(), (r.base, t, Some(r.why.clone())));
+            let t = if r.ty.is_some() && !r.bad {
+                r.ty.clone()
+            } else {
+                None
+            };
+            self.used
+                .insert(name.clone(), (r.base, t, Some(r.why.clone())));
         }
         name
     }
@@ -362,7 +450,14 @@ impl Frame {
         }
         let rel = |n: String, d: N| {
             if d != 0.0 {
-                format!("{n} + {}", if d < 10.0 { js_num(d) } else { format!("0x{}", js_hex(d)) })
+                format!(
+                    "{n} + {}",
+                    if d < 10.0 {
+                        js_num(d)
+                    } else {
+                        format!("0x{}", js_hex(d))
+                    }
+                )
             } else {
                 n
             }
@@ -396,7 +491,8 @@ impl Frame {
         Some((n, t, d, false))
     }
     fn decl(&self) -> String {
-        let mut list: Vec<(&String, &(N, Option<String>, Option<String>))> = self.used.iter().collect();
+        let mut list: Vec<(&String, &(N, Option<String>, Option<String>))> =
+            self.used.iter().collect();
         if list.is_empty() {
             return String::new();
         }
@@ -423,7 +519,10 @@ impl Frame {
             if why.is_empty() {
                 String::new()
             } else {
-                format!(" // named [heur: {}]", why.iter().cloned().collect::<Vec<_>>().join("; "))
+                format!(
+                    " // named [heur: {}]",
+                    why.iter().cloned().collect::<Vec<_>>().join("; ")
+                )
             }
         )
     }
@@ -461,8 +560,12 @@ struct ViewField {
 
 impl FnSugar<'_> {
     fn frame_obj(&self, pr: &Printer, e: E) -> Option<(String, String, N, bool)> {
-        let Node::Bin(BinOp::Add, a, c) = self.ir.get(e) else { return None };
-        let (Node::Var(av), Node::Const(cv)) = (self.ir.get(a), self.ir.get(c)) else { return None };
+        let Node::Bin(BinOp::Add, a, c) = self.ir.get(e) else {
+            return None;
+        };
+        let (Node::Var(av), Node::Const(cv)) = (self.ir.get(a), self.ir.get(c)) else {
+            return None;
+        };
         if pr.var_name(av) != "fp" {
             return None;
         }
@@ -476,14 +579,23 @@ impl FnSugar<'_> {
     fn typed_obj(&self, pr: &Printer, e: E) -> Option<(String, String)> {
         let ir = self.ir;
         if let Node::Var(id) = ir.get(e) {
-            return self.var_types.get(&id).map(|t| (pr.var_name(id), t.clone()));
+            return self
+                .var_types
+                .get(&id)
+                .map(|t| (pr.var_name(id), t.clone()));
         }
         if let Some(fo) = self.frame_obj(pr, e) {
-            return if fo.2 != 0.0 { None } else { Some((fo.0, fo.1)) };
+            return if fo.2 != 0.0 {
+                None
+            } else {
+                Some((fo.0, fo.1))
+            };
         }
         let f = match ir.get(e) {
             Node::Load { size: 8, addr } => self.view_field(pr, addr),
-            Node::Bin(BinOp::Add, _, c) if matches!(ir.get(c), Node::Const(_)) => self.view_field(pr, e),
+            Node::Bin(BinOp::Add, _, c) if matches!(ir.get(c), Node::Const(_)) => {
+                self.view_field(pr, e)
+            }
             _ => None,
         }?;
         if f.rest != 0.0 {
@@ -516,7 +628,11 @@ impl FnSugar<'_> {
             Some(fo) => (fo.0, fo.1),
             None => self.typed_obj(pr, b)?,
         };
-        let size = views.map.get(&o.1).and_then(|v| v.size).filter(|s| *s != 0.0 && !s.is_nan());
+        let size = views
+            .map
+            .get(&o.1)
+            .and_then(|v| v.size)
+            .filter(|s| *s != 0.0 && !s.is_nan());
         let mut t = o.0.clone();
         let mut rel = off;
         if let Some(s) = size {
@@ -546,7 +662,10 @@ impl FnSugar<'_> {
                 if f.rest == 0.0 && fits(&f.last) {
                     return Some((f.t, 21));
                 }
-                if matches!(f.last, FT::Embed(_)) && f.rest == 0.0 && self.frame_obj(pr, addr).is_some_and(|x| x.3) {
+                if matches!(f.last, FT::Embed(_))
+                    && f.rest == 0.0
+                    && self.frame_obj(pr, addr).is_some_and(|x| x.3)
+                {
                     let mut t = f.t.clone();
                     let mut last = f.last.clone();
                     let mut n = 0;
@@ -555,7 +674,9 @@ impl FnSugar<'_> {
                         if !views.map.contains_key(ty) {
                             break;
                         }
-                        let Some(r) = views.resolve(ty, 0.0) else { break };
+                        let Some(r) = views.resolve(ty, 0.0) else {
+                            break;
+                        };
                         if r.rest != 0.0 {
                             break;
                         }
@@ -588,7 +709,11 @@ impl FnSugar<'_> {
                 let f = self.view_field(pr, e);
                 let fo = self.frame_obj(pr, e);
                 let f = f?;
-                if !matches!(f.last, FT::Embed(_)) || fo.as_ref().is_some_and(|x| x.3 && (f.rest != 0.0 || x.2 == 0.0)) {
+                if !matches!(f.last, FT::Embed(_))
+                    || fo
+                        .as_ref()
+                        .is_some_and(|x| x.3 && (f.rest != 0.0 || x.2 == 0.0))
+                {
                     return None;
                 }
                 Some(if f.rest != 0.0 {
@@ -670,15 +795,31 @@ impl FnSugar<'_> {
             return None;
         }
         let custom = |c: u64| {
-            let n = if c >= 100 { sem.const_comment(c, 0) } else { None };
-            format!("Err(ProgramError::Custom({c}{}))", n.map_or(String::new(), |n| format!(" {n}")))
+            let n = if c >= 100 {
+                sem.const_comment(c, 0)
+            } else {
+                None
+            };
+            format!(
+                "Err(ProgramError::Custom({c}{}))",
+                n.map_or(String::new(), |n| format!(" {n}"))
+            )
         };
         let at_ok = |a: E| self.ok_at.iter().any(|&x| expr_eq(ir, x, a));
         match s {
-            Stmt::Store { size: 4, v, addr, .. } if matches!(ir.get(*v), Node::Const(_)) && at_ok(*addr) => {
-                let Node::Const(sv) = ir.get(*v) else { unreachable!() };
+            Stmt::Store {
+                size: 4, v, addr, ..
+            } if matches!(ir.get(*v), Node::Const(_)) && at_ok(*addr) => {
+                let Node::Const(sv) = ir.get(*v) else {
+                    unreachable!()
+                };
                 let c = match prev {
-                    Some(Stmt::Store { size: 4, v: pv, addr: pa, .. }) => match ir.get(*pv) {
+                    Some(Stmt::Store {
+                        size: 4,
+                        v: pv,
+                        addr: pa,
+                        ..
+                    }) => match ir.get(*pv) {
                         Node::Const(pc) => {
                             let c4 = ir.c(4);
                             let want = ir.bin(BinOp::Add, *addr, c4);
@@ -699,8 +840,12 @@ impl FnSugar<'_> {
                 }
                 sem.result_tag_name(sv)
             }
-            Stmt::Store { size: 8, v, addr, .. } if matches!(ir.get(*v), Node::Const(x) if x != 0) && at_ok(*addr) => {
-                let Node::Const(sv) = ir.get(*v) else { unreachable!() };
+            Stmt::Store {
+                size: 8, v, addr, ..
+            } if matches!(ir.get(*v), Node::Const(x) if x != 0) && at_ok(*addr) => {
+                let Node::Const(sv) = ir.get(*v) else {
+                    unreachable!()
+                };
                 let (tag, code) = (sv & 0xffff_ffff, sv >> 32);
                 if tag == 0 {
                     Some(custom(code))
@@ -710,9 +855,20 @@ impl FnSugar<'_> {
                     None
                 }
             }
-            Stmt::Stores { size: 4, vals, addr, .. } if matches!(ir.get(ir.at(*vals, 0)), Node::Const(_)) && at_ok(*addr) => {
-                let Node::Const(v0) = ir.get(ir.at(*vals, 0)) else { unreachable!() };
-                let c = if vals.len > 1 { Some(ir.at(*vals, 1)) } else { None };
+            Stmt::Stores {
+                size: 4,
+                vals,
+                addr,
+                ..
+            } if matches!(ir.get(ir.at(*vals, 0)), Node::Const(_)) && at_ok(*addr) => {
+                let Node::Const(v0) = ir.get(ir.at(*vals, 0)) else {
+                    unreachable!()
+                };
+                let c = if vals.len > 1 {
+                    Some(ir.at(*vals, 1))
+                } else {
+                    None
+                };
                 if v0 == 0 {
                     if let Some(Node::Const(cv)) = c.map(|c| ir.get(c)) {
                         return Some(custom(cv));
@@ -781,11 +937,17 @@ impl Sugar for FnSugar<'_> {
         if !self.arg_notes {
             return None;
         }
-        let CallTarget::Fn { pc } = t else { return None };
+        let CallTarget::Fn { pc } = t else {
+            return None;
+        };
         if i != 1 || !self.d.error_from.contains(pc) || v >= 0x10000 {
             return None;
         }
-        let nm = self.d.idl.and_then(|i| i.error_name(6000.0 + v as N)).filter(|s| !s.is_empty());
+        let nm = self
+            .d
+            .idl
+            .and_then(|i| i.error_name(6000.0 + v as N))
+            .filter(|s| !s.is_empty());
         Some(match nm {
             Some(nm) => format!("error::{nm} = {}", 6000 + v),
             None => format!("error {}", 6000 + v),
@@ -843,7 +1005,11 @@ impl Sugar for FnSugar<'_> {
         let mut fr = self.frame.borrow_mut();
         if let Some(f) = fr.as_mut() {
             if let Some(rg) = &f.rg {
-                f.cur = rg.at.get(&(n as *const SNode)).cloned().unwrap_or_else(|| Rc::new(Vec::new()));
+                f.cur = rg
+                    .at
+                    .get(&(n as *const SNode))
+                    .cloned()
+                    .unwrap_or_else(|| Rc::new(Vec::new()));
             }
         }
     }
@@ -910,7 +1076,10 @@ fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> 
         let mut base: Option<E> = None;
         let mut bytes: IndexMap<i128, u8> = IndexMap::new();
         let mut last: Option<u32> = None;
-        let mut flush = |base: &mut Option<E>, bytes: &mut IndexMap<i128, u8>, last: &mut Option<u32>, out: &mut HashMap<u32, String>| {
+        let mut flush = |base: &mut Option<E>,
+                         bytes: &mut IndexMap<i128, u8>,
+                         last: &mut Option<u32>,
+                         out: &mut HashMap<u32, String>| {
             if let Some(l) = *last {
                 if bytes.len() >= 4 {
                     let mut offs: Vec<i128> = bytes.keys().copied().collect();
@@ -935,14 +1104,18 @@ fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> 
                 let s = tree.stmt(*si);
                 let (addr, size, vals): (Option<E>, u8, Vec<E>) = match s {
                     Stmt::Store { addr, size, v, .. } => (Some(*addr), *size, vec![*v]),
-                    Stmt::Stores { addr, size, vals, .. } => (Some(*addr), *size, ir.to_vec(*vals)),
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => (Some(*addr), *size, ir.to_vec(*vals)),
                     _ => (None, 0, vec![]),
                 };
                 if let Some(addr) = addr {
                     if vals.iter().all(|&v| matches!(ir.get(v), Node::Const(_))) {
                         let (b, o) = match ir.get(addr) {
                             Node::Bin(BinOp::Add, a, c) if matches!(ir.get(c), Node::Const(_)) => {
-                                let Node::Const(c) = ir.get(c) else { unreachable!() };
+                                let Node::Const(c) = ir.get(c) else {
+                                    unreachable!()
+                                };
                                 (a, c as i64 as i128)
                             }
                             _ => (addr, 0),
@@ -952,7 +1125,9 @@ fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> 
                             base = Some(b);
                         }
                         for (i, v) in vals.iter().enumerate() {
-                            let Node::Const(cv) = ir.get(*v) else { unreachable!() };
+                            let Node::Const(cv) = ir.get(*v) else {
+                                unreachable!()
+                            };
                             for j in 0..size as usize {
                                 let k = o + (i * size as usize + j) as i128;
                                 bytes.insert(k, ((cv >> (8 * j)) & 0xff) as u8);
@@ -1037,7 +1212,11 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
                 visit(d, ir, fp, a, false, v);
                 visit(d, ir, fp, b, false, v);
             }
-            Node::Neg(a) | Node::Not(a) | Node::Ext { a, .. } | Node::Bswap { a, .. } | Node::Lnot(a) => visit(d, ir, fp, a, false, v),
+            Node::Neg(a)
+            | Node::Not(a)
+            | Node::Ext { a, .. }
+            | Node::Bswap { a, .. }
+            | Node::Lnot(a) => visit(d, ir, fp, a, false, v),
             Node::Sel(c, a, b) => {
                 visit(d, ir, fp, c, false, v);
                 visit(d, ir, fp, a, false, v);
@@ -1046,7 +1225,10 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
             Node::Fn(n, args) => {
                 let name = ir.name(n);
                 let av = ir.to_vec(args);
-                if &*name == "keyeq" || (&*name == "memeq" && av.get(2).is_some_and(|&x| ir.get(x) == Node::Const(32))) {
+                if &*name == "keyeq"
+                    || (&*name == "memeq"
+                        && av.get(2).is_some_and(|&x| ir.get(x) == Node::Const(32)))
+                {
                     let k = if &*name == "keyeq" { 1 } else { 2 };
                     for &a in av.iter().take(k) {
                         if let Some(x) = fo(a) {
@@ -1089,17 +1271,20 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
             }
         }
         if let Some((name, ty, inout)) = r {
-            v.outs.entry(K::of(o0.unwrap())).or_default().push(FrameClaim {
-                name,
-                ty,
-                why: if inout {
-                    "the object the calls they are passed to work on".into()
-                } else {
-                    "out parameter of the calls they are passed to".into()
-                },
-                out: !inout,
-                extent: None,
-            });
+            v.outs
+                .entry(K::of(o0.unwrap()))
+                .or_default()
+                .push(FrameClaim {
+                    name,
+                    ty,
+                    why: if inout {
+                        "the object the calls they are passed to work on".into()
+                    } else {
+                        "out parameter of the calls they are passed to".into()
+                    },
+                    out: !inout,
+                    extent: None,
+                });
         } else if let (Some(o0), CallTarget::Fn { pc }) = (o0, t) {
             if d.out_params.contains(pc) && args.len() > 1 {
                 v.generic.entry(K::of(o0)).or_default().push(FrameClaim {
@@ -1120,10 +1305,16 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
             for (i, &a) in args.iter().enumerate() {
                 let Some(x) = fo(a) else { continue };
                 let reg = d.f(*pc).map_or(i as i32 + 1, |cf| arg_reg(cf, i));
-                let Some(tv) = d.param_view(*pc, reg) else { continue };
+                let Some(tv) = d.param_view(*pc, reg) else {
+                    continue;
+                };
                 let out = reg == 1 && (d.out_params.contains(pc) || d.lib_out.contains_key(pc));
                 v.typed_args.entry(K::of(x)).or_default().push(FrameClaim {
-                    name: if out { "res".into() } else { format!("s{}", js_hex(-x)) },
+                    name: if out {
+                        "res".into()
+                    } else {
+                        format!("s{}", js_hex(-x))
+                    },
                     ty: Some(tv),
                     why: "typed as the parameter of the calls they are passed to".into(),
                     out,
@@ -1200,12 +1391,19 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
             && cs.iter().all(|c| c.ty == cs[0].ty && c.name == cs[0].name)
         {
             for c in cs {
-                claims.entry(*o).or_default().push(FrameClaim { out: false, ..c.clone() });
+                claims.entry(*o).or_default().push(FrameClaim {
+                    out: false,
+                    ..c.clone()
+                });
             }
         }
     }
     for (o, cs) in &generic {
-        if cs.len() == 1 && escapes.get(o).copied() == Some(1) && !outs.contains_key(o) && !claims.contains_key(o) {
+        if cs.len() == 1
+            && escapes.get(o).copied() == Some(1)
+            && !outs.contains_key(o)
+            && !claims.contains_key(o)
+        {
             claims.entry(*o).or_default().push(cs[0].clone());
         }
     }
@@ -1245,7 +1443,9 @@ fn frame_accesses(f: &Func, fp: u32) -> Vec<(N, N, bool, bool)> {
                         out.push((o, *size as N, false, true));
                     }
                 }
-                Stmt::Stores { addr, size, vals, .. } => {
+                Stmt::Stores {
+                    addr, size, vals, ..
+                } => {
                     if let Some(o) = off(*addr) {
                         for i in 0..vals.len {
                             out.push((o + (i * *size as u32) as N, *size as N, false, true));
@@ -1294,7 +1494,9 @@ impl RegionCfg for RC<'_> {
         &self.bases
     }
     fn root_of(&self, t: &CallTarget, args: &[E], at: i64) -> Option<Root> {
-        let CallTarget::Fn { pc: tp } = t else { return None };
+        let CallTarget::Fn { pc: tp } = t else {
+            return None;
+        };
         let d = self.d;
         if let (Some(acc), Some(tpc)) = (&self.accounts, self.tpc) {
             if *tp == tpc {
@@ -1335,7 +1537,8 @@ impl RegionCfg for RC<'_> {
                 ty: rt.clone(),
                 shift: None,
                 size: None,
-                why: "out parameter of the call writing it (per call where the slot is reused)".into(),
+                why: "out parameter of the call writing it (per call where the slot is reused)"
+                    .into(),
                 reused: true,
             });
         }
@@ -1349,10 +1552,13 @@ impl RegionCfg for RC<'_> {
             return Some(Root {
                 name: rn.clone(),
                 copy_name: format!("{rn}_copy"),
-                ty: d.param_view(*tp, 1).or_else(|| tag.map(|t| format!("Tagged{}", t * 8))),
+                ty: d
+                    .param_view(*tp, 1)
+                    .or_else(|| tag.map(|t| format!("Tagged{}", t * 8))),
                 shift: None,
                 size: None,
-                why: "out parameter of the call writing it (per call where the slot is reused)".into(),
+                why: "out parameter of the call writing it (per call where the slot is reused)"
+                    .into(),
                 reused: true,
             });
         }
@@ -1360,7 +1566,9 @@ impl RegionCfg for RC<'_> {
         None
     }
     fn arg_root(&self, t: &CallTarget, _args: &[E], _pc: i64, i: usize) -> Option<Root> {
-        let CallTarget::Fn { pc: tp } = t else { return None };
+        let CallTarget::Fn { pc: tp } = t else {
+            return None;
+        };
         let reg = self.d.f(*tp).map_or(i as i32 + 1, |cf| arg_reg(cf, i));
         let ty = self.d.param_view(*tp, reg)?;
         Some(Root {
@@ -1375,7 +1583,9 @@ impl RegionCfg for RC<'_> {
     }
     fn typed_src(&self, e: E) -> Option<(String, String)> {
         let ir = self.d.f(self.pc).unwrap().ir.as_ref().unwrap();
-        let Node::Var(id) = ir.get(e) else { return None };
+        let Node::Var(id) = ir.get(e) else {
+            return None;
+        };
         let name = self.names.get(id as usize).cloned().flatten()?;
         let t = self.var_types.get(&id)?;
         if builtin_name(t) {
@@ -1422,7 +1632,13 @@ impl RegionCfg for RC<'_> {
         let last = r.path.last().unwrap();
         // .replace(/\[(\d+)\]$/, '_$1')
         let name = match last.rfind('[') {
-            Some(i) if last.ends_with(']') && last[i + 1..last.len() - 1].bytes().all(|c| c.is_ascii_digit()) && last.len() - i > 2 => {
+            Some(i)
+                if last.ends_with(']')
+                    && last[i + 1..last.len() - 1]
+                        .bytes()
+                        .all(|c| c.is_ascii_digit())
+                    && last.len() - i > 2 =>
+            {
                 format!("{}_{}", &last[..i], &last[i + 1..last.len() - 1])
             }
             _ => last.clone(),
@@ -1432,8 +1648,8 @@ impl RegionCfg for RC<'_> {
 }
 
 /// Printing of every function, the outlined helpers, and the output tables.
-pub fn run(d: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
-    let d = &d;
+pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
+    let d = &dm;
     let n = d.fs.len();
     // finalBody: `x = undef` of variables never assigned anything else is dropped
     let mut finals: Vec<Tree> = Vec::with_capacity(n);
@@ -1450,37 +1666,45 @@ pub fn run(d: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
     }
     // outlines
     let outl: Outlines = {
-        let fns: Vec<OutlineFn> = d
-            .fs
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let fp = fp_var(f);
-                let mut bases: Vec<N> = match fp {
-                    Some(fp) => d.frame_offsets(i, fp).iter().map(|k| k.get()).collect(),
-                    None => vec![],
-                };
-                bases.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                OutlineFn {
-                    f,
-                    tree: &finals[i],
-                    fp,
-                    ret: if d.out_params.contains(&f.pc) { param_var(f, 1) } else { None },
-                    bases,
-                    no_const_stores: d.sem.result_ok_tag.is_some(),
-                }
-            })
-            .collect();
+        let fns: Vec<OutlineFn> =
+            d.fs.iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let fp = fp_var(f);
+                    let mut bases: Vec<N> = match fp {
+                        Some(fp) => d.frame_offsets(i, fp).iter().map(|k| k.get()).collect(),
+                        None => vec![],
+                    };
+                    bases.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    OutlineFn {
+                        f,
+                        tree: &finals[i],
+                        fp,
+                        ret: if d.out_params.contains(&f.pc) {
+                            param_var(f, 1)
+                        } else {
+                            None
+                        },
+                        bases,
+                        no_const_stores: d.sem.result_ok_tag.is_some(),
+                    }
+                })
+                .collect();
         let taken = |nm: &str| {
-            d.is_global(nm) || d.views.map.contains_key(nm) || d.views.opaque.contains_key(nm) || RESERVED_TS.contains(&nm)
+            d.is_global(nm)
+                || d.views.map.contains_key(nm)
+                || d.views.opaque.contains_key(nm)
+                || RESERVED_TS.contains(&nm)
         };
         find_outlines(&fns, &taken)
     };
     let helper_names: HashSet<String> = outl.helpers.iter().map(|h| h.name.clone()).collect();
     let mut funcs: Vec<ReadFunc> = Vec::new();
     for i in 0..n {
-        funcs.push(print_func(d, i, &finals[i], &outl, &helper_names));
+        let v = add_args_view(&mut dm, i);
+        funcs.push(print_func(&dm, i, &finals[i], &outl, &helper_names, v));
     }
+    let d = &dm;
     // the outlined helpers' definitions
     let mut outlined = Vec::new();
     for h in &outl.helpers {
@@ -1494,7 +1718,11 @@ pub fn run(d: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
             format!(
                 "function {}({}){} {{",
                 h.name,
-                h.params.iter().map(|p| format!("{p}: u64")).collect::<Vec<_>>().join(", "),
+                h.params
+                    .iter()
+                    .map(|p| format!("{p}: u64"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if h.value { ": u64" } else { "" }
             ),
         ];
@@ -1508,7 +1736,9 @@ pub fn run(d: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         .iter()
         .filter(|(pc, _)| d.idx.contains_key(pc))
         .map(|(pc, name)| {
-            let dd = d.idl.and_then(|i| i.instructions.iter().find(|x| &x.name == name));
+            let dd = d
+                .idl
+                .and_then(|i| i.instructions.iter().find(|x| &x.name == name));
             IxRow {
                 name: name.clone(),
                 pc: *pc,
@@ -1532,7 +1762,7 @@ pub fn run(d: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         n_funcs: d.p.funcs.len(),
         funcs,
         outlined,
-        views: d.views.clone_all(),
+        views: d.views.clone(),
         instructions,
         processors,
         anchor: d.sem.anchor,
@@ -1547,7 +1777,14 @@ fn is_short_temp(n: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &HashSet<String>) -> ReadFunc {
+fn print_func(
+    d: &Dx,
+    fi: usize,
+    tree: &Tree,
+    outl: &Outlines,
+    helper_names: &HashSet<String>,
+    args_view: Option<String>,
+) -> ReadFunc {
     let f = d.fs[fi];
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
@@ -1629,35 +1866,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
     let mut arg_types: IndexMap<u32, String> = IndexMap::new();
     let mut arg_names: Vec<String> = Vec::new();
     let ix_name = d.sem.ix_names.get(&pc).cloned();
-    let ix_def = ix_name
-        .as_ref()
-        .and_then(|ix| d.idl.and_then(|i| i.instructions.iter().find(|x| &x.name == ix)));
-    let views_ptr = &d.views as *const Views as *mut Views;
+    let ix_def = ix_name.as_ref().and_then(|ix| {
+        d.idl
+            .and_then(|i| i.instructions.iter().find(|x| &x.name == ix))
+    });
     if let Some(ix_def) = ix_def.filter(|x| !x.arg_defs.is_empty()) {
-        let idl = d.idl.unwrap();
-        let vbase = format!("{}Args", pascal_ix(ix_name.as_ref().unwrap()));
-        let vname = if idl.types.contains_key(&vbase) {
-            format!("{}IxArgs", vbase.strip_suffix("Args").unwrap())
-        } else {
-            vbase
-        };
-        // SAFETY: the views are only read elsewhere while this function's naming runs (as in the TS,
-        // where the argument view is added to the shared table here)
-        let views = unsafe { &mut *views_ptr };
-        let view = if views.map.contains_key(&vname) {
-            Some(vname.clone())
-        } else {
-            views.borsh_view(
-                &vname,
-                &format!(
-                    "arguments of instruction {} (Anchor IDL, Borsh layout; after the 8-byte discriminator)",
-                    ix_name.as_ref().unwrap()
-                ),
-                &ix_def.arg_defs,
-                &idl.types,
-                0.0,
-            )
-        };
+        let view = args_view;
         let found = view.as_ref().and_then(|v| args_var(d, fi, v));
         if let (Some(found), Some(view)) = (found, &view) {
             if used(found) {
@@ -1668,8 +1882,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 let vfields = d.views.map[view].fields.clone();
                 for b in &f.blocks {
                     for st in &b.stmts {
-                        let Stmt::Set { dst, e, .. } = st else { continue };
-                        let Node::Load { size, addr } = ir.get(*e) else { continue };
+                        let Stmt::Set { dst, e, .. } = st else {
+                            continue;
+                        };
+                        let Node::Load { size, addr } = ir.get(*e) else {
+                            continue;
+                        };
                         let dst = *dst as u32;
                         if !used(dst) || is_param(f, dst) {
                             continue;
@@ -1683,7 +1901,9 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                             _ => -1.0,
                         };
                         let fd = if off >= 0.0 {
-                            vfields.iter().find(|x| x.off == off && x.t == FT::Scalar(size))
+                            vfields
+                                .iter()
+                                .find(|x| x.off == off && x.t == FT::Scalar(size))
                         } else {
                             None
                         };
@@ -1722,7 +1942,11 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             let nm = format!(
                 "{}{}",
                 camel_us(base).to_lowercase(),
-                if t.ends_with("Record") { "_acc" } else { "_data" }
+                if t.ends_with("Record") {
+                    "_acc"
+                } else {
+                    "_data"
+                }
             );
             let u = unique(&nm, &names);
             set_name(&mut names, *v, u);
@@ -1739,7 +1963,8 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
         }
     }
     if let Some(an) = an {
-        let mut vn: Vec<(u32, String)> = an.var_names.iter().map(|(v, n)| (*v, n.clone())).collect();
+        let mut vn: Vec<(u32, String)> =
+            an.var_names.iter().map(|(v, n)| (*v, n.clone())).collect();
         vn.sort_by_key(|x| x.0);
         for (v, nm0) in vn {
             if !used(v)
@@ -1787,17 +2012,28 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
     }
     if let Some(&tag) = d.out_tags.get(&pc) {
         if let Some(a) = param_var(f, 1) {
-            if !var_types.contains_key(&a) && names.get(a as usize).cloned().flatten().as_deref() == Some("ret") {
+            if !var_types.contains_key(&a)
+                && names.get(a as usize).cloned().flatten().as_deref() == Some("ret")
+            {
                 let t = format!("Tagged{}", tag * 8);
                 var_types.insert(a, t.clone());
-                ctx_notes.push(format!("ret: {t} (every store at ret + 0 is a constant: an enum's variant tag)"));
+                ctx_notes.push(format!(
+                    "ret: {t} (every store at ret + 0 is a constant: an enum's variant tag)"
+                ));
             }
         }
     }
     if let Some(m) = d.data_vars.get(&pc) {
         for (v, t) in m {
             if var_types.get(v) == Some(t) && used(*v) {
-                data_notes.push(format!("{}: {t}", names.get(*v as usize).cloned().flatten().unwrap_or_else(|| "undefined".into())));
+                data_notes.push(format!(
+                    "{}: {t}",
+                    names
+                        .get(*v as usize)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_else(|| "undefined".into())
+                ));
             }
         }
     }
@@ -1807,9 +2043,15 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
         grew = false;
         for b in &f.blocks {
             for st in &b.stmts {
-                let Stmt::Set { dst, e, .. } = st else { continue };
+                let Stmt::Set { dst, e, .. } = st else {
+                    continue;
+                };
                 let dv = *dst as u32;
-                if var_types.contains_key(&dv) || !used(dv) || is_param(f, dv) || d.def_count(pc, dv) != 1 {
+                if var_types.contains_key(&dv)
+                    || !used(dv)
+                    || is_param(f, dv)
+                    || d.def_count(pc, dv) != 1
+                {
                     continue;
                 }
                 let t = {
@@ -1831,10 +2073,18 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
     }
     for b in &f.blocks {
         for st in &b.stmts {
-            let Stmt::Set { dst, e, .. } = st else { continue };
+            let Stmt::Set { dst, e, .. } = st else {
+                continue;
+            };
             let dv = *dst as u32;
-            let Node::Load { size: 8, addr: a } = ir.get(*e) else { continue };
-            let cur = names.get(dv as usize).cloned().flatten().unwrap_or_default();
+            let Node::Load { size: 8, addr: a } = ir.get(*e) else {
+                continue;
+            };
+            let cur = names
+                .get(dv as usize)
+                .cloned()
+                .flatten()
+                .unwrap_or_default();
             if !used(dv) || is_param(f, dv) || !is_short_temp(&cur) || d.def_count(pc, dv) != 1 {
                 continue;
             }
@@ -1850,17 +2100,29 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 },
                 _ => 0.0,
             };
-            let Some(t) = bv.and_then(|b| var_types.get(&b)) else { continue };
+            let Some(t) = bv.and_then(|b| var_types.get(&b)) else {
+                continue;
+            };
             if !(t.ends_with("Accounts") || t.ends_with("Context")) || off < 0.0 {
                 continue;
             }
-            let Some(r) = d.views.resolve(t, off) else { continue };
+            let Some(r) = d.views.resolve(t, off) else {
+                continue;
+            };
             if r.rest != 0.0 || !matches!(r.last, FT::Ref(_)) {
                 continue;
             }
             let last = r.path.last().unwrap();
             let base = match last.rfind('[') {
-                Some(i) if last.ends_with(']') && last[i + 1..last.len() - 1].bytes().all(|c| c.is_ascii_digit()) && last.len() - i > 2 => &last[..i],
+                Some(i)
+                    if last.ends_with(']')
+                        && last[i + 1..last.len() - 1]
+                            .bytes()
+                            .all(|c| c.is_ascii_digit())
+                        && last.len() - i > 2 =>
+                {
+                    &last[..i]
+                }
                 _ => last.as_str(),
             };
             let u = unique(base, &names);
@@ -1872,8 +2134,13 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
     if let Some(ok) = d.sem.result_ok_tag {
         for b in &f.blocks {
             for s in &b.stmts {
-                if let Stmt::Store { size: 4, v, addr, .. } = s {
-                    if ir.get(*v) == Node::Const(ok) && !ok_at.iter().any(|&x| expr_eq(ir, x, *addr)) {
+                if let Stmt::Store {
+                    size: 4, v, addr, ..
+                } = s
+                {
+                    if ir.get(*v) == Node::Const(ok)
+                        && !ok_at.iter().any(|&x| expr_eq(ir, x, *addr))
+                    {
                         ok_at.push(*addr);
                     }
                 }
@@ -1908,7 +2175,11 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                     .copied()
                     .or_else(|| pda_abi(&d.fn_name(*t)))
                     .or_else(|| d.pda_wrappers.get(t).copied())
-                    .unwrap_or(if d.invoke_wrappers.contains(t) { SiteKind::Invoke } else { SiteKind::Call }),
+                    .unwrap_or(if d.invoke_wrappers.contains(t) {
+                        SiteKind::Invoke
+                    } else {
+                        SiteKind::Call
+                    }),
             ),
             _ => None,
         }),
@@ -1937,8 +2208,10 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
         let taint = d.taint.get(&pc);
         let defs_by_key: RefCell<Option<HashMap<String, u32>>> = RefCell::new(None);
         let names_r = names_final.clone();
-        let exec_memo: RefCell<HashMap<(i64, u8), (Option<crate::cpi::CpiDesc>, i64)>> = RefCell::new(HashMap::new());
-        let sites_by_node: HashMap<*const SNode, CpiSite> = sites.iter().map(|(k, v)| (*k, v.1.clone())).collect();
+        let exec_memo: RefCell<HashMap<(i64, u8), (Option<crate::cpi::CpiDesc>, i64)>> =
+            RefCell::new(HashMap::new());
+        let sites_by_node: HashMap<*const SNode, CpiSite> =
+            sites.iter().map(|(k, v)| (*k, v.1.clone())).collect();
         let tree_ref = tree;
         let note = move |pr: &mut Printer, n: &SNode| -> Option<String> {
             let s = sites_by_node.get(&(n as *const SNode))?;
@@ -1947,12 +2220,16 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                     let mut m: HashMap<String, u32> = HashMap::new();
                     for b in &f.blocks {
                         for st in &b.stmts {
-                            let Stmt::Set { dst, e, .. } = st else { continue };
+                            let Stmt::Set { dst, e, .. } = st else {
+                                continue;
+                            };
                             let dv = *dst as u32;
                             if names_r.get(dv as usize).cloned().flatten().is_none() {
                                 continue;
                             }
-                            if !matches!(ir.get(*e), Node::Load { .. } | Node::Bin(..)) || d.def_count(pc, dv) != 1 {
+                            if !matches!(ir.get(*e), Node::Load { .. } | Node::Bin(..))
+                                || d.def_count(pc, dv) != 1
+                            {
                                 continue;
                             }
                             m.entry(jkey_s(ir, *e)).or_insert(dv);
@@ -2010,7 +2287,9 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                     }
                 }
                 Some(CallTarget::Fn { pc: t }) => {
-                    if d.invoke_thunks.contains_key(t) && matches!(s.abi, SiteKind::C | SiteKind::Rust) {
+                    if d.invoke_thunks.contains_key(t)
+                        && matches!(s.abi, SiteKind::C | SiteKind::Rust)
+                    {
                         Some(ExecSiteKind::Thunk)
                     } else if d.invoke_wrappers.contains(t) {
                         Some(ExecSiteKind::Wrapper)
@@ -2020,11 +2299,15 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 }
                 _ => None,
             };
-            let decoded = dd.as_ref().is_some_and(|x| x.family.is_some() && !x.guessed);
+            let decoded = dd
+                .as_ref()
+                .is_some_and(|x| x.family.is_some() && !x.guessed);
             if let Some(kind) = kind {
                 if !decoded && d.exec_budget.borrow().steps > 0 {
                     let at = match n {
-                        SNode::Stmt(si) if matches!(tree_ref.stmt(*si), Stmt::Call { .. }) => Some(stmt_pc(tree_ref.stmt(*si))),
+                        SNode::Stmt(si) if matches!(tree_ref.stmt(*si), Stmt::Call { .. }) => {
+                            Some(stmt_pc(tree_ref.stmt(*si)))
+                        }
                         _ => {
                             let t = match &s.t {
                                 Some(CallTarget::Fn { pc: t }) => Some(format!("fn:{t}")),
@@ -2108,7 +2391,11 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             }
             if let Some(t) = &cs[0].ty {
                 let all = cs.iter().all(|c| c.ty.as_ref() == Some(t));
-                let ok = if builtin_name(t) { d.views.is_builtin(t) } else { d.views.map.contains_key(t) };
+                let ok = if builtin_name(t) {
+                    d.views.is_builtin(t)
+                } else {
+                    d.views.map.contains_key(t)
+                };
                 if all && ok {
                     obj_type.insert(*o, t.clone());
                 }
@@ -2136,7 +2423,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 let x = extent_of.get(&bk).copied();
                 let bad_t = match &t {
                     Some(t) => {
-                        let sized = builtin_name(t) || d.views.map.get(t).and_then(|v| v.size).is_some_and(|s| s != 0.0 && !s.is_nan());
+                        let sized = builtin_name(t)
+                            || d.views
+                                .map
+                                .get(t)
+                                .and_then(|v| v.size)
+                                .is_some_and(|s| s != 0.0 && !s.is_nan());
                         !(if sized {
                             fits_access(&d.views, t, dd, size, copy)
                         } else {
@@ -2151,14 +2443,22 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 }
             }
         }
-        let generic = |b: &K, obj_why: &IndexMap<K, String>| obj_why.get(b).map(|s| s.as_str()) == Some(GENERIC_RESULT);
-        let claimed: Vec<N> = obj_name.keys().filter(|b| !generic(b, &obj_why)).map(|k| k.get()).collect();
+        let generic = |b: &K, obj_why: &IndexMap<K, String>| {
+            obj_why.get(b).map(|s| s.as_str()) == Some(GENERIC_RESULT)
+        };
+        let claimed: Vec<N> = obj_name
+            .keys()
+            .filter(|b| !generic(b, &obj_why))
+            .map(|k| k.get())
+            .collect();
         let rg = {
             let tpc = d.try_of.get(&pc).copied();
             let ix = d.sem.ix_names.get(&pc).cloned();
             let pp = ix.as_ref().map(|x| pascal_ix(x));
             let accounts = match (&tpc, &pp) {
-                (Some(_), Some(p)) if d.views.map.contains_key(&format!("{p}Accounts")) => Some(format!("{p}Accounts")),
+                (Some(_), Some(p)) if d.views.map.contains_key(&format!("{p}Accounts")) => {
+                    Some(format!("{p}Accounts"))
+                }
                 _ => None,
             };
             let rc = RC {
@@ -2194,7 +2494,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
         if let Some(rg) = &rg {
             let keys: Vec<K> = obj_name.keys().copied().collect();
             for b in keys {
-                if generic(&b, &obj_why) && rg.list.iter().any(|r| !r.dropped && b.get() >= r.lo && b.get() < r.hi) {
+                if generic(&b, &obj_why)
+                    && rg
+                        .list
+                        .iter()
+                        .any(|r| !r.dropped && b.get() >= r.lo && b.get() < r.hi)
+                {
                     obj_name.shift_remove(&b);
                     obj_type.shift_remove(&b);
                 }
@@ -2209,7 +2514,11 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             }
         }
         let typed = !obj_type.is_empty()
-            || rg.as_ref().is_some_and(|rg| rg.list.iter().any(|r| r.ty.is_some() && !r.bad && !r.dropped));
+            || rg.as_ref().is_some_and(|rg| {
+                rg.list
+                    .iter()
+                    .any(|r| r.ty.is_some() && !r.bad && !r.dropped)
+            });
         *sugar.frame.borrow_mut() = Some(Frame {
             obj_name,
             obj_type,
@@ -2236,7 +2545,11 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             .and_then(|v| names_final.get(v.id as usize).cloned().flatten())
             .unwrap_or(dflt)
     };
-    let pdef = |r: i32| PARAM_NAME.get(r as usize).map_or("undefined".to_string(), |s| s.to_string());
+    let pdef = |r: i32| {
+        PARAM_NAME
+            .get(r as usize)
+            .map_or("undefined".to_string(), |s| s.to_string())
+    };
     let mut params: Vec<String> = Vec::new();
     let sa = f.stack_args.unwrap_or(0);
     if f.is_entry {
@@ -2247,10 +2560,18 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             params.push(format!("{}: {}", param_nm(r, pdef(r)), param_type(r)));
         }
         for k in 0..sa as i32 {
-            params.push(format!("{}: {}", param_nm(100 + k, format!("p{}", 5 + k)), param_type(100 + k)));
+            params.push(format!(
+                "{}: {}",
+                param_nm(100 + k, format!("p{}", 5 + k)),
+                param_type(100 + k)
+            ));
         }
         for &r in &f.extra_in {
-            params.push(format!("{}: {}", param_nm(r as i32, pdef(r as i32)), param_type(r as i32)));
+            params.push(format!(
+                "{}: {}",
+                param_nm(r as i32, pdef(r as i32)),
+                param_type(r as i32)
+            ));
         }
     }
     let name = d.fn_name(pc);
@@ -2283,12 +2604,21 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             let ps: Vec<String> = f
                 .vars
                 .iter()
-                .filter(|v| v.param >= 1 && v.param != 10 && tp.vars.contains_key(&v.id) && names_final.get(v.id as usize).cloned().flatten().is_some())
+                .filter(|v| {
+                    v.param >= 1
+                        && v.param != 10
+                        && tp.vars.contains_key(&v.id)
+                        && names_final.get(v.id as usize).cloned().flatten().is_some()
+                })
                 .map(|v| {
                     format!(
                         "{} ({})",
                         names_final[v.id as usize].as_ref().unwrap(),
-                        if tp.vars[&v.id] == crate::taint::TK::Ptr { "points to it" } else { "value" }
+                        if tp.vars[&v.id] == crate::taint::TK::Ptr {
+                            "points to it"
+                        } else {
+                            "value"
+                        }
                     )
                 })
                 .collect();
@@ -2332,7 +2662,17 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 .map(|i| {
                     i.instructions
                         .iter()
-                        .flat_map(|x| x.accounts.iter().map(|a| a.split(' ').next().unwrap().split('.').next_back().unwrap().to_string()))
+                        .flat_map(|x| {
+                            x.accounts.iter().map(|a| {
+                                a.split(' ')
+                                    .next()
+                                    .unwrap()
+                                    .split('.')
+                                    .next_back()
+                                    .unwrap()
+                                    .to_string()
+                            })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -2340,7 +2680,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
                 let base = {
                     let i = nm.rfind('_');
                     match i {
-                        Some(i) if nm[i + 1..].bytes().all(|c| c.is_ascii_digit()) && i + 1 < nm.len() => &nm[..i],
+                        Some(i)
+                            if nm[i + 1..].bytes().all(|c| c.is_ascii_digit())
+                                && i + 1 < nm.len() =>
+                        {
+                            &nm[..i]
+                        }
                         _ => nm,
                     }
                 };
@@ -2363,7 +2708,12 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
     lines.push(format!("{sig} {{"));
     let hoisted: Vec<u32> = hoisted.into_iter().filter(|&v| used(v)).collect();
     let body_lines = print_nodes(&mut pr, tree, body, "\t", &decls, &hoisted);
-    let fdecl = sugar.frame.borrow().as_ref().map(|fr| fr.decl()).unwrap_or_default();
+    let fdecl = sugar
+        .frame
+        .borrow()
+        .as_ref()
+        .map(|fr| fr.decl())
+        .unwrap_or_default();
     if !fdecl.is_empty() {
         lines.push(fdecl);
     }
@@ -2373,8 +2723,14 @@ fn print_func(d: &Dx, fi: usize, tree: &Tree, outl: &Outlines, helper_names: &Ha
             .map(|&v| {
                 format!(
                     "{}{} = 0",
-                    names_final.get(v as usize).cloned().flatten().unwrap_or_else(|| format!("u{v}")),
-                    var_types.get(&v).map_or(String::new(), |t| format!(": {t}"))
+                    names_final
+                        .get(v as usize)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_else(|| format!("u{v}")),
+                    var_types
+                        .get(&v)
+                        .map_or(String::new(), |t| format!(": {t}"))
                 )
             })
             .collect();
@@ -2481,7 +2837,11 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
 /// callsOf: direct callees and function-address constants.
 fn calls_of(d: &Dx, f: &Func) -> Vec<i64> {
     let ir = f.ir.as_ref().unwrap();
-    let pc_by_addr: HashMap<u64, i64> = d.p.funcs.keys().map(|&pc| (sbpf_program::fn_addr(d.p, pc), pc)).collect();
+    let pc_by_addr: HashMap<u64, i64> =
+        d.p.funcs
+            .keys()
+            .map(|&pc| (sbpf_program::fn_addr(d.p, pc), pc))
+            .collect();
     let mut out: IndexSet<i64> = IndexSet::new();
     let visit = |e: E, out: &mut IndexSet<i64>| {
         ir.walk(e, &mut |_, n| match n {
@@ -2501,7 +2861,8 @@ fn calls_of(d: &Dx, f: &Func) -> Vec<i64> {
     for b in &f.blocks {
         for s in &b.stmts {
             if let Stmt::Call {
-                t: CallTarget::Fn { pc }, ..
+                t: CallTarget::Fn { pc },
+                ..
             } = s
             {
                 out.insert(*pc);
@@ -2568,7 +2929,9 @@ pub fn map_expr(ir: &Ir, e: E, f: &mut dyn FnMut(E) -> E) -> E {
         }
         Node::Call(t, args) => {
             let tt = match ir.target(t) {
-                CallTarget::Ind { e } => CallTarget::Ind { e: map_expr(ir, e, f) },
+                CallTarget::Ind { e } => CallTarget::Ind {
+                    e: map_expr(ir, e, f),
+                },
                 x => x,
             };
             let xs: Vec<E> = ir.items(args).map(|a| map_expr(ir, a, f)).collect();
@@ -2591,7 +2954,15 @@ fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mu
     let ir = f.ir.as_ref().unwrap();
     let pc = f.pc;
     let taint = d.taint.get(&pc);
-    fn visit(d: &Dx, f: &Func, tree: &Tree, ns: &[SNode], fpv: u32, pr: &mut Printer, taint: Option<&crate::taint::FnTaint>) {
+    fn visit(
+        d: &Dx,
+        f: &Func,
+        tree: &Tree,
+        ns: &[SNode],
+        fpv: u32,
+        pr: &mut Printer,
+        taint: Option<&crate::taint::FnTaint>,
+    ) {
         let ir = f.ir.as_ref().unwrap();
         for n in ns {
             if let SNode::Stmt(si) = n {
@@ -2621,7 +2992,14 @@ fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mu
                             };
                             let m = {
                                 let mut b = d.wrap_budget.borrow_mut();
-                                describe_model(d.ctx, f, stmt_pc(s), ExecSiteKind::Wrapper, &mut env, &mut b)
+                                describe_model(
+                                    d.ctx,
+                                    f,
+                                    stmt_pc(s),
+                                    ExecSiteKind::Wrapper,
+                                    &mut env,
+                                    &mut b,
+                                )
                             };
                             if let Some(m) = m {
                                 let _ = m.format(&mut env);
@@ -2642,4 +3020,32 @@ fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mu
 #[allow(dead_code)]
 fn unused() {
     let _ = format_ix;
+}
+
+/// The IDL argument view of the function's instruction (`views.map.get(vname) ?? views.borshView(...)`):
+/// added to the shared table while the function is named, as in the TS.
+fn add_args_view(d: &mut Dx, fi: usize) -> Option<String> {
+    let pc = d.fs[fi].pc;
+    let ix_name = d.sem.ix_names.get(&pc).cloned()?;
+    let idl = d.idl?;
+    let ix_def = idl.instructions.iter().find(|x| x.name == ix_name)?;
+    if ix_def.arg_defs.is_empty() {
+        return None;
+    }
+    let vbase = format!("{}Args", pascal_ix(&ix_name));
+    let vname = if idl.types.contains_key(&vbase) {
+        format!("{}IxArgs", vbase.strip_suffix("Args").unwrap())
+    } else {
+        vbase
+    };
+    if d.views.map.contains_key(&vname) {
+        return Some(vname);
+    }
+    d.views.borsh_view(
+        &vname,
+        &format!("arguments of instruction {ix_name} (Anchor IDL, Borsh layout; after the 8-byte discriminator)"),
+        &ix_def.arg_defs,
+        &idl.types,
+        0.0,
+    )
 }

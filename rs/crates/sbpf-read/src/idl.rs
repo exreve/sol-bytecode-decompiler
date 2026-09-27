@@ -307,8 +307,10 @@ pub fn parse_idl(json: &Value) -> IdlInfo {
     };
     for t in arr(nn(get(json, "types"))) {
         if truthy(get(t, "name")) && truthy(get(t, "type")) {
-            info.types
-                .insert(js_string_opt(get(t, "name")), get(t, "type").unwrap().clone());
+            info.types.insert(
+                js_string_opt(get(t, "name")),
+                get(t, "type").unwrap().clone(),
+            );
         }
     }
     for a in arr(nn(get(json, "accounts"))) {
@@ -500,7 +502,10 @@ pub fn borsh_size(t: &Value, types: &IndexMap<String, Value>, depth: u32) -> Opt
 }
 
 /// borshPrefix: fields up to the first one whose size depends on the data.
-pub fn borsh_prefix(fields: &[(String, Value)], types: &IndexMap<String, Value>) -> Vec<BorshField> {
+pub fn borsh_prefix(
+    fields: &[(String, Value)],
+    types: &IndexMap<String, Value>,
+) -> Vec<BorshField> {
     let mut out = Vec::new();
     let mut off = 0.0;
     for (name, t) in fields {
@@ -529,10 +534,7 @@ pub fn struct_fields(name: &str, types: &IndexMap<String, Value>) -> Option<Vec<
     let Some(Value::Array(fs)) = get(def, "fields") else {
         return None;
     };
-    if !fs
-        .iter()
-        .all(|f| f.is_object() && truthy(get(f, "name")))
-    {
+    if !fs.iter().all(|f| f.is_object() && truthy(get(f, "name"))) {
         return None;
     }
     Some(
@@ -579,11 +581,20 @@ pub fn borsh_sample(
         ok: bool,
         types: &'a IndexMap<String, Value>,
     }
-    fn put(st: &mut S, rnd: &mut dyn FnMut() -> u8, n: N, path: &str, kind: LeafKind, heap: bool, ty: String) {
+    fn put(
+        st: &mut S,
+        rnd: &mut dyn FnMut() -> u8,
+        n: N,
+        path: &str,
+        kind: LeafKind,
+        heap: bool,
+        ty: String,
+    ) {
         let off = st.bytes.len() as N;
         let mut i = 0.0;
         while i < n {
-            st.bytes.push(if kind == LeafKind::Bool { 1 } else { rnd() });
+            st.bytes
+                .push(if kind == LeafKind::Bool { 1 } else { rnd() });
             i += 1.0;
         }
         st.leaves.push(SampleLeaf {
@@ -628,13 +639,21 @@ pub fn borsh_sample(
                 st.ok = false;
                 return;
             };
-            let ty = if s == "publicKey" { "pubkey".to_string() } else { s.clone() };
+            let ty = if s == "publicKey" {
+                "pubkey".to_string()
+            } else {
+                s.clone()
+            };
             return put(
                 st,
                 rnd,
                 z,
                 path,
-                if z == 32.0 { LeafKind::Key } else { LeafKind::Int },
+                if z == 32.0 {
+                    LeafKind::Key
+                } else {
+                    LeafKind::Int
+                },
                 heap,
                 ty,
             );
@@ -654,12 +673,27 @@ pub fn borsh_sample(
             }
             if let Value::String(e) = &et {
                 if e == "u8" || e == "i8" {
-                    return put(st, rnd, n, path, LeafKind::Bytes, heap, format!("[{e}; {}]", js_num(n)));
+                    return put(
+                        st,
+                        rnd,
+                        n,
+                        path,
+                        LeafKind::Bytes,
+                        heap,
+                        format!("[{e}; {}]", js_num(n)),
+                    );
                 }
             }
             let mut i = 0.0;
             while i < n {
-                val(st, rnd, &et, &format!("{path}[{}]", js_num(i)), heap, depth + 1);
+                val(
+                    st,
+                    rnd,
+                    &et,
+                    &format!("{path}[{}]", js_num(i)),
+                    heap,
+                    depth + 1,
+                );
                 i += 1.0;
             }
             return;
@@ -690,7 +724,14 @@ pub fn borsh_sample(
             if kind == Some("struct") {
                 if let Some(Value::Array(fs)) = get(&def, "fields") {
                     for (i, f) in fs.iter().enumerate() {
-                        val(st, rnd, field_type(f), &format!("{path}.{}", fname(f, i)), heap, depth + 1);
+                        val(
+                            st,
+                            rnd,
+                            field_type(f),
+                            &format!("{path}.{}", fname(f, i)),
+                            heap,
+                            depth + 1,
+                        );
                     }
                     return;
                 }
@@ -701,7 +742,14 @@ pub fn borsh_sample(
                         st.bytes.push(0);
                         let v = &vs[0];
                         for (i, f) in arr(nn(get(v, "fields"))).iter().enumerate() {
-                            val(st, rnd, field_type(f), &format!("{path}.{}", fname(f, i)), heap, depth + 1);
+                            val(
+                                st,
+                                rnd,
+                                field_type(f),
+                                &format!("{path}.{}", fname(f, i)),
+                                heap,
+                                depth + 1,
+                            );
                         }
                         return;
                     }

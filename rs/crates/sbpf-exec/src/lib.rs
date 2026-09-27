@@ -262,7 +262,11 @@ impl<'p> ProgCtx<'p> {
         };
         let mut pc = fpc;
         while pc < end {
-            let Some(ins) = (if pc >= 0 { p.insns.get(pc as usize) } else { None }) else {
+            let Some(ins) = (if pc >= 0 {
+                p.insns.get(pc as usize)
+            } else {
+                None
+            }) else {
                 return Err(Exc::Fatal(
                     "Cannot read properties of undefined (reading 'opc')".into(),
                 ));
@@ -412,7 +416,8 @@ const UNDEF: u64 = 0xdeadbeef_deadbeef;
 
 /// The pseudo-random bytes of page k for a seed (a xorshift32 stream, little-endian words).
 fn fill_bytes(seed: u32, k: u64, b: &mut [u8; 4096]) {
-    let mut x: u32 = (k as u32) ^ ((k >> 32) as u32).wrapping_mul(0x9e3779b9) ^ seed.wrapping_mul(0x85ebca6b);
+    let mut x: u32 =
+        (k as u32) ^ ((k >> 32) as u32).wrapping_mul(0x9e3779b9) ^ seed.wrapping_mul(0x85ebca6b);
     if x == 0 {
         x = 1;
     }
@@ -465,7 +470,11 @@ impl<'c> ExecMem<'c> {
     fn page(&mut self, k: u64) -> &mut Page {
         if !self.pages.contains_key(&k) {
             let mut b = Box::new([0u8; 4096]);
-            let t0 = if (0x30_0000..0x40_0000).contains(&k) { 0 } else { 1 };
+            let t0 = if (0x30_0000..0x40_0000).contains(&k) {
+                0
+            } else {
+                1
+            };
             if self.fill_seed != 0 {
                 fill_bytes(self.fill_seed, k, &mut b);
             }
@@ -775,7 +784,15 @@ impl<'c> Exec<'c> {
         let mut rt = [0u8; 16];
         rt[..10].fill(1);
         let taint = self.taint;
-        let r = self.frame(h, pc, 0, fp, &mut regs, if taint { Some(&mut rt) } else { None }, 0);
+        let r = self.frame(
+            h,
+            pc,
+            0,
+            fp,
+            &mut regs,
+            if taint { Some(&mut rt) } else { None },
+            0,
+        );
         let steps = self.steps - start;
         match r {
             Ok(()) => Ok(ExecResult {
@@ -930,8 +947,11 @@ impl<'c> Exec<'c> {
                         self.mem
                             .set_taint(d.wrapping_add(off64), (mt & 15) as usize, ctl);
                     } else if mt & STX != 0 {
-                        self.mem
-                            .set_taint(d.wrapping_add(off64), (mt & 15) as usize, rt[src] | ctl);
+                        self.mem.set_taint(
+                            d.wrapping_add(off64),
+                            (mt & 15) as usize,
+                            rt[src] | ctl,
+                        );
                     } else if o == 0x18 && !no_lddw {
                         tv = ctl as i32;
                     } else if pqr && cls == 6 {
@@ -1415,7 +1435,11 @@ fn pqr_op(o: u8, d: u64, s: u64, imm32: i32) -> R<u64> {
             if !is64 {
                 return bad();
             }
-            let b: i128 = if is_imm { imm32 as i128 } else { s as i64 as i128 };
+            let b: i128 = if is_imm {
+                imm32 as i128
+            } else {
+                s as i64 as i128
+            };
             Ok((((d as i64 as i128) * b) >> 64) as u64)
         }
         0x40 | 0x60 => {

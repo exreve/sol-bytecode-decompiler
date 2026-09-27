@@ -197,7 +197,13 @@ impl Ctx<'_> {
         r.codes[len] = Some(codes.clone());
         for k in (0..len).rev() {
             let n = &ns[k];
-            for nm in top_names(self.ir, self.tree, std::slice::from_ref(n), self.name_fn, self.str_at) {
+            for nm in top_names(
+                self.ir,
+                self.tree,
+                std::slice::from_ref(n),
+                self.name_fn,
+                self.str_at,
+            ) {
                 r.top_last.entry(nm).or_insert(k);
             }
             if names.len() >= 2 {
@@ -329,7 +335,14 @@ pub fn anchor_fn(
     // try-call result groups
     let mut group: IndexMap<u32, u32> = IndexMap::new();
     let mut gid = 0u32;
-    fn groups(ir: &Ir, tree: &Tree, fp: Option<u32>, ns: &[SNode], group: &mut IndexMap<u32, u32>, gid: &mut u32) {
+    fn groups(
+        ir: &Ir,
+        tree: &Tree,
+        fp: Option<u32>,
+        ns: &[SNode],
+        group: &mut IndexMap<u32, u32>,
+        gid: &mut u32,
+    ) {
         let mut cur: Option<(N, u32)> = None;
         for n in ns {
             let SNode::Stmt(si) = n else {
@@ -373,7 +386,10 @@ pub fn anchor_fn(
                     }
                 }
             }
-            if matches!(s, Stmt::Store { .. } | Stmt::Stores { .. } | Stmt::Copy { .. }) {
+            if matches!(
+                s,
+                Stmt::Store { .. } | Stmt::Stores { .. } | Stmt::Copy { .. }
+            ) {
                 cur = None;
             }
         }
@@ -392,7 +408,8 @@ pub fn anchor_fn(
         for k in 0..ns.len() {
             let n = &ns[k];
             if let SNode::If { c, then, els } = n {
-                let mut sides: [(Option<&Vec<SNode>>, bool); 2] = [(Some(then), false), (Some(els), false)];
+                let mut sides: [(Option<&Vec<SNode>>, bool); 2] =
+                    [(Some(then), false), (Some(els), false)];
                 if els.is_empty() && exits(cx.tree, then) {
                     sides[1] = (None, true);
                 }
@@ -409,7 +426,8 @@ pub fn anchor_fn(
                             }
                             nm = i.names.first().unwrap().clone();
                             codes = i.codes.clone();
-                            top_has = top_names(cx.ir, cx.tree, side, cx.name_fn, cx.str_at).contains(&nm);
+                            top_has = top_names(cx.ir, cx.tree, side, cx.name_fn, cx.str_at)
+                                .contains(&nm);
                         }
                         None => {
                             let suf = cx.suffixes(ns);
@@ -418,7 +436,8 @@ pub fn anchor_fn(
                             }
                             nm = suf.one[k + 1].clone().unwrap();
                             codes = suf.codes[k + 1].clone().unwrap();
-                            top_has = suf.top_last.get(&nm).map_or(-1, |&x| x as i64) >= k as i64 + 1;
+                            top_has =
+                                suf.top_last.get(&nm).map_or(-1, |&x| x as i64) >= k as i64 + 1;
                         }
                     }
                     if rest && !top_has {
@@ -497,10 +516,16 @@ pub fn out_aliases(f: &Func) -> Option<IndexSet<u32>> {
             match s {
                 Stmt::Set { dst, e, .. } => defs.entry(*dst).or_default().push(Some(*e)),
                 Stmt::Call { dst, .. } => defs.entry(*dst).or_default().push(None),
-                Stmt::Store { size: 8, addr, v, .. } => {
+                Stmt::Store {
+                    size: 8, addr, v, ..
+                } => {
                     if let Some(o) = fo_any(ir, *addr, fp) {
                         let k = K::of(o);
-                        let nv = if slots.contains_key(&k) { None } else { Some(*v) };
+                        let nv = if slots.contains_key(&k) {
+                            None
+                        } else {
+                            Some(*v)
+                        };
                         slots.insert(k, nv);
                     }
                 }
@@ -510,7 +535,11 @@ pub fn out_aliases(f: &Func) -> Option<IndexSet<u32>> {
                     if let Some(o) = fo_any(ir, *addr, fp) {
                         for (i, v) in ir.items(*vals).enumerate() {
                             let k = K::of(o + (*size as usize * i) as N);
-                            let nv = if slots.contains_key(&k) || *size != 8 { None } else { Some(v) };
+                            let nv = if slots.contains_key(&k) || *size != 8 {
+                                None
+                            } else {
+                                Some(v)
+                            };
                             slots.insert(k, nv);
                         }
                     }
@@ -600,15 +629,24 @@ pub fn accounts_layout(f: &Func, names: &IndexMap<u32, String>) -> IndexMap<K, S
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
-                Stmt::Store { size: 8, addr, v, .. } => {
+                Stmt::Store {
+                    size: 8, addr, v, ..
+                } => {
                     if let Some(o) = fo(*addr) {
                         let k = K::of(o);
-                        let nv = if slot.contains_key(&k) { None } else { Some(*v) };
+                        let nv = if slot.contains_key(&k) {
+                            None
+                        } else {
+                            Some(*v)
+                        };
                         slot.insert(k, nv);
                     }
                 }
                 Stmt::Stores {
-                    size: 8, addr, vals, ..
+                    size: 8,
+                    addr,
+                    vals,
+                    ..
                 } => {
                     if let Some(o) = fo(*addr) {
                         for (i, v) in ir.items(*vals).enumerate() {
@@ -655,11 +693,14 @@ pub fn accounts_layout(f: &Func, names: &IndexMap<u32, String>) -> IndexMap<K, S
     };
     for b in &f.blocks {
         let err_block = b.stmts.iter().any(|s| match s {
-            Stmt::Store { size: 8, addr, v, .. } => {
-                ir.get(*v) == Node::Const(0) && out_off(*addr) == 0.0
-            }
+            Stmt::Store {
+                size: 8, addr, v, ..
+            } => ir.get(*v) == Node::Const(0) && out_off(*addr) == 0.0,
             Stmt::Stores {
-                size: 8, addr, vals, ..
+                size: 8,
+                addr,
+                vals,
+                ..
             } => ir.get(ir.at(*vals, 0)) == Node::Const(0) && out_off(*addr) == 0.0,
             _ => false,
         });
@@ -739,7 +780,15 @@ fn account_evidence(f: &Func) -> HashSet<u32> {
                 }
             }
             if let Node::Fn(n, args) = x {
-                let which = ir.with_name(n, |s| if s == "memeq" { 2 } else if s == "keyeq" { 1 } else { 0 });
+                let which = ir.with_name(n, |s| {
+                    if s == "memeq" {
+                        2
+                    } else if s == "keyeq" {
+                        1
+                    } else {
+                        0
+                    }
+                });
                 for i in 0..which.min(args.len) {
                     if let Some(v) = key_ptr_of(ir.at(args, i)) {
                         out.insert(v);

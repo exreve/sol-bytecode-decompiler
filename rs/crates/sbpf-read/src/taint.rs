@@ -107,7 +107,13 @@ pub fn instruction_taint(
                             if let Some(o) = fo(*addr) {
                                 for (i, v) in ir.items(*vals).enumerate() {
                                     let k = taint(ir, &t, fp, v);
-                                    set_frame(&mut t, o + (i * *size as usize) as N, *size as N, k, &mut changed);
+                                    set_frame(
+                                        &mut t,
+                                        o + (i * *size as usize) as N,
+                                        *size as N,
+                                        k,
+                                        &mut changed,
+                                    );
                                 }
                             }
                         }
@@ -119,7 +125,13 @@ pub fn instruction_taint(
                                 for (lo, hi, k) in snap {
                                     if lo < so + n && so < hi {
                                         let a = lo.max(so);
-                                        set_frame(&mut t, a - so + o, hi.min(so + n) - a, Some(k), &mut changed);
+                                        set_frame(
+                                            &mut t,
+                                            a - so + o,
+                                            hi.min(so + n) - a,
+                                            Some(k),
+                                            &mut changed,
+                                        );
                                     }
                                 }
                             } else if taint(ir, &t, fp, *src).is_some() {
@@ -135,35 +147,36 @@ pub fn instruction_taint(
             }
         }
         res.insert(pc, t);
-        let mut visit_call = |callee: i64, args: L, res: &mut IndexMap<i64, FnTaint>, queue: &mut IndexSet<i64>| {
-            let Some(cf) = funcs.get(&callee) else { return };
-            for (i, a) in ir.items(args).enumerate() {
-                // (the function's taint as it is now: a recursive call may have changed it)
-                let t = &res[&pc];
-                let k = match fo(a) {
-                    Some(o) => {
-                        if frame_at(t, o, extent(o)).is_some() {
-                            Some(TK::Ptr)
-                        } else {
-                            None
+        let mut visit_call =
+            |callee: i64, args: L, res: &mut IndexMap<i64, FnTaint>, queue: &mut IndexSet<i64>| {
+                let Some(cf) = funcs.get(&callee) else { return };
+                for (i, a) in ir.items(args).enumerate() {
+                    // (the function's taint as it is now: a recursive call may have changed it)
+                    let t = &res[&pc];
+                    let k = match fo(a) {
+                        Some(o) => {
+                            if frame_at(t, o, extent(o)).is_some() {
+                                Some(TK::Ptr)
+                            } else {
+                                None
+                            }
                         }
+                        None => taint(ir, t, fp, a),
+                    };
+                    let Some(k) = k else { continue };
+                    let reg = arg_reg(cf, i);
+                    let Some(pv) = cf.vars.iter().find(|v| v.param == reg) else {
+                        continue;
+                    };
+                    let ct = res.entry(callee).or_default();
+                    let old = ct.vars.get(&pv.id).copied();
+                    let n = join(old, Some(k));
+                    if n != old {
+                        ct.vars.insert(pv.id, n.unwrap());
+                        queue.insert(callee);
                     }
-                    None => taint(ir, t, fp, a),
-                };
-                let Some(k) = k else { continue };
-                let reg = arg_reg(cf, i);
-                let Some(pv) = cf.vars.iter().find(|v| v.param == reg) else {
-                    continue;
-                };
-                let ct = res.entry(callee).or_default();
-                let old = ct.vars.get(&pv.id).copied();
-                let n = join(old, Some(k));
-                if n != old {
-                    ct.vars.insert(pv.id, n.unwrap());
-                    queue.insert(callee);
                 }
-            }
-        };
+            };
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Call {
@@ -211,8 +224,7 @@ fn set_var(t: &mut FnTaint, v: u32, k: Option<TK>, changed: &mut bool) {
 
 fn set_frame(t: &mut FnTaint, o: N, n: N, k: Option<TK>, changed: &mut bool) {
     let Some(k) = k else { return };
-    if t
-        .frame
+    if t.frame
         .iter()
         .any(|&(lo, hi, kk)| lo <= o && o + n <= hi && (kk == k || kk == TK::Val))
     {
@@ -300,7 +312,10 @@ pub fn expr_tainted(t: Option<&FnTaint>, ir: &Ir, e: E, fp: Option<u32>) -> bool
                 if let (Node::Var(av), Node::Const(c)) = (ir.get(a), ir.get(c)) {
                     if Some(av) == fp {
                         let o = n_s(c);
-                        if t.frame.iter().any(|&(lo, hi, _)| lo < o + size as N && o < hi) {
+                        if t.frame
+                            .iter()
+                            .any(|&(lo, hi, _)| lo < o + size as N && o < hi)
+                        {
                             hit = true;
                         }
                     }

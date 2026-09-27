@@ -6,7 +6,9 @@ use crate::idl::{borsh_sample, get, js_string_opt, truthy, IdlInfo, LeafKind, Sa
 use crate::util::{fo_any, is_memcpy_name, js_hex, stmt_exprs, term_br, to_int32, unb58, K, N};
 use crate::views::{fid, Field, View, Views, FT};
 use indexmap::{IndexMap, IndexSet};
-use sbpf_exec::{call_target_name, CallName, Exec, ExecMem, MemObserver, NoHooks, ProgCtx, TaintArg};
+use sbpf_exec::{
+    call_target_name, CallName, Exec, ExecMem, MemObserver, NoHooks, ProgCtx, TaintArg,
+};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_program::Func;
 use sbpf_struct::{SNode, Tree};
@@ -79,7 +81,11 @@ fn spl_sample(kind: &str) -> Sample {
             path: path.into(),
             off: bytes.len() as N,
             size: n as N,
-            kind: if n == 32 { LeafKind::Key } else { LeafKind::Int },
+            kind: if n == 32 {
+                LeafKind::Key
+            } else {
+                LeafKind::Int
+            },
             ty: ty.into(),
             heap: false,
         });
@@ -251,7 +257,8 @@ impl<'c> StateCtx<'c> {
             return Some(r);
         }
         let owner = unb58(&smp.owner);
-        let out = self.run_account_callee(x, &data_of(smp, &smp.bytes), &owner, [0, 1, 0], None, None);
+        let out =
+            self.run_account_callee(x, &data_of(smp, &smp.bytes), &owner, [0, 1, 0], None, None);
         for w in out.as_deref().map(heap_words).unwrap_or_default() {
             if let Some(mut b) = self.locate_in(x, smp, Some(w)) {
                 b.box_at = Some(w);
@@ -263,7 +270,9 @@ impl<'c> StateCtx<'c> {
 
     fn locate_in(&self, x: i64, smp: &Sample, box_at: Option<N>) -> Option<Located> {
         let owner = unb58(&smp.owner);
-        let run = |bytes: &[u8]| self.run_account_callee(x, &data_of(smp, bytes), &owner, [0, 1, 0], box_at, None);
+        let run = |bytes: &[u8]| {
+            self.run_account_callee(x, &data_of(smp, bytes), &owner, [0, 1, 0], box_at, None)
+        };
         let base = run(&smp.bytes)?;
         let mut at4: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut i = 0;
@@ -324,11 +333,18 @@ impl<'c> StateCtx<'c> {
             let mut b2 = smp.bytes.clone();
             for i in 0..l.size as usize {
                 let k = l.off as usize + i;
-                b2[k] = if l.kind == LeafKind::Bool { 0 } else { b2[k] ^ 0x5a };
+                b2[k] = if l.kind == LeafKind::Bool {
+                    0
+                } else {
+                    b2[k] ^ 0x5a
+                };
             }
             let Some(o2) = run(&b2) else { continue };
             let diff: Vec<usize> = (0..SIZE).filter(|&i| o2[i] != base[i]).collect();
-            if !diff.is_empty() && diff.len() as N <= l.size && ((diff[diff.len() - 1] - diff[0]) as N) < l.size {
+            if !diff.is_empty()
+                && diff.len() as N <= l.size
+                && ((diff[diff.len() - 1] - diff[0]) as N) < l.size
+            {
                 at.insert(
                     l.path.clone(),
                     Loc {
@@ -360,12 +376,16 @@ impl<'c> StateCtx<'c> {
             let run = |box_at: Option<N>, f: &dyn Fn(usize) -> u8| {
                 self.run_account_callee(x, &make(f), owner, [0, 1, 0], box_at, None)
             };
-            let Some(base0) = run(None, &|_| 0) else { continue };
+            let Some(base0) = run(None, &|_| 0) else {
+                continue;
+            };
             let mut cands: Vec<Option<N>> = vec![None];
             cands.extend(heap_words(&base0).into_iter().map(Some));
             for box_at in cands {
                 let map = decode_copies(&|f: &dyn Fn(usize) -> u8| run(box_at, f), n);
-                let Some(map) = map.filter(|m| m.len() >= 8) else { continue };
+                let Some(map) = map.filter(|m| m.len() >= 8) else {
+                    continue;
+                };
                 let base = run(box_at, &|_| 0).unwrap();
                 return Some(Located {
                     at: copy_leaves(&map, 8),
@@ -420,7 +440,14 @@ impl<'c> StateCtx<'c> {
             }
             let mut e = Exec::new(self.ctx, mem, 60_000, false);
             e.no_panic = true;
-            let r = match e.run(&mut NoHooks, x, &[OUT, db, n as u64, 0, 0], 0x2_0000_3000, None, &[]) {
+            let r = match e.run(
+                &mut NoHooks,
+                x,
+                &[OUT, db, n as u64, 0, 0],
+                0x2_0000_3000,
+                None,
+                &[],
+            ) {
                 Ok(r) => r,
                 Err(m) => crate::util::js_throw(&m),
             };
@@ -433,7 +460,10 @@ impl<'c> StateCtx<'c> {
         if run_n(NN, &|_| 0, true).is_some() {
             let rd = *read.borrow();
             let mut ns: Vec<usize> = Vec::new();
-            for n in std::iter::once(rd).chain(lens.iter().copied()).chain(std::iter::once(NN)) {
+            for n in std::iter::once(rd)
+                .chain(lens.iter().copied())
+                .chain(std::iter::once(NN))
+            {
                 if !ns.contains(&n) {
                     ns.push(n);
                 }
@@ -529,7 +559,9 @@ fn decode_copies(
     n: usize,
 ) -> Option<IndexMap<usize, usize>> {
     let hash = |i: usize, k: u32| -> u8 {
-        (((((i as u32).wrapping_add(1)).wrapping_mul(0x9e3779b1) ^ k.wrapping_mul(0x85ebca6b)) >> 16) & 1) as u8
+        (((((i as u32).wrapping_add(1)).wrapping_mul(0x9e3779b1) ^ k.wrapping_mul(0x85ebca6b))
+            >> 16)
+            & 1) as u8
     };
     let mut bits = 0u32;
     while (1u64 << bits) < n as u64 + 1 {
@@ -622,7 +654,13 @@ fn fields_eq(a: &[Field], b: &[Field]) -> bool {
 }
 
 /// buildViews: views of a located layout (nested structs flattened, arrays of structs as element views).
-fn build_views(views: &mut Views, top: &str, doc: &str, at: &IndexMap<String, Loc>, info: Option<InfoAt>) -> Option<String> {
+fn build_views(
+    views: &mut Views,
+    top: &str,
+    doc: &str,
+    at: &IndexMap<String, Loc>,
+    info: Option<InfoAt>,
+) -> Option<String> {
     #[derive(Default)]
     struct T {
         leaf: Option<Loc>,
@@ -638,7 +676,11 @@ fn build_views(views: &mut Views, top: &str, doc: &str, at: &IndexMap<String, Lo
                 .get(x)
                 .is_some_and(|w| w.doc.starts_with("Account<") || w.doc.starts_with("element of"))
         };
-        let b = if own(n) { n.to_string() } else { format!("{n}Obj") };
+        let b = if own(n) {
+            n.to_string()
+        } else {
+            format!("{n}Obj")
+        };
         if !taken(v, &b) {
             return b;
         }
@@ -778,12 +820,28 @@ fn build_views(views: &mut Views, top: &str, doc: &str, at: &IndexMap<String, Lo
                             count: None,
                         });
                     } else {
-                        out.extend(fields_of(v, e, base, &format!("{name}_{i}_"), type_hint, top, view_name));
+                        out.extend(fields_of(
+                            v,
+                            e,
+                            base,
+                            &format!("{name}_{i}_"),
+                            type_hint,
+                            top,
+                            view_name,
+                        ));
                     }
                 }
                 continue;
             }
-            out.extend(fields_of(v, c, base, &format!("{name}_"), type_hint, top, view_name));
+            out.extend(fields_of(
+                v,
+                c,
+                base,
+                &format!("{name}_"),
+                type_hint,
+                top,
+                view_name,
+            ));
         }
         out
     }
@@ -811,7 +869,10 @@ fn build_views(views: &mut Views, top: &str, doc: &str, at: &IndexMap<String, Lo
     }
     fields.sort_by(|a, b| a.off.partial_cmp(&b.off).unwrap());
     for v in views.map.values() {
-        if v.doc.starts_with("Account<") && strip_obj_suffix(&v.name) == top && fields_eq(&v.fields, &fields) {
+        if v.doc.starts_with("Account<")
+            && strip_obj_suffix(&v.name) == top
+            && fields_eq(&v.fields, &fields)
+        {
             return Some(v.name.clone());
         }
     }
@@ -845,7 +906,14 @@ fn strip_obj_suffix(n: &str) -> &str {
 /// inlineString: an identifier written with constant stores to consecutive bytes of one base.
 pub fn inline_string(ir: &Ir, tree: &Tree, ns: &[SNode]) -> Option<String> {
     let mut bytes: IndexMap<u32, IndexMap<i64, Option<u8>>> = IndexMap::new();
-    fn put(ir: &Ir, bytes: &mut IndexMap<u32, IndexMap<i64, Option<u8>>>, base: Option<u32>, o: i64, size: u8, v: E) {
+    fn put(
+        ir: &Ir,
+        bytes: &mut IndexMap<u32, IndexMap<i64, Option<u8>>>,
+        base: Option<u32>,
+        o: i64,
+        size: u8,
+        v: E,
+    ) {
         let Some(b) = base else { return };
         if !(0..=64).contains(&o) {
             return;
@@ -857,11 +925,20 @@ pub fn inline_string(ir: &Ir, tree: &Tree, ns: &[SNode]) -> Option<String> {
                 _ => None,
             };
             let k = o + i;
-            let nv = if m.contains_key(&k) && m[&k] != x { None } else { x };
+            let nv = if m.contains_key(&k) && m[&k] != x {
+                None
+            } else {
+                x
+            };
             m.insert(k, nv);
         }
     }
-    fn scan(ir: &Ir, tree: &Tree, xs: &[SNode], bytes: &mut IndexMap<u32, IndexMap<i64, Option<u8>>>) {
+    fn scan(
+        ir: &Ir,
+        tree: &Tree,
+        xs: &[SNode],
+        bytes: &mut IndexMap<u32, IndexMap<i64, Option<u8>>>,
+    ) {
         for n in xs {
             match n {
                 SNode::Stmt(si) => match tree.stmt(*si) {
@@ -885,7 +962,9 @@ pub fn inline_string(ir: &Ir, tree: &Tree, ns: &[SNode]) -> Option<String> {
                     } => {
                         let (a, c) = match ir.get(*addr) {
                             Node::Bin(BinOp::Add, a, c) if matches!(ir.get(c), Node::Const(_)) => {
-                                let Node::Const(c) = ir.get(c) else { unreachable!() };
+                                let Node::Const(c) = ir.get(c) else {
+                                    unreachable!()
+                                };
                                 (a, c)
                             }
                             _ => (*addr, 0),
@@ -924,7 +1003,8 @@ pub fn inline_string(ir: &Ir, tree: &Tree, ns: &[SNode]) -> Option<String> {
         if s.chars().count() >= 3
             && s.chars().count() == m.len()
             && b[0].is_ascii_lowercase()
-            && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+            && b.iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
         {
             return Some(s);
         }
@@ -969,7 +1049,13 @@ fn mentions_var(ir: &Ir, tree: &Tree, ns: &[SNode], v: u32) -> bool {
 }
 
 /// immediates: 64-bit immediates of a function's code and its callees within `depth` calls.
-fn immediates(p: &sbpf_program::Program, ctx: &ProgCtx, pc: i64, depth: u32, memo: &mut HashMap<(i64, u32), IndexSet<u64>>) -> IndexSet<u64> {
+fn immediates(
+    p: &sbpf_program::Program,
+    ctx: &ProgCtx,
+    pc: i64,
+    depth: u32,
+    memo: &mut HashMap<(i64, u32), IndexSet<u64>>,
+) -> IndexSet<u64> {
     if let Some(r) = memo.get(&(pc, depth)) {
         return r.clone();
     }
@@ -1097,7 +1183,14 @@ pub fn account_objects(
     let mut view_of: HashMap<(i64, String), Option<String>> = HashMap::new();
     let mut box_at_of: HashMap<(i64, String), N> = HashMap::new();
     let mut spl_memo: HashMap<(i64, u32), IndexSet<String>> = HashMap::new();
-    fn spl_of(p: &sbpf_program::Program, ctx: &ProgCtx, fnames: &dyn Fn(i64) -> Option<String>, pc: i64, depth: u32, memo: &mut HashMap<(i64, u32), IndexSet<String>>) -> IndexSet<String> {
+    fn spl_of(
+        p: &sbpf_program::Program,
+        ctx: &ProgCtx,
+        fnames: &dyn Fn(i64) -> Option<String>,
+        pc: i64,
+        depth: u32,
+        memo: &mut HashMap<(i64, u32), IndexSet<String>>,
+    ) -> IndexSet<String> {
         if let Some(r) = memo.get(&(pc, depth)) {
             return r.clone();
         }
@@ -1139,18 +1232,24 @@ pub fn account_objects(
         for b in &f.blocks {
             for s in &b.stmts {
                 match s {
-                    Stmt::Set { dst, .. } | Stmt::Call { dst, .. } => *defs.entry(*dst).or_default() += 1,
+                    Stmt::Set { dst, .. } | Stmt::Call { dst, .. } => {
+                        *defs.entry(*dst).or_default() += 1
+                    }
                     _ => {}
                 }
             }
         }
-        let Some(aliases) = out_aliases(f) else { continue };
+        let Some(aliases) = out_aliases(f) else {
+            continue;
+        };
         let fo = |e: E| fo_any(ir, e, fp);
         let oo = |e: E| -> Option<N> {
             match ir.get(e) {
                 Node::Var(v) if aliases.contains(&v) => Some(0.0),
                 Node::Bin(BinOp::Add, a, c) => match (ir.get(a), ir.get(c)) {
-                    (Node::Var(v), Node::Const(c)) if aliases.contains(&v) => Some(crate::util::n_s(c)),
+                    (Node::Var(v), Node::Const(c)) if aliases.contains(&v) => {
+                        Some(crate::util::n_s(c))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -1317,7 +1416,13 @@ pub fn account_objects(
                 if o0.off == 0.0 && fo(dst).is_none() && oo(dst).is_none() {
                     if s.objs[o0.obj].view.is_some() {
                         s.box_vars.insert(dv, o0.obj);
-                        s.vset(dv, Org { obj: o0.obj, off: -1.0 });
+                        s.vset(
+                            dv,
+                            Org {
+                                obj: o0.obj,
+                                off: -1.0,
+                            },
+                        );
                     }
                     return;
                 }
@@ -1332,7 +1437,8 @@ pub fn account_objects(
         let is_name_call = |st: &Stmt| -> bool {
             match st {
                 Stmt::Call {
-                    t: CallTarget::Fn { pc }, ..
+                    t: CallTarget::Fn { pc },
+                    ..
                 } => *pc == name_fn,
                 Stmt::Set { e, .. } => match ir.get(*e) {
                     Node::Call(t, _) => ir.target(t) == CallTarget::Fn { pc: name_fn },
@@ -1341,9 +1447,15 @@ pub fn account_objects(
                 _ => false,
             }
         };
-        let names_err = |ns: &[SNode]| ns.iter().any(|n| matches!(n, SNode::Stmt(si) if is_name_call(tree.stmt(*si))));
+        let names_err = |ns: &[SNode]| {
+            ns.iter()
+                .any(|n| matches!(n, SNode::Stmt(si) if is_name_call(tree.stmt(*si))))
+        };
         let exits = |ns: &[SNode]| {
-            matches!(ns.last(), Some(SNode::Return(_) | SNode::Break(_) | SNode::Continue(_) | SNode::Trap(_))) || names_err(ns)
+            matches!(
+                ns.last(),
+                Some(SNode::Return(_) | SNode::Break(_) | SNode::Continue(_) | SNode::Trap(_))
+            ) || names_err(ns)
         };
         // the walk (statement order), with its environment passed explicitly
         struct Env<'a, 'b> {
@@ -1386,29 +1498,34 @@ pub fn account_objects(
             }
             let mut hits: IndexSet<String> = IndexSet::new();
             for v in immediates(env.p, env.st.ctx, x, 4, env.memo) {
-                let t = env.discs.get(&v).cloned().or_else(|| {
-                    if env.disc_at_memo.is_none() {
-                        let mut m = HashMap::new();
-                        for (d, name) in env.discs {
-                            let needle = d.to_le_bytes();
-                            let img = env.p.image();
-                            for &ri in &img.order {
-                                let r = &env.p.elf.regions[ri];
-                                let hay = env.p.elf.region_bytes(r);
-                                let mut from = 0;
-                                while let Some(i) = crate::sem::find(&hay[from..], &needle) {
-                                    m.insert(r.vaddr + (from + i) as u64, name.clone());
-                                    from += i + 1;
-                                    if from > hay.len() {
-                                        break;
+                let t = env
+                    .discs
+                    .get(&v)
+                    .cloned()
+                    .or_else(|| {
+                        if env.disc_at_memo.is_none() {
+                            let mut m = HashMap::new();
+                            for (d, name) in env.discs {
+                                let needle = d.to_le_bytes();
+                                let img = env.p.image();
+                                for &ri in &img.order {
+                                    let r = &env.p.elf.regions[ri];
+                                    let hay = env.p.elf.region_bytes(r);
+                                    let mut from = 0;
+                                    while let Some(i) = crate::sem::find(&hay[from..], &needle) {
+                                        m.insert(r.vaddr + (from + i) as u64, name.clone());
+                                        from += i + 1;
+                                        if from > hay.len() {
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            *env.disc_at_memo = Some(m);
                         }
-                        *env.disc_at_memo = Some(m);
-                    }
-                    env.disc_at_memo.as_ref().unwrap().get(&v).cloned()
-                }).or_else(|| named_disc(v, env.discs));
+                        env.disc_at_memo.as_ref().unwrap().get(&v).cloned()
+                    })
+                    .or_else(|| named_disc(v, env.discs));
                 if let Some(t) = t {
                     hits.insert(t);
                 }
@@ -1418,7 +1535,11 @@ pub fn account_objects(
                     hits.insert(t);
                 }
             }
-            let t = if hits.len() == 1 { hits.first().cloned() } else { None };
+            let t = if hits.len() == 1 {
+                hits.first().cloned()
+            } else {
+                None
+            };
             env.type_of.insert(x, t.clone());
             t
         };
@@ -1452,11 +1573,18 @@ pub fn account_objects(
                 if get(def, "kind").and_then(|x| x.as_str()) != Some("struct") {
                     return None;
                 }
-                let Some(Value::Array(fs)) = get(def, "fields") else { return None };
+                let Some(Value::Array(fs)) = get(def, "fields") else {
+                    return None;
+                };
                 let fields: Vec<(String, Value)> = fs
                     .iter()
                     .filter(|f| f.is_object() && truthy(get(f, "name")))
-                    .map(|f| (js_string_opt(get(f, "name")), get(f, "type").cloned().unwrap_or(Value::Null)))
+                    .map(|f| {
+                        (
+                            js_string_opt(get(f, "name")),
+                            get(f, "type").cloned().unwrap_or(Value::Null),
+                        )
+                    })
                     .collect();
                 let mut rng = Rng::new();
                 let (bytes, leaves) = borsh_sample(&fields, &idl.types, &mut || rng.next())?;
@@ -1505,7 +1633,9 @@ pub fn account_objects(
                     (Some(_), Some(a)) => unb58(a),
                     _ => vec![7; 32],
                 };
-                let b = env.st.run_account_callee(x, &data, &owner, [1, 1, 0], None, None);
+                let b = env
+                    .st
+                    .run_account_callee(x, &data, &owner, [1, 1, 0], None, None);
                 let r = b.and_then(|b| info_in(&b, 0x40));
                 env.info_words.insert(x, r);
             }
@@ -1529,7 +1659,9 @@ pub fn account_objects(
                     Node::Call(t, args) => (true, *dst, Some(ir.target(t)), ir.to_vec(args), *pc),
                     _ => (false, *dst, None, vec![], *pc),
                 },
-                Stmt::Call { dst, t, args, pc, .. } => (true, *dst, Some(t.clone()), ir.to_vec(*args), *pc),
+                Stmt::Call {
+                    dst, t, args, pc, ..
+                } => (true, *dst, Some(t.clone()), ir.to_vec(*args), *pc),
                 _ => (false, -1, None, vec![], 0),
             };
             if !is_call {
@@ -1552,7 +1684,9 @@ pub fn account_objects(
                             s.clobber(g, *size as N, false);
                         }
                     }
-                    Stmt::Stores { addr, size, vals, .. } => {
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => {
                         if *size == 8 {
                             for (i, v) in ir.items(*vals).enumerate() {
                                 let o = origin_of(s, v);
@@ -1594,7 +1728,9 @@ pub fn account_objects(
                 return;
             }
             let is_copy = match &t {
-                CallTarget::Sys { name, .. } => &**name == "sol_memcpy_" || &**name == "sol_memmove_",
+                CallTarget::Sys { name, .. } => {
+                    &**name == "sol_memcpy_" || &**name == "sol_memmove_"
+                }
                 _ => is_memcpy_name(&(env.fnames)(tpc).unwrap_or_default()),
             };
             if is_copy && args.len() >= 3 {
@@ -1651,7 +1787,13 @@ pub fn account_objects(
                         s.clobber(out, n, false);
                         let mut w2 = 0.0;
                         while w2 < n {
-                            s.org.set(out + w2, Org { obj: id, off: w2 - w.off });
+                            s.org.set(
+                                out + w2,
+                                Org {
+                                    obj: id,
+                                    off: w2 - w.off,
+                                },
+                            );
                             w2 += 8.0;
                         }
                     }
@@ -1724,7 +1866,16 @@ pub fn account_objects(
                 s.objs[obj].name = Some(nm);
             }
         };
-        walk(&tree.body, &mut s, &mut env, tree, ir, &mut on_stmt, &exits, &name_inline);
+        walk(
+            &tree.body,
+            &mut s,
+            &mut env,
+            tree,
+            ir,
+            &mut on_stmt,
+            &exits,
+            &name_inline,
+        );
         // objects in place in the returned struct
         let mut inline: IndexMap<K, AccountObj> = IndexMap::new();
         let mut bases: IndexMap<(usize, K), u32> = IndexMap::new();
@@ -1732,7 +1883,12 @@ pub fn account_objects(
             *bases.entry((o.obj, K::of(k.get() - o.off))).or_default() += 1;
         }
         let mut infos: IndexMap<K, (String, Option<String>, bool)> = IndexMap::new();
-        let rust = |t: &str| t.strip_prefix("spl:").or_else(|| t.strip_prefix("disc:")).unwrap_or(t).to_string();
+        let rust = |t: &str| {
+            t.strip_prefix("spl:")
+                .or_else(|| t.strip_prefix("disc:"))
+                .unwrap_or(t)
+                .to_string()
+        };
         let acc = |ob: &Obj| AccountObj {
             name: ob.name.clone().unwrap_or_else(|| "undefined".into()),
             view: ob.view.clone().unwrap_or_else(|| "undefined".into()),
@@ -1755,19 +1911,33 @@ pub fn account_objects(
         for (&(obj, base), &n) in &bases {
             let ob = &s.objs[obj];
             let b = base.get();
-            if ob.name.is_none() || b < 0.0 || b == -1.0 || s.out_words.get(&base).is_some_and(|o| o.off == -1.0) {
+            if ob.name.is_none()
+                || b < 0.0
+                || b == -1.0
+                || s.out_words.get(&base).is_some_and(|o| o.off == -1.0)
+            {
                 continue;
             }
             if ob.view.is_none() {
                 if s.out_words.get(&base).is_some_and(|o| o.off == 0.0) {
-                    infos.insert(base, (ob.name.clone().unwrap(), ob.ty.as_deref().map(rust), ob.embed));
+                    infos.insert(
+                        base,
+                        (
+                            ob.name.clone().unwrap(),
+                            ob.ty.as_deref().map(rust),
+                            ob.embed,
+                        ),
+                    );
                 }
                 continue;
             }
             if n < 2 || ob.ty.is_none() {
                 continue;
             }
-            let prev = inline.iter().find(|(_, a)| Some(&a.name) == ob.name.as_ref()).map(|(k, _)| *k);
+            let prev = inline
+                .iter()
+                .find(|(_, a)| Some(&a.name) == ob.name.as_ref())
+                .map(|(k, _)| *k);
             if let Some(pk) = prev {
                 let pn = bases.get(&(obj, pk)).copied().unwrap_or(0);
                 if pn > n || (pn == n && pk.get() < b) {
@@ -1789,10 +1959,22 @@ pub fn account_objects(
             let o = &s.objs[*id];
             calls.insert(
                 *at,
-                (o.name.clone(), if o.view.is_some() && !o.boxed { o.view.clone() } else { None }),
+                (
+                    o.name.clone(),
+                    if o.view.is_some() && !o.boxed {
+                        o.view.clone()
+                    } else {
+                        None
+                    },
+                ),
             );
         }
-        if !boxes.is_empty() || !inline.is_empty() || !infos.is_empty() || !refs.is_empty() || !calls.is_empty() {
+        if !boxes.is_empty()
+            || !inline.is_empty()
+            || !infos.is_empty()
+            || !refs.is_empty()
+            || !calls.is_empty()
+        {
             res.insert(
                 pc,
                 AccountObjs {
@@ -1825,7 +2007,9 @@ fn spl_kind(nm: &str) -> Option<&'static str> {
     let hex_ok = |s: &str| {
         s.is_empty()
             || s.strip_prefix('_').is_some_and(|h| {
-                !h.is_empty() && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                !h.is_empty()
+                    && h.bytes()
+                        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
             })
     };
     // (the optional group first: "_from_slice" / "_unchecked" may also be missing)

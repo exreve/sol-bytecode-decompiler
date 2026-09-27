@@ -167,7 +167,8 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
             None => {}
             Some(info) if info.param == 10 || self.cfg.typed(s.pc, v) || s.busy.contains(&v) => {}
             Some(info) if info.param >= 0 => {
-                if !s.defs.contains_key(&v) && ((1..=5).contains(&info.param) || info.param >= 100) {
+                if !s.defs.contains_key(&v) && ((1..=5).contains(&info.param) || info.param >= 100)
+                {
                     let x = self.uf.fresh();
                     self.uf.cls[x].members.push((s.pc, v));
                     n = Some(x);
@@ -177,14 +178,21 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
                 let d = s.defs.get(&v).cloned();
                 let ir = s.ir;
                 let is_ptr_def = |at: &(usize, usize)| match Self::stmt(s, *at) {
-                    Stmt::Set { e, .. } => matches!(ir.get(*e), Node::Var(_) | Node::Load { size: 8, .. }),
+                    Stmt::Set { e, .. } => {
+                        matches!(ir.get(*e), Node::Var(_) | Node::Load { size: 8, .. })
+                    }
                     _ => false,
                 };
-                if let Some(d) = d.as_ref().filter(|d| d.len() > 1 && d.len() <= 16 && d.iter().all(is_ptr_def)) {
+                if let Some(d) = d
+                    .as_ref()
+                    .filter(|d| d.len() > 1 && d.len() <= 16 && d.iter().all(is_ptr_def))
+                {
                     s.busy.insert(v);
                     let mut ns: Vec<usize> = Vec::new();
                     for at in d {
-                        let Stmt::Set { e, .. } = Self::stmt(s, *at) else { unreachable!() };
+                        let Stmt::Set { e, .. } = Self::stmt(s, *at) else {
+                            unreachable!()
+                        };
                         let e = *e;
                         let dn = match ir.get(e) {
                             Node::Var(id) => self.node(s, id),
@@ -301,7 +309,9 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
                 for st in &b.stmts {
                     let (addr, size, vals): (E, u8, Vec<E>) = match st {
                         Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                        Stmt::Stores { addr, size, vals, .. } => (*addr, *size, s.ir.to_vec(*vals)),
+                        Stmt::Stores {
+                            addr, size, vals, ..
+                        } => (*addr, *size, s.ir.to_vec(*vals)),
                         _ => continue,
                     };
                     if size != 8 {
@@ -338,13 +348,18 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
         for at in s.defs.get(&v).cloned().unwrap_or_default() {
             match Self::stmt(s, at) {
                 Stmt::Set { e, .. } if matches!(s.ir.get(*e), Node::Var(_)) => {
-                    let Node::Var(id) = s.ir.get(*e) else { unreachable!() };
+                    let Node::Var(id) = s.ir.get(*e) else {
+                        unreachable!()
+                    };
                     for x in Self::roots_of(s, id, seen) {
                         r.insert(x);
                     }
                 }
-                Stmt::Set { e, .. } if matches!(s.ir.get(*e), Node::Load { size: 8, addr } if fo_add(s.ir, addr, s.fp).is_some()) => {
-                    let Node::Load { addr, .. } = s.ir.get(*e) else { unreachable!() };
+                Stmt::Set { e, .. } if matches!(s.ir.get(*e), Node::Load { size: 8, addr } if fo_add(s.ir, addr, s.fp).is_some()) =>
+                {
+                    let Node::Load { addr, .. } = s.ir.get(*e) else {
+                        unreachable!()
+                    };
                     r.insert(Root::C(K::of(fo_add(s.ir, addr, s.fp).unwrap())));
                 }
                 _ => {
@@ -387,7 +402,9 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
                         }
                         continue;
                     }
-                    Stmt::Stores { addr, size, vals, .. } => {
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => {
                         if let Some(d) = fo_add(s.ir, *addr, s.fp) {
                             if d < off + 8.0 && d + (*size as u32 * vals.len) as N > off {
                                 return None;
@@ -405,7 +422,9 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
                     }
                     _ => {}
                 }
-                let Some((t, args)) = crate::util::call_of(s.ir, st) else { continue };
+                let Some((t, args)) = crate::util::call_of(s.ir, st) else {
+                    continue;
+                };
                 let mut best: Option<(usize, N)> = None;
                 for (i, a) in s.ir.items(args).enumerate() {
                     if let Some(o) = fo_add(s.ir, a, s.fp) {
@@ -450,7 +469,14 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
         match c.acc.get_mut(&(K::of(off), size)) {
             Some(a) => a.n += count,
             None => {
-                c.acc.insert((K::of(off), size), Acc { off, size, n: count });
+                c.acc.insert(
+                    (K::of(off), size),
+                    Acc {
+                        off,
+                        size,
+                        n: count,
+                    },
+                );
             }
         }
     }
@@ -496,9 +522,11 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
                 self.visit(s, a, av, fi);
                 self.visit(s, b, av, fi);
             }
-            Node::Neg(a) | Node::Not(a) | Node::Lnot(a) | Node::Ext { a, .. } | Node::Bswap { a, .. } => {
-                self.visit(s, a, av, fi)
-            }
+            Node::Neg(a)
+            | Node::Not(a)
+            | Node::Lnot(a)
+            | Node::Ext { a, .. }
+            | Node::Bswap { a, .. } => self.visit(s, a, av, fi),
             Node::Sel(c, a, b) => {
                 self.visit(s, c, av, fi);
                 self.visit(s, a, av, fi);
@@ -522,14 +550,25 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn call(&mut self, s: &mut FnState, t: &CallTarget, args: L, bi: usize, at: usize, av: &mut Vec<(usize, u32)>, fi: usize) {
+    fn call(
+        &mut self,
+        s: &mut FnState,
+        t: &CallTarget,
+        args: L,
+        bi: usize,
+        at: usize,
+        av: &mut Vec<(usize, u32)>,
+        fi: usize,
+    ) {
         let ir = s.ir;
         if let CallTarget::Ind { e } = t {
             self.visit(s, *e, av, fi);
         }
         for (i, a) in ir.items(args).enumerate() {
             self.visit(s, a, av, fi);
-            let CallTarget::Fn { pc: cpc } = t else { continue };
+            let CallTarget::Fn { pc: cpc } = t else {
+                continue;
+            };
             let cpc = *cpc;
             if self.cfg.skip(cpc) || cpc == s.pc || self.cfg.func(cpc).is_none_or(|f| f.noreturn) {
                 continue;
@@ -583,10 +622,14 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
             }
             let (addr, size, vals): (E, u8, Vec<E>) = match st {
                 Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                Stmt::Stores { addr, size, vals, .. } => (*addr, *size, ir.to_vec(*vals)),
+                Stmt::Stores {
+                    addr, size, vals, ..
+                } => (*addr, *size, ir.to_vec(*vals)),
                 _ => continue,
             };
-            let Some(d) = fo_add(ir, addr, s.fp) else { continue };
+            let Some(d) = fo_add(ir, addr, s.fp) else {
+                continue;
+            };
             if d < o || d >= hi {
                 continue;
             }
@@ -707,7 +750,9 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
                     Stmt::Store { .. } | Stmt::Stores { .. } => {
                         let (addr, size, vals): (E, u8, Vec<E>) = match st {
                             Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                            Stmt::Stores { addr, size, vals, .. } => (*addr, *size, ir.to_vec(*vals)),
+                            Stmt::Stores {
+                                addr, size, vals, ..
+                            } => (*addr, *size, ir.to_vec(*vals)),
                             _ => unreachable!(),
                         };
                         let b0 = base(ir, addr);
@@ -716,7 +761,11 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
                             g.visit(&mut s, *x, &mut arith_vars, fi);
                             if let (Some(ff), 8, Node::Var(xid)) = (ff, size, ir.get(*x)) {
                                 let xn = g.node(&mut s, xid);
-                                let cn = if xn.is_none() { None } else { g.cell(&mut s, ff + 8.0 * i as N) };
+                                let cn = if xn.is_none() {
+                                    None
+                                } else {
+                                    g.cell(&mut s, ff + 8.0 * i as N)
+                                };
                                 if let (Some(cn), Some(xn)) = (cn, xn) {
                                     g.edges.push((cn, To::Node(xn)));
                                 }
@@ -876,7 +925,9 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
     }
     for i in 0..g.field_edges.len() {
         let (x, k, rel) = g.field_edges[i];
-        let Some(&pn) = param_node.get(&k) else { continue };
+        let Some(&pn) = param_node.get(&k) else {
+            continue;
+        };
         let r = g.uf.find(pn);
         if !g.uf.cls[r].acc.contains_key(&(K::of(rel), 8)) {
             continue;
@@ -923,7 +974,9 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
                 continue;
             }
             let hint = format!("S_{}_local", strip_fn(&cfg.fn_name(*pc)));
-            let Some(t) = p3.build(*n, &hint) else { continue };
+            let Some(t) = p3.build(*n, &hint) else {
+                continue;
+            };
             out.entry(*pc).or_default().insert(*v, t);
         }
     }
@@ -937,7 +990,10 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
         let v = &views.map[nm];
         if v.fields.len() > 4
             || nm.starts_with("Data_")
-            || !v.fields.iter().all(|x| matches!(x.t, FT::Scalar(_)) && is_gen_scalar(&x.name))
+            || !v
+                .fields
+                .iter()
+                .all(|x| matches!(x.t, FT::Scalar(_)) && is_gen_scalar(&x.name))
         {
             continue;
         }
@@ -957,7 +1013,11 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
                 .iter()
                 .map(|x| format!(
                     "{}u{}",
-                    if contiguous { String::new() } else { format!("0x{}", js_hex(x.off)) },
+                    if contiguous {
+                        String::new()
+                    } else {
+                        format!("0x{}", js_hex(x.off))
+                    },
                     scalar_size(&x.t) as u32 * 8
                 ))
                 .collect::<Vec<_>>()
@@ -1021,11 +1081,14 @@ fn scalar_size(t: &FT) -> N {
 
 /// `/^f0x[0-9a-f]+_u\d+$/`
 fn is_gen_scalar(n: &str) -> bool {
-    let Some(r) = n.strip_prefix("f0x") else { return false };
+    let Some(r) = n.strip_prefix("f0x") else {
+        return false;
+    };
     let Some(i) = r.find("_u") else { return false };
     let (h, d) = (&r[..i], &r[i + 2..]);
     !h.is_empty()
-        && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        && h.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         && !d.is_empty()
         && d.bytes().all(|c| c.is_ascii_digit())
 }
@@ -1065,7 +1128,9 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
         let accs: Vec<Acc> = self.uf.cls[root].acc.values().copied().collect();
         let mut hit: IndexSet<K> = IndexSet::new();
         for a in &accs {
-            let Some(r) = self.views.resolve(view, a.off) else { return -1 };
+            let Some(r) = self.views.resolve(view, a.off) else {
+                return -1;
+            };
             let fits = match &r.last {
                 FT::Scalar(s) => *s == a.size,
                 FT::Ref(_) => a.size == 8,
@@ -1077,12 +1142,18 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             hit.insert(K::of(self.views.field_at(view, a.off).unwrap().off));
         }
         let mut n = hit.len() as i64;
-        let ptrs: Vec<(K, usize)> = self.uf.cls[root].ptr.iter().map(|(k, v)| (*k, *v)).collect();
+        let ptrs: Vec<(K, usize)> = self.uf.cls[root]
+            .ptr
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         for (o, t) in ptrs {
             if self.empty(t, &mut HashSet::new()) {
                 continue;
             }
-            let Some(r) = self.views.resolve(view, o.get()) else { return -1 };
+            let Some(r) = self.views.resolve(view, o.get()) else {
+                return -1;
+            };
             let FT::Ref(to) = &r.last else { return -1 };
             if r.rest != 0.0 {
                 return -1;
@@ -1108,7 +1179,11 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             .filter(|f| f.name.starts_with("is_") || f.name == "executable")
             .map(|f| f.off)
             .collect();
-        if self.uf.cls[r].acc.values().any(|a| a.size == 1 && flags.contains(&a.off)) {
+        if self.uf.cls[r]
+            .acc
+            .values()
+            .any(|a| a.size == 1 && flags.contains(&a.off))
+        {
             return true;
         }
         for f in &info.fields {
@@ -1138,7 +1213,9 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             let res = self.views.resolve(view, o.get());
             let ft = self.uf.find(t);
             match res.as_ref().map(|x| &x.last) {
-                Some(FT::Ref(to)) if self.views.map.contains_key(to) && !self.view_of.contains_key(&ft) => {
+                Some(FT::Ref(to))
+                    if self.views.map.contains_key(to) && !self.view_of.contains_key(&ft) =>
+                {
                     let to = to.clone();
                     self.known(t, &to);
                 }
@@ -1166,10 +1243,12 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             return Some("AccountInfo".into());
         }
         let at = |c: &Cls, o: N| c.acc.contains_key(&(K::of(o), 8));
-        if self.views.map.contains_key("DataCell") && {
-            let c = &self.uf.cls[root];
-            at(c, 16.0) && at(c, 24.0) && at(c, 32.0)
-        } && self.matches(root, "DataCell", &mut HashSet::new()) >= 3
+        if self.views.map.contains_key("DataCell")
+            && {
+                let c = &self.uf.cls[root];
+                at(c, 16.0) && at(c, 24.0) && at(c, 32.0)
+            }
+            && self.matches(root, "DataCell", &mut HashSet::new()) >= 3
         {
             self.known(root, "DataCell");
             return Some("DataCell".into());
@@ -1228,7 +1307,9 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             } else if p >= 100 {
                 format!("p{}", 5 + p - 100)
             } else {
-                PARAM_NAMES.get(p as usize).map_or("undefined".to_string(), |s| s.to_string())
+                PARAM_NAMES
+                    .get(p as usize)
+                    .map_or("undefined".to_string(), |s| s.to_string())
             };
             name = format!("S_{}_{}", strip_fn(&self.cfg.fn_name(m.0)), pn);
         }
@@ -1253,7 +1334,9 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
         let mut hint_why: Option<String> = None;
         for x in &c.members {
             let f = self.cfg.func(x.0).unwrap();
-            let Some((fs, why)) = self.cfg.field_hints(x.0, f.vars[x.1 as usize].param) else { continue };
+            let Some((fs, why)) = self.cfg.field_hints(x.0, f.vars[x.1 as usize].param) else {
+                continue;
+            };
             if hint_why.as_ref().is_some_and(|w| *w != why) {
                 continue;
             }
@@ -1286,7 +1369,9 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             }
             let t = if a.size == 8 {
                 match c.ptr.get(&K::of(a.off)).copied() {
-                    Some(p) if !self.empty(p, &mut HashSet::new()) => self.build(p, &format!("{name}_{hex}")),
+                    Some(p) if !self.empty(p, &mut HashSet::new()) => {
+                        self.build(p, &format!("{name}_{hex}"))
+                    }
                     _ => None,
                 }
             } else {
@@ -1316,7 +1401,11 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             format!(
                 "an account's data pointer (acc.data.ptr: offsets in the account data) in {}{}",
                 self.cfg.fn_name(dm.0),
-                if c.data.len() > 1 || !c.members.is_empty() { " and the functions it is passed to" } else { "" }
+                if c.data.len() > 1 || !c.members.is_empty() {
+                    " and the functions it is passed to"
+                } else {
+                    ""
+                }
             )
         } else if let Some(m) = m {
             let f = self.cfg.func(m.0).unwrap();
@@ -1326,13 +1415,20 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
                 PARAM_NAMES.get(p as usize).copied().unwrap_or("p"),
                 self.cfg.fn_name(m.0),
                 if fns.len() > 1 {
-                    format!(" and {} more function{}", fns.len() - 1, if fns.len() > 2 { "s" } else { "" })
+                    format!(
+                        " and {} more function{}",
+                        fns.len() - 1,
+                        if fns.len() > 2 { "s" } else { "" }
+                    )
                 } else {
                     String::new()
                 }
             )
         } else {
-            format!("the objects the field {} points to", hint.replacen("_0x", ".0x", 1))
+            format!(
+                "the objects the field {} points to",
+                hint.replacen("_0x", ".0x", 1)
+            )
         };
         let doc = format!(
             "[heur] layout from the fixed-offset accesses through {wh} (fields: offset and size{}; other bytes not described)",

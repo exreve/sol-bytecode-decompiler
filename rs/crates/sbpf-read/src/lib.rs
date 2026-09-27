@@ -12,6 +12,7 @@ pub mod fieldnames;
 pub mod frameregions;
 pub mod idl;
 pub mod outline;
+pub mod printfn;
 pub mod sem;
 pub mod state;
 pub mod structs;

@@ -184,7 +184,12 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
         }
     }
     fn end(&mut self, keep: &dyn Fn(&Region) -> bool) {
-        let a: Vec<usize> = self.act.iter().copied().filter(|&id| keep(&self.list[id])).collect();
+        let a: Vec<usize> = self
+            .act
+            .iter()
+            .copied()
+            .filter(|&id| keep(&self.list[id]))
+            .collect();
         if a.len() != self.act.len() {
             self.act = Rc::new(a);
         }
@@ -204,13 +209,10 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
         id
     }
     fn find_copy(&self, root: usize, base: N) -> Option<usize> {
-        self.act
-            .iter()
-            .copied()
-            .find(|&id| {
-                let r = &self.list[id];
-                !r.out && r.root == root && r.base == base
-            })
+        self.act.iter().copied().find(|&id| {
+            let r = &self.list[id];
+            !r.out && r.root == root && r.base == base
+        })
     }
     fn copied(&mut self, d: N, n: N, src: Org) -> Option<Org> {
         let s_root = self.list[src.r].root;
@@ -296,7 +298,11 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
             }
             return;
         }
-        let t = if s.is_none() { self.cfg.typed_src(src) } else { None };
+        let t = if s.is_none() {
+            self.cfg.typed_src(src)
+        } else {
+            None
+        };
         let size = t.as_ref().and_then(|t| self.cfg.size_of(&t.0));
         self.clobber(d, n);
         if let (Some((ty, name)), Some(size)) = (&t, size) {
@@ -397,8 +403,14 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
             if i == 0 && r.is_some() {
                 continue;
             }
-            let Some(x) = self.cfg.arg_root(t, args, pc, i) else { continue };
-            let Some(size) = x.ty.as_ref().and_then(|t| self.cfg.size_of(t)).filter(|s| *s != 0.0 && !s.is_nan()) else {
+            let Some(x) = self.cfg.arg_root(t, args, pc, i) else {
+                continue;
+            };
+            let Some(size) =
+                x.ty.as_ref()
+                    .and_then(|t| self.cfg.size_of(t))
+                    .filter(|s| *s != 0.0 && !s.is_nan())
+            else {
                 continue;
             };
             let root = self.list.len();
@@ -454,7 +466,9 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                     None => self.var_org.delete(*dst as u32),
                 }
             }
-            Stmt::Call { t, args, pc, dst, .. } => {
+            Stmt::Call {
+                t, args, pc, dst, ..
+            } => {
                 self.on_call(t, &ir.to_vec(*args), *pc, *dst);
                 if let CallTarget::Ind { e } = t {
                     self.loads(*e);
@@ -464,7 +478,9 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
             Stmt::Store { .. } | Stmt::Stores { .. } => {
                 let (addr, size, vals): (E, u8, Vec<E>) = match s {
                     Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                    Stmt::Stores { addr, size, vals, .. } => (*addr, *size, ir.to_vec(*vals)),
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => (*addr, *size, ir.to_vec(*vals)),
                     _ => unreachable!(),
                 };
                 self.loads(addr);
@@ -473,7 +489,8 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                 }
                 let Some(d) = self.fo(addr) else { return };
                 for i in 0..vals.len() {
-                    self.accesses.push((d + (i * size as usize) as N, size as N, self.act.clone()));
+                    self.accesses
+                        .push((d + (i * size as usize) as N, size as N, self.act.clone()));
                 }
                 let tot = (size as usize * vals.len()) as N;
                 if size != 8 {
@@ -486,7 +503,9 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                 if os.len() >= 2
                     && o0.is_some()
                     && os.iter().enumerate().all(|(i, o)| {
-                        o.is_some_and(|o| o.r == o0.unwrap().r && o.off == o0.unwrap().off + 8.0 * i as N)
+                        o.is_some_and(|o| {
+                            o.r == o0.unwrap().r && o.off == o0.unwrap().off + 8.0 * i as N
+                        })
                     })
                 {
                     self.clobber(d, 8.0 * os.len() as N);
@@ -523,7 +542,9 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                                 w.push((d, d + *size as N));
                             }
                         }
-                        Stmt::Stores { addr, size, vals, .. } => {
+                        Stmt::Stores {
+                            addr, size, vals, ..
+                        } => {
                             if let Some(d) = self.fo(*addr) {
                                 w.push((d, d + (*size as u32 * vals.len) as N));
                             }
@@ -651,7 +672,8 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                     self.forget(&w);
                 }
                 SNode::Switch { cases, .. } => {
-                    let rs: Vec<(Act, Vec<K>, Vec<u32>)> = cases.iter().map(|c| self.isolated(&c.1)).collect();
+                    let rs: Vec<(Act, Vec<K>, Vec<u32>)> =
+                        cases.iter().map(|c| self.isolated(&c.1)).collect();
                     for r in &rs {
                         for k in &r.1 {
                             self.org.delete(*k);
@@ -684,13 +706,19 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
                     let spc = crate::util::stmt_pc(s);
                     if let Some((t, args)) = crate::util::call_of(ir, s) {
                         let av = ir.to_vec(args);
-                        if av.first().is_some_and(|&a| self.fo(a).is_some()) && self.cfg.root_of(&t, &av, spc).is_some() {
+                        if av.first().is_some_and(|&a| self.fo(a).is_some())
+                            && self.cfg.root_of(&t, &av, spc).is_some()
+                        {
                             return true;
                         }
-                        if av.iter().enumerate().any(|(i, &a)| self.fo(a).is_some() && self.cfg.arg_root(&t, &av, spc, i).is_some()) {
+                        if av.iter().enumerate().any(|(i, &a)| {
+                            self.fo(a).is_some() && self.cfg.arg_root(&t, &av, spc, i).is_some()
+                        }) {
                             return true;
                         }
-                        if self.cfg.is_copy(&t) && av.get(1).is_some_and(|&a| self.cfg.typed_src(a).is_some()) {
+                        if self.cfg.is_copy(&t)
+                            && av.get(1).is_some_and(|&a| self.cfg.typed_src(a).is_some())
+                        {
                             return true;
                         }
                     } else if let Stmt::Copy { src, .. } = s {
@@ -724,7 +752,12 @@ impl<C: RegionCfg + ?Sized> W<'_, C> {
 }
 
 /// frameRegions
-pub fn frame_regions<C: RegionCfg + ?Sized>(ir: &Ir, tree: &Tree, body: &Vec<SNode>, cfg: &C) -> Regions {
+pub fn frame_regions<C: RegionCfg + ?Sized>(
+    ir: &Ir,
+    tree: &Tree,
+    body: &Vec<SNode>,
+    cfg: &C,
+) -> Regions {
     let mut w = W {
         cfg,
         ir,
@@ -761,7 +794,9 @@ pub fn frame_regions<C: RegionCfg + ?Sized>(ir: &Ir, tree: &Tree, body: &Vec<SNo
             }
             let (addr, size, n2) = match s {
                 Stmt::Store { addr, size, .. } => (*addr, *size, 1u32),
-                Stmt::Stores { addr, size, vals, .. } => (*addr, *size, vals.len),
+                Stmt::Stores {
+                    addr, size, vals, ..
+                } => (*addr, *size, vals.len),
                 _ => continue,
             };
             let Some(d) = w.fo(addr) else { continue };

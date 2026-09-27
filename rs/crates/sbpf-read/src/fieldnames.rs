@@ -2,9 +2,7 @@
 //! and role names of small unnamed functions.
 
 use crate::sem::known_key;
-use crate::util::{
-    b58, call_of, expr_eq, is_fn_hex, jkey_s, js_hex, n_s, stmt_exprs, u16len, N,
-};
+use crate::util::{b58, call_of, expr_eq, is_fn_hex, jkey_s, js_hex, n_s, stmt_exprs, u16len, N};
 use crate::views::{expr_type, fid, Field, Views, FT};
 use indexmap::{IndexMap, IndexSet};
 use regex::Regex;
@@ -30,14 +28,31 @@ pub fn generated(n: &str) -> bool {
     let Some(i) = r.find('_') else { return false };
     let (h, t) = (&r[..i], &r[i + 1..]);
     !h.is_empty()
-        && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        && h.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         && matches!(t, "u8" | "u16" | "u32" | "u64" | "ref")
 }
 
 const RESERVED: &[&str] = &[
-    "key", "owner", "is_signer", "is_writable", "executable", "rent_epoch", "data", "lamports",
-    "original_data_len", "data_len", "info", "borrow", "strong", "weak", "dup_marker", "len", "ptr",
-    "tag", "val",
+    "key",
+    "owner",
+    "is_signer",
+    "is_writable",
+    "executable",
+    "rent_epoch",
+    "data",
+    "lamports",
+    "original_data_len",
+    "data_len",
+    "info",
+    "borrow",
+    "strong",
+    "weak",
+    "dup_marker",
+    "len",
+    "ptr",
+    "tag",
+    "val",
 ];
 
 fn is_word(c: u8) -> bool {
@@ -52,7 +67,8 @@ fn key_word(s: &str) -> Option<&'static str> {
             continue;
         }
         for w in ["owner", "admin", "authority"] {
-            if b[i..].starts_with(w.as_bytes()) && !b.get(i + w.len()).is_some_and(|&c| is_word(c)) {
+            if b[i..].starts_with(w.as_bytes()) && !b.get(i + w.len()).is_some_and(|&c| is_word(c))
+            {
                 return Some(w);
             }
         }
@@ -64,8 +80,19 @@ fn js_trim(s: &str) -> &str {
     let ws = |c: char| {
         matches!(
             c,
-            '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2028}'
-                | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+            '\t' | '\n'
+                | '\u{b}'
+                | '\u{c}'
+                | '\r'
+                | ' '
+                | '\u{a0}'
+                | '\u{1680}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
         ) || ('\u{2000}'..='\u{200a}').contains(&c)
     };
     s.trim_matches(ws)
@@ -127,7 +154,8 @@ pub fn msg_subject(msg: &str, value: bool) -> Option<String> {
             .split([' ', '_'])
             .filter(|x| !x.is_empty() && !["the", "a", "an", "provided", "given"].contains(x))
             .collect();
-        if w.is_empty() || w.len() > 4 || w.iter().any(|x| !p.word.is_match(x) || p.bad.is_match(x)) {
+        if w.is_empty() || w.len() > 4 || w.iter().any(|x| !p.word.is_match(x) || p.bad.is_match(x))
+        {
             return None;
         }
         return Some(w.join("_") + suf);
@@ -177,7 +205,8 @@ impl Votes {
             let b = name.as_bytes();
             !b.is_empty()
                 && (b[0].is_ascii_lowercase() || b[0] == b'_')
-                && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
         };
         if !okn || self.shared(views, loc) {
             return;
@@ -196,7 +225,12 @@ impl Votes {
                 .or_insert_with(|| (loc.view.clone(), Vec::new()))
                 .1
                 .push(v);
-        } else if loc.key && views.map.get(&loc.view).is_some_and(|x| x.fields.iter().any(|f| generated(&f.name))) {
+        } else if loc.key
+            && views
+                .map
+                .get(&loc.view)
+                .is_some_and(|x| x.fields.iter().any(|f| generated(&f.name)))
+        {
             self.added
                 .entry(loc.view.clone())
                 .or_default()
@@ -271,10 +305,17 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
         if !any {
             'o: for b in &f.blocks {
                 for s in &b.stmts {
-                    let Some((CallTarget::Fn { pc: cpc }, _)) = call_of(ir, s) else { continue };
-                    let Some(cf) = cfg.funcs.get(&cpc) else { continue };
+                    let Some((CallTarget::Fn { pc: cpc }, _)) = call_of(ir, s) else {
+                        continue;
+                    };
+                    let Some(cf) = cfg.funcs.get(&cpc) else {
+                        continue;
+                    };
                     let ct = (cfg.types)(cpc);
-                    if ct.iter().any(|(v, t)| cf.vars.get(*v as usize).is_some_and(|x| x.param > 0) && reach(views, t, &mut gen)) {
+                    if ct.iter().any(|(v, t)| {
+                        cf.vars.get(*v as usize).is_some_and(|x| x.param > 0)
+                            && reach(views, t, &mut gen)
+                    }) {
                         any = true;
                         break 'o;
                     }
@@ -288,7 +329,10 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
     let mut n = 0;
     let mut by_view: IndexMap<String, Vec<(u32, Vote)>> = IndexMap::new();
     for (fid_, (view, v)) in &vt.votes {
-        by_view.entry(view.clone()).or_default().push((*fid_, pick(v)));
+        by_view
+            .entry(view.clone())
+            .or_default()
+            .push((*fid_, pick(v)));
     }
     for (view, m) in &vt.added {
         if !views.map.contains_key(view) {
@@ -298,8 +342,9 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
             let off = off.get();
             let overlaps = {
                 let v = &views.map[view];
-                v.fields.iter().any(|x| x.off < off + 32.0 && off < x.off + views.width(&x.t) * x.count.unwrap_or(1.0))
-                    || v.size.is_some_and(|s| off + 32.0 > s)
+                v.fields.iter().any(|x| {
+                    x.off < off + 32.0 && off < x.off + views.width(&x.t) * x.count.unwrap_or(1.0)
+                }) || v.size.is_some_and(|s| off + 32.0 > s)
             };
             if overlaps {
                 continue;
@@ -316,7 +361,10 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
             let v = views.map.get_mut(view).unwrap();
             v.fields.push(fd);
             v.fields.sort_by(|a, b| a.off.partial_cmp(&b.off).unwrap());
-            by_view.entry(view.clone()).or_default().push((id, pick(vs)));
+            by_view
+                .entry(view.clone())
+                .or_default()
+                .push((id, pick(vs)));
         }
     }
     let mut chosen: IndexMap<u32, Vote> = IndexMap::new();
@@ -357,7 +405,9 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
         }
     }
     for (view, list) in by_view.iter_mut() {
-        let Some(vw) = views.map.get(view) else { continue };
+        let Some(vw) = views.map.get(view) else {
+            continue;
+        };
         let renamed: HashSet<u32> = list.iter().map(|x| x.0).collect();
         let mut names: HashSet<String> = vw
             .fields
@@ -377,7 +427,9 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
         });
         let mut k = 0;
         for (id, v) in list.iter() {
-            let Some(&(off, embed)) = offs.get(id) else { continue };
+            let Some(&(off, embed)) = offs.get(id) else {
+                continue;
+            };
             let mut nm = if RESERVED.contains(&v.name.as_str()) {
                 if embed || v.rank <= 2 {
                     format!("{}_key", v.name)
@@ -401,7 +453,11 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
             let d = was
                 .strip_prefix("d0x")
                 .and_then(|r| r.split_once('_'))
-                .filter(|(h, _)| !h.is_empty() && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+                .filter(|(h, _)| {
+                    !h.is_empty()
+                        && h.bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                })
                 .map(|x| x.0.to_string());
             let head = match d {
                 Some(h) => format!("data +0x{h}"),
@@ -410,14 +466,20 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
             fd.doc = Some(format!(
                 "{head} [heur: {}]{}",
                 v.why,
-                fd.doc.as_ref().filter(|x| !x.is_empty()).map_or(String::new(), |x| format!(" {x}"))
+                fd.doc
+                    .as_ref()
+                    .filter(|x| !x.is_empty())
+                    .map_or(String::new(), |x| format!(" {x}"))
             ));
             fd.name = nm;
             k += 1;
         }
         if k > 0 {
             let vw = views.map.get_mut(view).unwrap();
-            vw.doc.push_str(&format!("; {k} field{} named after their use [heur]", if k > 1 { "s" } else { "" }));
+            vw.doc.push_str(&format!(
+                "; {k} field{} named after their use [heur]",
+                if k > 1 { "s" } else { "" }
+            ));
         }
         n += k;
     }
@@ -576,7 +638,9 @@ impl<'a> Scan<'a> {
         if let Node::Ext { a, .. } = self.ir.get(e) {
             e = self.val(a, 3);
         }
-        let Node::Load { size: esz, addr } = self.ir.get(e) else { return None };
+        let Node::Load { size: esz, addr } = self.ir.get(e) else {
+            return None;
+        };
         if size.is_some_and(|s| s != esz) {
             return None;
         }
@@ -618,13 +682,17 @@ impl<'a> Scan<'a> {
             return Some((*dst, *src, *n as N));
         }
         let (t, args) = call_of(self.ir, s)?;
-        let CallTarget::Fn { pc } = t else { return None };
+        let CallTarget::Fn { pc } = t else {
+            return None;
+        };
         if args.len < 3 || !is_memcpy_only(&(self.cfg.fn_name)(pc)) {
             return None;
         }
         let n = self.val(self.ir.at(args, 2), 3);
         match self.ir.get(n) {
-            Node::Const(v) if v <= 0x10000 => Some((self.ir.at(args, 0), self.ir.at(args, 1), v as N)),
+            Node::Const(v) if v <= 0x10000 => {
+                Some((self.ir.at(args, 0), self.ir.at(args, 1), v as N))
+            }
             _ => None,
         }
     }
@@ -636,7 +704,9 @@ impl<'a> Scan<'a> {
         let du = crate::util::big_u(d);
         match ir.get(e) {
             Node::Bin(BinOp::Add, a, b) if matches!(ir.get(b), Node::Const(_)) => {
-                let Node::Const(c) = ir.get(b) else { unreachable!() };
+                let Node::Const(c) = ir.get(b) else {
+                    unreachable!()
+                };
                 let c2 = ir.c(c.wrapping_add(du));
                 ir.bin(BinOp::Add, a, c2)
             }
@@ -658,7 +728,9 @@ impl<'a> Scan<'a> {
             for k in (0..si).rev() {
                 let s = &ss[k];
                 if let Some((dst, src, cn)) = self.copy_of(s) {
-                    let Some(d) = self.frame_off(dst) else { continue };
+                    let Some(d) = self.frame_off(dst) else {
+                        continue;
+                    };
                     if d <= o && o + n <= d + cn {
                         return Some(Write::Src(self.add(src, o - d), (bi, k)));
                     }
@@ -676,7 +748,9 @@ impl<'a> Scan<'a> {
                         }
                         continue;
                     }
-                    Stmt::Stores { addr, size, vals, .. } => {
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => {
                         if let Some(d) = self.frame_off(*addr) {
                             if d < o + n && o < d + (*size as u32 * vals.len) as N {
                                 return Some(Write::Store);
@@ -686,7 +760,9 @@ impl<'a> Scan<'a> {
                     }
                     _ => {}
                 }
-                let Some((t, args)) = call_of(self.ir, s) else { continue };
+                let Some((t, args)) = call_of(self.ir, s) else {
+                    continue;
+                };
                 let mut best: Option<(usize, N)> = None;
                 for (i, x) in self.ir.items(args).enumerate() {
                     if let Some(a) = self.frame_off(x) {
@@ -717,8 +793,15 @@ impl<'a> Scan<'a> {
             for b in &self.f.blocks {
                 for s in &b.stmts {
                     let (addr, vals): (E, Vec<E>) = match s {
-                        Stmt::Store { addr, size: 8, v, .. } => (*addr, vec![*v]),
-                        Stmt::Stores { addr, size: 8, vals, .. } => (*addr, self.ir.to_vec(*vals)),
+                        Stmt::Store {
+                            addr, size: 8, v, ..
+                        } => (*addr, vec![*v]),
+                        Stmt::Stores {
+                            addr,
+                            size: 8,
+                            vals,
+                            ..
+                        } => (*addr, self.ir.to_vec(*vals)),
                         _ => continue,
                     };
                     if let Some(o) = self.frame_off(addr) {
@@ -769,7 +852,12 @@ impl<'a> Scan<'a> {
                 Some(Write::Store) => {
                     let ws: Vec<Option<E>> = [0.0, 8.0, 16.0, 24.0]
                         .iter()
-                        .map(|i| self.words().get(&crate::util::K::of(o + i)).copied().flatten())
+                        .map(|i| {
+                            self.words()
+                                .get(&crate::util::K::of(o + i))
+                                .copied()
+                                .flatten()
+                        })
                         .collect();
                     let ls: Vec<Option<E>> = ws
                         .iter()
@@ -807,7 +895,8 @@ impl<'a> Scan<'a> {
             }
         }
         if let Node::Bin(BinOp::Add, aa, ab) = ir.get(a) {
-            if ir.get(ab) == Node::Const(8) && self.etype(aa).is_some_and(|t| t.ends_with("Record")) {
+            if ir.get(ab) == Node::Const(8) && self.etype(aa).is_some_and(|t| t.ends_with("Record"))
+            {
                 return Some(Key::Acct(aa));
             }
         }
@@ -866,13 +955,16 @@ impl<'a> Scan<'a> {
         let mut e = e;
         for _ in 0..3 {
             e = self.val(e, 3);
-            let Node::Load { size: 8, addr } = self.ir.get(e) else { return None };
+            let Node::Load { size: 8, addr } = self.ir.get(e) else {
+                return None;
+            };
             let l = self.loc(addr)?;
             let fd = l.field.as_ref()?;
             if l.rest != 0.0 {
                 return None;
             }
-            if (l.view.ends_with("Accounts") || l.view.ends_with("Context")) && !generated(&fd.name) {
+            if (l.view.ends_with("Accounts") || l.view.ends_with("Context")) && !generated(&fd.name)
+            {
                 return Some(strip_num_suffix(&fd.name).to_string());
             }
             if fd.name != "info" {
@@ -893,7 +985,9 @@ impl<'a> Scan<'a> {
             }
             let b = &self.f.blocks[at as usize];
             for s in &b.stmts {
-                let Some((t, args)) = call_of(self.ir, s) else { continue };
+                let Some((t, args)) = call_of(self.ir, s) else {
+                    continue;
+                };
                 let is_log = match &t {
                     CallTarget::Sys { name, .. } => &**name == "sol_log_",
                     CallTarget::Fn { pc } => is_log_name(&(self.cfg.fn_name)(*pc)),
@@ -918,7 +1012,9 @@ impl<'a> Scan<'a> {
         None
     }
     fn branch_msg(&self, bi: usize) -> Option<String> {
-        let Term::Br { t, f, .. } = &self.f.blocks[bi].term else { return None };
+        let Term::Br { t, f, .. } = &self.f.blocks[bi].term else {
+            return None;
+        };
         let a = self.log_in(*t as usize);
         let b = self.log_in(*f as usize);
         match (a, b) {
@@ -995,12 +1091,20 @@ impl<'a> Scan<'a> {
     }
     fn key_compare(&mut self, vt: &mut Votes, a: Option<Key>, b: Option<Key>, msg: Option<String>) {
         for (p, q) in [(&a, &b), (&b, &a)] {
-            let Some(Key::Field(l0, ptr)) = p else { continue };
-            let words: Option<Vec<Option<Loc>>> = if !*ptr && matches!(l0.field.as_ref().map(|f| &f.t), Some(FT::Scalar(_))) {
-                Some([0.0, 8.0, 16.0, 24.0].iter().map(|d| self.loc_in(&l0.view, l0.off + d)).collect())
-            } else {
-                None
+            let Some(Key::Field(l0, ptr)) = p else {
+                continue;
             };
+            let words: Option<Vec<Option<Loc>>> =
+                if !*ptr && matches!(l0.field.as_ref().map(|f| &f.t), Some(FT::Scalar(_))) {
+                    Some(
+                        [0.0, 8.0, 16.0, 24.0]
+                            .iter()
+                            .map(|d| self.loc_in(&l0.view, l0.off + d))
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
             if let Some(ws) = &words {
                 if !ws.iter().all(|w| {
                     w.as_ref().is_some_and(|w| {
@@ -1014,7 +1118,13 @@ impl<'a> Scan<'a> {
             let mut vote = |vt: &mut Votes, name: &str, rank: i32, why: String| {
                 if let Some(ws) = &words {
                     for (i, w) in ws.iter().enumerate() {
-                        vt.vote(views, w.as_ref(), &format!("{name}_w{i}"), rank, format!("{why} (word {i} of the key)"));
+                        vt.vote(
+                            views,
+                            w.as_ref(),
+                            &format!("{name}_w{i}"),
+                            rank,
+                            format!("{why} (word {i} of the key)"),
+                        );
                     }
                 } else {
                     vt.vote(views, Some(l0), name, rank, why);
@@ -1035,13 +1145,30 @@ impl<'a> Scan<'a> {
                             format!(
                                 "compared with the key of a signer{}{} in {fnm}",
                                 nm.as_ref().map_or(String::new(), |n| format!(" ({n})")),
-                                if kw.is_some() { format!(" (\"{}\")", msg.as_ref().unwrap()) } else { String::new() }
+                                if kw.is_some() {
+                                    format!(" (\"{}\")", msg.as_ref().unwrap())
+                                } else {
+                                    String::new()
+                                }
                             ),
                         );
                     } else if let Some(nm) = nm {
-                        vote(vt, &nm, 0, format!("compared with the key of account {nm} (has_one) in {fnm}"));
+                        vote(
+                            vt,
+                            &nm,
+                            0,
+                            format!("compared with the key of account {nm} (has_one) in {fnm}"),
+                        );
                     } else if let Some(sub) = &sub {
-                        vote(vt, sub, 2, format!("compared with an account's key; \"{}\" on failure in {fnm}", msg.as_ref().unwrap()));
+                        vote(
+                            vt,
+                            sub,
+                            2,
+                            format!(
+                                "compared with an account's key; \"{}\" on failure in {fnm}",
+                                msg.as_ref().unwrap()
+                            ),
+                        );
                     }
                 }
                 Some(Key::Const(name)) => {
@@ -1049,7 +1176,15 @@ impl<'a> Scan<'a> {
                 }
                 _ => {
                     if let Some(sub) = &sub {
-                        vote(vt, sub, 2, format!("a key compared; \"{}\" on failure in {fnm}", msg.as_ref().unwrap()));
+                        vote(
+                            vt,
+                            sub,
+                            2,
+                            format!(
+                                "a key compared; \"{}\" on failure in {fnm}",
+                                msg.as_ref().unwrap()
+                            ),
+                        );
                     }
                 }
             }
@@ -1057,7 +1192,9 @@ impl<'a> Scan<'a> {
     }
     fn clock_of(&self, e: E) -> Option<&'static str> {
         let e = self.val(e, 3);
-        let Node::Load { size: 8, addr } = self.ir.get(e) else { return None };
+        let Node::Load { size: 8, addr } = self.ir.get(e) else {
+            return None;
+        };
         let o = self.frame_off(addr)?;
         for &c in &self.clock_slots {
             if o == c + 32.0 {
@@ -1130,7 +1267,14 @@ struct Use {
     msgs: Vec<String>,
 }
 
-fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32, String>, vt: &mut Votes) {
+fn scan(
+    cfg: &FieldNameCfg,
+    views: &Views,
+    pc: i64,
+    f: &Func,
+    tys: &IndexMap<u32, String>,
+    vt: &mut Votes,
+) {
     let ir = f.ir.as_ref().unwrap();
     let mut sc = Scan {
         cfg,
@@ -1165,7 +1309,9 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                 sc.defs.insert(d, nv);
                 sc.def_at.insert(d, (bi, si));
             }
-            let Some((t, args)) = call_of(ir, s) else { continue };
+            let Some((t, args)) = call_of(ir, s) else {
+                continue;
+            };
             if matches!(t, CallTarget::Ind { .. }) {
                 continue;
             }
@@ -1174,10 +1320,17 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                 CallTarget::Fn { pc } => ((cfg.fn_name)(*pc), false),
                 _ => unreachable!(),
             };
-            if if sys { nm == "sol_log_" } else { is_log_name(&nm) } {
+            if if sys {
+                nm == "sol_log_"
+            } else {
+                is_log_name(&nm)
+            } {
                 sc.logs = true;
             }
-            if nm.contains("program_address") || nm.contains("invoke_signed") || (!sys && nm.starts_with("cpi_")) {
+            if nm.contains("program_address")
+                || nm.contains("invoke_signed")
+                || (!sys && nm.starts_with("cpi_"))
+            {
                 pda = true;
             }
             let clk = if sys {
@@ -1201,7 +1354,12 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
         for (bi, b) in f.blocks.iter().enumerate() {
             for (si, s) in b.stmts.iter().enumerate() {
                 sc.cur = (bi, si);
-                let Stmt::Store { size: 1, addr, v, .. } = s else { continue };
+                let Stmt::Store {
+                    size: 1, addr, v, ..
+                } = s
+                else {
+                    continue;
+                };
                 let o = sc.frame_off(*addr);
                 let l = sc.load_loc(*v, Some(1));
                 if let (Some(o), Some(l)) = (o, l) {
@@ -1221,7 +1379,9 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
             Node::Ext { a, .. } => a,
             _ => d,
         };
-        let Node::Load { size, addr } = ir.get(ld) else { continue };
+        let Node::Load { size, addr } = ir.get(ld) else {
+            continue;
+        };
         if let Some(l) = sc.loc(addr) {
             if let Some(fd) = &l.field {
                 if l.rest == 0.0 && fd.t == FT::Scalar(size) && generated(&fd.name) {
@@ -1254,11 +1414,16 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
             Node::Fn(n, args)
                 if ir.with_name(n, |s| s == "keyeq")
                     && args.len == 5
-                    && ir.items(args).skip(1).all(|a| matches!(ir.get(a), Node::Const(_))) =>
+                    && ir
+                        .items(args)
+                        .skip(1)
+                        .all(|a| matches!(ir.get(a), Node::Const(_))) =>
             {
                 let mut bytes = [0u8; 32];
                 for (i, a) in ir.items(args).skip(1).enumerate() {
-                    let Node::Const(v) = ir.get(a) else { unreachable!() };
+                    let Node::Const(v) = ir.get(a) else {
+                        unreachable!()
+                    };
                     bytes[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
                 }
                 let nm = known_key(&b58(&bytes));
@@ -1279,8 +1444,12 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                     if ck.is_none() && sub.is_none() {
                         continue;
                     }
-                    let Some(l) = sc.load_loc(p, None) else { continue };
-                    let FT::Scalar(sz) = l.field.as_ref().unwrap().t else { continue };
+                    let Some(l) = sc.load_loc(p, None) else {
+                        continue;
+                    };
+                    let FT::Scalar(sz) = l.field.as_ref().unwrap().t else {
+                        continue;
+                    };
                     if ck.is_some() && sz == 8 {
                         let ck = ck.unwrap();
                         vt.vote(
@@ -1288,11 +1457,23 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                             Some(&l),
                             if ck == "ts" { "deadline" } else { "slot" },
                             4,
-                            format!("compared with Clock.{} in {fnm}", if ck == "ts" { "unix_timestamp" } else { "slot" }),
+                            format!(
+                                "compared with Clock.{} in {fnm}",
+                                if ck == "ts" { "unix_timestamp" } else { "slot" }
+                            ),
                         );
                     } else if let Some(sub) = &sub {
                         if sc.load_loc(q, None).is_none() {
-                            vt.vote(sc.views, Some(&l), sub, 2, format!("compared; \"{}\" on failure in {fnm}", m.as_ref().unwrap()));
+                            vt.vote(
+                                sc.views,
+                                Some(&l),
+                                sub,
+                                2,
+                                format!(
+                                    "compared; \"{}\" on failure in {fnm}",
+                                    m.as_ref().unwrap()
+                                ),
+                            );
                         }
                     }
                 }
@@ -1306,7 +1487,10 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                             Some(&l),
                             if ts { "start_ts" } else { "start_slot" },
                             4,
-                            format!("subtracted from Clock.{} in {fnm}", if ts { "unix_timestamp" } else { "slot" }),
+                            format!(
+                                "subtracted from Clock.{} in {fnm}",
+                                if ts { "unix_timestamp" } else { "slot" }
+                            ),
                         );
                     }
                 }
@@ -1348,8 +1532,13 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                 _ => None,
             };
             match cmp_other {
-                Some((op, other)) if (op == CmpOp::Eq || op == CmpOp::Ne) && matches!(ir.get(other), Node::Const(_)) => {
-                    let Node::Const(ov) = ir.get(other) else { unreachable!() };
+                Some((op, other))
+                    if (op == CmpOp::Eq || op == CmpOp::Ne)
+                        && matches!(ir.get(other), Node::Const(_)) =>
+                {
+                    let Node::Const(ov) = ir.get(other) else {
+                        unreachable!()
+                    };
                     uses[&id].cmps.push(ov);
                     if let Some(m) = sc.msg_for(parent.unwrap()) {
                         uses[&id].msgs.push(m);
@@ -1369,9 +1558,11 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                 visit(sc, vt, uses, var_field, b, Some(e), fnm, use_of);
             }
             Node::Load { addr, .. } => visit(sc, vt, uses, var_field, addr, Some(e), fnm, use_of),
-            Node::Ext { a, .. } | Node::Neg(a) | Node::Not(a) | Node::Lnot(a) | Node::Bswap { a, .. } => {
-                visit(sc, vt, uses, var_field, a, Some(e), fnm, use_of)
-            }
+            Node::Ext { a, .. }
+            | Node::Neg(a)
+            | Node::Not(a)
+            | Node::Lnot(a)
+            | Node::Bswap { a, .. } => visit(sc, vt, uses, var_field, a, Some(e), fnm, use_of),
             Node::Call(_, args) | Node::Fn(_, args) => {
                 for x in ir.items(args) {
                     visit(sc, vt, uses, var_field, x, Some(e), fnm, use_of);
@@ -1387,12 +1578,16 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
             if let Stmt::Store { .. } | Stmt::Stores { .. } = s {
                 let (addr, size, vals): (E, u8, Vec<E>) = match s {
                     Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                    Stmt::Stores { addr, size, vals, .. } => (*addr, *size, ir.to_vec(*vals)),
+                    Stmt::Stores {
+                        addr, size, vals, ..
+                    } => (*addr, *size, ir.to_vec(*vals)),
                     _ => unreachable!(),
                 };
                 let (aa, ao) = match ir.get(addr) {
                     Node::Bin(BinOp::Add, a, c) if matches!(ir.get(c), Node::Const(_)) => {
-                        let Node::Const(c) = ir.get(c) else { unreachable!() };
+                        let Node::Const(c) = ir.get(c) else {
+                            unreachable!()
+                        };
                         (a, c)
                     }
                     _ => (addr, 0),
@@ -1426,7 +1621,16 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                         _ => *e,
                     };
                     if let Node::Load { addr, .. } = ir.get(ld) {
-                        visit(&mut sc, vt, &mut uses, &var_field, addr, Some(ld), &fnm, &use_of);
+                        visit(
+                            &mut sc,
+                            vt,
+                            &mut uses,
+                            &var_field,
+                            addr,
+                            Some(ld),
+                            &fnm,
+                            &use_of,
+                        );
                     }
                     continue;
                 }
@@ -1449,7 +1653,9 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                     visit(&mut sc, vt, &mut uses, &var_field, *c, None, &fnm, &use_of);
                 }
             }
-            Term::Ret { e: Some(e) } => visit(&mut sc, vt, &mut uses, &var_field, *e, None, &fnm, &use_of),
+            Term::Ret { e: Some(e) } => {
+                visit(&mut sc, vt, &mut uses, &var_field, *e, None, &fnm, &use_of)
+            }
             _ => {}
         }
     }
@@ -1478,7 +1684,11 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
                 4,
                 format!(
                     "a flag tested against 0{}{} in {fnm}",
-                    if u.stores.contains(&1) { " and set to 1" } else { "" },
+                    if u.stores.contains(&1) {
+                        " and set to 1"
+                    } else {
+                        ""
+                    },
                     if init_msg {
                         format!(" (\"{}\")", u.msgs.iter().find(|m| init(m)).unwrap())
                     } else {
@@ -1488,10 +1698,17 @@ fn scan(cfg: &FieldNameCfg, views: &Views, pc: i64, f: &Func, tys: &IndexMap<u32
             );
         } else if fd.off == 0.0
             && l.off == 0.0
-            && (u.cmps.iter().any(|&x| x != 0) || (!u.stores.is_empty() && u.cmps.is_empty() && u.stores.iter().any(|&x| x != 0)))
+            && (u.cmps.iter().any(|&x| x != 0)
+                || (!u.stores.is_empty() && u.cmps.is_empty() && u.stores.iter().any(|&x| x != 0)))
             && matches!(fd.t, FT::Scalar(_))
         {
-            vt.vote(views, Some(l), "kind", 8, format!("offset 0, only written and compared constants (a variant tag) in {fnm}"));
+            vt.vote(
+                views,
+                Some(l),
+                "kind",
+                8,
+                format!("offset 0, only written and compared constants (a variant tag) in {fnm}"),
+            );
         }
     }
 }
@@ -1507,7 +1724,11 @@ fn on_stmt(sc: &mut Scan, vt: &mut Votes, s: &Stmt, pda: bool, fnm: &str) {
         if let Some(vals) = vals {
             for i in 0..vals.len() {
                 let x = vals[i];
-                let len = if i + 1 < vals.len() { Some(sc.val(vals[i + 1], 3)) } else { None };
+                let len = if i + 1 < vals.len() {
+                    Some(sc.val(vals[i + 1], 3))
+                } else {
+                    None
+                };
                 let lv = match len.map(|l| ir.get(l)) {
                     Some(Node::Const(v)) if v != 0 && v <= 32 => v,
                     _ => continue,
@@ -1533,19 +1754,47 @@ fn on_stmt(sc: &mut Scan, vt: &mut Votes, s: &Stmt, pda: bool, fnm: &str) {
                 let why = format!("given as a PDA seed ({lv} bytes) in {fnm}");
                 if lv == 1 {
                     if l.field.as_ref().is_some_and(|f| f.t == FT::Scalar(1)) {
-                        vt.vote(sc.views, Some(&l), "bump", 3, format!("given as a 1-byte PDA seed in {fnm}"));
+                        vt.vote(
+                            sc.views,
+                            Some(&l),
+                            "bump",
+                            3,
+                            format!("given as a 1-byte PDA seed in {fnm}"),
+                        );
                     }
                 } else if l.field.is_none() {
                     if lv == 32 {
-                        vt.vote(sc.views, Some(&Loc { key: true, ..l.clone() }), "seed", 5, why);
+                        vt.vote(
+                            sc.views,
+                            Some(&Loc {
+                                key: true,
+                                ..l.clone()
+                            }),
+                            "seed",
+                            5,
+                            why,
+                        );
                     }
                 } else if matches!(l.field.as_ref().unwrap().t, FT::Scalar(sz) if sz as u64 == lv) {
                     vt.vote(sc.views, Some(&l), "seed", 5, why);
                 } else if lv == 32 && matches!(l.field.as_ref().unwrap().t, FT::Scalar(_)) {
-                    let ws: Vec<Option<Loc>> = [0.0, 8.0, 16.0, 24.0].iter().map(|d| sc.loc_in(&l.view, l.off + d)).collect();
-                    if ws.iter().all(|w| w.as_ref().is_some_and(|w| w.rest == 0.0 && w.field.as_ref().is_some_and(|f| f.t == FT::Scalar(8)))) {
+                    let ws: Vec<Option<Loc>> = [0.0, 8.0, 16.0, 24.0]
+                        .iter()
+                        .map(|d| sc.loc_in(&l.view, l.off + d))
+                        .collect();
+                    if ws.iter().all(|w| {
+                        w.as_ref().is_some_and(|w| {
+                            w.rest == 0.0 && w.field.as_ref().is_some_and(|f| f.t == FT::Scalar(8))
+                        })
+                    }) {
                         for (i, w) in ws.iter().enumerate() {
-                            vt.vote(sc.views, w.as_ref(), &format!("seed_w{i}"), 5, format!("{why} (word {i} of the key)"));
+                            vt.vote(
+                                sc.views,
+                                w.as_ref(),
+                                &format!("seed_w{i}"),
+                                5,
+                                format!("{why} (word {i} of the key)"),
+                            );
                         }
                     }
                 }
@@ -1578,9 +1827,16 @@ fn on_stmt(sc: &mut Scan, vt: &mut Votes, s: &Stmt, pda: bool, fnm: &str) {
             vt.vote(
                 sc.views,
                 Some(&l),
-                if ck == "ts" { "updated_ts" } else { "updated_slot" },
+                if ck == "ts" {
+                    "updated_ts"
+                } else {
+                    "updated_slot"
+                },
                 4,
-                format!("stored from Clock.{} in {fnm}", if ck == "ts" { "unix_timestamp" } else { "slot" }),
+                format!(
+                    "stored from Clock.{} in {fnm}",
+                    if ck == "ts" { "unix_timestamp" } else { "slot" }
+                ),
             );
         }
         if let (Node::Bin(op, a, b), FT::Scalar(fs)) = (ir.get(vv), &fd.t) {
@@ -1601,28 +1857,51 @@ fn on_stmt(sc: &mut Scan, vt: &mut Votes, s: &Stmt, pda: bool, fnm: &str) {
                         let o = sc.val(other, 3);
                         let sign = if op == BinOp::Add { "+" } else { "-" };
                         match ir.get(o) {
-                            Node::Const(c) if c == 1 || c == u64::MAX => {
-                                vt.vote(sc.views, Some(&l), "count", 7, format!("updated in place by {sign} 1 in {fnm}"))
-                            }
+                            Node::Const(c) if c == 1 || c == u64::MAX => vt.vote(
+                                sc.views,
+                                Some(&l),
+                                "count",
+                                7,
+                                format!("updated in place by {sign} 1 in {fnm}"),
+                            ),
                             Node::Const(_) => {}
-                            _ => vt.vote(sc.views, Some(&l), "balance", 6, format!("updated in place by {sign} an amount in {fnm}")),
+                            _ => vt.vote(
+                                sc.views,
+                                Some(&l),
+                                "balance",
+                                6,
+                                format!("updated in place by {sign} an amount in {fnm}"),
+                            ),
                         }
                     }
                 }
             }
         }
     }
-    let Some((t, args)) = call_of(ir, s) else { return };
+    let Some((t, args)) = call_of(ir, s) else {
+        return;
+    };
     if let CallTarget::Fn { pc } = &t {
         let nm = (sc.cfg.fn_name)(*pc);
-        if ["cpi_token_transfer", "cpi_token_mint_to", "cpi_token_burn", "cpi_token_approve"]
-            .iter()
-            .any(|p| nm.starts_with(p))
+        if [
+            "cpi_token_transfer",
+            "cpi_token_mint_to",
+            "cpi_token_burn",
+            "cpi_token_approve",
+        ]
+        .iter()
+        .any(|p| nm.starts_with(p))
         {
             for a in ir.items(args) {
                 if let Some(l) = sc.load_loc(a, Some(8)) {
                     if matches!(l.field.as_ref().unwrap().t, FT::Scalar(_)) {
-                        vt.vote(sc.views, Some(&l), "amount", 5, format!("passed to {nm} in {fnm}"));
+                        vt.vote(
+                            sc.views,
+                            Some(&l),
+                            "amount",
+                            5,
+                            format!("passed to {nm} in {fnm}"),
+                        );
                     }
                 }
             }
@@ -1688,9 +1967,12 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
             });
         }
         let has_call = stmts.iter().any(|s| call_of(ir, s).is_some());
-        let has_store = stmts
-            .iter()
-            .any(|s| matches!(s, Stmt::Store { .. } | Stmt::Stores { .. } | Stmt::Copy { .. }));
+        let has_store = stmts.iter().any(|s| {
+            matches!(
+                s,
+                Stmt::Store { .. } | Stmt::Stores { .. } | Stmt::Copy { .. }
+            )
+        });
         let pv: HashSet<u32> = params.iter().copied().collect();
         let word_of = |a: E| -> Option<(u32, u64)> {
             match ir.get(a) {
@@ -1709,7 +1991,10 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
                     if ir.with_name(n, |s| s == "memeq")
                         && args.len == 3
                         && ir.get(ir.at(args, 2)) == Node::Const(32)
-                        && ir.items(args).take(2).all(|a| matches!(ir.get(a), Node::Var(v) if pv.contains(&v)))
+                        && ir
+                            .items(args)
+                            .take(2)
+                            .all(|a| matches!(ir.get(a), Node::Var(v) if pv.contains(&v)))
                     {
                         r = true;
                     }
@@ -1720,7 +2005,9 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
         if !has_call
             && !has_store
             && params.len() == 2
-            && f.blocks.iter().any(|b| matches!(b.term, Term::Ret { e: Some(_) }))
+            && f.blocks
+                .iter()
+                .any(|b| matches!(b.term, Term::Ret { e: Some(_) }))
         {
             let mut offs: IndexSet<String> = IndexSet::new();
             for &l in &loads {
@@ -1757,9 +2044,7 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
             .collect();
         if infos.len() == 1 && f.blocks.iter().any(|b| matches!(b.term, Term::Br { .. })) {
             let iv = infos[0];
-            let is_signer = |x: E| {
-                matches!(ir.get(x), Node::Load { size: 1, addr } if matches!(ir.get(addr), Node::Bin(BinOp::Add, a, c) if ir.get(a) == Node::Var(iv) && ir.get(c) == Node::Const(0x28)))
-            };
+            let is_signer = |x: E| matches!(ir.get(x), Node::Load { size: 1, addr } if matches!(ir.get(addr), Node::Bin(BinOp::Add, a, c) if ir.get(a) == Node::Var(iv) && ir.get(c) == Node::Const(0x28)));
             let ok_loads = loads.iter().all(|&x| {
                 is_signer(x) || matches!(ir.get(x), Node::Load { size: 8, addr } if ir.get(addr) == Node::Var(iv))
             });
@@ -1767,7 +2052,9 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
             let ok_stores = stmts.iter().all(|s| match s {
                 Stmt::Set { .. } | Stmt::Eval { .. } => true,
                 Stmt::Store { v, .. } => matches!(ir.get(*v), Node::Const(_)),
-                Stmt::Stores { vals, .. } => ir.items(*vals).all(|v| matches!(ir.get(v), Node::Const(_))),
+                Stmt::Stores { vals, .. } => {
+                    ir.items(*vals).all(|v| matches!(ir.get(v), Node::Const(_)))
+                }
                 Stmt::Call { t, .. } => is_log_sys(t),
                 _ => false,
             });

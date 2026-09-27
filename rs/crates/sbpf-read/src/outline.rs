@@ -48,7 +48,13 @@ fn line_count(ns: &[SNode]) -> usize {
     for x in ns {
         n += match x {
             SNode::If { then, els, .. } => {
-                1 + line_count(then) + if els.is_empty() { 0 } else { 1 + line_count(els) } + 1
+                1 + line_count(then)
+                    + if els.is_empty() {
+                        0
+                    } else {
+                        1 + line_count(els)
+                    }
+                    + 1
             }
             _ => 1,
         };
@@ -76,7 +82,9 @@ impl Cand {
 fn returns_value(n: &SNode) -> bool {
     match n {
         SNode::Return(e) => e.is_some(),
-        SNode::If { then, els, .. } => then.iter().any(returns_value) || els.iter().any(returns_value),
+        SNode::If { then, els, .. } => {
+            then.iter().any(returns_value) || els.iter().any(returns_value)
+        }
         _ => false,
     }
 }
@@ -148,7 +156,13 @@ fn lead_call(fn_: &OutlineFn, n: &SNode) -> Option<(u32, E)> {
     let ir = fn_.f.ir.as_ref().unwrap();
     let s = fn_.tree.stmt(*si);
     match s {
-        Stmt::Call { dst, t, args, extra, .. } if *dst >= 0 && Some(*dst as u32) != fn_.fp && Some(*dst as u32) != fn_.ret => {
+        Stmt::Call {
+            dst,
+            t,
+            args,
+            extra,
+            ..
+        } if *dst >= 0 && Some(*dst as u32) != fn_.fp && Some(*dst as u32) != fn_.ret => {
             let mut all = ir.to_vec(*args);
             if let Some(x) = extra {
                 all.extend(ir.items(*x));
@@ -158,7 +172,9 @@ fn lead_call(fn_: &OutlineFn, n: &SNode) -> Option<(u32, E)> {
             Some((*dst as u32, ir.mk(Node::Call(ti, l))))
         }
         Stmt::Set { dst, e, .. }
-            if matches!(ir.get(*e), Node::Call(..)) && Some(*dst as u32) != fn_.fp && Some(*dst as u32) != fn_.ret =>
+            if matches!(ir.get(*e), Node::Call(..))
+                && Some(*dst as u32) != fn_.fp
+                && Some(*dst as u32) != fn_.ret =>
         {
             Some((*dst as u32, *e))
         }
@@ -174,13 +190,22 @@ fn ok_node(fn_: &OutlineFn, n: &SNode) -> bool {
             Node::Call(..) => false,
             Node::Var(id) => Some(id) != fp,
             Node::Bin(op, a, b) => {
-                if op == BinOp::Add && Some(ir.get(a)) == fp.map(Node::Var) && matches!(ir.get(b), Node::Const(_)) {
+                if op == BinOp::Add
+                    && Some(ir.get(a)) == fp.map(Node::Var)
+                    && matches!(ir.get(b), Node::Const(_))
+                {
                     return true;
                 }
                 ok_expr(ir, fp, a) && ok_expr(ir, fp, b)
             }
-            Node::Cmp(_, a, b) | Node::Land(a, b) | Node::Lor(a, b) => ok_expr(ir, fp, a) && ok_expr(ir, fp, b),
-            Node::Neg(a) | Node::Not(a) | Node::Lnot(a) | Node::Ext { a, .. } | Node::Bswap { a, .. } => ok_expr(ir, fp, a),
+            Node::Cmp(_, a, b) | Node::Land(a, b) | Node::Lor(a, b) => {
+                ok_expr(ir, fp, a) && ok_expr(ir, fp, b)
+            }
+            Node::Neg(a)
+            | Node::Not(a)
+            | Node::Lnot(a)
+            | Node::Ext { a, .. }
+            | Node::Bswap { a, .. } => ok_expr(ir, fp, a),
             Node::Load { addr, .. } => ok_expr(ir, fp, addr),
             Node::Sel(c, a, b) => ok_expr(ir, fp, c) && ok_expr(ir, fp, a) && ok_expr(ir, fp, b),
             Node::Fn(_, args) => ir.items(args).all(|x| ok_expr(ir, fp, x)),
@@ -196,7 +221,9 @@ fn ok_node(fn_: &OutlineFn, n: &SNode) -> bool {
     };
     match n {
         SNode::Stmt(si) => match fn_.tree.stmt(*si) {
-            Stmt::Set { e, dst, .. } => ok_expr(ir, fp, *e) && Some(*dst as u32) != fp && Some(*dst as u32) != ret,
+            Stmt::Set { e, dst, .. } => {
+                ok_expr(ir, fp, *e) && Some(*dst as u32) != fp && Some(*dst as u32) != ret
+            }
             Stmt::Store { addr, v, .. } => {
                 dest(*addr)
                     && ok_expr(ir, fp, *addr)
@@ -207,15 +234,20 @@ fn ok_node(fn_: &OutlineFn, n: &SNode) -> bool {
                 dest(*addr)
                     && ok_expr(ir, fp, *addr)
                     && ir.items(*vals).all(|x| ok_expr(ir, fp, x))
-                    && !(fn_.no_const_stores && ir.items(*vals).any(|x| matches!(ir.get(x), Node::Const(_))))
+                    && !(fn_.no_const_stores
+                        && ir.items(*vals).any(|x| matches!(ir.get(x), Node::Const(_))))
             }
-            Stmt::Copy { dst, src, .. } => dest(*dst) && ok_expr(ir, fp, *dst) && ok_expr(ir, fp, *src),
+            Stmt::Copy { dst, src, .. } => {
+                dest(*dst) && ok_expr(ir, fp, *dst) && ok_expr(ir, fp, *src)
+            }
             Stmt::Eval { e, .. } => ok_expr(ir, fp, *e),
             Stmt::Trap { .. } => true,
             Stmt::Call { .. } => false,
         },
         SNode::If { c, then, els } => {
-            ok_expr(ir, fp, *c) && then.iter().all(|x| ok_node(fn_, x)) && els.iter().all(|x| ok_node(fn_, x))
+            ok_expr(ir, fp, *c)
+                && then.iter().all(|x| ok_node(fn_, x))
+                && els.iter().all(|x| ok_node(fn_, x))
         }
         SNode::Return(e) => e.is_none_or(|e| ok_expr(ir, fp, e)),
         SNode::Trap(_) => true,
@@ -313,7 +345,11 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
                 Node::Not(a) => format!("(not {})", self.ser(a, only)),
                 Node::Lnot(a) => format!("(lnot {})", self.ser(a, only)),
                 Node::Ext { signed, bits, a } => {
-                    format!("(ext{}{bits} {})", if signed { 's' } else { 'u' }, self.ser(a, only))
+                    format!(
+                        "(ext{}{bits} {})",
+                        if signed { 's' } else { 'u' },
+                        self.ser(a, only)
+                    )
                 }
                 Node::Bswap { bits, a } => format!("(bswap{bits} {})", self.ser(a, only)),
                 Node::Load { size, addr } => format!("[{size} {}]", self.ser(addr, only)),
@@ -346,21 +382,34 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
                     let (a, b) = (self.ser(*addr, only), self.ser(*v, only));
                     format!("st{size} {a} {b}")
                 }
-                Stmt::Stores { size, addr, vals, .. } => {
+                Stmt::Stores {
+                    size, addr, vals, ..
+                } => {
                     let a = self.ser(*addr, only);
                     let vs: Vec<String> = self.ir.items(*vals).map(|x| self.ser(x, only)).collect();
                     format!("sts{size} {a} {}", vs.join(" "))
                 }
-                Stmt::Copy { dst, src, n, rev, .. } => {
+                Stmt::Copy {
+                    dst, src, n, rev, ..
+                } => {
                     let (a, b) = (self.ser(*dst, only), self.ser(*src, only));
-                    format!("cp{} {a} {b} {n}", if *rev == Some(true) { "r" } else { "" })
+                    format!(
+                        "cp{} {a} {b} {n}",
+                        if *rev == Some(true) { "r" } else { "" }
+                    )
                 }
                 Stmt::Eval { e, .. } => format!("ev {}", self.ser(*e, only)),
                 Stmt::Trap { msg, .. } => format!("trap {}", json_str(msg)),
                 Stmt::Call { .. } => crate::util::js_throw("call in an outlining candidate"),
             }
         }
-        fn list(&mut self, tree: &Tree, xs: &[SNode], top: bool, only: &dyn Fn(u32) -> bool) -> String {
+        fn list(
+            &mut self,
+            tree: &Tree,
+            xs: &[SNode],
+            top: bool,
+            only: &dyn Fn(u32) -> bool,
+        ) -> String {
             let mut parts = Vec::new();
             for n in xs {
                 parts.push(match n {
@@ -393,7 +442,12 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
     if let Some((d, _)) = lead {
         s.vars.insert(d, "@C".into());
     }
-    let mut key = s.list(tree, if lead.is_some() { &run[1..] } else { run }, true, &only);
+    let mut key = s.list(
+        tree,
+        if lead.is_some() { &run[1..] } else { run },
+        true,
+        &only,
+    );
     if let Some((_, call)) = lead {
         key = key.replace("@C", &format!("P{}", s.params.len()));
         s.params.push(call);
@@ -410,14 +464,23 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
     let mut groups: IndexMap<String, Vec<Cand>> = IndexMap::new();
     for (fi, fn_) in fns.iter().enumerate() {
         let mut total0: Option<HashMap<u32, u32>> = None;
-        fn visit(fn_: &OutlineFn, fi: usize, ns: &Vec<SNode>, total0: &mut Option<HashMap<u32, u32>>, groups: &mut IndexMap<String, Vec<Cand>>, min_lines: usize) {
+        fn visit(
+            fn_: &OutlineFn,
+            fi: usize,
+            ns: &Vec<SNode>,
+            total0: &mut Option<HashMap<u32, u32>>,
+            groups: &mut IndexMap<String, Vec<Cand>>,
+            min_lines: usize,
+        ) {
             for n in ns {
                 match n {
                     SNode::If { then, els, .. } => {
                         visit(fn_, fi, then, total0, groups, min_lines);
                         visit(fn_, fi, els, total0, groups, min_lines);
                     }
-                    SNode::Block { body, .. } | SNode::Loop { body, .. } => visit(fn_, fi, body, total0, groups, min_lines),
+                    SNode::Block { body, .. } | SNode::Loop { body, .. } => {
+                        visit(fn_, fi, body, total0, groups, min_lines)
+                    }
                     SNode::Switch { cases, .. } => {
                         for c in cases {
                             visit(fn_, fi, &c.1, total0, groups, min_lines);
@@ -483,7 +546,11 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
         })
     }
     let gain = |g: &[&Cand]| -> i64 {
-        let site = if g[0].nodes().iter().any(returns_value) { 1 } else { 2 };
+        let site = if g[0].nodes().iter().any(returns_value) {
+            1
+        } else {
+            2
+        };
         g.len() as i64 * (g[0].lines as i64 - site) - (g[0].lines as i64 + 2)
     };
     let mut order: Vec<Vec<&Cand>> = groups
@@ -494,7 +561,10 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
     order.sort_by(|a, b| gain(b).cmp(&gain(a)));
     let mut chosen: Vec<Vec<&Cand>> = Vec::new();
     for g0 in order {
-        let g: Vec<&Cand> = g0.into_iter().filter(|c| free(c.nodes(), &covered)).collect();
+        let g: Vec<&Cand> = g0
+            .into_iter()
+            .filter(|c| free(c.nodes(), &covered))
+            .collect();
         if g.len() < 2 || gain(&g) <= 0 {
             continue;
         }
@@ -505,11 +575,13 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
     }
     let u16cmp = |a: &str, b: &str| a.encode_utf16().cmp(b.encode_utf16());
     chosen.sort_by(|a, b| {
-        b.len().cmp(&a.len()).then(if u16cmp(&a[0].key, &b[0].key) == std::cmp::Ordering::Less {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Greater
-        })
+        b.len().cmp(&a.len()).then(
+            if u16cmp(&a[0].key, &b[0].key) == std::cmp::Ordering::Less {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            },
+        )
     });
     let mut out = Outlines::default();
     let mut k = 0;
@@ -534,13 +606,13 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
         let hi = out.helpers.len();
         out.helpers.push(h);
         for x in g {
-            out.at
-                .entry((x.fi, x.list))
-                .or_default()
-                .insert(x.i, OutlineUse {
+            out.at.entry((x.fi, x.list)).or_default().insert(
+                x.i,
+                OutlineUse {
                     helper: hi,
                     args: x.params.clone(),
-                });
+                },
+            );
         }
     }
     out
@@ -581,7 +653,9 @@ fn helper_of(fn_: &OutlineFn, c: &Cand, name: &str, ret_first: bool) -> Helper {
                 ids.insert(c.lead.unwrap(), id);
             }
             Node::Bin(_, _, b) => {
-                let Node::Const(v) = fir.get(b) else { unreachable!() };
+                let Node::Const(v) = fir.get(b) else {
+                    unreachable!()
+                };
                 frame_param.insert(crate::util::K::of(n_s(v)), id);
             }
             _ => {}
@@ -736,7 +810,12 @@ fn helper_of(fn_: &OutlineFn, c: &Cand, name: &str, ret_first: bool) -> Helper {
                                 pc: *pc,
                             }
                         }
-                        Stmt::Stores { size, addr, vals, pc } => {
+                        Stmt::Stores {
+                            size,
+                            addr,
+                            vals,
+                            pc,
+                        } => {
                             let a = hh.ex(*addr);
                             let vs: Vec<E> = hh.fir.items(*vals).map(|x| hh.ex(x)).collect();
                             let l = hh.hir.list(vs);
@@ -747,7 +826,13 @@ fn helper_of(fn_: &OutlineFn, c: &Cand, name: &str, ret_first: bool) -> Helper {
                                 pc: *pc,
                             }
                         }
-                        Stmt::Copy { dst, src: s2, n, pc, rev } => {
+                        Stmt::Copy {
+                            dst,
+                            src: s2,
+                            n,
+                            pc,
+                            rev,
+                        } => {
                             let (d, s2) = (hh.ex(*dst), hh.ex(*s2));
                             Stmt::Copy {
                                 dst: d,
@@ -777,7 +862,11 @@ fn helper_of(fn_: &OutlineFn, c: &Cand, name: &str, ret_first: bool) -> Helper {
         }
         out
     }
-    let src_nodes = if c.lead.is_some() { &c.nodes()[1..] } else { c.nodes() };
+    let src_nodes = if c.lead.is_some() {
+        &c.nodes()[1..]
+    } else {
+        c.nodes()
+    };
     let body = nodes(&mut hh, fn_.tree, src_nodes, &mut tree);
     tree.body = body;
     let H { vars, names, .. } = hh;

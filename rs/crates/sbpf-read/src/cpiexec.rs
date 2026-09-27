@@ -678,37 +678,74 @@ fn model0<'c>(
     let mut rb = b_run.unwrap();
     {
         let (a, b) = (&ra.cap, &rb.cap);
-        if a.abi_c != b.abi_c || a.metas.len() != b.metas.len() || a.data.b.len() != b.data.b.len() {
+        if a.abi_c != b.abi_c || a.metas.len() != b.metas.len() || a.data.b.len() != b.data.b.len()
+        {
             return Ok(None);
         }
     }
     let (ap, bp) = (
-        std::mem::replace(&mut ra.cap.program, TB { b: vec![], t: vec![] }),
-        std::mem::replace(&mut rb.cap.program, TB { b: vec![], t: vec![] }),
+        std::mem::replace(
+            &mut ra.cap.program,
+            TB {
+                b: vec![],
+                t: vec![],
+            },
+        ),
+        std::mem::replace(
+            &mut rb.cap.program,
+            TB {
+                b: vec![],
+                t: vec![],
+            },
+        ),
     );
     let (app, bpp) = (ra.cap.program_ptr, rb.cap.program_ptr);
     let program = key_text(env, &mut ra, &mut rb, &ap, &bp, app, bpp);
     let mut accounts = Vec::new();
     let na = ra.cap.metas.len();
     for i in 0..na {
-        let mk = std::mem::replace(&mut ra.cap.metas[i].key, TB { b: vec![], t: vec![] });
-        let nk = std::mem::replace(&mut rb.cap.metas[i].key, TB { b: vec![], t: vec![] });
+        let mk = std::mem::replace(
+            &mut ra.cap.metas[i].key,
+            TB {
+                b: vec![],
+                t: vec![],
+            },
+        );
+        let nk = std::mem::replace(
+            &mut rb.cap.metas[i].key,
+            TB {
+                b: vec![],
+                t: vec![],
+            },
+        );
         let (mp, np) = (ra.cap.metas[i].ptr, rb.cap.metas[i].ptr);
         let k = key_text(env, &mut ra, &mut rb, &mk, &nk, mp, np);
         let (m, n) = (&ra.cap.metas[i], &rb.cap.metas[i]);
         let fixed = m.flags_tainted & 1 == 0 && n.flags_tainted & 1 == 0;
         accounts.push(Acc {
             text: k.known.unwrap_or(k.text),
-            w: if fixed && m.w == n.w { Some(m.w as N) } else { None },
-            s: if fixed && m.s == n.s { Some(m.s as N) } else { None },
+            w: if fixed && m.w == n.w {
+                Some(m.w as N)
+            } else {
+                None
+            },
+            s: if fixed && m.s == n.s {
+                Some(m.s as N)
+            } else {
+                None
+            },
         });
     }
     // signer seeds
     let seeds;
     let (sa, sb) = (ra.cap.signers.clone(), rb.cap.signers.clone());
     match (&sa, &sb) {
-        (Some(x), Some(y)) if x.len() == y.len() && x.is_empty() => seeds = Some("no signer seeds".to_string()),
-        (Some(x), Some(y)) if x.len() == y.len() && x.iter().zip(y).all(|(s, t)| s.len() == t.len()) => {
+        (Some(x), Some(y)) if x.len() == y.len() && x.is_empty() => {
+            seeds = Some("no signer seeds".to_string())
+        }
+        (Some(x), Some(y))
+            if x.len() == y.len() && x.iter().zip(y).all(|(s, t)| s.len() == t.len()) =>
+        {
             let mut list = Vec::new();
             for (i, s) in x.iter().enumerate() {
                 let mut parts = Vec::new();
@@ -773,7 +810,10 @@ fn seed_text(env: &mut CpiEnv, ra: &mut Run, rb: &mut Run, x: (u64, u64), y: (u6
         return if n <= 8 {
             format!("u{} 0x{:x}", n * 8, le(&bx, 0, n))
         } else {
-            format!("0x{}", bx.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            format!(
+                "0x{}",
+                bx.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )
         };
     }
     if n == 32 {
@@ -809,4 +849,3 @@ fn seed_text(env: &mut CpiEnv, ra: &mut Run, rb: &mut Run, x: (u64, u64), y: (u6
         None => format!("? ({n} bytes)"),
     }
 }
-

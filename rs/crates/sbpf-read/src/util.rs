@@ -117,7 +117,9 @@ pub fn pad_end(s: &str, n: f64) -> String {
 /// `/^fn_[0-9a-f]+$/`
 pub fn is_fn_hex(n: &str) -> bool {
     n.strip_prefix("fn_").is_some_and(|r| {
-        !r.is_empty() && r.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        !r.is_empty()
+            && r.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     })
 }
 
@@ -139,7 +141,10 @@ pub fn is_memcpy_name(n: &str) -> bool {
 pub fn strip_hex_suffix(n: &str, min: usize) -> &str {
     if let Some(i) = n.rfind('_') {
         let t = &n[i + 1..];
-        if t.len() >= min && t.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+        if t.len() >= min
+            && t.bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
             return &n[..i];
         }
     }
@@ -237,9 +242,9 @@ pub fn expr_eq(ir: &Ir, a: E, b: E) -> bool {
         (Node::Land(a1, b1), Node::Land(a2, b2)) | (Node::Lor(a1, b1), Node::Lor(a2, b2)) => {
             expr_eq(ir, a1, a2) && expr_eq(ir, b1, b2)
         }
-        (Node::Neg(p), Node::Neg(q)) | (Node::Not(p), Node::Not(q)) | (Node::Lnot(p), Node::Lnot(q)) => {
-            expr_eq(ir, p, q)
-        }
+        (Node::Neg(p), Node::Neg(q))
+        | (Node::Not(p), Node::Not(q))
+        | (Node::Lnot(p), Node::Lnot(q)) => expr_eq(ir, p, q),
         (
             Node::Ext {
                 signed: s1,
@@ -302,9 +307,9 @@ pub fn json_eq(ir: &Ir, a: E, b: E) -> bool {
         (Node::Land(a1, b1), Node::Land(a2, b2)) | (Node::Lor(a1, b1), Node::Lor(a2, b2)) => {
             json_eq(ir, a1, a2) && json_eq(ir, b1, b2)
         }
-        (Node::Neg(p), Node::Neg(q)) | (Node::Not(p), Node::Not(q)) | (Node::Lnot(p), Node::Lnot(q)) => {
-            json_eq(ir, p, q)
-        }
+        (Node::Neg(p), Node::Neg(q))
+        | (Node::Not(p), Node::Not(q))
+        | (Node::Lnot(p), Node::Lnot(q)) => json_eq(ir, p, q),
         (
             Node::Ext {
                 signed: s1,
@@ -651,7 +656,10 @@ pub fn unb58(s: &str) -> Vec<u8> {
     let mut mag: Vec<u64> = vec![0]; // little-endian base 2^32
     let _ = &mut n;
     for c in s.chars() {
-        let idx = B58.iter().position(|&x| x as char == c).map_or(-1i64, |i| i as i64);
+        let idx = B58
+            .iter()
+            .position(|&x| x as char == c)
+            .map_or(-1i64, |i| i as i64);
         // mag = mag * 58 + idx (with sign)
         let mut carry: u64 = 0;
         for d in mag.iter_mut() {

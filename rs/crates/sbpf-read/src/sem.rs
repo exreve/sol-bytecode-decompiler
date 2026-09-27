@@ -13,59 +13,203 @@ use std::sync::OnceLock;
 
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("11111111111111111111111111111111", "SYSTEM_PROGRAM"),
-    ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TOKEN_PROGRAM"),
-    ("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "TOKEN_2022_PROGRAM"),
-    ("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL", "ASSOCIATED_TOKEN_PROGRAM"),
-    ("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "MEMO_PROGRAM"),
-    ("Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo", "MEMO_V1_PROGRAM"),
-    ("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s", "TOKEN_METADATA_PROGRAM"),
-    ("ComputeBudget111111111111111111111111111111", "COMPUTE_BUDGET_PROGRAM"),
-    ("BPFLoaderUpgradeab1e11111111111111111111111", "BPF_LOADER_UPGRADEABLE"),
-    ("BPFLoader2111111111111111111111111111111111", "BPF_LOADER_2"),
-    ("BPFLoader1111111111111111111111111111111111", "BPF_LOADER_1"),
-    ("SysvarC1ock11111111111111111111111111111111", "SYSVAR_CLOCK"),
+    (
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "TOKEN_PROGRAM",
+    ),
+    (
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        "TOKEN_2022_PROGRAM",
+    ),
+    (
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        "ASSOCIATED_TOKEN_PROGRAM",
+    ),
+    (
+        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+        "MEMO_PROGRAM",
+    ),
+    (
+        "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",
+        "MEMO_V1_PROGRAM",
+    ),
+    (
+        "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+        "TOKEN_METADATA_PROGRAM",
+    ),
+    (
+        "ComputeBudget111111111111111111111111111111",
+        "COMPUTE_BUDGET_PROGRAM",
+    ),
+    (
+        "BPFLoaderUpgradeab1e11111111111111111111111",
+        "BPF_LOADER_UPGRADEABLE",
+    ),
+    (
+        "BPFLoader2111111111111111111111111111111111",
+        "BPF_LOADER_2",
+    ),
+    (
+        "BPFLoader1111111111111111111111111111111111",
+        "BPF_LOADER_1",
+    ),
+    (
+        "SysvarC1ock11111111111111111111111111111111",
+        "SYSVAR_CLOCK",
+    ),
     ("SysvarRent111111111111111111111111111111111", "SYSVAR_RENT"),
-    ("Sysvar1nstructions1111111111111111111111111", "SYSVAR_INSTRUCTIONS"),
-    ("SysvarRecentB1ockHashes11111111111111111111", "SYSVAR_RECENT_BLOCKHASHES"),
-    ("SysvarEpochSchedu1e111111111111111111111111", "SYSVAR_EPOCH_SCHEDULE"),
+    (
+        "Sysvar1nstructions1111111111111111111111111",
+        "SYSVAR_INSTRUCTIONS",
+    ),
+    (
+        "SysvarRecentB1ockHashes11111111111111111111",
+        "SYSVAR_RECENT_BLOCKHASHES",
+    ),
+    (
+        "SysvarEpochSchedu1e111111111111111111111111",
+        "SYSVAR_EPOCH_SCHEDULE",
+    ),
     ("SysvarFees111111111111111111111111111111111", "SYSVAR_FEES"),
-    ("SysvarS1otHashes111111111111111111111111111", "SYSVAR_SLOT_HASHES"),
-    ("SysvarStakeHistory1111111111111111111111111", "SYSVAR_STAKE_HISTORY"),
-    ("SysvarEpochRewards1111111111111111111111111", "SYSVAR_EPOCH_REWARDS"),
-    ("SysvarLastRestartS1ot1111111111111111111111", "SYSVAR_LAST_RESTART_SLOT"),
-    ("Stake11111111111111111111111111111111111111", "STAKE_PROGRAM"),
-    ("Vote111111111111111111111111111111111111111", "VOTE_PROGRAM"),
-    ("Config1111111111111111111111111111111111111", "CONFIG_PROGRAM"),
-    ("AddressLookupTab1e1111111111111111111111111", "ADDRESS_LOOKUP_TABLE_PROGRAM"),
-    ("Ed25519SigVerify111111111111111111111111111", "ED25519_PROGRAM"),
-    ("KeccakSecp256k11111111111111111111111111111", "SECP256K1_PROGRAM"),
+    (
+        "SysvarS1otHashes111111111111111111111111111",
+        "SYSVAR_SLOT_HASHES",
+    ),
+    (
+        "SysvarStakeHistory1111111111111111111111111",
+        "SYSVAR_STAKE_HISTORY",
+    ),
+    (
+        "SysvarEpochRewards1111111111111111111111111",
+        "SYSVAR_EPOCH_REWARDS",
+    ),
+    (
+        "SysvarLastRestartS1ot1111111111111111111111",
+        "SYSVAR_LAST_RESTART_SLOT",
+    ),
+    (
+        "Stake11111111111111111111111111111111111111",
+        "STAKE_PROGRAM",
+    ),
+    (
+        "Vote111111111111111111111111111111111111111",
+        "VOTE_PROGRAM",
+    ),
+    (
+        "Config1111111111111111111111111111111111111",
+        "CONFIG_PROGRAM",
+    ),
+    (
+        "AddressLookupTab1e1111111111111111111111111",
+        "ADDRESS_LOOKUP_TABLE_PROGRAM",
+    ),
+    (
+        "Ed25519SigVerify111111111111111111111111111",
+        "ED25519_PROGRAM",
+    ),
+    (
+        "KeccakSecp256k11111111111111111111111111111",
+        "SECP256K1_PROGRAM",
+    ),
     ("So11111111111111111111111111111111111111112", "WSOL_MINT"),
     ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "USDC_MINT"),
     ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USDT_MINT"),
-    ("srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX", "OPENBOOK_V1_PROGRAM"),
-    ("opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb", "OPENBOOK_V2_PROGRAM"),
-    ("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", "RAYDIUM_AMM_V4_PROGRAM"),
-    ("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", "RAYDIUM_CLMM_PROGRAM"),
-    ("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C", "RAYDIUM_CPMM_PROGRAM"),
-    ("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", "ORCA_WHIRLPOOL_PROGRAM"),
-    ("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", "JUPITER_V6_PROGRAM"),
-    ("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", "METEORA_DLMM_PROGRAM"),
-    ("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", "PUMPFUN_PROGRAM"),
-    ("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d", "MPL_CORE_PROGRAM"),
-    ("BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY", "BUBBLEGUM_PROGRAM"),
-    ("SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy", "STAKE_POOL_PROGRAM"),
-    ("namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX", "NAME_SERVICE_PROGRAM"),
-    ("rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ", "PYTH_RECEIVER_PROGRAM"),
-    ("FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH", "PYTH_ORACLE_PROGRAM"),
-    ("SBondMDrcV3K4kxZR1HNVT7osZxAHVHgYXL5Ze1oMUv", "SWITCHBOARD_ONDEMAND_PROGRAM"),
-    ("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf", "SQUADS_V4_PROGRAM"),
-    ("MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD", "MARINADE_PROGRAM"),
-    ("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD", "KAMINO_LEND_PROGRAM"),
-    ("dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH", "DRIFT_PROGRAM"),
-    ("worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth", "WORMHOLE_CORE_PROGRAM"),
-    ("wormDTUJ6AWPNvk59vGQbDvGJmqbDTdgWgAqcLBCgUb", "WORMHOLE_TOKEN_BRIDGE"),
-    ("4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg", "MANGO_V4_PROGRAM"),
-    ("T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt", "JITO_TIP_PROGRAM"),
+    (
+        "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX",
+        "OPENBOOK_V1_PROGRAM",
+    ),
+    (
+        "opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb",
+        "OPENBOOK_V2_PROGRAM",
+    ),
+    (
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+        "RAYDIUM_AMM_V4_PROGRAM",
+    ),
+    (
+        "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+        "RAYDIUM_CLMM_PROGRAM",
+    ),
+    (
+        "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+        "RAYDIUM_CPMM_PROGRAM",
+    ),
+    (
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "ORCA_WHIRLPOOL_PROGRAM",
+    ),
+    (
+        "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+        "JUPITER_V6_PROGRAM",
+    ),
+    (
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+        "METEORA_DLMM_PROGRAM",
+    ),
+    (
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "PUMPFUN_PROGRAM",
+    ),
+    (
+        "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
+        "MPL_CORE_PROGRAM",
+    ),
+    (
+        "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY",
+        "BUBBLEGUM_PROGRAM",
+    ),
+    (
+        "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy",
+        "STAKE_POOL_PROGRAM",
+    ),
+    (
+        "namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX",
+        "NAME_SERVICE_PROGRAM",
+    ),
+    (
+        "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ",
+        "PYTH_RECEIVER_PROGRAM",
+    ),
+    (
+        "FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH",
+        "PYTH_ORACLE_PROGRAM",
+    ),
+    (
+        "SBondMDrcV3K4kxZR1HNVT7osZxAHVHgYXL5Ze1oMUv",
+        "SWITCHBOARD_ONDEMAND_PROGRAM",
+    ),
+    (
+        "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",
+        "SQUADS_V4_PROGRAM",
+    ),
+    (
+        "MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD",
+        "MARINADE_PROGRAM",
+    ),
+    (
+        "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD",
+        "KAMINO_LEND_PROGRAM",
+    ),
+    (
+        "dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH",
+        "DRIFT_PROGRAM",
+    ),
+    (
+        "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth",
+        "WORMHOLE_CORE_PROGRAM",
+    ),
+    (
+        "wormDTUJ6AWPNvk59vGQbDvGJmqbDTdgWgAqcLBCgUb",
+        "WORMHOLE_TOKEN_BRIDGE",
+    ),
+    (
+        "4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg",
+        "MANGO_V4_PROGRAM",
+    ),
+    (
+        "T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt",
+        "JITO_TIP_PROGRAM",
+    ),
 ];
 
 pub fn known_key(b58s: &str) -> Option<&'static str> {
@@ -106,7 +250,10 @@ pub const PROGRAM_ERRORS: [&str; 27] = [
     "IncorrectAuthority",
 ];
 fn perr(i: u64) -> &'static str {
-    PROGRAM_ERRORS.get(i as usize).copied().unwrap_or("undefined")
+    PROGRAM_ERRORS
+        .get(i as usize)
+        .copied()
+        .unwrap_or("undefined")
 }
 
 pub fn anchor_error_name(v: u64) -> Option<&'static str> {
@@ -229,7 +376,11 @@ fn sel_db() -> &'static SelDb {
             .unwrap_or_default();
         let list = |k: &str| -> Vec<String> {
             v[k].as_array()
-                .map(|a| a.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|x| x.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         SelDb {
@@ -268,7 +419,9 @@ fn vocab() -> &'static Vec<(u64, u32)> {
     T.get_or_init(|| {
         let db = sel_db();
         let n = db.verbs.len() * 2 * (db.nouns.len() + 1);
-        let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).min(16);
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |x| x.get())
+            .min(16);
         let chunk = n.div_ceil(threads).max(1);
         let mut parts: Vec<Vec<(u64, u32)>> = Vec::new();
         std::thread::scope(|s| {
@@ -410,7 +563,14 @@ impl SemR {
             }
             for i in 0..4 {
                 let w = u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
-                key_chunks.insert(w, if i == 0 { n.to_string() } else { format!("{n}[{i}]") });
+                key_chunks.insert(
+                    w,
+                    if i == 0 {
+                        n.to_string()
+                    } else {
+                        format!("{n}[{i}]")
+                    },
+                );
             }
         }
         let mut s = SemR {
@@ -476,8 +636,10 @@ impl SemR {
             let mut xs = vec![w.clone()];
             xs.extend(camel_parts(w));
             for x in xs {
-                self.disc
-                    .insert(sha8(format!("account:{x}").as_bytes()), format!("account:{x}"));
+                self.disc.insert(
+                    sha8(format!("account:{x}").as_bytes()),
+                    format!("account:{x}"),
+                );
                 self.disc
                     .insert(sha8(format!("event:{x}").as_bytes()), format!("event:{x}"));
                 let sn = snake_sem(&x);
@@ -491,7 +653,10 @@ impl SemR {
             let hb = h.as_bytes();
             for i in 0..8 {
                 let pair = hb.get(i * 2..i * 2 + 2);
-                match pair.and_then(|p| std::str::from_utf8(p).ok()).and_then(|p| u8::from_str_radix(p, 16).ok()) {
+                match pair
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|p| u8::from_str_radix(p, 16).ok())
+                {
                     Some(x) => b[i] = x,
                     None => break,
                 }
@@ -649,10 +814,7 @@ impl SemR {
         }
         if let Some(errs) = &self.idl_errors {
             if (6000..0x10000).contains(&v) {
-                return errs
-                    .get(&crate::util::K::of(v as f64).0)
-                    .cloned()
-                    .flatten();
+                return errs.get(&crate::util::K::of(v as f64).0).cloned().flatten();
             }
         }
         None
@@ -816,7 +978,10 @@ mod tests {
     fn words_and_parts() {
         let mut w = indexmap::IndexSet::new();
         words_in(b"xx ab abc 9Hello_World1 ", &mut w);
-        assert_eq!(w.iter().cloned().collect::<Vec<_>>(), vec!["abc", "Hello_World1"]);
+        assert_eq!(
+            w.iter().cloned().collect::<Vec<_>>(),
+            vec!["abc", "Hello_World1"]
+        );
         assert_eq!(camel_parts("SwapBaseIn"), vec!["SwapBaseIn"]);
         assert_eq!(camel_parts("ABcdEf_GhI"), vec!["BcdEf", "Gh"]);
     }

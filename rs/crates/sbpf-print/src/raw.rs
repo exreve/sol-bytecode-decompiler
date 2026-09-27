@@ -118,7 +118,11 @@ pub fn structure_func(f: &mut Func) -> Tree {
 }
 
 /// Map over items on worker threads, results in input order.
-pub fn par_map<T: Send, R: Send>(items: Vec<T>, threads: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+pub fn par_map<T: Send, R: Send>(
+    items: Vec<T>,
+    threads: usize,
+    f: impl Fn(T) -> R + Sync,
+) -> Vec<R> {
     let n = items.len();
     if threads <= 1 || n <= 1 {
         return items.into_iter().map(f).collect();
