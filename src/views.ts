@@ -313,7 +313,8 @@ export class Views {
 	 * last (embedded) field, and what the path denotes: a scalar of `size`, a ref (loaded pointer), or an
 	 * embedded object (address).
 	 */
-	resolve(type: string, off: number): { path: string[]; rest: number; last: FieldType } | undefined {
+	resolve(type: string, off: number, depth = 0): { path: string[]; rest: number; last: FieldType } | undefined {
+		if (depth > 32) return undefined // (views never nest this deep; guards against a cyclic view graph)
 		const f = this.fieldAt(type, off)
 		if (!f) return undefined
 		let d = off - f.off
@@ -321,11 +322,11 @@ export class Views {
 			// an array element: f[k]
 			const w = this.width(f.t), k = Math.floor(d / w)
 			d -= k * w
-			const inner = d > 0 && this.map.has(f.t.type) ? this.resolve(f.t.type, d) : undefined
+			const inner = d > 0 && this.map.has(f.t.type) ? this.resolve(f.t.type, d, depth + 1) : undefined
 			return inner ? { path: [`${f.name}[${k}]`, ...inner.path], rest: inner.rest, last: inner.last } : { path: [`${f.name}[${k}]`], rest: d, last: f.t }
 		}
 		if (f.t.k === 'embed' && d > 0 && this.map.has(f.t.type)) {
-			const inner = this.resolve(f.t.type, d)
+			const inner = this.resolve(f.t.type, d, depth + 1)
 			if (inner) return { path: [f.name, ...inner.path], rest: inner.rest, last: inner.last }
 		}
 		return { path: [f.name], rest: d, last: f.t }

@@ -135,7 +135,7 @@ export class Printer {
         // (the first field of an embedded object: x.a.b for a load at x.a)
         const V = this.ctx.views;
         let t = f.t, last: import('./views.ts').FieldType = f.last;
-        for (let r; last.k === 'embed' && V.map.has(last.type) && (r = V.resolve(last.type, 0)) && !r.rest;) { t += '.' + r.path.join('.'); last = r.last; }
+        for (let r, n = 0; n < 32 && last.k === 'embed' && V.map.has(last.type) && (r = V.resolve(last.type, 0)) && !r.rest; n++) { t += '.' + r.path.join('.'); last = r.last; }
         if ((last.k === 'scalar' && last.size === e.size) || (last.k === 'ref' && e.size === 8)) return { t, prec: P.prim };
       }
       if (f.last.k === 'embed') return { t: `ld${e.size * 8}(${f.rest ? `${f.t} + ${fmtConst(BigInt(f.rest))}` : f.t})`, prec: P.call };

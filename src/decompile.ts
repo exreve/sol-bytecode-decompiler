@@ -1116,7 +1116,10 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     const ixName = sem.ixNames.get(pc);
     const ixDef = opts.sugar !== false && ixName ? opts.idl?.instructions.find(i => i.name === ixName) : undefined;
     if (ixDef && ixDef.argDefs.length) {
-      const vname = ixName!.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('') + 'Args';
+      // <Ix>Args, unless the IDL defines a type of that name (commonly the type of the single `args` argument):
+      // the argument-list view must not replace that type's view (it would embed itself)
+      const vbase = ixName!.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('') + 'Args';
+      const vname = opts.idl!.types.has(vbase) ? vbase.replace(/Args$/, 'IxArgs') : vbase;
       const view = views.map.get(vname) ?? views.borshView(vname, `arguments of instruction ${ixName} (Anchor IDL, Borsh layout; after the 8-byte discriminator)`, ixDef.argDefs, opts.idl!.types);
       const found = view && argsVar(f, view.name, views);
       if (found !== undefined && used.has(found)) {
