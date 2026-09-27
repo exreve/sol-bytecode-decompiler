@@ -41,7 +41,7 @@ export interface Options {
   loader?: string;       // owner of the program account when known (fetched): BPFLoader1111… serializes the input unaligned
 }
 
-export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number> }
+export interface FuncOut { pc: number; name: string; text: string; irreducible: boolean; f: VarFunc; body: Node[]; names: string[]; calls: Set<number>; varTypes?: Map<number, string> }
 export interface Result {
   program: Program;
   funcs: FuncOut[];
@@ -1577,7 +1577,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     if (facts.has(pc)) facts.get(pc)!.expr = e => pr.u(e, 0);
-    funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)! });
+    funcs.push({ pc, name: f.name, text: lines.join('\n'), irreducible, f, body, names, calls: callMap.get(pc)!, varTypes });
   }
   // Anchor try-call checks: what the callee whose result they test checks (see calleeChecks)
   if (sem.anchor) {

@@ -126,6 +126,7 @@ dependencies = [
  "sbpf-opt",
  "sbpf-print",
  "sbpf-program",
+ "sbpf-read",
  "sbpf-struct",
  "serde_json",
 ]

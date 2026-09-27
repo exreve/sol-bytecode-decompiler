@@ -154,6 +154,8 @@ pub struct ReadFunc {
     pub is_entry: bool,
     /// the variables' view types as printed (insertion order)
     pub var_types: Vec<(u32, String)>,
+    /// the variables' names (by id)
+    pub names: Vec<Option<String>>,
 }
 
 pub struct IxRow {
@@ -1771,4 +1773,57 @@ pub fn call_insns(d: &Dx, fpc: i64, target: &str) -> Vec<i64> {
         pc += 1;
     }
     out
+}
+
+/// layout.ts renderSingle of the readable output (without the analysis summary block).
+pub fn render_read(r: &ReadOut) -> String {
+    use sbpf_print::raw::{render_single_of, SingleFunc, SingleIn, SingleIx};
+    let funcs = r
+        .funcs
+        .iter()
+        .map(|f| SingleFunc {
+            pc: f.pc,
+            name: &f.name,
+            text: &f.text,
+            calls: &f.calls,
+            is_entry: f.is_entry,
+        })
+        .collect();
+    let ixs = r
+        .instructions
+        .iter()
+        .map(|i| SingleIx {
+            name: &i.name,
+            disc: i.disc,
+            args: i.args.as_deref(),
+            accounts: i.accounts.as_deref(),
+            str_accounts: i.str_accounts.as_deref(),
+        })
+        .collect();
+    let processors = r
+        .processors
+        .iter()
+        .map(|(f, n)| (f.as_str(), n.as_slice()))
+        .collect();
+    let views = |cands: &IndexSet<String>| -> Vec<String> {
+        let names: Vec<String> = cands.iter().filter(|n| r.views.has(n)).cloned().collect();
+        if names.is_empty() {
+            return vec![];
+        }
+        let mut out = vec!["// typed views: x.field is exactly the load / store / address given by the field declaration".to_string()];
+        out.extend(crate::views::VIEW_NOTATION.iter().map(|s| s.to_string()));
+        out.extend(r.views.render(&names));
+        out
+    };
+    render_single_of(&SingleIn {
+        version: r.version,
+        n_insns: r.n_insns,
+        n_funcs: r.n_funcs,
+        funcs,
+        ixs,
+        anchor: r.anchor,
+        processors,
+        views: &views,
+        outlined: r.outlined.iter().map(|x| x.1.as_str()).collect(),
+    })
 }

@@ -2746,6 +2746,7 @@ fn print_func(
         calls: calls_of(d, f),
         is_entry: f.is_entry,
         var_types: var_types.into_iter().collect(),
+        names,
     }
 }
 

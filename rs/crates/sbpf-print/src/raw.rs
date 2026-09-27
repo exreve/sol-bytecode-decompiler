@@ -386,18 +386,127 @@ pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     x.len().cmp(&y.len())
 }
 
+/// One function of the single file.
+pub struct SingleFunc<'a> {
+    pub pc: i64,
+    pub name: &'a str,
+    pub text: &'a str,
+    pub calls: &'a [i64],
+    pub is_entry: bool,
+}
+
+/// One row of the instruction table.
+pub struct SingleIx<'a> {
+    pub name: &'a str,
+    pub disc: u64,
+    pub args: Option<&'a [String]>,
+    pub accounts: Option<&'a [String]>,
+    pub str_accounts: Option<&'a [String]>,
+}
+
+/// What renderSingle reads of a decompile Result.
+pub struct SingleIn<'a> {
+    pub version: u32,
+    pub n_insns: usize,
+    pub n_funcs: usize,
+    pub funcs: Vec<SingleFunc<'a>>,
+    pub ixs: Vec<SingleIx<'a>>,
+    pub anchor: bool,
+    /// (function name, instruction names)
+    pub processors: Vec<(&'a str, &'a [String])>,
+    /// usedViews: the view declarations for the candidate names scanned from the texts (in order)
+    pub views: &'a dyn Fn(&IndexSet<String>) -> Vec<String>,
+    /// the outlined helpers' texts
+    pub outlined: Vec<&'a str>,
+}
+
 /// renderSingle without the analysis summary (`// security summary …` block).
 pub fn render_single(r: &Raw) -> String {
     let p = &r.p;
-    let by_pc: HashMap<i64, usize> = r.funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
-    let name = |i: usize| p.funcs[&r.funcs[i].pc].name.as_str();
-    let proc_names: HashSet<String> = r
+    let funcs = r
+        .funcs
+        .iter()
+        .map(|f| {
+            let pf = &p.funcs[&f.pc];
+            SingleFunc {
+                pc: f.pc,
+                name: pf.name.as_str(),
+                text: f.text.as_str(),
+                calls: &f.calls,
+                is_entry: pf.is_entry,
+            }
+        })
+        .collect::<Vec<_>>();
+    let by_pc: HashSet<i64> = r.funcs.iter().map(|f| f.pc).collect();
+    let ixs = r
+        .sem
+        .ix_names
+        .iter()
+        .filter(|(pc, _)| by_pc.contains(pc))
+        .map(|(_, n)| SingleIx {
+            name: n.as_str(),
+            disc: sha8(&format!("global:{n}")),
+            args: None,
+            accounts: None,
+            str_accounts: None,
+        })
+        .collect();
+    let processors = r
         .sem
         .processors
-        .keys()
-        .filter(|pc| by_pc.contains_key(pc))
-        .map(|pc| p.funcs[pc].name.clone())
+        .iter()
+        .filter(|(pc, _)| by_pc.contains(pc))
+        .map(|(pc, names)| (p.funcs[pc].name.as_str(), names.as_slice()))
         .collect();
+    let no_views = |_: &IndexSet<String>| Vec::new();
+    render_single_of(&SingleIn {
+        version: p.version,
+        n_insns: p.insns.len(),
+        n_funcs: p.funcs.len(),
+        funcs,
+        ixs,
+        anchor: r.sem.anchor,
+        processors,
+        views: &no_views,
+        outlined: vec![],
+    })
+}
+
+/// usedViews' scan: `/(?::|\bas) ([A-Z][A-Za-z0-9_]*)\b/g` capture groups, first appearance order.
+pub fn scan_views(text: &str, out: &mut IndexSet<String>) {
+    let b = text.as_bytes();
+    let w = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while i < b.len() {
+        let st = if b[i] == b':' {
+            i + 1
+        } else if b[i] == b'a' && b.get(i + 1) == Some(&b's') && (i == 0 || !w(b[i - 1])) {
+            i + 2
+        } else {
+            i += 1;
+            continue;
+        };
+        if b.get(st) == Some(&b' ') && b.get(st + 1).is_some_and(|c| c.is_ascii_uppercase()) {
+            let s = st + 1;
+            let mut e = s;
+            while e < b.len() && w(b[e]) {
+                e += 1;
+            }
+            if !out.contains(&text[s..e]) {
+                out.insert(text[s..e].to_string());
+            }
+            i = e;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// layout.ts renderSingle (without the analysis summary block).
+pub fn render_single_of(r: &SingleIn) -> String {
+    let by_pc: HashMap<i64, usize> = r.funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
+    let name = |i: usize| r.funcs[i].name;
+    let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0).collect();
     let is_root = |i: usize| name(i).starts_with("ix_") || proc_names.contains(name(i));
     let handlers: Vec<usize> = (0..r.funcs.len()).filter(|&i| is_root(i)).collect();
     let mut owners: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -409,7 +518,7 @@ pub fn render_single(r: &Raw) -> String {
             if !o.contains(&h) {
                 o.push(h);
             }
-            for t in &r.funcs[x].calls {
+            for t in r.funcs[x].calls {
                 if let Some(&ti) = by_pc.get(t) {
                     if !seen.contains(&ti) && !is_root(ti) {
                         seen.insert(ti);
@@ -468,54 +577,54 @@ pub fn render_single(r: &Raw) -> String {
             entry.push(i);
         }
     }
-    entry.sort_by_key(|&i| (!p.funcs[&r.funcs[i].pc].is_entry, r.funcs[i].pc));
+    entry.sort_by_key(|&i| (!r.funcs[i].is_entry, r.funcs[i].pc));
 
     let mut out: Vec<String> = vec![PRELUDE.to_string(), PROVENANCE.to_string()];
     out.push(format!(
         "// program: sBPF v{}, {} instructions, {} functions ({} decompiled, 0 library)",
-        p.version,
-        p.insns.len(),
-        p.funcs.len(),
+        r.version,
+        r.n_insns,
+        r.n_funcs,
         r.funcs.len()
     ));
-    let mut ixs: Vec<(&str, i64)> = r
-        .sem
-        .ix_names
-        .iter()
-        .filter(|(pc, _)| by_pc.contains_key(pc))
-        .map(|(pc, n)| (n.as_str(), *pc))
-        .collect();
-    if !ixs.is_empty() {
-        out.push(if r.sem.anchor {
+    if !r.ixs.is_empty() {
+        out.push(if r.anchor {
             "// instructions (Anchor, discriminator = sha256(\"global:<name>\")[..8] of instruction data, as u64):".into()
         } else {
             "// instruction handlers (named from their \"Instruction: X\" logs, or [heur] from the discriminator compared before the call):".into()
         });
-        ixs.sort_by(|a, b| locale_cmp(a.0, b.0));
-        for (n, _) in ixs {
-            out.push(if r.sem.anchor {
-                format!(
-                    "//   {n:<28} 0x{:016x}  -> ix_{n}",
-                    sha8(&format!("global:{n}"))
-                )
+        let mut ixs: Vec<&SingleIx> = r.ixs.iter().collect();
+        ixs.sort_by(|a, b| locale_cmp(a.name, b.name));
+        for i in ixs {
+            let n = i.name;
+            out.push(if r.anchor {
+                format!("//   {n:<28} 0x{:016x}  -> ix_{n}", i.disc)
             } else {
                 format!("//   {n:<28} -> ix_{n}")
             });
+            if let Some(a) = i.args.filter(|a| !a.is_empty()) {
+                out.push(format!("//     args [idl]: {}", a.join(", ")));
+            }
+            if let Some(a) = i.accounts.filter(|a| !a.is_empty()) {
+                out.push(format!("//     accounts [idl]: {}", a.join(", ")));
+            } else if let Some(a) = i.str_accounts.filter(|a| !a.is_empty()) {
+                out.push(format!(
+                    "//     accounts [str, order of first use]: {}",
+                    a.join(", ")
+                ));
+            }
         }
     }
-    for (pc, names) in &r.sem.processors {
-        if by_pc.contains_key(pc) {
-            out.push(format!(
-                "// instructions handled inline by {} (search its \"Instruction: X\" log calls): {}",
-                p.funcs[pc].name,
-                names.join(", ")
-            ));
-        }
+    for (f, names) in &r.processors {
+        out.push(format!(
+            "// instructions handled inline by {f} (search its \"Instruction: X\" log calls): {}",
+            names.join(", ")
+        ));
     }
     out.push(String::new());
     let mut calls: IndexSet<String> = IndexSet::new();
     for f in &r.funcs {
-        called(&f.text, &mut calls);
+        called(f.text, &mut calls);
     }
     let lower = |n: &str| {
         let b = n.as_bytes();
@@ -544,6 +653,15 @@ pub fn render_single(r: &Raw) -> String {
     if !helpers.is_empty() {
         out.push("// helpers:".into());
         out.extend(helpers.iter().map(|s| s.to_string()));
+        out.push(String::new());
+    }
+    let mut vnames: IndexSet<String> = IndexSet::new();
+    for f in &r.funcs {
+        scan_views(f.text, &mut vnames);
+    }
+    let vw = (r.views)(&vnames);
+    if !vw.is_empty() {
+        out.extend(vw);
         out.push(String::new());
     }
     let is_sys = |n: &str| {
@@ -577,13 +695,17 @@ pub fn render_single(r: &Raw) -> String {
         out.extend(sys);
         out.push(String::new());
     }
+    if !r.outlined.is_empty() {
+        out.push(crate::consts::OUTLINED.into());
+        out.extend(r.outlined.iter().map(|t| format!("{t}\n")));
+    }
     let mut section = |title: &str, fs: &[usize]| {
         if fs.is_empty() {
             return;
         }
         out.push(format!("// ===== {title} ====="));
         for &i in fs {
-            out.push(r.funcs[i].text.clone());
+            out.push(r.funcs[i].text.to_string());
             out.push(String::new());
         }
     };

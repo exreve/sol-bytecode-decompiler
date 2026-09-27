@@ -2,7 +2,7 @@
 // stage, byte-compared against `rs/` (sbpf-dump) by scripts/parity.ts. The encoding is specified in
 // rs/README.md; any change here must be mirrored in rs/crates/sbpf-dump.
 //
-//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir
+//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseElf, Image, type Elf } from '../src/elf.ts'
@@ -16,10 +16,11 @@ import { optimizeFunc, setFoldImage, isSettled } from '../src/simplify.ts'
 import { recognizeIdioms } from '../src/idioms.ts'
 import { compactStores, sinkFrameLoads } from '../src/compact.ts'
 import { decompile } from '../src/decompile.ts'
+import { parseIdl, type IdlInfo } from '../src/idl.ts'
 import type { Node } from '../src/structure.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -330,7 +331,35 @@ export function dumpStage4(bytes: Uint8Array, stages: readonly string[], res: Ma
 	if (stages.includes('rawfile')) res.set('rawfile', header('rawfile') + line({ text: withoutAnalysis(r.text) }))
 }
 
-export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): Map<string, string> {
+/**
+ * Stage 5: the readable output (`decompile(bytes, { full: true, idl })`, the CLI default without library
+ * classification). `types` = each function's variable names and typed-view assignment (insertion
+ * order), `rtext` = each function's printed text, `readfile` = the single-file text minus the analysis
+ * summary (stage 8).
+ */
+export function dumpStage5(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>, idl?: IdlInfo) {
+	const want = ['types', 'rtext', 'readfile'].filter(s => stages.includes(s))
+	if (!want.length) return
+	let r: ReturnType<typeof decompile>
+	try { r = decompile(bytes, { full: true, idl }) } catch (e) { res.set(want[0], header(want[0]) + errLine(e)); return }
+	if (stages.includes('types')) {
+		const out = [header('types')]
+		for (const f of r.funcs) {
+			const names = Array.from(f.names, x => x ?? null)
+			while (names.length && names[names.length - 1] === null) names.pop()
+			out.push(line({ t: 'func', pc: f.pc, name: f.name, names, types: [...f.varTypes ?? []] }))
+		}
+		res.set('types', out.join(''))
+	}
+	if (stages.includes('rtext')) {
+		const out = [header('rtext')]
+		for (const f of r.funcs) out.push(line({ t: 'func', pc: f.pc, name: f.name, text: f.text }))
+		res.set('rtext', out.join(''))
+	}
+	if (stages.includes('readfile')) res.set('readfile', header('readfile') + line({ text: withoutAnalysis(r.text) }))
+}
+
+export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES, idl?: IdlInfo): Map<string, string> {
 	const res = new Map<string, string>()
 	let elf: Elf
 	try { elf = parseElf(bytes) } catch (e) { res.set('elf', header('elf') + errLine(e)); return res }
@@ -343,20 +372,22 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): 
 	dumpStage2(bytes, stages, res)
 	dumpStage3(bytes, stages, res)
 	dumpStage4(bytes, stages, res)
+	dumpStage5(bytes, stages, res, idl)
 	return res
 }
 
 if (import.meta.main) {
 	const args = process.argv.slice(2)
 	let stages: readonly string[] = STAGES
+	let idlFile: string | undefined
 	const pos: string[] = []
 	for (let i = 0; i < args.length; i++) {
-		if (args[i] === '--idl') i++ // (accepted for the later stages; the early stages do not use it)
+		if (args[i] === '--idl') idlFile = args[++i] // (stage 5 on; the earlier stages do not use it)
 		else if (args[i] === '--stages') stages = args[++i].split(',')
 		else pos.push(args[i])
 	}
-	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir'); process.exit(2) }
+	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir'); process.exit(2) }
 	const [file, dir] = pos
 	mkdirSync(dir, { recursive: true })
-	for (const [stage, text] of dumpAll(new Uint8Array(readFileSync(file)), stages)) writeFileSync(join(dir, `${stage}.jsonl`), text)
+	for (const [stage, text] of dumpAll(new Uint8Array(readFileSync(file)), stages, idlFile ? parseIdl(JSON.parse(readFileSync(idlFile, 'utf8'))) : undefined)) writeFileSync(join(dir, `${stage}.jsonl`), text)
 }

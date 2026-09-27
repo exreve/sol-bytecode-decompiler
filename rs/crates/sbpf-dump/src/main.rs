@@ -1,12 +1,13 @@
 //! Stage dumps, byte-identical to `scripts/dump.ts` (encoding: rs/README.md), and a stage timer.
 //!
-//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir
+//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir
 //!   sbpf-dump --time [--iters N] prog.so...
 
 mod enc;
 mod stage2;
 mod stage3;
 mod stage4;
+mod stage5;
 
 use enc::*;
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
@@ -15,7 +16,7 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 14] = [
+const STAGES: [&str; 17] = [
     "elf",
     "insns",
     "cfg",
@@ -30,6 +31,9 @@ const STAGES: [&str; 14] = [
     "struct",
     "text",
     "rawfile",
+    "types",
+    "rtext",
+    "readfile",
 ];
 
 fn dump_elf(elf: &Elf) -> String {
@@ -201,7 +205,11 @@ fn dump_lift(p: &Program) -> String {
     o
 }
 
-fn dump_all(bytes: &[u8], stages: &[String]) -> Vec<(&'static str, String)> {
+fn dump_all(
+    bytes: &[u8],
+    stages: &[String],
+    idl: Option<&sbpf_read::idl::IdlInfo>,
+) -> Vec<(&'static str, String)> {
     let mut res = vec![];
     let want = |s: &str| stages.iter().any(|x| x == s);
     let elf = match parse_elf(bytes) {
@@ -234,6 +242,7 @@ fn dump_all(bytes: &[u8], stages: &[String]) -> Vec<(&'static str, String)> {
     stage2::dump_stage2(bytes, stages, &mut res);
     stage3::dump_stage3(bytes, stages, &mut res);
     stage4::dump_stage4(bytes, stages, &mut res);
+    stage5::dump_stage5(bytes, stages, idl, &mut res);
     res
 }
 
@@ -368,10 +377,14 @@ fn real_main() {
     }
     let mut stages: Vec<String> = STAGES.iter().map(|s| s.to_string()).collect();
     let mut pos = vec![];
+    let mut idl_file: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--idl" => i += 1, // (accepted for the later stages)
+            "--idl" => {
+                idl_file = Some(args[i + 1].clone()); // (stage 5 on)
+                i += 1;
+            }
             "--stages" => {
                 stages = args[i + 1].split(',').map(String::from).collect();
                 i += 1;
@@ -381,12 +394,17 @@ fn real_main() {
         i += 1;
     }
     if pos.len() != 2 {
-        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir");
+        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir");
         std::process::exit(2);
     }
     let bytes = std::fs::read(&pos[0]).expect("read input");
     std::fs::create_dir_all(&pos[1]).expect("mkdir");
-    for (stage, text) in dump_all(&bytes, &stages) {
+    let idl = idl_file.map(|f| {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(f).expect("read idl")).expect("idl json");
+        sbpf_read::idl::parse_idl(&v)
+    });
+    for (stage, text) in dump_all(&bytes, &stages, idl.as_ref()) {
         std::fs::write(
             std::path::Path::new(&pos[1]).join(format!("{stage}.jsonl")),
             text,
