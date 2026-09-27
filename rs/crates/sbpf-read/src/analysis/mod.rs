@@ -298,6 +298,13 @@ pub struct An<'a> {
     pub getters: RefCell<HashMap<i64, bool>>,
     /// a TS exception the analysis would throw (its message; the analysis dump reports it)
     pub err: RefCell<Option<String>>,
+    /// report-layer memos (per function, as the TS's WeakMaps): condition lines by condKey, the first pc of each
+    /// printed line, the sysvar scan of each block, whether a function's text names SYSVAR_INSTRUCTIONS
+    pub cond_lines: RefCell<HashMap<i64, Rc<HashMap<String, i64>>>>,
+    pub line_pcs: RefCell<HashMap<i64, Rc<HashMap<i64, i64>>>>,
+    pub sysvar_scans: RefCell<HashMap<(i64, usize), Rc<audit::SysvarScan>>>,
+    pub names_id: RefCell<HashMap<i64, bool>>,
+    pub fn_discs: RefCell<HashMap<i64, Rc<Vec<(u64, String)>>>>,
 }
 
 impl<'a> An<'a> {
@@ -342,6 +349,11 @@ impl<'a> An<'a> {
             lib_cpi: Default::default(),
             getters: Default::default(),
             err: Default::default(),
+            cond_lines: Default::default(),
+            line_pcs: Default::default(),
+            sysvar_scans: Default::default(),
+            names_id: Default::default(),
+            fn_discs: Default::default(),
         }
     }
     pub fn fo(&self, pc: i64) -> Option<&FnRef<'a>> {

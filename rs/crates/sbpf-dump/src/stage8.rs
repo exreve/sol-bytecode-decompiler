@@ -666,7 +666,11 @@ pub fn dump_stage8(
         } else {
             String::new()
         };
-        let f = if wf { flow_lines(an, wa) } else { String::new() };
+        let f = if wf {
+            flow_lines(an, wa)
+        } else {
+            String::new()
+        };
         format!("{a}\u{0}{f}")
     };
     let r = match decompile_read_hook(

@@ -141,13 +141,25 @@ struct P3<'a, 'x> {
 impl<'a, 'x> P3<'a, 'x> {
     fn line_at(&self, fname: &str, line: i64) -> Option<i64> {
         let pc = *self.by_name.get(fname)?;
-        let facts = self.an.facts.borrow();
-        let ff = facts.get(&pc)?;
-        ff.pc_line
-            .iter()
-            .filter(|x| *x.1 == line)
-            .map(|x| *x.0)
-            .min()
+        let hit = self.an.line_pcs.borrow().get(&pc).cloned();
+        let m = match hit {
+            Some(m) => m,
+            None => {
+                let facts = self.an.facts.borrow();
+                let ff = facts.get(&pc)?;
+                let mut m: HashMap<i64, i64> = HashMap::new();
+                for (&pc, &l) in &ff.pc_line {
+                    let e = m.entry(l).or_insert(pc);
+                    if *e > pc {
+                        *e = pc;
+                    }
+                }
+                let m = std::rc::Rc::new(m);
+                self.an.line_pcs.borrow_mut().insert(pc, m.clone());
+                m
+            }
+        };
+        m.get(&line).copied()
     }
     fn loc(&self, fname: &str, line: i64) -> Loc {
         Loc {
@@ -178,11 +190,21 @@ impl<'a, 'x> P3<'a, 'x> {
         }
         let g = self.an.cfg(fn_);
         let ir = fir(g.f);
-        let k = cond_key(ir, c.c, 0);
-        for (e, x) in &ff.cond_line {
-            if cond_key(ir, *e, 0) == k {
-                return *x;
+        let hit = self.an.cond_lines.borrow().get(&fn_).cloned();
+        let m = match hit {
+            Some(m) => m,
+            None => {
+                let mut m: HashMap<String, i64> = HashMap::new();
+                for (e, x) in &ff.cond_line {
+                    m.entry(cond_key(ir, *e, 0)).or_insert(*x);
+                }
+                let m = std::rc::Rc::new(m);
+                self.an.cond_lines.borrow_mut().insert(fn_, m.clone());
+                m
             }
+        };
+        if let Some(&x) = m.get(&cond_key(ir, c.c, 0)) {
+            return x;
         }
         let bl = &g.f.blocks[c.b];
         let mut pcs: Vec<Option<i64>> = vec![bl.stmts.last().map(stmt_pc)];
@@ -1720,4 +1742,3 @@ fn proofs(an: &An, ix: &IxOut) -> Vec<Proof> {
     }
     out
 }
-

@@ -551,10 +551,27 @@ impl<'a> An<'a> {
         }
         for fn_ in &fns {
             if let Some(fo) = self.fo(*fn_) {
-                for m in
-                    crate::jre!(r"0x([0-9a-f]{9,16}) /\* account:(\w+) \*/").captures_iter(&fo.text)
-                {
-                    discs.insert(u64::from_str_radix(&m[1], 16).unwrap(), m[2].to_string());
+                let hit = self.fn_discs.borrow().get(fn_).cloned();
+                let l = match hit {
+                    Some(l) => l,
+                    None => {
+                        let l: Vec<(u64, String)> = if fo.text.contains(" /* account:") {
+                            crate::jre!(r"0x([0-9a-f]{9,16}) /\* account:(\w+) \*/")
+                                .captures_iter(&fo.text)
+                                .map(|m| {
+                                    (u64::from_str_radix(&m[1], 16).unwrap(), m[2].to_string())
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+                        let l = Rc::new(l);
+                        self.fn_discs.borrow_mut().insert(*fn_, l.clone());
+                        l
+                    }
+                };
+                for (d, n) in l.iter() {
+                    discs.insert(*d, n.clone());
                 }
             }
         }
@@ -924,10 +941,15 @@ impl<'a> An<'a> {
             let Some(pc) = by_name.get(n) else {
                 return false;
             };
-            self.facts.borrow()[pc]
+            if let Some(&y) = self.names_id.borrow().get(pc) {
+                return y;
+            }
+            let y = self.facts.borrow()[pc]
                 .lines
                 .iter()
-                .any(|l| l.contains("SYSVAR_INSTRUCTIONS"))
+                .any(|l| l.contains("SYSVAR_INSTRUCTIONS"));
+            self.names_id.borrow_mut().insert(*pc, y);
+            y
         });
         for fname in &ix.functions {
             let ff = by_name.get(fname).copied();
@@ -947,9 +969,17 @@ impl<'a> An<'a> {
                 {
                     continue;
                 }
-                let (b, c) = self.sysvar_scan(fpc, &d, bi);
-                bases0.extend(b.iter().cloned());
-                cands.extend(c.iter().cloned());
+                let hit = self.sysvar_scans.borrow().get(&(fpc, bi)).cloned();
+                let y = match hit {
+                    Some(y) => y,
+                    None => {
+                        let y = Rc::new(self.sysvar_scan(fpc, &d, bi));
+                        self.sysvar_scans.borrow_mut().insert((fpc, bi), y.clone());
+                        y
+                    }
+                };
+                bases0.extend(y.0.iter().cloned());
+                cands.extend(y.1.iter().cloned());
             }
             let ir = fir(fo.f);
             for (base, p, what) in cands {
@@ -1185,6 +1215,9 @@ impl<'a> An<'a> {
         x
     }
 }
+
+/// a block's sysvar scan: bases read at no offset, candidate reads
+pub type SysvarScan = (Vec<String>, Vec<(E, Pos, &'static str)>);
 
 const AUDIT_VALUE_OPS: &[&str] = &[
     "LAMPORT_WRITE",

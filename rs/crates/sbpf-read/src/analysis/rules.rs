@@ -64,7 +64,9 @@ fn address_checked(ix: &IxOut, a: &str) -> bool {
 }
 
 fn runtime_authorized(o: &OpOut) -> bool {
-    o.cpi(|c| (nz(&c.known) || nz(&c.family)) && !nz(&c.seeds)).unwrap_or(false) && !o.has("PDA_SIGNATURE")
+    o.cpi(|c| (nz(&c.known) || nz(&c.family)) && !nz(&c.seeds))
+        .unwrap_or(false)
+        && !o.has("PDA_SIGNATURE")
 }
 
 fn seeds(o: &OpOut) -> bool {
@@ -74,13 +76,16 @@ fn seeds(o: &OpOut) -> bool {
 fn init_mechanics(ix: &IxOut, o: &OpOut) -> bool {
     o.cpi(|c| {
         c.family.as_deref() == Some("system")
-            && crate::jre!(r"^(CreateAccount|Assign|Allocate|Transfer)$").is_match(c.ix.as_deref().unwrap_or(""))
+            && crate::jre!(r"^(CreateAccount|Assign|Allocate|Transfer)$")
+                .is_match(c.ix.as_deref().unwrap_or(""))
     })
     .unwrap_or(false)
         && ix.ops.iter().any(|x| {
             x.has("ACCOUNT_CREATE")
-                || x.cpi(|c| c.family.as_deref() == Some("system") && c.ix.as_deref() == Some("Allocate"))
-                    .unwrap_or(false)
+                || x.cpi(|c| {
+                    c.family.as_deref() == Some("system") && c.ix.as_deref() == Some("Allocate")
+                })
+                .unwrap_or(false)
         })
 }
 
@@ -96,10 +101,12 @@ fn init_write(ix: &IxOut, o: &OpOut) -> bool {
 }
 
 fn authorized(ix: &IxOut, oi: usize) -> bool {
-    ix.authority
-        .iter()
-        .flatten()
-        .any(|r| r.op == oi && r.enabled_by.iter().any(|e| e.kind == "stored" || e.kind == "pda"))
+    ix.authority.iter().flatten().any(|r| {
+        r.op == oi
+            && r.enabled_by
+                .iter()
+                .any(|e| e.kind == "stored" || e.kind == "pda")
+    })
 }
 
 fn admin_gated(ix: &IxOut) -> bool {
@@ -121,7 +128,9 @@ fn rels(ix: &IxOut) -> &[super::phase2::Relation] {
 
 /// `/^\*?([A-Za-z_]\w*)/` of a text
 fn lead_name(t: &str) -> Option<String> {
-    crate::jre!(r"^\*?([A-Za-z_]\w*)").captures(t).map(|m| m[1].to_string())
+    crate::jre!(r"^\*?([A-Za-z_]\w*)")
+        .captures(t)
+        .map(|m| m[1].to_string())
 }
 
 fn signer_unrelated(ix: &IxOut) -> Vec<F> {
@@ -139,31 +148,44 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
     for rw in ix.authority.iter().flatten() {
         let o = &ix.ops[rw.op];
         let has_signer = rw.enabled_by.iter().any(|e| e.kind == "signer");
-        let stored = rw.enabled_by.iter().any(|e| e.kind == "stored" || e.kind == "pda");
+        let stored = rw
+            .enabled_by
+            .iter()
+            .any(|e| e.kind == "stored" || e.kind == "pda");
         if !has_signer
             || stored
             || seeds(o)
             || init_mechanics(ix, o)
-            || rw.enabled_by.iter().any(|e| e.kind == "signer" && address_checked(ix, &e.what))
+            || rw
+                .enabled_by
+                .iter()
+                .any(|e| e.kind == "signer" && address_checked(ix, &e.what))
         {
             continue;
         }
         if rw.enabled_by.iter().any(|e| {
-            e.kind == "signer" && row(ix, &e.what).and_then(|x| x.constraints.get("key")).map(|c| c.status) == Some("found")
+            e.kind == "signer"
+                && row(ix, &e.what)
+                    .and_then(|x| x.constraints.get("key"))
+                    .map(|c| c.status)
+                    == Some("found")
         }) {
             continue;
         }
         if rw.enabled_by.iter().any(|e| {
             e.kind == "signer"
-                && ix
-                    .checks
-                    .iter()
-                    .any(|c| c.account.as_deref() == Some(e.what.as_str()) && c.kinds.contains(&"custom") && c.status == "found")
+                && ix.checks.iter().any(|c| {
+                    c.account.as_deref() == Some(e.what.as_str())
+                        && c.kinds.contains(&"custom")
+                        && c.status == "found"
+                })
         }) {
             continue;
         }
         let closed = match &o.target {
-            Some(t) if o.anchor_close && !t.is_empty() => Some(format!("{}.", t.split('.').next().unwrap_or(""))),
+            Some(t) if o.anchor_close && !t.is_empty() => {
+                Some(format!("{}.", t.split('.').next().unwrap_or("")))
+            }
             _ => None,
         };
         if let Some(cl) = &closed {
@@ -172,7 +194,8 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
             }
             if rels(ix).iter().any(|x| {
                 (x.kind == "has_one" || x.kind == "field_eq")
-                    && ((x.a.starts_with(cl.as_str()) && x.b.ends_with(".key")) || (x.b.starts_with(cl.as_str()) && x.a.ends_with(".key")))
+                    && ((x.a.starts_with(cl.as_str()) && x.b.ends_with(".key"))
+                        || (x.b.starts_with(cl.as_str()) && x.a.ends_with(".key")))
             }) {
                 continue;
             }
@@ -181,7 +204,9 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
             continue;
         }
         let t = match &o.target {
-            Some(tg) if o.has("AUTHORITY_WRITE") && !tg.is_empty() => row(ix, tg.split('.').next().unwrap_or("")),
+            Some(tg) if o.has("AUTHORITY_WRITE") && !tg.is_empty() => {
+                row(ix, tg.split('.').next().unwrap_or(""))
+            }
             _ => None,
         };
         if let Some(t) = t {
@@ -190,8 +215,7 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
                 && none("discriminator")
                 && none("initialized")
                 && (none("owner") || t.constraints["owner"].status == "runtime")
-                && o
-                    .sources
+                && o.sources
                     .iter()
                     .flatten()
                     .any(|s| Some(&s.param) == o.target.as_ref() && signer_key(ix, &s.source))
@@ -200,12 +224,23 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
             }
         }
         let pass_on = o
-            .cpi(|c| (nz(&c.known) || nz(&c.family)) && (c.accounts.iter().any(|x| x.s.is_some_and(|v| v != 0.0 && !v.is_nan())) || c.accounts.is_empty()))
+            .cpi(|c| {
+                (nz(&c.known) || nz(&c.family))
+                    && (c
+                        .accounts
+                        .iter()
+                        .any(|x| x.s.is_some_and(|v| v != 0.0 && !v.is_nan()))
+                        || c.accounts.is_empty())
+            })
             .unwrap_or(false);
         if pass_on || runtime_authorized(o) {
             continue;
         }
-        let sg: Vec<&super::phase2::Enabler> = rw.enabled_by.iter().filter(|e| e.kind == "signer").collect();
+        let sg: Vec<&super::phase2::Enabler> = rw
+            .enabled_by
+            .iter()
+            .filter(|e| e.kind == "signer")
+            .collect();
         out.push(F {
             accounts: sg.iter().map(|e| e.what.clone()).collect(),
             path: vec![l(&o.at)],
@@ -228,7 +263,10 @@ fn signer_unrelated(ix: &IxOut) -> Vec<F> {
 
 /// the account whose key a CPI's program id is
 fn prog_account(ix: &IxOut, o: &OpOut) -> Option<String> {
-    let is_acct = |a: &str| ix.accounts.iter().any(|x| x.name == a) || crate::jre!(r"^(remaining_accounts|account)\[\d+\]$").is_match(a);
+    let is_acct = |a: &str| {
+        ix.accounts.iter().any(|x| x.name == a)
+            || crate::jre!(r"^(remaining_accounts|account)\[\d+\]$").is_match(a)
+    };
     for s in o.sources.iter().flatten() {
         if s.param == "program" {
             if let Some(m) = crate::jre!(r"^(.+)\.key$").captures(&s.source) {
@@ -251,7 +289,11 @@ fn prog_account(ix: &IxOut, o: &OpOut) -> Option<String> {
 
 fn prog_id_checked(ix: &IxOut, o: &OpOut, acct: Option<&str>) -> bool {
     let cpi = o.cpi.as_ref().unwrap().borrow().clone();
-    if cpi.checked.as_deref().is_some_and(|c| c.contains("(id compared with")) {
+    if cpi
+        .checked
+        .as_deref()
+        .is_some_and(|c| c.contains("(id compared with"))
+    {
         return true;
     }
     if crate::jre!(r"built before it: \w+ \(TokenInstruction::pack").is_match(&o.text) {
@@ -263,12 +305,15 @@ fn prog_id_checked(ix: &IxOut, o: &OpOut, acct: Option<&str>) -> bool {
         None => prog_account(ix, o),
     };
     if o.guards.iter().flatten().map(|i| &ix.checks[*i]).any(|c| {
-        c.kinds.iter().any(|k| *k == "address" || *k == "executable" || *k == "key")
+        c.kinds
+            .iter()
+            .any(|k| *k == "address" || *k == "executable" || *k == "key")
             && ((!nz(&c.account) && !c.kinds.contains(&"initialized"))
                 || c.account.as_deref().unwrap_or("").contains("program")
                 || (nz(&c.account) && {
                     let a = c.account.as_ref().unwrap();
-                    cpi.program.contains(a.strip_suffix('?').unwrap_or(a)) || Some(a) == prog.as_ref()
+                    cpi.program.contains(a.strip_suffix('?').unwrap_or(a))
+                        || Some(a) == prog.as_ref()
                 })
                 || (unid && c.kinds.contains(&"address")))
     }) {
@@ -277,16 +322,19 @@ fn prog_id_checked(ix: &IxOut, o: &OpOut, acct: Option<&str>) -> bool {
     let Some(prog) = prog.filter(|p| !p.is_empty()) else {
         return false;
     };
-    if ["address", "key", "pda", "has_one"]
-        .iter()
-        .any(|k| row(ix, &prog).and_then(|x| x.constraints.get(k)).map(|c| c.status) == Some("found"))
-    {
+    if ["address", "key", "pda", "has_one"].iter().any(|k| {
+        row(ix, &prog)
+            .and_then(|x| x.constraints.get(k))
+            .map(|c| c.status)
+            == Some("found")
+    }) {
         return true;
     }
     let pk = format!("{prog}.key");
-    rels(ix)
-        .iter()
-        .any(|x| (x.a == pk && !x.b.ends_with(".key")) || (x.b == pk && !x.a.ends_with(".key") && !x.a.starts_with('(')))
+    rels(ix).iter().any(|x| {
+        (x.a == pk && !x.b.ends_with(".key"))
+            || (x.b == pk && !x.a.ends_with(".key") && !x.a.starts_with('('))
+    })
 }
 
 fn member_unsigned(ix: &IxOut) -> Vec<F> {
@@ -307,9 +355,18 @@ fn member_unsigned(ix: &IxOut) -> Vec<F> {
                     || (r.a == format!("{t}.key") && r.b == format!("{m}.key")))
         })
     };
-    let created = |t: &str| row(ix, t).is_some_and(|x| ["zero", "rent_exempt", "pda", "address"].iter().any(|k| x.has(k)));
+    let created = |t: &str| {
+        row(ix, t).is_some_and(|x| {
+            ["zero", "rent_exempt", "pda", "address"]
+                .iter()
+                .any(|k| x.has(k))
+        })
+    };
     let mut out = Vec::new();
-    for r in rel.iter().filter(|r| r.kind == "member" && r.status == "found") {
+    for r in rel
+        .iter()
+        .filter(|r| r.kind == "member" && r.status == "found")
+    {
         let x = r.b.strip_suffix(".key").unwrap_or(&r.b).to_string();
         let m = r.a.split('.').next().unwrap_or("").to_string();
         let Some(rw) = row(ix, &x) else { continue };
@@ -318,7 +375,10 @@ fn member_unsigned(ix: &IxOut) -> Vec<F> {
                 accounts: vec![x.clone(), m.clone()],
                 path: vec![l(&r.at), l(&writes[0].at)],
                 evidence: vec![
-                    format!("{x}.key is looked up in {} (a membership check), but {x} does not sign", r.a),
+                    format!(
+                        "{x}.key is looked up in {} (a membership check), but {x} does not sign",
+                        r.a
+                    ),
                     js_slice(&writes[0].text, 0, Some(120)),
                 ],
                 confidence: "medium",
@@ -327,16 +387,31 @@ fn member_unsigned(ix: &IxOut) -> Vec<F> {
             continue;
         }
         let w = writes.iter().find(|o| {
-            let t = o.target.as_ref().map(|t| t.split('.').next().unwrap_or("").to_string());
+            let t = o
+                .target
+                .as_ref()
+                .map(|t| t.split('.').next().unwrap_or("").to_string());
             match t {
                 Some(t) if !t.is_empty() => {
-                    t != m && t != x && ix.accounts.iter().any(|y| y.name == t) && !created(&t) && !init_write(ix, o) && !related(&t, &m)
+                    t != m
+                        && t != x
+                        && ix.accounts.iter().any(|y| y.name == t)
+                        && !created(&t)
+                        && !init_write(ix, o)
+                        && !related(&t, &m)
                 }
                 _ => false,
             }
         });
         if let Some(w) = w {
-            let wt = w.target.as_ref().unwrap().split('.').next().unwrap_or("").to_string();
+            let wt = w
+                .target
+                .as_ref()
+                .unwrap()
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .to_string();
             out.push(F {
                 accounts: vec![wt.clone(), m.clone()],
                 path: vec![l(&r.at), l(&w.at)],
@@ -360,9 +435,14 @@ fn cross_unrelated(ix: &IxOut) -> Vec<F> {
     let rel = rels(ix);
     let key_rel = |x: &str| {
         let k = format!("{x}.key");
-        rel.iter().any(|r| r.kind != "member" && r.kind != "address" && (r.a == k || r.b == k))
+        rel.iter()
+            .any(|r| r.kind != "member" && r.kind != "address" && (r.a == k || r.b == k))
     };
-    let fixed = |x: &str| ["pda", "address", "zero"].iter().any(|k| row(ix, x).is_some_and(|y| y.has(k)));
+    let fixed = |x: &str| {
+        ["pda", "address", "zero"]
+            .iter()
+            .any(|k| row(ix, x).is_some_and(|y| y.has(k)))
+    };
     let mut out = Vec::new();
     for (ci, c) in ix.checks.iter().enumerate() {
         let Some((aa, bb)) = &c.cross else { continue };
@@ -374,7 +454,9 @@ fn cross_unrelated(ix: &IxOut) -> Vec<F> {
         }
         let o = ix.ops.iter().find(|o| {
             o.guards.as_ref().is_some_and(|g| g.contains(&ci))
-                && (o.has("ACCOUNT_DATA_WRITE") || is_value_or_auth(o) || (o.has("CPI") && !o.cpi(|c| nz(&c.known)).unwrap_or(false)))
+                && (o.has("ACCOUNT_DATA_WRITE")
+                    || is_value_or_auth(o)
+                    || (o.has("CPI") && !o.cpi(|c| nz(&c.known)).unwrap_or(false)))
         });
         let Some(o) = o else { continue };
         out.push(F {
@@ -396,8 +478,15 @@ fn cross_unrelated(ix: &IxOut) -> Vec<F> {
 }
 
 fn bound_crank(ix: &IxOut, o: &OpOut) -> bool {
-    let guards: Vec<&CheckOut> = o.guards.iter().flatten().filter_map(|i| ix.checks.get(*i)).collect();
-    let custom = guards.iter().any(|c| c.kinds.contains(&"custom") && c.status == "found");
+    let guards: Vec<&CheckOut> = o
+        .guards
+        .iter()
+        .flatten()
+        .filter_map(|i| ix.checks.get(*i))
+        .collect();
+    let custom = guards
+        .iter()
+        .any(|c| c.kinds.contains(&"custom") && c.status == "found");
     let pda_signed = seeds(o) || o.has("PDA_SIGNATURE");
     if pda_signed
         && guards.iter().any(|c| {
@@ -421,54 +510,83 @@ fn bound_crank(ix: &IxOut, o: &OpOut) -> bool {
         .cpi(|c| {
             c.accounts
                 .iter()
-                .filter(|x| x.role.as_ref().is_some_and(|r| !r.is_empty() && (r == "destination" || r == "to")))
-                .map(|x| crate::jre!(r"^\*?([A-Za-z_]\w*)$").captures(&x.text).map(|m| m[1].to_string()))
+                .filter(|x| {
+                    x.role
+                        .as_ref()
+                        .is_some_and(|r| !r.is_empty() && (r == "destination" || r == "to"))
+                })
+                .map(|x| {
+                    crate::jre!(r"^\*?([A-Za-z_]\w*)$")
+                        .captures(&x.text)
+                        .map(|m| m[1].to_string())
+                })
                 .collect()
         })
         .unwrap_or_default();
-    if recips.is_empty() || recips.iter().any(|d| d.as_ref().is_none_or(|d| !ix.accounts.iter().any(|y| &y.name == d))) {
+    if recips.is_empty()
+        || recips.iter().any(|d| {
+            d.as_ref()
+                .is_none_or(|d| !ix.accounts.iter().any(|y| &y.name == d))
+        })
+    {
         return false;
     }
     let rel = rels(ix);
     let fixed = |x: &str| {
         let k = format!("{x}.key");
-        rel.iter().any(|r| (r.kind == "field_eq" || r.kind == "has_one") && (r.a == k || r.b == k))
-            || ["address", "pda"].iter().any(|c| row(ix, x).is_some_and(|y| y.has(c)))
+        rel.iter()
+            .any(|r| (r.kind == "field_eq" || r.kind == "has_one") && (r.a == k || r.b == k))
+            || ["address", "pda"]
+                .iter()
+                .any(|c| row(ix, x).is_some_and(|y| y.has(c)))
     };
     let bound = |d: &str| {
         fixed(d)
             || rel.iter().any(|r| {
                 r.kind == "token"
                     && r.a == format!("{d}.owner")
-                    && (if let Some(b) = r.b.strip_suffix(".key") { fixed(b) } else { true })
+                    && (if let Some(b) = r.b.strip_suffix(".key") {
+                        fixed(b)
+                    } else {
+                        true
+                    })
             })
     };
     custom && recips.iter().all(|d| bound(d.as_ref().unwrap()))
 }
 
 fn mint_unanchored(ix: &IxOut) -> Vec<F> {
-    let pays = ix
-        .ops
-        .iter()
-        .any(|o| (o.has("TOKEN_TRANSFER") || o.has("LAMPORT_TRANSFER")) && (seeds(o) || o.has("PDA_SIGNATURE")));
+    let pays = ix.ops.iter().any(|o| {
+        (o.has("TOKEN_TRANSFER") || o.has("LAMPORT_TRANSFER"))
+            && (seeds(o) || o.has("PDA_SIGNATURE"))
+    });
     if !pays {
         return vec![];
     }
-    let name = |t: Option<String>| t.and_then(|t| crate::jre!(r"^\*?([A-Za-z_]\w*)$").captures(&t).map(|m| m[1].to_string()));
+    let name = |t: Option<String>| {
+        t.and_then(|t| {
+            crate::jre!(r"^\*?([A-Za-z_]\w*)$")
+                .captures(&t)
+                .map(|m| m[1].to_string())
+        })
+    };
     let anchored = |x: &str| {
         let Some(rw) = row(ix, x) else { return true };
         if ["address", "pda", "has_one"].iter().any(|c| rw.has(c)) {
             return true;
         }
         let k = format!("{x}.key");
-        rels(ix)
-            .iter()
-            .any(|r| (r.a == k || r.b == k) && r.kind != "token" && r.kind != "compare" && r.kind != "member")
+        rels(ix).iter().any(|r| {
+            (r.a == k || r.b == k) && r.kind != "token" && r.kind != "compare" && r.kind != "member"
+        })
     };
     let seg = |n: &str| snake(n).split('_').next().unwrap_or("").to_string();
     let signs = |x: &AcctOut| x.expected.signer || x.has("signer");
     let party = |d: &str| {
-        let p = ix.accounts.iter().find(|x| x.name != d && snake(&x.name) == seg(d));
+        let p = ix
+            .accounts
+            .iter()
+            .find(|x| x.name != d && snake(&x.name) == seg(d));
         p.is_some_and(|p| {
             let k = format!("{}.key", p.name);
             !signs(p)
@@ -480,12 +598,21 @@ fn mint_unanchored(ix: &IxOut) -> Vec<F> {
     let mut out = Vec::new();
     for o in &ix.ops {
         let ok = o.has("TOKEN_TRANSFER")
-            && o.cpi(|c| c.ix.as_deref() == Some("TransferChecked") && !nz(&c.seeds)).unwrap_or(false)
+            && o.cpi(|c| c.ix.as_deref() == Some("TransferChecked") && !nz(&c.seeds))
+                .unwrap_or(false)
             && !o.has("PDA_SIGNATURE");
         if !ok {
             continue;
         }
-        let role_text = |r: &str| o.cpi(|c| c.accounts.iter().find(|x| x.role.as_deref() == Some(r)).map(|x| x.text.clone())).flatten();
+        let role_text = |r: &str| {
+            o.cpi(|c| {
+                c.accounts
+                    .iter()
+                    .find(|x| x.role.as_deref() == Some(r))
+                    .map(|x| x.text.clone())
+            })
+            .flatten()
+        };
         let m = name(role_text("mint"));
         let d = name(role_text("to"));
         let (Some(m), Some(d)) = (m, d) else { continue };
@@ -603,7 +730,9 @@ impl<'a> An<'a> {
                 if known || prog == "?" {
                     continue;
                 }
-                let Some(acct) = prog_account(ix, o) else { continue };
+                let Some(acct) = prog_account(ix, o) else {
+                    continue;
+                };
                 if prog_id_checked(ix, o, Some(&acct)) {
                     continue;
                 }
@@ -664,19 +793,29 @@ impl<'a> An<'a> {
         }
         // value-move-no-signer
         {
-            let signers = ix.accounts.iter().any(|x| x.has("signer")) || ix.checks.iter().any(|c| c.kinds.contains(&"signer"));
+            let signers = ix.accounts.iter().any(|x| x.has("signer"))
+                || ix.checks.iter().any(|c| c.kinds.contains(&"signer"));
             let fs = if signers {
                 vec![]
             } else {
                 ix.ops
                     .iter()
-                    .filter(|o| is_value_or_auth(o) && !runtime_authorized(o) && !init_mechanics(ix, o) && !o.anchor_close && !bound_crank(ix, o))
+                    .filter(|o| {
+                        is_value_or_auth(o)
+                            && !runtime_authorized(o)
+                            && !init_mechanics(ix, o)
+                            && !o.anchor_close
+                            && !bound_crank(ix, o)
+                    })
                     .take(3)
                     .map(|o| {
                         let pda = seeds(o) || o.has("PDA_SIGNATURE");
                         let mut ev = vec![t140(&o.text)];
                         if pda {
-                            ev.push("the program signs it (PDA); no caller signature is required".into());
+                            ev.push(
+                                "the program signs it (PDA); no caller signature is required"
+                                    .into(),
+                            );
                         }
                         F {
                             accounts: super::phase2::op_accounts(o).into_iter().collect(),
@@ -688,7 +827,11 @@ impl<'a> An<'a> {
                     })
                     .collect()
             };
-            push("value-move-no-signer", "Value movement or authority change with no signer check and no PDA signature", fs);
+            push(
+                "value-move-no-signer",
+                "Value movement or authority change with no signer check and no PDA signature",
+                fs,
+            );
         }
         // signer-not-related-to-authority
         push(
@@ -699,18 +842,36 @@ impl<'a> An<'a> {
         // check-bypassable
         {
             let mut fs = Vec::new();
-            for o in ix.ops.iter().filter(|o| !runtime_authorized(o) && !init_mechanics(ix, o)) {
+            for o in ix
+                .ops
+                .iter()
+                .filter(|o| !runtime_authorized(o) && !init_mechanics(ix, o))
+            {
                 for b in o.bypass.iter().flatten() {
                     if anchor && ix.checks[b.check].error == "return" {
                         continue;
                     }
                     let c = &ix.checks[b.check];
                     fs.push(F {
-                        accounts: c.account.iter().filter(|a| !a.is_empty()).cloned().collect(),
+                        accounts: c
+                            .account
+                            .iter()
+                            .filter(|a| !a.is_empty())
+                            .cloned()
+                            .collect(),
                         path: b.path.iter().map(l).collect(),
                         evidence: vec![
-                            format!("check {} ({}): fails if {}", l(&c.at), c.kinds.join(", "), js_slice(&c.cond, 0, Some(80))),
-                            format!("operation {}: {}", l(&o.at), js_slice(&o.text, 0, Some(100))),
+                            format!(
+                                "check {} ({}): fails if {}",
+                                l(&c.at),
+                                c.kinds.join(", "),
+                                js_slice(&c.cond, 0, Some(80))
+                            ),
+                            format!(
+                                "operation {}: {}",
+                                l(&o.at),
+                                js_slice(&o.text, 0, Some(100))
+                            ),
                             if b.strong {
                                 "no other check of this kind on the path".into()
                             } else {
@@ -732,11 +893,19 @@ impl<'a> An<'a> {
         {
             let mut fs = Vec::new();
             for o in &ix.ops {
-                if !o.has("TOKEN_TRANSFER") || o.cpi(|c| c.ix.as_deref() != Some("Transfer")).unwrap_or(true) {
+                if !o.has("TOKEN_TRANSFER")
+                    || o.cpi(|c| c.ix.as_deref() != Some("Transfer"))
+                        .unwrap_or(true)
+                {
                     continue;
                 }
                 let d = o
-                    .cpi(|c| c.accounts.iter().find(|x| x.role.as_deref() == Some("destination")).map(|x| x.text.clone()))
+                    .cpi(|c| {
+                        c.accounts
+                            .iter()
+                            .find(|x| x.role.as_deref() == Some("destination"))
+                            .map(|x| x.text.clone())
+                    })
                     .flatten()
                     .and_then(|t| lead_name(&t));
                 let Some(d) = d.filter(|d| ix.accounts.iter().any(|x| &x.name == d)) else {
@@ -745,15 +914,22 @@ impl<'a> An<'a> {
                 let rw = row(ix, &d);
                 let pda = rw.is_some_and(|x| x.has("pda"));
                 let pre = format!("{d}.");
-                let related = rw.is_some_and(|x| x.constraints.contains_key("token_mint") || x.constraints.contains_key("associated") || pda)
-                    || rels(ix)
-                        .iter()
-                        .any(|x| (x.a.starts_with(&pre) || x.b.starts_with(&pre)) && format!("{}{}", x.a, x.b).contains("mint"));
+                let related = rw.is_some_and(|x| {
+                    x.constraints.contains_key("token_mint")
+                        || x.constraints.contains_key("associated")
+                        || pda
+                }) || rels(ix).iter().any(|x| {
+                    (x.a.starts_with(&pre) || x.b.starts_with(&pre))
+                        && format!("{}{}", x.a, x.b).contains("mint")
+                });
                 if !related {
                     fs.push(F {
                         accounts: vec![d.clone()],
                         path: vec![l(&o.at)],
-                        evidence: vec![t140(&o.text), format!("no token::mint constraint / mint relation found for {d}")],
+                        evidence: vec![
+                            t140(&o.text),
+                            format!("no token::mint constraint / mint relation found for {d}"),
+                        ],
                         confidence: "low",
                         weight: w_of(o),
                     });
@@ -777,7 +953,8 @@ impl<'a> An<'a> {
                     .filter(|s| {
                         s.trust == "caller-controlled"
                             && ((s.param == "program"
-                                && !(o.cpi.is_some() && prog_account(ix, o).is_some_and(|p| !p.is_empty()))
+                                && !(o.cpi.is_some()
+                                    && prog_account(ix, o).is_some_and(|p| !p.is_empty()))
                                 && s.source != "instruction data"
                                 && s.source != "remaining accounts")
                                 || (o.has("AUTHORITY_WRITE")
@@ -794,7 +971,10 @@ impl<'a> An<'a> {
                     fs.push(F {
                         accounts: vec![s.source.clone()],
                         path: vec![l(&o.at)],
-                        evidence: vec![format!("{} ← {} ({})", s.param, s.source, s.trust), js_slice(&o.text, 0, Some(120))],
+                        evidence: vec![
+                            format!("{} ← {} ({})", s.param, s.source, s.trust),
+                            js_slice(&o.text, 0, Some(120)),
+                        ],
                         confidence: "low",
                         weight: w_of(o),
                     });
@@ -816,7 +996,11 @@ impl<'a> An<'a> {
         {
             let mut fs: Vec<F> = Vec::new();
             if let Some(au) = &ix.audit {
-                for a0 in au.data_reads.iter().filter(|a| sysvar_name(a) && !address_checked(ix, a)) {
+                for a0 in au
+                    .data_reads
+                    .iter()
+                    .filter(|a| sysvar_name(a) && !address_checked(ix, a))
+                {
                     fs.push(F {
                         accounts: vec![a0.clone()],
                         path: vec![],
@@ -915,7 +1099,11 @@ impl<'a> An<'a> {
                     }
                 })
                 .collect();
-            push("cpi-result-ignored", "CPI whose result (the Result invoke / the CPI helper returns) is never tested", fs);
+            push(
+                "cpi-result-ignored",
+                "CPI whose result (the Result invoke / the CPI helper returns) is never tested",
+                fs,
+            );
         }
         // truncating-cast
         {
@@ -937,11 +1125,19 @@ impl<'a> An<'a> {
                     }
                 })
                 .collect();
-            push("truncating-cast", "Amount / balance narrowed (truncating cast) on a value path", fs);
+            push(
+                "truncating-cast",
+                "Amount / balance narrowed (truncating cast) on a value path",
+                fs,
+            );
         }
         // remaining-account-unchecked
         {
-            let ok: IndexSet<&String> = ix.audit.iter().flat_map(|au| au.rem_checked.iter()).collect();
+            let ok: IndexSet<&String> = ix
+                .audit
+                .iter()
+                .flat_map(|au| au.rem_checked.iter())
+                .collect();
             let mut fs = Vec::new();
             for o in &ix.ops {
                 let mut rs: IndexSet<String> = IndexSet::new();
@@ -954,8 +1150,13 @@ impl<'a> An<'a> {
                 }
                 if let Some(c) = &o.cpi {
                     for x in &c.borrow().accounts {
-                        if x.role.as_ref().is_some_and(|r| !r.is_empty() && crate::jre!(r"^(destination|to|authority|owner|account)$").is_match(r)) {
-                            if let Some(m) = crate::jre!(r"remaining_accounts\[\d+\]").find(&x.text) {
+                        if x.role.as_ref().is_some_and(|r| {
+                            !r.is_empty()
+                                && crate::jre!(r"^(destination|to|authority|owner|account)$")
+                                    .is_match(r)
+                        }) {
+                            if let Some(m) = crate::jre!(r"remaining_accounts\[\d+\]").find(&x.text)
+                            {
                                 rs.insert(m.as_str().to_string());
                             }
                         }
@@ -975,7 +1176,11 @@ impl<'a> An<'a> {
                 }
             }
             fs.truncate(2);
-            push("remaining-account-unchecked", "Remaining account used as a destination / authority with no key or owner check", fs);
+            push(
+                "remaining-account-unchecked",
+                "Remaining account used as a destination / authority with no key or owner check",
+                fs,
+            );
         }
         // init-if-needed-reinit
         {
@@ -1116,7 +1321,8 @@ impl<'a> An<'a> {
                 }
                 let data_caller = c.fields.is_empty()
                     || o.sources.iter().flatten().any(|s| {
-                        s.trust == "caller-controlled" && (s.source == "instruction data" || s.source.starts_with("ix."))
+                        s.trust == "caller-controlled"
+                            && (s.source == "instruction data" || s.source.starts_with("ix."))
                     });
                 if !data_caller {
                     continue;
@@ -1149,7 +1355,9 @@ impl<'a> An<'a> {
         {
             let mut fs = Vec::new();
             for (oi, o) in ix.ops.iter().enumerate() {
-                if !o.has("ACCOUNT_CLOSE") || o.cpi(|c| nz(&c.known) || nz(&c.family)).unwrap_or(false) {
+                if !o.has("ACCOUNT_CLOSE")
+                    || o.cpi(|c| nz(&c.known) || nz(&c.family)).unwrap_or(false)
+                {
                     continue;
                 }
                 let (zeroed, revived) = close_zeroing(self, ix, oi);
@@ -1158,7 +1366,10 @@ impl<'a> An<'a> {
                     fs.push(F {
                         accounts: vec![tg],
                         path: vec![l(&o.at)],
-                        evidence: vec![js_slice(&o.text, 0, Some(120)), format!("realloc after the close: {rv}")],
+                        evidence: vec![
+                            js_slice(&o.text, 0, Some(120)),
+                            format!("realloc after the close: {rv}"),
+                        ],
                         confidence: "medium",
                         weight: 5.0,
                     });
@@ -1193,7 +1404,8 @@ impl<'a> An<'a> {
                 .filter(|x| {
                     x.status == "unchecked"
                         && !cannot_wrap(&x.expr)
-                        && !(x.kind == "add" && crate::jre!(r" \+ (?:0x[0-9a-f]{1,2}|\d{1,3})$").is_match(&x.expr))
+                        && !(x.kind == "add"
+                            && crate::jre!(r" \+ (?:0x[0-9a-f]{1,2}|\d{1,3})$").is_match(&x.expr))
                 })
                 .collect();
             v8_sort(&mut xs, |x, y| {
@@ -1218,11 +1430,23 @@ impl<'a> An<'a> {
                             format!("{} ← {} ({})", x.target, x.expr, x.kind),
                             format!(
                                 "no comparison of the operands found on the way{}{}",
-                                if caller { "; operands include instruction data" } else { "" },
-                                if x.unnamed.unwrap_or(false) { "; field not named (native layout)" } else { "" }
+                                if caller {
+                                    "; operands include instruction data"
+                                } else {
+                                    ""
+                                },
+                                if x.unnamed.unwrap_or(false) {
+                                    "; field not named (native layout)"
+                                } else {
+                                    ""
+                                }
                             ),
                         ],
-                        confidence: if caller && x.kind == "sub" { "medium" } else { "low" },
+                        confidence: if caller && x.kind == "sub" {
+                            "medium"
+                        } else {
+                            "low"
+                        },
                         weight: if x.kind == "sub" { 3.0 } else { 2.0 },
                     }
                 })
@@ -1249,11 +1473,17 @@ impl<'a> An<'a> {
             out.truncate(3);
             return out;
         }
-        let signers: IndexSet<&String> = ix.accounts.iter().filter(|x| x.has("signer")).map(|x| &x.name).collect();
+        let signers: IndexSet<&String> = ix
+            .accounts
+            .iter()
+            .filter(|x| x.has("signer"))
+            .map(|x| &x.name)
+            .collect();
         let own = |o: &OpOut| {
             o.cpi(|c| {
                 c.accounts.iter().any(|x| {
-                    x.s.is_some_and(|v| v != 0.0 && !v.is_nan()) && signers.contains(&lead_name(&x.text).unwrap_or_default())
+                    x.s.is_some_and(|v| v != 0.0 && !v.is_nan())
+                        && signers.contains(&lead_name(&x.text).unwrap_or_default())
                 })
             })
             .unwrap_or(false)
@@ -1264,7 +1494,10 @@ impl<'a> An<'a> {
         });
         let wr = rw.is_none()
             && !ix.ops.iter().any(own)
-            && !ix.checks.iter().any(|c| !nz(&c.account) && c.kinds.contains(&"custom"));
+            && !ix
+                .checks
+                .iter()
+                .any(|c| !nz(&c.account) && c.kinds.contains(&"custom"));
         let wrote = |acct: &str| -> Option<&OpOut> {
             if !wr {
                 return None;
@@ -1280,13 +1513,19 @@ impl<'a> An<'a> {
         let split = |field: &str| -> (String, String) {
             match field.find('.') {
                 Some(i) => (field[..i].to_string(), field[i + 1..].to_string()),
-                None => (js_slice(field, 0, Some(crate::util::u16len(field).saturating_sub(1))), field.to_string()),
+                None => (
+                    js_slice(field, 0, Some(crate::util::u16len(field).saturating_sub(1))),
+                    field.to_string(),
+                ),
             }
         };
         let afs = a.authority_fields.as_deref().unwrap_or(&[]);
         if !a.program.anchor
             || (rw.is_none() && !afs.iter().any(|x| wrote(&split(&x.0).0).is_some()))
-            || ix.checks.iter().any(|c| c.kinds.contains(&"has_one") && !nz(&c.account) && c.sides.is_none())
+            || ix
+                .checks
+                .iter()
+                .any(|c| c.kinds.contains(&"has_one") && !nz(&c.account) && c.sides.is_none())
         {
             return vec![];
         }
@@ -1301,7 +1540,10 @@ impl<'a> An<'a> {
         let mut res = Vec::new();
         for (field, written_by) in afs {
             let (acct, f) = split(field);
-            if !signers.contains(&f) || written_by.contains(&ix.name) || !ix.accounts.iter().any(|x| x.name == acct) {
+            if !signers.contains(&f)
+                || written_by.contains(&ix.name)
+                || !ix.accounts.iter().any(|x| x.name == acct)
+            {
                 continue;
             }
             let fk = format!("{f}.key");
@@ -1355,7 +1597,10 @@ fn rule_unverified(ix: &IxOut) -> Vec<F> {
                 accounts: vec![s.source.split('.').next().unwrap_or("").to_string()],
                 path: vec![l(&o.at)],
                 evidence: vec![
-                    format!("{} ← {}: the account's owner is not verified (no check found)", s.param, s.source),
+                    format!(
+                        "{} ← {}: the account's owner is not verified (no check found)",
+                        s.param, s.source
+                    ),
                     js_slice(&o.text, 0, Some(120)),
                 ],
                 confidence: "low",
@@ -1371,7 +1616,8 @@ fn rule_unverified(ix: &IxOut) -> Vec<F> {
             .and_then(|x| x.constraints.get("owner"))
             .is_some_and(|c| c.status == "found" || c.status == "partial")
             || ix.ops.iter().any(|o| {
-                o.target.as_deref() == Some(&format!("{a}.lamports")) && (o.has("ACCOUNT_CLOSE") || o.how == Some("-="))
+                o.target.as_deref() == Some(&format!("{a}.lamports"))
+                    && (o.has("ACCOUNT_CLOSE") || o.how == Some("-="))
             })
     };
     for o in &ix.ops {
@@ -1383,7 +1629,11 @@ fn rule_unverified(ix: &IxOut) -> Vec<F> {
             let a = c.sides.as_ref().and_then(|(x, y)| {
                 [x, y]
                     .into_iter()
-                    .map(|s| crate::jre!(r"^([A-Za-z_]\w*(?:\[\d+\])?)\.data\b").captures(s).map(|m| m[1].to_string()))
+                    .map(|s| {
+                        crate::jre!(r"^([A-Za-z_]\w*(?:\[\d+\])?)\.data\b")
+                            .captures(s)
+                            .map(|m| m[1].to_string())
+                    })
                     .find(|x| x.as_ref().is_some_and(|x| !x.is_empty() && !checked(x)))
                     .flatten()
             });
@@ -1393,7 +1643,10 @@ fn rule_unverified(ix: &IxOut) -> Vec<F> {
                     accounts: vec![a.clone()],
                     path: vec![l(&c.at), l(&o.at)],
                     evidence: vec![
-                        format!("check {} reads {a}'s data ({x} == {y}); {a}'s owner is not checked", l(&c.at)),
+                        format!(
+                            "check {} reads {a}'s data ({x} == {y}); {a}'s owner is not checked",
+                            l(&c.at)
+                        ),
                         js_slice(&o.text, 0, Some(120)),
                     ],
                     confidence: "low",
@@ -1413,7 +1666,8 @@ fn rule_duplicate(ix: &IxOut, anchor: bool) -> Vec<F> {
             .iter()
             .filter(|o| {
                 o.has("ACCOUNT_DATA_WRITE")
-                    && crate::jre!(r"^account\[\d+\]\.data\[\d+\.\.\d+\]$").is_match(o.target.as_deref().unwrap_or(""))
+                    && crate::jre!(r"^account\[\d+\]\.data\[\d+\.\.\d+\]$")
+                        .is_match(o.target.as_deref().unwrap_or(""))
                     && owned(o.target.as_ref().unwrap().split('.').next().unwrap_or(""))
             })
             .collect();
@@ -1423,11 +1677,16 @@ fn rule_duplicate(ix: &IxOut, anchor: bool) -> Vec<F> {
                 let yt = y.target.as_ref().unwrap();
                 let ax = xt.split('.').next().unwrap_or("");
                 let ay = yt.split('.').next().unwrap_or("");
-                if super::report::js_str_cmp(ax, ay) != std::cmp::Ordering::Less || xt[ax.len()..] != yt[ay.len()..] {
+                if super::report::js_str_cmp(ax, ay) != std::cmp::Ordering::Less
+                    || xt[ax.len()..] != yt[ay.len()..]
+                {
                     continue;
                 }
                 let (kx, ky) = (format!("{ax}.key"), format!("{ay}.key"));
-                if rels(ix).iter().any(|r| (r.a == kx && r.b == ky) || (r.a == ky && r.b == kx)) {
+                if rels(ix)
+                    .iter()
+                    .any(|r| (r.a == kx && r.b == ky) || (r.a == ky && r.b == kx))
+                {
                     continue;
                 }
                 let both = format!("{}{}", x.text, y.text);
@@ -1459,9 +1718,17 @@ fn rule_duplicate(ix: &IxOut, anchor: bool) -> Vec<F> {
     if ix.checks.iter().any(|c| c.key_cmp) {
         return vec![];
     }
-    let w: Vec<String> = ix.accounts.iter().filter(|x| x.expected.writable).map(|x| x.name.clone()).collect();
+    let w: Vec<String> = ix
+        .accounts
+        .iter()
+        .filter(|x| x.expected.writable)
+        .map(|x| x.name.clone())
+        .collect();
     let mine = |o: &OpOut| {
-        let a = o.target.as_ref().map(|t| t.split('.').next().unwrap_or("").to_string());
+        let a = o
+            .target
+            .as_ref()
+            .map(|t| t.split('.').next().unwrap_or("").to_string());
         o.has("ACCOUNT_DATA_WRITE")
             && a.as_ref().is_some_and(|a| {
                 !a.is_empty()
@@ -1492,7 +1759,11 @@ fn rule_duplicate(ix: &IxOut, anchor: bool) -> Vec<F> {
 
 fn rule_type_unchecked(a: &Analysis, xi: usize) -> Vec<F> {
     let ix = &a.ixs[xi];
-    if !ix.ops.iter().any(|o| is_value_or_auth(o) && !runtime_authorized(o)) {
+    if !ix
+        .ops
+        .iter()
+        .any(|o| is_value_or_auth(o) && !runtime_authorized(o))
+    {
         return vec![];
     }
     if ix.kind != "anchor" {
@@ -1501,14 +1772,18 @@ fn rule_type_unchecked(a: &Analysis, xi: usize) -> Vec<F> {
                 j != xi
                     && i.kind != "anchor"
                     && i.checks.iter().any(|c| {
-                        c.account.as_deref() == Some(x) && c.kinds.contains(&"discriminator") && c.status == "found"
+                        c.account.as_deref() == Some(x)
+                            && c.kinds.contains(&"discriminator")
+                            && c.status == "found"
                     })
             })
         };
         let used = |x: &str| {
             let pre = format!("{x}.");
             tagged(x)
-                && ix.ops.iter().any(|o| is_value_or_auth(o) && o.target.as_ref().is_some_and(|t| t.starts_with(&pre)))
+                && ix.ops.iter().any(|o| {
+                    is_value_or_auth(o) && o.target.as_ref().is_some_and(|t| t.starts_with(&pre))
+                })
                 && ix.checks.iter().any(|c| {
                     c.account.as_deref() == Some(x)
                         && c.status == "found"
@@ -1528,8 +1803,11 @@ fn rule_type_unchecked(a: &Analysis, xi: usize) -> Vec<F> {
                 (o.has("ACCOUNT_CREATE") && o.target.as_ref().is_some_and(|t| t.starts_with(&pre)))
                     || o.cpi(|c| {
                         c.family.as_deref() == Some("system")
-                            && crate::jre!(r"^(CreateAccount|Allocate|Assign)").is_match(c.ix.as_deref().unwrap_or(""))
-                            && c.accounts.iter().any(|y| y.text.strip_prefix('*').unwrap_or(&y.text) == x)
+                            && crate::jre!(r"^(CreateAccount|Allocate|Assign)")
+                                .is_match(c.ix.as_deref().unwrap_or(""))
+                            && c.accounts
+                                .iter()
+                                .any(|y| y.text.strip_prefix('*').unwrap_or(&y.text) == x)
                     })
                     .unwrap_or(false)
             })
@@ -1578,16 +1856,27 @@ fn rule_type_unchecked(a: &Analysis, xi: usize) -> Vec<F> {
 }
 
 fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
-    if ix.accounts.iter().any(|x| x.has("signer")) || ix.checks.iter().any(|c| c.kinds.contains(&"signer")) {
+    if ix.accounts.iter().any(|x| x.has("signer"))
+        || ix.checks.iter().any(|c| c.kinds.contains(&"signer"))
+    {
         return vec![];
     }
     let gate = ["signer", "address", "pda", "custom", "state", "raw"];
     let mut tagged: IndexSet<String> = IndexSet::new();
     for o in &ix.ops {
-        if crate::jre!(r"\.data\[0\.\.[18]\]$|\.discriminator$").is_match(o.target.as_deref().unwrap_or(""))
+        if crate::jre!(r"\.data\[0\.\.[18]\]$|\.discriminator$")
+            .is_match(o.target.as_deref().unwrap_or(""))
             && crate::jre!(r"^(0x[0-9a-f]+|\d+)$").is_match(o.value.as_deref().unwrap_or(""))
         {
-            tagged.insert(o.target.as_ref().unwrap().split('.').next().unwrap_or("").to_string());
+            tagged.insert(
+                o.target
+                    .as_ref()
+                    .unwrap()
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            );
         }
     }
     if let Some(g) = ix.audit.as_ref().and_then(|a| a.init_gated.as_ref()) {
@@ -1596,7 +1885,9 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
     let gates = |c: &CheckOut| {
         c.kinds.iter().any(|k| {
             gate.contains(k)
-                && (*k != "raw" || c.sides.is_some() || crate::jre!(r"memcmp|memeq|keyeq|is_signer|, 0x20\)").is_match(&c.cond))
+                && (*k != "raw"
+                    || c.sides.is_some()
+                    || crate::jre!(r"memcmp|memeq|keyeq|is_signer|, 0x20\)").is_match(&c.cond))
         })
     };
     let ws: Vec<&OpOut> = ix
@@ -1617,8 +1908,13 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
     for o in &ws {
         tg.insert(o.target.clone().unwrap());
     }
-    let any_guard = ws.iter().any(|o| o.guards.as_ref().is_some_and(|g| !g.is_empty()));
-    let accts: IndexSet<String> = tg.iter().map(|t| t.split('.').next().unwrap_or("").to_string()).collect();
+    let any_guard = ws
+        .iter()
+        .any(|o| o.guards.as_ref().is_some_and(|g| !g.is_empty()));
+    let accts: IndexSet<String> = tg
+        .iter()
+        .map(|t| t.split('.').next().unwrap_or("").to_string())
+        .collect();
     let tgv: Vec<&String> = tg.iter().collect();
     vec![F {
         accounts: accts.into_iter().collect(),
@@ -1626,7 +1922,11 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
         evidence: vec![
             format!(
                 "writes {}{}",
-                tgv.iter().take(4).map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                tgv.iter()
+                    .take(4)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 if tgv.len() > 4 { ", …" } else { "" }
             ),
             if any_guard {
@@ -1635,7 +1935,11 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
                 "no dominating check found".into()
             },
         ],
-        confidence: if ws.iter().any(|o| o.has("AUTHORITY_WRITE")) || !any_guard { "medium" } else { "low" },
+        confidence: if ws.iter().any(|o| o.has("AUTHORITY_WRITE")) || !any_guard {
+            "medium"
+        } else {
+            "low"
+        },
         weight: ws.iter().map(|o| w_of(o)).fold(2.0, f64::max),
     }]
 }
@@ -1650,20 +1954,31 @@ fn rule_mint_burn(ix: &IxOut) -> Vec<F> {
             .cpi(|c| {
                 c.accounts
                     .iter()
-                    .find(|x| x.role.as_ref().is_some_and(|r| !r.is_empty() && crate::jre!(r"authority|owner").is_match(r)))
+                    .find(|x| {
+                        x.role.as_ref().is_some_and(|r| {
+                            !r.is_empty() && crate::jre!(r"authority|owner").is_match(r)
+                        })
+                    })
                     .cloned()
             })
             .flatten();
-        let n = au
-            .as_ref()
-            .and_then(|a| crate::jre!(r"^\*?([A-Za-z_]\w*(?:\[\d+\])?)").captures(&a.text).map(|m| m[1].to_string()));
+        let n = au.as_ref().and_then(|a| {
+            crate::jre!(r"^\*?([A-Za-z_]\w*(?:\[\d+\])?)")
+                .captures(&a.text)
+                .map(|m| m[1].to_string())
+        });
         let rw = n.as_ref().and_then(|n| row(ix, n));
         let signed = rw.is_some_and(|x| x.has("signer"));
         let from_data: Vec<&super::report::SrcRow> = o
             .sources
             .iter()
             .flatten()
-            .filter(|s| au.as_ref().is_some_and(|a| a.role.as_ref() == Some(&s.param)) && !s.source.ends_with(".key") && s.source.contains('.'))
+            .filter(|s| {
+                au.as_ref()
+                    .is_some_and(|a| a.role.as_ref() == Some(&s.param))
+                    && !s.source.ends_with(".key")
+                    && s.source.contains('.')
+            })
             .collect();
         let seeds_data: Vec<&super::report::SrcRow> = if !seeds(o) {
             vec![]
@@ -1671,7 +1986,11 @@ fn rule_mint_burn(ix: &IxOut) -> Vec<F> {
             o.sources
                 .iter()
                 .flatten()
-                .filter(|s| s.param == "signer seeds" && s.trust == "caller-controlled" && !s.source.ends_with(".key"))
+                .filter(|s| {
+                    s.param == "signer seeds"
+                        && s.trust == "caller-controlled"
+                        && !s.source.ends_with(".key")
+                })
                 .collect()
         };
         if signed {
@@ -1679,16 +1998,26 @@ fn rule_mint_burn(ix: &IxOut) -> Vec<F> {
         }
         if !from_data.is_empty() {
             out.push(F {
-                accounts: vec![n.clone().unwrap_or_else(|| au.as_ref().unwrap().text.clone())],
+                accounts: vec![n
+                    .clone()
+                    .unwrap_or_else(|| au.as_ref().unwrap().text.clone())],
                 path: vec![l(&o.at)],
                 evidence: vec![
                     t140(&o.text),
                     format!(
                         "authority ← {}",
-                        from_data.iter().map(|s| format!("{} ({})", s.source, s.trust)).collect::<Vec<_>>().join(", ")
+                        from_data
+                            .iter()
+                            .map(|s| format!("{} ({})", s.source, s.trust))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 ],
-                confidence: if from_data.iter().any(|s| s.trust == "caller-controlled") { "medium" } else { "low" },
+                confidence: if from_data.iter().any(|s| s.trust == "caller-controlled") {
+                    "medium"
+                } else {
+                    "low"
+                },
                 weight: w_of(o),
             });
             continue;
@@ -1701,7 +2030,11 @@ fn rule_mint_burn(ix: &IxOut) -> Vec<F> {
                     t140(&o.text),
                     format!(
                         "PDA signer seeds from unverified account data: {}",
-                        seeds_data.iter().map(|s| s.source.clone()).collect::<Vec<_>>().join(", ")
+                        seeds_data
+                            .iter()
+                            .map(|s| s.source.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 ],
                 confidence: "low",
@@ -1730,21 +2063,34 @@ fn rule_recipient_unbound(ix: &IxOut, anchor: bool) -> Vec<F> {
     let mut out = Vec::new();
     for o in &ix.ops {
         let k = &o.kinds;
-        if !k.iter().any(|x| *x == "TOKEN_TRANSFER" || *x == "LAMPORT_TRANSFER" || *x == "MINT") {
+        if !k
+            .iter()
+            .any(|x| *x == "TOKEN_TRANSFER" || *x == "LAMPORT_TRANSFER" || *x == "MINT")
+        {
             continue;
         }
         let dest = o
             .cpi(|c| {
                 c.accounts
                     .iter()
-                    .find(|x| x.role.as_ref().is_some_and(|r| !r.is_empty() && crate::jre!(r"^(destination|to|account)$").is_match(r)))
+                    .find(|x| {
+                        x.role.as_ref().is_some_and(|r| {
+                            !r.is_empty() && crate::jre!(r"^(destination|to|account)$").is_match(r)
+                        })
+                    })
                     .map(|x| x.text.clone())
             })
             .flatten();
-        let d = dest.and_then(|t| crate::jre!(r"^\*?([A-Za-z_]\w*(?:\[\d+\])?)").captures(&t).map(|m| m[1].to_string()));
+        let d = dest.and_then(|t| {
+            crate::jre!(r"^\*?([A-Za-z_]\w*(?:\[\d+\])?)")
+                .captures(&t)
+                .map(|m| m[1].to_string())
+        });
         let rw = d.as_ref().and_then(|d| row(ix, d));
         if rw.is_none()
-            && !(d.as_ref().is_some_and(|d| !d.is_empty() && !anchor && crate::jre!(r"^account\[\d+\]$").is_match(d)) && !k.contains(&"MINT"))
+            && !(d.as_ref().is_some_and(|d| {
+                !d.is_empty() && !anchor && crate::jre!(r"^account\[\d+\]$").is_match(d)
+            }) && !k.contains(&"MINT"))
         {
             continue;
         }
@@ -1753,34 +2099,71 @@ fn rule_recipient_unbound(ix: &IxOut, anchor: bool) -> Vec<F> {
             rw.and_then(|x| x.constraints.get(c))
                 .is_some_and(|e| e.status != "not_found" && e.status != "runtime")
         };
-        let mut list: Vec<&str> = vec!["token_owner", "token_mint", "associated", "has_one", "key", "address", "pda", "signer"];
+        let mut list: Vec<&str> = vec![
+            "token_owner",
+            "token_mint",
+            "associated",
+            "has_one",
+            "key",
+            "address",
+            "pda",
+            "signer",
+        ];
         if !anchor {
             list.push("owner");
         }
         let bind: Vec<&str> = list.into_iter().filter(|c| fnd(c)).collect();
         let pre = format!("{d}.");
-        let rel = rels(ix).iter().any(|x| x.a.starts_with(&pre) || x.b.starts_with(&pre));
+        let rel = rels(ix)
+            .iter()
+            .any(|x| x.a.starts_with(&pre) || x.b.starts_with(&pre));
         if anchor && fnd("rent_exempt") {
             continue;
         }
         let seg = |n: &str| snake(n).split('_').next().unwrap_or("").to_string();
-        let signers: Vec<&AcctOut> = ix.accounts.iter().filter(|x| x.expected.signer || x.has("signer")).collect();
-        let who = if d.is_empty() || d.starts_with("account[") { None } else { Some(seg(&d)) };
-        let party = who
-            .as_ref()
-            .and_then(|w| ix.accounts.iter().find(|x| x.name != d && snake(&x.name) == *w));
+        let signers: Vec<&AcctOut> = ix
+            .accounts
+            .iter()
+            .filter(|x| x.expected.signer || x.has("signer"))
+            .collect();
+        let who = if d.is_empty() || d.starts_with("account[") {
+            None
+        } else {
+            Some(seg(&d))
+        };
+        let party = who.as_ref().and_then(|w| {
+            ix.accounts
+                .iter()
+                .find(|x| x.name != d && snake(&x.name) == *w)
+        });
         let bound = party.is_some_and(|p| {
             let k = format!("{}.key", p.name);
-            rels(ix).iter().any(|x| x.kind != "address" && (x.a == k || x.b == k))
+            rels(ix)
+                .iter()
+                .any(|x| x.kind != "address" && (x.a == k || x.b == k))
         });
         let third = bound && !signers.iter().any(|x| Some(seg(&x.name)) == who);
-        let owner_bound = ["token_owner", "associated", "has_one", "key", "address", "pda"]
-            .iter()
-            .any(|c| rw.and_then(|x| x.constraints.get(c)).map(|e| e.status) == Some("found"))
+        let owner_bound = [
+            "token_owner",
+            "associated",
+            "has_one",
+            "key",
+            "address",
+            "pda",
+        ]
+        .iter()
+        .any(|c| rw.and_then(|x| x.constraints.get(c)).map(|e| e.status) == Some("found"))
             || rels(ix).iter().any(|x| {
-                x.kind != "compare" && [&x.a, &x.b].iter().any(|y| **y == format!("{d}.owner") || **y == format!("{d}.key"))
+                x.kind != "compare"
+                    && [&x.a, &x.b]
+                        .iter()
+                        .any(|y| **y == format!("{d}.owner") || **y == format!("{d}.key"))
             });
-        if if third { owner_bound } else { !bind.is_empty() || rel } {
+        if if third {
+            owner_bound
+        } else {
+            !bind.is_empty() || rel
+        } {
             continue;
         }
         let conf = if signers.is_empty() || third {
@@ -1794,7 +2177,10 @@ fn rule_recipient_unbound(ix: &IxOut, anchor: bool) -> Vec<F> {
         };
         if conf == "info"
             && ix.checks.iter().any(|c| {
-                !nz(&c.account) && c.kinds.iter().any(|x| crate::jre!(r"^(token_mint|token_owner|has_one|associated)$").is_match(x))
+                !nz(&c.account)
+                    && c.kinds.iter().any(|x| {
+                        crate::jre!(r"^(token_mint|token_owner|has_one|associated)$").is_match(x)
+                    })
             })
         {
             continue;
@@ -1806,11 +2192,18 @@ fn rule_recipient_unbound(ix: &IxOut, anchor: bool) -> Vec<F> {
                 t140(&o.text),
                 format!(
                     "{d}: no owner / mint / key / PDA / relation check found{}{}",
-                    if seeds(o) { "; the program signs this outflow (PDA)" } else { "" },
+                    if seeds(o) {
+                        "; the program signs this outflow (PDA)"
+                    } else {
+                        ""
+                    },
                     if signers.is_empty() {
                         "; no signer check in the instruction".to_string()
                     } else if third {
-                        format!("; named after {}, who does not sign", who.as_deref().unwrap_or("undefined"))
+                        format!(
+                            "; named after {}, who does not sign",
+                            who.as_deref().unwrap_or("undefined")
+                        )
                     } else {
                         String::new()
                     }
