@@ -17,7 +17,10 @@
 // names + declarations + printBody + the function's lines (a script-local copy of decompile's raw
 // printing path, checked against decompile's text), each summed over all functions.
 //
-//   node scripts/stagetime.ts [--iters N] [--stage3 | --stage4] prog.so...
+// With --stage5: the whole readable output (decompile(bytes, { full: true }), the single file included)
+// minus its analysis (analyze(), stage 8: timed separately on the same result and subtracted), and
+// the raw output (sugar: false) the same way: read = readable - raw is what stage 5 adds.
+//   node scripts/stagetime.ts [--iters N] [--stage3 | --stage4 | --stage5] prog.so...
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { parseElf } from '../src/elf.ts'
@@ -32,14 +35,15 @@ import { structure, cleanup, type Node } from '../src/structure.ts'
 import { statementIdioms } from '../src/stmtidioms.ts'
 import { Printer, printBody } from '../src/print.ts'
 import { decompile } from '../src/decompile.ts'
+import { analyze } from '../src/analysis/report.ts'
 import { walkExpr, type Expr, type Stmt } from '../src/ir.ts'
 import { stmtExprs } from '../src/simplify.ts'
 
 const args = process.argv.slice(2)
 let iters = 5
 const files: string[] = []
-let stage3 = false, stage4 = false
-for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else files.push(args[i]) }
+let stage3 = false, stage4 = false, stage5 = false
+for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else if (args[i] === '--stage5') stage5 = true; else files.push(args[i]) }
 
 // ---- decompile.ts's raw printing path (script-local copy for timing; checked against decompile's text) ----
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st'])
@@ -125,7 +129,25 @@ function rawText(f: VarFunc, body: Node[], irreducible: boolean, fnName: (pc: nu
 	return lines.join('\n')
 }
 
-if (stage4) {
+if (stage5) {
+	console.log('file\traw\treadable\tread')
+	for (const f of files) {
+		const bytes = new Uint8Array(readFileSync(f))
+		const best = [Infinity, Infinity]
+		for (let it = 0; it < iters + 1; it++) {
+			const v = [false, true].map(sugar => {
+				const t0 = performance.now()
+				const r = decompile(bytes, { sugar, full: true })
+				const t1 = performance.now()
+				analyze(r)
+				return t1 - t0 - (performance.now() - t1)
+			})
+			if (it) for (let k = 0; k < 2; k++) best[k] = Math.min(best[k], v[k]) // (first run: warm-up)
+		}
+		console.log([basename(f), best[0].toFixed(1), best[1].toFixed(1), (best[1] - best[0]).toFixed(1)].join('\t'))
+	}
+	process.exit(0)
+} else if (stage4) {
 	console.log('file\tstruct\tprint\ttotal')
 	for (const f of files) {
 		const bytes = new Uint8Array(readFileSync(f))

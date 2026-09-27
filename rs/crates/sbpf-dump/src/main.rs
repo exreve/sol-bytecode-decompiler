@@ -341,6 +341,15 @@ fn main() {
 
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("--time5") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        time5(files, iters);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--time4") {
         let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
             (args[2].parse().unwrap(), &args[3..])
@@ -532,5 +541,41 @@ fn time3(files: &[String], iters: usize) {
             .to_string_lossy();
         let cols: Vec<String> = best.iter().map(|x| format!("{x:.2}")).collect();
         println!("{name}\t{}", cols.join("\t"));
+    }
+}
+
+/// Stage 5 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage5 (the whole
+/// raw / readable output, single file included, without the analysis), on 1 thread and on worker threads.
+fn time5(files: &[String], iters: usize) {
+    println!("file\traw\treadable\tread\traw_par\treadable_par\tread_par");
+    let n = stage3::threads();
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = [f64::MAX; 4];
+        for _ in 0..iters {
+            for (k, th) in [(0, 1), (2, n)] {
+                let t = Instant::now();
+                let r = sbpf_print::raw::decompile_raw(&bytes, th).unwrap();
+                std::hint::black_box(sbpf_print::raw::render_single(&r));
+                let t1 = Instant::now();
+                let r = sbpf_read::decompile::decompile_read(&bytes, None, th).unwrap();
+                std::hint::black_box(sbpf_read::decompile::render_read(&r));
+                best[k] = best[k].min((t1 - t).as_secs_f64() * 1e3);
+                best[k + 1] = best[k + 1].min(t1.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let name = std::path::Path::new(f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        println!(
+            "{name}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+            best[0],
+            best[1],
+            best[1] - best[0],
+            best[2],
+            best[3],
+            best[3] - best[2]
+        );
     }
 }
