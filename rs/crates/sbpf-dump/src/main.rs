@@ -449,7 +449,9 @@ fn time3(files: &[String], iters: usize) {
             }
             let built: Vec<usize> = (0..q.funcs.len()).collect();
             sbpf_dataflow::stackargs::rewrite_stack_args(&mut q.funcs, &built);
-            sbpf_opt::par_each(q.funcs.values_mut().collect(), n, |g| sbpf_opt::finish(g, false));
+            sbpf_opt::par_each(q.funcs.values_mut().collect(), n, |g| {
+                sbpf_opt::finish(g, false)
+            });
             let par = tp.elapsed().as_secs_f64() * 1e3;
             let v = [v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], par];
             for k in 0..10 {

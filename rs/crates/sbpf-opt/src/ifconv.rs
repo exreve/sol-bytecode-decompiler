@@ -127,7 +127,12 @@ pub fn if_convert(x: &mut Fx, f: &mut Func, max_stmts: usize) -> bool {
     };
     let mut changed = false;
     for ai in 0..f.blocks.len() {
-        let Term::Br { c: tc, t: tt, f: tf } = f.blocks[ai].term else {
+        let Term::Br {
+            c: tc,
+            t: tt,
+            f: tf,
+        } = f.blocks[ai].term
+        else {
             continue;
         };
         if tt == tf {
@@ -194,9 +199,7 @@ pub fn if_convert(x: &mut Fx, f: &mut Func, max_stmts: usize) -> bool {
         let differ: Vec<u32> = targets
             .iter()
             .copied()
-            .filter(|&v| {
-                !(both(v) && x.expr_eq(get(&on_t, v).unwrap(), get(&on_f, v).unwrap()))
-            })
+            .filter(|&v| !(both(v) && x.expr_eq(get(&on_t, v).unwrap(), get(&on_f, v).unwrap())))
             .collect();
         let mut stmts: Vec<Stmt> = vec![];
         let mut c = tc;

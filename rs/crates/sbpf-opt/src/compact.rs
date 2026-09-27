@@ -47,9 +47,9 @@ pub fn sink_frame_loads(x: &mut Fx, f: &mut Func) {
     let param = |x: &Fx, e: E| match x.node(e) {
         Node::Var(id) => {
             id != fp
-                && vars.get(id as usize).is_some_and(|v| {
-                    (v.param >= 1 && v.param <= 5) || v.param >= 100
-                })
+                && vars
+                    .get(id as usize)
+                    .is_some_and(|v| (v.param >= 1 && v.param <= 5) || v.param >= 100)
                 && !defd[id as usize]
         }
         _ => false,
@@ -226,7 +226,9 @@ pub fn compact_stores(x: &mut Fx, f: &mut Func) {
             // maximal window of stores with the same destination base
             let mut j = i + 1;
             while j < st.len() {
-                let Stmt::Store { addr, .. } = st[j] else { break };
+                let Stmt::Store { addr, .. } = st[j] else {
+                    break;
+                };
                 if !x.expr_eq(base_off(x, addr).0, db) {
                     break;
                 }
@@ -243,8 +245,7 @@ pub fn compact_stores(x: &mut Fx, f: &mut Func) {
             i = j;
         }
         // `void ldN(p)` right before a branch whose condition first loads the same bytes
-        if let (Some(Stmt::Eval { e, .. }), Term::Br { c, .. }) = (out.last(), &f.blocks[bi].term)
-        {
+        if let (Some(Stmt::Eval { e, .. }), Term::Br { c, .. }) = (out.last(), &f.blocks[bi].term) {
             if let Node::Load { size, addr } = x.node(*e) {
                 if let Some((fs, fa)) = first_load(x, *c) {
                     if fs >= size && x.expr_eq(fa, addr) {
@@ -300,9 +301,11 @@ fn first_load(x: &mut Fx, e: E) -> Option<(u8, E)> {
                 first_load(x, a)
             }
         }
-        Node::Ext { a, .. } | Node::Lnot(a) | Node::Not(a) | Node::Neg(a) | Node::Bswap { a, .. } => {
-            first_load(x, a)
-        }
+        Node::Ext { a, .. }
+        | Node::Lnot(a)
+        | Node::Not(a)
+        | Node::Neg(a)
+        | Node::Bswap { a, .. } => first_load(x, a),
         Node::Fn(name, args) => {
             let n = x.intr(name);
             let ok = n == Intr::Keyeq
@@ -463,7 +466,12 @@ fn compact_window(x: &mut Fx, win: &[Store], frame: bool) -> Vec<Stmt> {
                 if win[i].size != size
                     || (o - o0) % sz != 0
                     || seen.contains(&o)
-                    || (!frame && (if down { o >= offs[i - 1] } else { o <= offs[i - 1] }))
+                    || (!frame
+                        && (if down {
+                            o >= offs[i - 1]
+                        } else {
+                            o <= offs[i - 1]
+                        }))
                 {
                     lim = i - k;
                     break;

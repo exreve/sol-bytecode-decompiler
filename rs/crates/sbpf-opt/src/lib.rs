@@ -491,6 +491,13 @@ impl<'i> Fx<'i> {
     /// stmtInfo(s): calls `f` on every variable occurrence of the statement's expressions (stmtExprs
     /// order) and returns the union of their side-effect flags.
     pub fn sinfo(&mut self, s: &Stmt, mut f: impl FnMut(u32)) -> u8 {
+        if let Stmt::Set { e, .. } | Stmt::Eval { e, .. } = *s {
+            let (a, n) = self.vars_range(e);
+            for k in a..a + n {
+                f(self.ivars[k as usize]);
+            }
+            return self.fx(e);
+        }
         let mut es = std::mem::take(&mut self.scratch);
         stmt_exprs(&self.ir, s, &mut es);
         let mut fl = 0;
@@ -534,6 +541,30 @@ impl<'i> Fx<'i> {
             f(self.ivars[k as usize]);
         }
     }
+    /// Some variable occurrence of `e` satisfies `p` (early exit, not cached).
+    pub fn any_var(&self, e: E, p: &mut dyn FnMut(u32) -> bool) -> bool {
+        match self.ir.get(e) {
+            Node::Var(id) => p(id),
+            Node::Bin(_, a, b) | Node::Cmp(_, a, b) | Node::Land(a, b) | Node::Lor(a, b) => {
+                self.any_var(a, p) || self.any_var(b, p)
+            }
+            Node::Neg(a)
+            | Node::Not(a)
+            | Node::Lnot(a)
+            | Node::Ext { a, .. }
+            | Node::Bswap { a, .. } => self.any_var(a, p),
+            Node::Load { addr, .. } => self.any_var(addr, p),
+            Node::Sel(c, a, b) => self.any_var(c, p) || self.any_var(a, p) || self.any_var(b, p),
+            Node::Call(t, args) => {
+                (match self.ir.target(t) {
+                    CallTarget::Ind { e } => self.any_var(e, p),
+                    _ => false,
+                }) || (0..args.len).any(|k| self.any_var(self.ir.at(args, k), p))
+            }
+            Node::Fn(_, args) => (0..args.len).any(|k| self.any_var(self.ir.at(args, k), p)),
+            _ => false,
+        }
+    }
     pub fn uses_var(&mut self, e: E, v: u32) -> bool {
         let mut h = false;
         self.evars(e, |x| h |= x == v);
@@ -574,16 +605,9 @@ impl<'i> Fx<'i> {
             (Node::Bswap { bits: b1, a: p }, Node::Bswap { bits: b2, a: q }) => {
                 b1 == b2 && self.expr_eq(p, q)
             }
-            (
-                Node::Load {
-                    size: s1,
-                    addr: p,
-                },
-                Node::Load {
-                    size: s2,
-                    addr: q,
-                },
-            ) => s1 == s2 && self.expr_eq(p, q),
+            (Node::Load { size: s1, addr: p }, Node::Load { size: s2, addr: q }) => {
+                s1 == s2 && self.expr_eq(p, q)
+            }
             (Node::Sel(c1, a1, b1), Node::Sel(c2, a2, b2)) => {
                 self.expr_eq(c1, c2) && self.expr_eq(a1, a2) && self.expr_eq(b1, b2)
             }
@@ -639,16 +663,9 @@ impl<'i> Fx<'i> {
             (Node::Bswap { bits: b1, a: p }, Node::Bswap { bits: b2, a: q }) => {
                 b1 == b2 && self.json_eq(p, q)
             }
-            (
-                Node::Load {
-                    size: s1,
-                    addr: p,
-                },
-                Node::Load {
-                    size: s2,
-                    addr: q,
-                },
-            ) => s1 == s2 && self.json_eq(p, q),
+            (Node::Load { size: s1, addr: p }, Node::Load { size: s2, addr: q }) => {
+                s1 == s2 && self.json_eq(p, q)
+            }
             (Node::Sel(c1, a1, b1), Node::Sel(c2, a2, b2)) => {
                 self.json_eq(c1, c2) && self.json_eq(a1, a2) && self.json_eq(b1, b2)
             }
@@ -1047,7 +1064,12 @@ pub fn prune_unreachable(f: &mut Func) {
 /// optimizeFunc; promoteStack (then optimizeFunc again); recognizeIdioms (then optimizeFunc again
 /// unless the function is settled and idioms did not really change it). `after_opt` is called after
 /// the first optimizeFunc (for the intermediate dump).
-pub fn phase2(f: &mut Func, img: Option<&Image>, exact_memory: bool, after_opt: impl FnOnce(&Func, bool)) -> bool {
+pub fn phase2(
+    f: &mut Func,
+    img: Option<&Image>,
+    exact_memory: bool,
+    after_opt: impl FnOnce(&Func, bool),
+) -> bool {
     let mut x = Fx::new(f.ir.take().expect("variable IR"), img);
     let mut settled = optimize_func(&mut x, f);
     f.ir = Some(x.ir);

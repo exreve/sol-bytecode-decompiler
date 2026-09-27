@@ -24,7 +24,7 @@ stages are at 100% parity.
 |---|---|---|
 | 1 | `elf`, `program`, `emu` (+ `murmur`, `syscalls`, `ir` types) | `elf`, `insns`, `cfg`, `lift` (pilot: done except `emu`) |
 | 2 | `dataflow`, `stack`, `stackargs` | `dataflow` (signatures, materialized blocks), `vars`, `stack`, `stackargs` (done) |
-| 3 | `simplify`, `cfgopt`, `ifconv`, `idioms`, `compact` | `optir` (IR after each group) |
+| 3 | `simplify`, `cfgopt`, `ifconv`, `idioms`, `compact` (+ decompile's phase 2) | `opt`, `optir`, `compact` (done) |
 | 4 | `structure`, `stmtidioms`, `print` | `struct`, `text` (printed output) |
 | 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state` | `views`, `accounts`, `layout` records |
 | 6 | `exec`, `cpiexec`, `cpi`, `builtins` | `exec`, `cpi` |
@@ -352,12 +352,95 @@ algorithms unchanged. The remaining cost is mostly hashing (`HashSet`/`HashMap` 
 block materialization, pc → function lookups) and per-statement vectors in recoverVars' first pass;
 none of it changes the order of anything, so it can be tightened later without parity risk.
 
+## Stage 3 results
+
+Ported: `src/simplify.ts` (simplifyExpr/simp1/simpSel, `optimizeFunc` and its pass loop with the
+`real`/`prevLast` early exits and `settled`, propagateGlobal, inlineLocal/inlineCall, dce,
+foldConstBranches), `src/cfgopt.ts` (tailDuplicate, threadJumps, mergeBlocks, local/global constant
+propagation, localCopyProp, deadStores, liveInSets), `src/ifconv.ts`, `src/idioms.ts` (popcount/clz/ctz,
+memeq/keyeq word-compare chains), `src/compact.ts` (sinkFrameLoads, compactStores), read-only memory
+folding (`setFoldImage` → `Fx::img`), `pruneUnreachable`, and decompile's per-function phase
+(`sbpf_opt::phase2`: optimizeFunc; promoteStack + optimizeFunc; recognizeIdioms + optimizeFunc unless
+settled and not really modified; then rewriteStackArgs over all functions and `sbpf_opt::finish`:
+sinkFrameLoads + compactStores) → `sbpf-opt` (~5.4k lines of rustfmt-ed Rust). Dumps: `opt` (after the
+first optimizeFunc), `optir` (after the whole per-function phase), `compact` (after rewriteStackArgs,
+sinkFrameLoads, compactStores: the input of structuring); format in [`rs/README.md`](../rs/README.md).
+This resolves the stage 2 harness limitation: the pipeline composition recoverVars → optimizeFunc →
+promoteStack → optimizeFunc → idioms → optimizeFunc → rewriteStackArgs → sinkFrameLoads → compactStores
+is now checked in its exact order. Library classification (stage 7) is not ported: the dumps run every
+function, as `--full` does.
+
+Design:
+
+- **`Fx`**: one per function for the whole phase; it owns the function's arena while passes run and keeps
+  caches keyed by expression id: side-effect flags (hasSideEffectsOrMem), variable occurrences of
+  statement expressions (stmtInfo), and "simplifyExpr(e) returns e" (the TS `simple` mark). Nodes are
+  immutable, so an answer cached for an id never goes stale; this replaces the TS per-statement
+  `StmtMeta` symbol cache (same answers, no invalidation logic).
+- **Identity** is id equality, as decided for the IR: every TS object creation is a new node (`{ ...e, a, b }`
+  after a swap, substVars' full rebuild, mapExpr's rebuild in idioms and sinkFrameLoads), every reuse the
+  same id (shared `m` values in propagateGlobal, the shared select condition in ifConvert), so round counts,
+  `settled` and the `real` flags come out the same.
+- **sameBody** (`JSON.stringify` of `[stmts with pc 0, term]`) is a structural comparison that equates
+  calls (unlike exprEq), which is what the JSON strings decide; statement key orders are the same for
+  all constructors, so no string is built.
+- **bigint offsets** in compact.ts are i128; the u64 wrap (`BigInt.asUintN`) is the truncating cast.
+- **Parallel per-function phase** (`sbpf_opt::par_each`, `SBPF_THREADS`): each function owns its arena and
+  only reads the program image, so phase 2 and `finish` run on worker threads with results in function
+  order. For that the IR's shared strings became `Arc<str>` (was `Rc<str>`), which made `Func` `Send`.
+
+### Parity
+
+- All binary sets: **615 / 615 identical** on `opt`, `optir`, `compact` (first run already identical;
+  re-run after the speed changes and the parallel driver).
+- Fuzz: **4000 / 4000 identical** on `dataflow,vars,opt,optir,compact` (seeds 1, 3, 7, 11; 1000 each, seed
+  3 on corpus/bench/eval bases).
+- No residual differences.
+
+### Speed
+
+Best of 10 (Rust) / 5 after warm-up (TS, Node 26), ms, same machine (`sbpf-dump --time3`,
+`scripts/stagetime.ts --stage3`), after inferSignatures + recoverVars of every function; each column is
+summed over all functions: `opt1` = optimizeFunc, `promote` = promoteStack, `opt2` = optimizeFunc after a
+promotion, `idioms` = recognizeIdioms, `opt3` = optimizeFunc after idioms, `stackargs` =
+rewriteStackArgs, `sink` / `compact` = sinkFrameLoads / compactStores; `total` = their sum; `parallel` =
+the same work with phase 2 and sink/compact on 8 worker threads (wall time).
+
+| program | | opt1 | promote | opt2 | idioms | opt3 | stackargs | sink | compact | total | parallel |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| token22 | TS | 317.0 | 18.4 | 31.5 | 24.1 | 109.4 | 39.2 | 11.3 | 17.5 | 577.9 | |
+| | Rust | 66.0 | 3.9 | 5.8 | 4.3 | 21.8 | 5.0 | 1.9 | 3.6 | 112.4 | 32.4 |
+| | speedup | 4.8× | 4.7× | 5.5× | 5.5× | 5.0× | 7.9× | 6.0× | 4.8× | **5.1×** | **17.8×** |
+| whirlpool | TS | 650.6 | 47.7 | 66.3 | 51.2 | 13.5 | 93.3 | 38.9 | 68.8 | 1049.2 | |
+| | Rust | 132.1 | 11.0 | 14.8 | 7.0 | 2.8 | 11.1 | 5.9 | 11.7 | 198.8 | 58.5 |
+| | speedup | 4.9× | 4.3× | 4.5× | 7.3× | 4.9× | 8.4× | 6.6× | 5.9× | **5.3×** | **17.9×** |
+| jup | TS | 985.4 | 73.8 | 161.9 | 70.4 | 294.0 | 138.0 | 42.6 | 82.3 | 1849.8 | |
+| | Rust | 198.4 | 18.7 | 32.9 | 14.8 | 65.4 | 18.3 | 8.1 | 18.9 | 384.1 | 121.2 |
+| | speedup | 5.0× | 3.9× | 4.9× | 4.8× | 4.5× | 7.5× | 5.3× | 4.3× | **4.8×** | **15.3×** |
+| svault_v3 | TS | 1054.3 | 54.4 | 75.6 | 78.7 | 68.0 | 112.6 | 39.0 | 90.4 | 1619.7 | |
+| | Rust | 207.6 | 15.2 | 14.5 | 13.4 | 13.8 | 16.8 | 8.6 | 22.8 | 314.2 | 101.2 |
+| | speedup | 5.1× | 3.6× | 5.2× | 5.9× | 4.9× | 6.7× | 4.5× | 4.0× | **5.2×** | **16.0×** |
+
+Inside optimizeFunc (jup, one run, from temporary timers in both implementations; not committed):
+simplification 250 → 27 ms (9×, the per-id stability cache skips stable subtrees), propagateGlobal 256 →
+~45, inlineLocal 455 → ~100, dce 73 → 10, globalConstProp 156 → ~42, localCopyProp 50 → 15, deadStores
+285 → ~70, ifConvert 43 → 14, threadJumps 21 → 8, tailDuplicate 31 → 10 ms. The weakest ratios (3.5–4.5×)
+are the passes that re-derive whole-function tables every round exactly as TS does (use/def counts,
+gen/kill rows, the constant lattice); keeping those incrementally would be an algorithm change (allowed
+only when provably order-preserving) and is left for later.
+
+The single-threaded per-function phase is **4.8–5.3× faster** than TS; on 8 threads **15–18×**
+(the profile's optimizeFunc + idioms + compact share, 15–22% of the TS run, drops to ~1–1.5%).
+
 ## Plan changes
 
-- **Stage 2 is done** (above). The `stack`/`stackargs` dumps are harnesses on unoptimized IR; stage 3
-  must add the composed per-function dump (`optir`: IR after recoverVars → optimizeFunc → promoteStack →
-  optimizeFunc → idioms, then after rewriteStackArgs and `sinkFrameLoads`/`compactStores`), over all
-  functions as `--full` builds them (classification is stage 7).
+- **Stage 2 and stage 3 are done** (above). Stage 3's `opt`/`optir`/`compact` dumps check the composed
+  per-function pipeline in its exact order, over all functions as `--full` builds them; the library skip
+  (classification) arrives with stage 7, whose dump should then re-run stage 3 on user functions only.
+- **Parallelism is in**: the per-function phase runs on worker threads (`par_each`); later per-function
+  stages (structuring, printing) should use the same driver. Shared IR strings are `Arc<str>`.
+- **Remaining single-thread headroom in stage 3** is in whole-function recounts per round (see *Stage 3
+  results*); not worth an algorithm change while the parallel driver already gives 15–18×.
 - **`decompile.ts` gets a stage.** Its own passes are 10–12% of the run and sit between the listed
   modules: `sinkFrameLoads`, naming (`nameThunks`, symbol sanitizing), phase 3 (discriminator constants,
   Result layouts, out-parameters), declarations. Port its phase 2 driver with stage 3, its structuring

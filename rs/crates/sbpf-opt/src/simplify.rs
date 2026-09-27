@@ -69,10 +69,9 @@ impl Fx<'_> {
         match self.node(e) {
             Node::Cmp(..) | Node::Lnot(_) | Node::Land(..) | Node::Lor(..) => true,
             Node::Const(v) => v <= 1,
-            Node::Fn(name, _) => matches!(
-                self.intr(name),
-                Intr::Memeq | Intr::Keyeq | Intr::RcRelease
-            ),
+            Node::Fn(name, _) => {
+                matches!(self.intr(name), Intr::Memeq | Intr::Keyeq | Intr::RcRelease)
+            }
             _ => false,
         }
     }
@@ -580,17 +579,29 @@ impl Fx<'_> {
             }
             Node::Neg(a) => {
                 let a2 = self.simplify_expr(a);
-                let n = if a2 == a { e } else { self.ir.mk(Node::Neg(a2)) };
+                let n = if a2 == a {
+                    e
+                } else {
+                    self.ir.mk(Node::Neg(a2))
+                };
                 self.simp1(n)
             }
             Node::Not(a) => {
                 let a2 = self.simplify_expr(a);
-                let n = if a2 == a { e } else { self.ir.mk(Node::Not(a2)) };
+                let n = if a2 == a {
+                    e
+                } else {
+                    self.ir.mk(Node::Not(a2))
+                };
                 self.simp1(n)
             }
             Node::Lnot(a) => {
                 let a2 = self.simplify_expr(a);
-                let n = if a2 == a { e } else { self.ir.mk(Node::Lnot(a2)) };
+                let n = if a2 == a {
+                    e
+                } else {
+                    self.ir.mk(Node::Lnot(a2))
+                };
                 self.simp1(n)
             }
             Node::Ext { signed, bits, a } => {
@@ -750,9 +761,7 @@ impl Look for One {
 impl Fx<'_> {
     /// substVars: returns `e` when no variable of `m` occurs; otherwise rebuilds every composite node.
     pub(crate) fn subst_vars<M: Look>(&mut self, e: E, m: &M) -> E {
-        let mut hit = false;
-        self.evars(e, |v| hit |= m.look(v).is_some());
-        if !hit {
+        if !self.any_var(e, &mut |v| m.look(v).is_some()) {
             return e;
         }
         self.subst_go(e, m)
@@ -1228,7 +1237,10 @@ fn inline_local(x: &mut Fx, f: &mut Func, exact: &mut Option<Vec<i32>>) -> bool 
                 let t_calls = matches!(t, Stmt::Call { .. }) || tf & CALL != 0;
                 let t_writes = matches!(
                     t,
-                    Stmt::Store { .. } | Stmt::Stores { .. } | Stmt::Copy { .. } | Stmt::Trap { .. }
+                    Stmt::Store { .. }
+                        | Stmt::Stores { .. }
+                        | Stmt::Copy { .. }
+                        | Stmt::Trap { .. }
                 ) || t_calls;
                 if fx != 0 && t_writes {
                     break;
@@ -1425,56 +1437,48 @@ fn dce(x: &mut Fx, f: &mut Func, initial: Option<Vec<i32>>) -> bool {
         let mut next = uses.clone();
         let mut any = false;
         for b in &mut f.blocks {
-            let old = std::mem::take(&mut b.stmts);
-            let mut out: Vec<Stmt> = Vec::with_capacity(old.len());
-            for s in old {
-                match s {
-                    Stmt::Set { dst, e, pc } => {
-                        if x.node(e) == Node::Var(dst as u32) {
-                            any = true;
-                            x.sinfo(&s, |v| next[v as usize] -= 1);
-                            continue;
-                        }
-                        if uses[dst as usize] == 0 {
-                            if x.fx(e) != 0 {
-                                out.push(Stmt::Eval { e, pc });
-                            } else {
-                                x.sinfo(&s, |v| next[v as usize] -= 1);
-                            }
-                            any = true;
-                            continue;
-                        }
-                        out.push(s);
+            // (in place: statements are kept, dropped or replaced in order)
+            b.stmts.retain_mut(|s| match *s {
+                Stmt::Set { dst, e, pc } => {
+                    if x.node(e) == Node::Var(dst as u32) {
+                        any = true;
+                        x.sinfo(s, |v| next[v as usize] -= 1);
+                        return false;
                     }
-                    Stmt::Call { dst, .. } if dst >= 0 && uses[dst as usize] == 0 => {
-                        let mut s = s;
-                        if let Stmt::Call { dst, .. } = &mut s {
-                            *dst = -1;
+                    if uses[dst as usize] == 0 {
+                        any = true;
+                        if x.fx(e) != 0 {
+                            *s = Stmt::Eval { e, pc };
+                            return true;
                         }
-                        out.push(s);
+                        x.sinfo(s, |v| next[v as usize] -= 1);
+                        return false;
+                    }
+                    true
+                }
+                Stmt::Call { ref mut dst, .. } if *dst >= 0 && uses[*dst as usize] == 0 => {
+                    *dst = -1;
+                    any = true;
+                    true
+                }
+                Stmt::Eval { e, pc } => {
+                    if x.fx(e) == 0 {
+                        any = true;
+                        x.sinfo(s, |v| next[v as usize] -= 1);
+                        return false;
+                    }
+                    let inner = trapping_core(x, e);
+                    if inner != e {
+                        let ns = Stmt::Eval { e: inner, pc };
+                        x.sinfo(s, |v| next[v as usize] -= 1);
+                        x.sinfo(&ns, |v| next[v as usize] += 1);
+                        *s = ns;
                         any = true;
                     }
-                    Stmt::Eval { e, pc } => {
-                        if x.fx(e) == 0 {
-                            any = true;
-                            x.sinfo(&s, |v| next[v as usize] -= 1);
-                            continue;
-                        }
-                        let inner = trapping_core(x, e);
-                        if inner != e {
-                            let ns = Stmt::Eval { e: inner, pc };
-                            x.sinfo(&s, |v| next[v as usize] -= 1);
-                            x.sinfo(&ns, |v| next[v as usize] += 1);
-                            out.push(ns);
-                            any = true;
-                            continue;
-                        }
-                        out.push(s);
-                    }
-                    s => out.push(s),
+                    true
                 }
-            }
-            b.stmts = out;
+                _ => true,
+            });
         }
         if !any {
             break;
@@ -1497,9 +1501,11 @@ fn trapping_core(x: &mut Fx, e: E) -> E {
             kids.push(a);
             kids.push(b)
         }
-        Node::Neg(a) | Node::Not(a) | Node::Ext { a, .. } | Node::Bswap { a, .. } | Node::Lnot(a) => {
-            kids.push(a)
-        }
+        Node::Neg(a)
+        | Node::Not(a)
+        | Node::Ext { a, .. }
+        | Node::Bswap { a, .. }
+        | Node::Lnot(a) => kids.push(a),
         Node::Fn(_, args) => kids.extend(x.ir.items(args)),
         _ => {}
     }

@@ -284,7 +284,9 @@ pub fn recognize_idioms(x: &mut Fx, f: &mut Func) -> (bool, bool) {
         let mut out = Vec::with_capacity(b.stmts.len());
         for (i, s) in b.stmts.iter().enumerate() {
             mt.cur_i = i;
-            out.push(x.map_stmt(s, &mut |x, e| rw(x, fr, &mut mt, e, &mut changed, &mut real)));
+            out.push(x.map_stmt(s, &mut |x, e| {
+                rw(x, fr, &mut mt, e, &mut changed, &mut real)
+            }));
         }
         mt.cur_i = b.stmts.len();
         let te = term_expr(&b.term).map(|e| rw(x, fr, &mut mt, e, &mut changed, &mut real));
@@ -361,7 +363,10 @@ fn same_body(x: &Fx, f: &Func, a: usize, b: usize) -> bool {
         return true;
     }
     p.stmts.len() == q.stmts.len()
-        && p.stmts.iter().zip(&q.stmts).all(|(s, t)| stmt_json_eq(x, s, t))
+        && p.stmts
+            .iter()
+            .zip(&q.stmts)
+            .all(|(s, t)| stmt_json_eq(x, s, t))
         && term_json_eq(x, &p.term, &q.term)
 }
 
@@ -450,9 +455,18 @@ fn stmt_json_eq(x: &Fx, s: &Stmt, t: &Stmt) -> bool {
 
 fn term_json_eq(x: &Fx, a: &Term, b: &Term) -> bool {
     match (a, b) {
-        (Term::Br { c: c1, t: t1, f: f1 }, Term::Br { c: c2, t: t2, f: f2 }) => {
-            t1 == t2 && f1 == f2 && x.json_eq(*c1, *c2)
-        }
+        (
+            Term::Br {
+                c: c1,
+                t: t1,
+                f: f1,
+            },
+            Term::Br {
+                c: c2,
+                t: t2,
+                f: f2,
+            },
+        ) => t1 == t2 && f1 == f2 && x.json_eq(*c1, *c2),
         (Term::Ret { e: Some(p) }, Term::Ret { e: Some(q) }) => x.json_eq(*p, *q),
         (p, q) => p == q,
     }
@@ -618,7 +632,9 @@ fn merge_word_compares(x: &mut Fx, f: &mut Func) -> bool {
             if nb.id == 0 || nb.preds.len() != 1 || chain.contains(&n) {
                 break;
             }
-            let Some(w) = word_compare(x, f, n) else { break };
+            let Some(w) = word_compare(x, f, n) else {
+                break;
+            };
             if w.q.is_none() != w0.q.is_none()
                 || chain
                     .iter()
