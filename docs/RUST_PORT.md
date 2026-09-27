@@ -26,8 +26,8 @@ stages are at 100% parity.
 | 2 | `dataflow`, `stack`, `stackargs` | `dataflow` (signatures, materialized blocks), `vars`, `stack`, `stackargs` (done) |
 | 3 | `simplify`, `cfgopt`, `ifconv`, `idioms`, `compact` (+ decompile's phase 2) | `opt`, `optir`, `compact` (done) |
 | 4 | `structure`, `stmtidioms`, `print` (+ decompile's raw printing path, renderSingle) | `struct`, `text`, `rawfile` (done: raw output) |
-| 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state` | `views`, `accounts`, `layout` records |
-| 6 | `exec`, `cpiexec`, `cpi`, `builtins` | `exec`, `cpi` |
+| 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state`, `outline`, `taint` (+ decompile's phases 3–4, readable renderSingle) | `types`, `rtext`, `readfile` (done: readable output, with and without IDL) |
+| 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (with stage 7: only used on library functions) | (covered by `rtext` / `readfile`) |
 | 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `fingerprint`, `semantics` |
 | 8 | `src/analysis/*` | `analysis` (analysis JSON, canonical key order) |
 | 9 | `layout`, `budget`, `rpc`, `cli` | whole CLI output (`-o dir/`) byte-compared |
@@ -516,7 +516,102 @@ The first port (passes rebuilding the tree as the TS does, `format!`-per-subexpr
 text building (~9 ns per output byte). Single-thread gains are lower than stage 3's because V8 is good at
 exactly this (short strings as ropes, small short-lived objects); the parallel driver matters more here.
 
+## Stage 5 results
+
+Ported (with stage 6's `exec`, `cpiexec`, `cpi`, which the readable text needs): `src/views.ts`,
+`accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`,
+`state.ts`, `outline.ts`, `taint.ts`, the read side of `semantics.ts`, and the rest of `src/decompile.ts`
+(phase 3: discriminator constants, Result layouts, out-parameters; phase 4: invoke thunks / PDA and
+invoke wrappers, Accounts / Context views, zero-copy loaders, per-function names and view types, the
+printing hooks: typed views, account and input fields, frame objects and regions, strings, keys, Result
+tags, stored strings, CPI / PDA / fmt notes, outlined tails) → `sbpf-exec` (the concrete interpreter,
+local SHA-256 / Keccak) and `sbpf-read` (`decompile_read`, `render_read`); `layout.ts` renderSingle is
+shared with the raw path (`sbpf-print::raw::render_single_of`: IDL args / accounts rows, typed-view
+declarations, outlined tails). ~20k lines of rustfmt-ed Rust. Dumps: `types` (each function's variable
+names and view assignment; TS side: `FuncOut.varTypes`, an output-neutral field added for the dump),
+`rtext` (each function's readable text), `readfile` (the single file); `--idl` on both dumpers,
+`parity.ts --idl` picks the binaries that have one. Format in [`rs/README.md`](../rs/README.md).
+
+As for `rawfile`, the `readfile` dump drops the `// security summary` block (stage 8's `analyze`) on
+both sides; everything else, CPI comments included, is compared.
+
+Fixes found by parity (all Rust-side, TS unchanged):
+
+- **The TS reads phase 4 facts of the built functions.** `recoverVars` works in place (`f as VarFunc`),
+  so `p.funcs` holds the optimized functions by phase 4: invoke thunks, PDA wrappers (block and syscall
+  counts, `nparams`) and `unalignedInput` are read from them, not from the register-level CFG (jup: a
+  `sol_try_find_program_address` removed by the optimizer made `fn_93bc0` a PDA wrapper in Rust only).
+- **NaN view sizes.** A Borsh view whose size is unknown has size `NaN`; JS `Math.max(0x400, NaN + 0x100)`
+  is `NaN` and `Array.from({ length: NaN })` is empty (so the account run fails), while Rust's `f64::max`
+  ignores NaN. `util::jmax` keeps the JS semantics where view sizes are maxed.
+- The IDL argument view is added to the shared view table while each function is named (as in the TS),
+  outside the per-function printing borrow (no unsafe aliasing).
+
+Design notes:
+
+- Phase 4 printing runs function by function on one thread: naming a function can add views
+  (IDL argument views, zero-copy loaders) that later functions' names and types depend on. Stages 1–4
+  keep their worker threads.
+- `f64` stands for JS numbers wherever the TS does arithmetic on offsets / sizes (`N`); `K` keys JS
+  `Map<number, …>` (SameValueZero: `-0` is `0`).
+
+### Parity
+
+- Without IDL, all binary sets: **615 / 615 identical** on `types`, `rtext` and `readfile` (samples,
+  regress, compat, bench, eval: 213; corpus: 402).
+- With IDL (the 183 binaries that have one: samples/regress 2, bench, eval, corpus): **IDL_RESULT**.
+- Fuzz: **6000 / 6000 identical** (1000 each: seeds 1, 7, 11 on samples + compat, seed 3 on corpus + bench +
+  eval; seed 13: 2000 on samples + compat + bench); 1409 of them reach the readable output without an
+  error (the others stop at an earlier stage's error, reported identically).
+- Equivalence harness on the **Rust-printed** readable text (`test/equiv.ts`'s readable check with the
+  program text replaced by the Rust `readfile` text, 5 trials per function): memo, token, ata, stake_pool,
+  token22, whirlpool, svault_v3, jup — 4991 functions, 24 855 trials, **0 failing functions, 0 errors**;
+  with IDL: squads_v4, metadao_conditional_vault, bench a_vault, eval candy_machine_v2, corpus SAGE —
+  3418 functions, 17 074 trials, 0 errors, **1 failing function** (metadao `fn_a4a8`, a store width
+  mismatch at event #860), which fails identically on the TS text (a TS issue, not a port difference).
+- No residual differences apart from the analysis summary block (stage 8), excluded by construction.
+
+### Speed
+
+Best of 10 (Rust) / 5 after warm-up (TS, Node 26), ms, same machine (`sbpf-dump --time5`,
+`scripts/stagetime.ts --stage5`): the whole output from the bytes (all stages, single file included) minus
+the analysis (`analyze()`, stage 8, timed separately on the same result and subtracted on the TS side; the
+Rust side has none): `raw` = `decompile(bytes, { sugar: false, full: true })`, `readable` = `decompile(bytes,
+{ full: true })`, `read` = readable − raw (what stage 5 adds); `parallel` = the same with 8 worker threads
+(wall time).
+
+| program | | raw | readable | read | readable, parallel |
+|---|---|---:|---:|---:|---:|
+| token22 | TS | 890.6 | 1641.8 | 751.2 | |
+| | Rust | 192.2 | 351.5 | 159.2 | 269.7 |
+| | speedup | 4.6× | **4.7×** | 4.7× | **6.1×** |
+| whirlpool | TS | 1575.8 | 3520.0 | 1944.2 | |
+| | Rust | 342.6 | 961.8 | 619.2 | 795.1 |
+| | speedup | 4.6× | **3.7×** | 3.1× | **4.4×** |
+| jup | TS | 3029.0 | 5917.4 | 2888.4 | |
+| | Rust | 636.1 | 1368.6 | 732.5 | 1060.2 |
+| | speedup | 4.8× | **4.3×** | 3.9× | **5.6×** |
+| svault_v3 | TS | 2830.9 | 5563.0 | 2732.1 | |
+| | Rust | 663.5 | 1364.3 | 700.7 | 1097.7 |
+| | speedup | 4.3× | **4.1×** | 3.9× | **5.1×** |
+
+The stage 5 part is a straight port (no Rust-specific restructuring yet) and runs on one thread, so the
+parallel driver only shortens stages 1–4 (the `read` part is the same 160–790 ms with 8 threads); it is
+now the larger half of the Rust run. The TS side also keeps memory across `decompile` calls (one Node
+process timing token22, whirlpool, jup and svault_v3 in a row runs out of its 4 GB heap), which the
+Rust side does not.
+
 ## Plan changes
+
+- **Stage 5 is done** (above), with `exec` / `cpiexec` / `cpi` of stage 6; `builtins` moves to stage 7
+  (u128 builtin names are only given to library functions, i.e. with classification). Next: stage 7
+  (`fingerprint`, `library`, `diff`, `selector`, the rest of `semantics`: the CLI default without `--full`),
+  then stage 8 (analysis: brings back the summary block in `rawfile` / `readfile`).
+- **A dedicated Rust performance pass follows the full port** (after stage 9), guarded by byte-identical
+  comparisons against the frozen TS outputs (whole CLI output and stage dumps of every corpus binary).
+  Known targets: stage 5's phase 4 on worker threads (the order-dependent part is the view table: name
+  and add views in a sequential pre-pass, print in parallel), the concrete runs of `anchorstate` /
+  `cpiexec` (repeated interpreter runs per callee), and the allocation-heavy parts of stage 4.
 
 - **Stage 4 is done for the raw output** (above): structuring, statement idioms, the printer and the raw
   printing path (naming, declarations, function text, single file). The readable output's printing hooks
