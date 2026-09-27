@@ -22,7 +22,7 @@ pub fn check_pcs(p: &Program) -> Result<(), String> {
     for f in p.funcs.values() {
         if f.blocks
             .iter()
-            .any(|b| b.end >= p.insns.len() as i64 && b.start <= b.end)
+            .any(|b| b.start <= b.end && (b.start < 0 || b.end >= p.insns.len() as i64))
         {
             return Err("Cannot read properties of undefined (reading 'opc')".into());
         }
