@@ -54,15 +54,16 @@ fn fs_error(e: &std::io::Error, syscall: &str, path: Option<&str>) -> String {
     }
 }
 
-fn read_file(path: &str) -> Result<Vec<u8>, Exit> {
+/// readFileSync (Err: the exception's first line).
+fn read_file(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| {
         // a directory opens, then fails on read (as Node reports it)
         let dir = e.raw_os_error() == Some(21);
-        thrown(fs_error(
+        fs_error(
             &e,
             if dir { "read" } else { "open" },
             if dir { None } else { Some(path) },
-        ))
+        )
     })
 }
 
@@ -88,40 +89,64 @@ struct Loaded {
     loader: Option<String>,
 }
 
-/// Program bytes, and the IDL (explicit file, or the on-chain one of a fetched program).
-fn load(input: &str, idl_file: Option<&str>, rpc: Option<&str>) -> Result<Loaded, Exit> {
-    let (mut program_id, mut loader) = (None, None);
-    let bytes = if input == "-" {
+/// The synchronous part of the TS `load` (up to the fetch): the bytes of a local input (or the exception reading
+/// it threw), or the address to fetch. `Err`: the CLI exits (`fail`).
+enum Start<'a> {
+    Local(Result<Vec<u8>, String>),
+    Remote(&'a str, &'a str),
+}
+
+fn start<'a>(input: &'a str, rpc: Option<&'a str>) -> Result<Start<'a>, Exit> {
+    if input == "-" {
         let mut b = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut b)
-            .map_err(|e| thrown(fs_error(&e, "read", None)))?;
-        b
-    } else if Path::new(input).exists() {
-        read_file(input)?
-    } else if rpc::is_address(input) {
+        return Ok(Start::Local(
+            std::io::stdin()
+                .read_to_end(&mut b)
+                .map(|_| b)
+                .map_err(|e| fs_error(&e, "read", None)),
+        ));
+    }
+    if Path::new(input).exists() {
+        return Ok(Start::Local(read_file(input)));
+    }
+    if rpc::is_address(input) {
         let Some(rpc_url) = rpc else {
             return Err(fail(format!(
                 "{input} looks like a program address: pass --rpc <url> to fetch it"
             )));
         };
-        program_id = Some(input);
-        let (b, l) = rpc::fetch_program_account(rpc_url, input).map_err(fail)?;
-        loader = Some(l);
-        eprintln!("fetched {input}: {} bytes", b.len());
-        b
-    } else {
-        return Err(fail(format!(
-            "{input}: no such file, and not a program address"
-        )));
+        return Ok(Start::Remote(input, rpc_url));
+    }
+    Err(fail(format!(
+        "{input}: no such file, and not a program address"
+    )))
+}
+
+/// JSON.parse's SyntaxError (V8's text for the end of input; otherwise serde's description).
+fn json_parse(text: &[u8]) -> Result<serde_json::Value, Exit> {
+    serde_json::from_str(&String::from_utf8_lossy(text)).map_err(|e| {
+        thrown(if e.is_eof() {
+            "SyntaxError: Unexpected end of JSON input".to_string()
+        } else {
+            format!("SyntaxError: {e}")
+        })
+    })
+}
+
+/// The rest of `load`: program bytes, and the IDL (explicit file, or the on-chain one of a fetched program).
+fn finish(s: Start, idl_file: Option<&str>) -> Result<Loaded, Exit> {
+    let (bytes, remote, loader) = match s {
+        Start::Local(b) => (b.map_err(thrown)?, None, None),
+        Start::Remote(input, rpc_url) => {
+            let (b, l) = rpc::fetch_program_account(rpc_url, input).map_err(fail)?;
+            eprintln!("fetched {input}: {} bytes", b.len());
+            (b, Some((input, rpc_url)), Some(l))
+        }
     };
     let mut idl_json = None;
     if let Some(f) = idl_file {
-        let text = read_file(f)?;
-        let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&text))
-            .map_err(|e| thrown(format!("SyntaxError: {e}")))?;
-        idl_json = Some(v);
-    } else if let (Some(pid), Some(rpc_url)) = (program_id, rpc) {
+        idl_json = Some(json_parse(&read_file(f).map_err(thrown)?)?);
+    } else if let Some((pid, rpc_url)) = remote {
         idl_json = rpc::fetch_idl(pid, rpc_url);
         if idl_json.is_some() {
             eprintln!("using on-chain Anchor IDL of {pid}");
@@ -200,8 +225,17 @@ fn run_inner(args: &[String], threads: usize) -> Result<(), Exit> {
     let out = opt("-o").filter(|s| !s.is_empty());
 
     if inputs.len() == 2 {
-        let a = load(inputs[0], None, rpc)?;
-        let b = load(inputs[1], None, rpc)?;
+        // Promise.all(inputs.map(load)): the synchronous parts of both loads (a `fail` exits at once), then the
+        // first exception thrown there, then the fetches
+        let sa = start(inputs[0], rpc)?;
+        let sb = start(inputs[1], rpc)?;
+        for x in [&sa, &sb] {
+            if let Start::Local(Err(e)) = x {
+                return Err(thrown(e));
+            }
+        }
+        let a = finish(sa, None)?;
+        let b = finish(sb, None)?;
         let text = sbpf_read::diff::diff_report(
             &a.bytes,
             &b.bytes,
@@ -217,7 +251,10 @@ fn run_inner(args: &[String], threads: usize) -> Result<(), Exit> {
         return Ok(());
     }
 
-    let l = load(inputs[0], opt("--idl").filter(|s| !s.is_empty()), rpc)?;
+    let l = finish(
+        start(inputs[0], rpc)?,
+        opt("--idl").filter(|s| !s.is_empty()),
+    )?;
     let r = sbpf_read::decompile::decompile_read_opts(
         &l.bytes,
         l.idl.as_ref(),
