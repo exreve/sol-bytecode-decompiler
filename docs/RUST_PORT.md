@@ -883,8 +883,8 @@ per-call `Vec`s of walked nodes (`ir.walk` collects before visiting), cloned `Op
      the `// security summary` block of `rawfile` / `readfile`; the dumps' `withoutAnalysis` goes away).
   4. The diff's native-arm profiles (`analyze(r).ixs` in diff.ts `profile`): remove the `unsupported: native instruction
      arms` error, re-run the 199 diff pairs.
-  - Sweep notes: 5 parallel Node parity processes get OOM-killed on corpus chunks (19 GB box); 3 in parallel is safe
-    (`sweep.sh`-style chunks of 25 files, re-run chunks without a `parity:` line).
+  - Sweep notes: parallel Node parity processes get OOM-killed on corpus chunks (19 GB box: 5 lost 7 chunks, 3 lost one); run 2–3 in parallel
+    (chunks of 25 files) and re-run the chunks without a `parity:` line. The sweeps were re-run after the memo change (615 / 615, IDL 184 / 184).
 
 - **Stage 8a is done** (above): the analysis foundation (`facts`, `flow`).
 
