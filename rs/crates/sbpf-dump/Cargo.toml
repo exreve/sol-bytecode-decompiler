@@ -1,0 +1,11 @@
+[package]
+name = "sbpf-dump"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sbpf-elf.workspace = true
+sbpf-ir.workspace = true
+sbpf-program.workspace = true

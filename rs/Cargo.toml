@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+indexmap = "2"
+serde_json = "1"
+sbpf-elf = { path = "crates/sbpf-elf" }
+sbpf-ir = { path = "crates/sbpf-ir" }
+sbpf-program = { path = "crates/sbpf-program" }
+
+[profile.release]
+codegen-units = 1
+debug = false
