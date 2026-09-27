@@ -2006,3 +2006,24 @@ pub fn site_objects(
 pub fn token_ix_name(tag: u64) -> Option<&'static str> {
     fam_ix(Fam::Token, tag).map(|l| l.name)
 }
+
+/// A well-known program's instruction layouts (knownFamilies: the FAMILY entries in order): (known-id label,
+/// family label, [(tag, name, account roles)] by ascending tag).
+pub type KnownFamily = (&'static str, &'static str, Vec<(u64, &'static str, &'static [&'static str])>);
+
+pub fn known_families() -> Vec<KnownFamily> {
+    let fams = [
+        ("TOKEN_PROGRAM", Fam::Token),
+        ("TOKEN_2022_PROGRAM", Fam::Token),
+        ("SYSTEM_PROGRAM", Fam::System),
+        ("ASSOCIATED_TOKEN_PROGRAM", Fam::Ata),
+        ("COMPUTE_BUDGET_PROGRAM", Fam::ComputeBudget),
+        ("STAKE_PROGRAM", Fam::Stake),
+    ];
+    fams.iter()
+        .map(|&(k, f)| {
+            let ixs = (0..1024u64).filter_map(|t| fam_ix(f, t).map(|l| (t, l.name, l.accounts))).collect();
+            (k, fam_label(f), ixs)
+        })
+        .collect()
+}

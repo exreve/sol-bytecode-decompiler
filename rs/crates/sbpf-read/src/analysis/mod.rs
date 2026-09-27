@@ -5,6 +5,7 @@
 
 pub mod acct;
 pub mod anchor;
+pub mod dispatch;
 pub mod facts;
 pub mod flow;
 
