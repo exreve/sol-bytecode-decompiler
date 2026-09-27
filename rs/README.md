@@ -18,10 +18,12 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-exec` | `src/exec.ts` (+ SHA-256 / Keccak) | concrete interpreter of the built functions (CPI / account runs) |
 | `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts`; `src/analysis/facts.ts`, `flow.ts`, `paths.ts`, `sources.ts`, `report.ts`, `phase2.ts`, `phase3.ts`, `audit.ts`, `consistency.ts`, `libcpi.ts` (`analysis/`) | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
 | `sbpf-lib` | `src/fingerprint.ts`, `src/library.ts` (+ `crateOf` of `src/demangle.ts`), `src/builtins.ts` | function fingerprints and signatures (local SHA-1), library classification against `data/libsigs.json` / `data/libnames.json` (crate-aware policy, behavioral names), u128 builtins recognized by behavior |
-| `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
+| `sbpf-cli` | `src/cli.ts`, `src/rpc.ts`, `idl.ts` fetchIdl | the `sbpf-decompile` binary: arguments, stdin / file / `--rpc` program loading (all loaders), the on-chain Anchor IDL, single file / project output, two-program diff |
+| `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer; `sbpf-fixtures` (regression runner against the frozen TS CLI outputs) |
 
 Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order), `serde_json` (string
-escaping; IDL parsing with `preserve_order`), `regex` and `miniz_oxide` (sbpf-read).
+escaping; IDL parsing with `preserve_order`), `regex` and `miniz_oxide` (sbpf-read; the IDL account's zlib in sbpf-cli), `ureq` (sbpf-cli: blocking HTTPS with
+rustls, for `--rpc` only).
 
 ## Build and run
 
@@ -29,6 +31,8 @@ The cargo target dir is outside `/home` (`.cargo/config.toml`: `/tmp/claude-1000
 
 ```sh
 cd rs && cargo build --release
+/tmp/claude-1000/rs-target/release/sbpf-decompile prog.so [-o out.ts | -o dir/] [--idl x.json] [--full] [--rpc <url>]   # the CLI (as src/cli.ts)
+/tmp/claude-1000/rs-target/release/sbpf-fixtures --fixtures /tmp/claude-1000/fixtures [--ofile] [-j 2] [substring...]  # run from the repo root (with corpus/): sbpf-decompile vs the frozen TS outputs
 /tmp/claude-1000/rs-target/release/sbpf-dump prog.so out_dir            # stage dumps (as scripts/dump.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time --iters 5 a.so b.so # stage timings (as scripts/stagetime.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time3 --iters 5 a.so     # stage 3 timings (as stagetime.ts --stage3)
@@ -38,7 +42,7 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --time8 --iters 5 a.so     # analysis foundation (as stagetime.ts --stage8)
 /tmp/claude-1000/rs-target/release/sbpf-dump --timediff --iters 5 a.so b.so   # program diff timing (as stagetime.ts --diff)
 /tmp/claude-1000/rs-target/release/sbpf-dump --diff a.so b.so out_dir   # diff.jsonl (as dump.ts --diff)
-/tmp/claude-1000/rs-target/release/sbpf-dump --cli prog.so [--idl x.json] [--full] [-o out.ts | -o dir/]  # the CLI's output (dev driver)
+/tmp/claude-1000/rs-target/release/sbpf-dump --cli <sbpf-decompile arguments>  # the CLI (same entry, honours SBPF_THREADS)
 /tmp/claude-1000/rs-target/release/sbpf-dump --timecli --iters 5 a.so   # whole CLI output timing (single file, project; 1 / n threads)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
@@ -47,6 +51,8 @@ node scripts/parity.ts samples/token.so compat/bin                       # given
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
 node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
 node scripts/cliparity.ts [--idl] [--full] samples compat/bin            # TS CLI vs sbpf-dump --cli: diff -r of -o dir/ and -o out.ts
+node scripts/cliparity.ts --bin /tmp/claude-1000/rs-target/release/sbpf-decompile samples   # ... vs the real binary
+node scripts/fixtures.ts --root <repo> --out /tmp/claude-1000/fixtures <files relative to root>   # freeze the TS CLI outputs (zstd)
 ```
 
 Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow,analysis,project] out_dir`, or `--diff a.so b.so out_dir`

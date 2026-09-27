@@ -1,7 +1,7 @@
 //! Regression runner against the frozen TS CLI fixtures (`scripts/fixtures.ts`, see docs/RUST_PORT.md): runs the
 //! real `sbpf-decompile` binary on every binary of the fixtures and compares its outputs byte for byte.
 //!
-//!   sbpf-fixtures --fixtures dir [--bin sbpf-decompile] [--root repo (default .)] [-j N] [--ofile] [--no-diff] [substring...]
+//!   sbpf-fixtures --fixtures dir [--bin sbpf-decompile] [--root repo (default .)] [-j N] [--ofile] [--no-diff | --only-diff] [substring...]
 //!
 //! Per binary (`<fixtures>/<path>.jsonl.zst`, decompressed with `zstd -dc --long=27`): the default single file on
 //! stdout (and `-o out.ts` with `--ofile`), the project (`-o dir/`), `--full` on stdout, and with the binary's IDL
@@ -284,7 +284,7 @@ fn main() {
         ofile: false,
         tmp: std::env::temp_dir().join(format!("sbpf-fixtures-{}", std::process::id())),
     };
-    let (mut jobs, mut diffs, mut filters) = (2usize, true, Vec::new());
+    let (mut jobs, mut diffs, mut bins, mut filters) = (2usize, true, true, Vec::new());
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -306,6 +306,7 @@ fn main() {
             }
             "--ofile" => cfg.ofile = true,
             "--no-diff" => diffs = false,
+            "--only-diff" => bins = false,
             s => filters.push(s.to_string()),
         }
         i += 1;
@@ -318,7 +319,7 @@ fn main() {
     let list = std::fs::read_to_string(cfg.fixtures.join("files.txt")).expect("files.txt");
     let files: Vec<String> = list
         .lines()
-        .filter(|l| !l.is_empty() && wanted(l))
+        .filter(|l| bins && !l.is_empty() && wanted(l))
         .map(|s| s.to_string())
         .collect();
     let counts: Mutex<BTreeMap<&'static str, (usize, usize)>> = Mutex::new(BTreeMap::new());
