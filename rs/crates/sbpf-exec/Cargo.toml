@@ -1,0 +1,9 @@
+[package]
+name = "sbpf-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sbpf-elf.workspace = true
+sbpf-program.workspace = true

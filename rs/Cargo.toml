@@ -9,7 +9,9 @@ license = "MIT"
 
 [workspace.dependencies]
 indexmap = "2"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+miniz_oxide = "0.8"
+regex = { version = "1", default-features = false, features = ["std"] }
 sbpf-elf = { path = "crates/sbpf-elf" }
 sbpf-ir = { path = "crates/sbpf-ir" }
 sbpf-program = { path = "crates/sbpf-program" }
@@ -17,6 +19,8 @@ sbpf-dataflow = { path = "crates/sbpf-dataflow" }
 sbpf-opt = { path = "crates/sbpf-opt" }
 sbpf-struct = { path = "crates/sbpf-struct" }
 sbpf-print = { path = "crates/sbpf-print" }
+sbpf-exec = { path = "crates/sbpf-exec" }
+sbpf-read = { path = "crates/sbpf-read" }
 
 [profile.release]
 codegen-units = 1
