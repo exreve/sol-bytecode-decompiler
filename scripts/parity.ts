@@ -1,22 +1,25 @@
 // Parity of the Rust port (rs/) against the TypeScript oracle: runs both stage dumpers over a set of
 // binaries and diffs each stage, reporting the first differing line (dev tool, read-only).
 //
-//   node scripts/parity.ts [--root dir] [--bin rs-dump-binary] [--stages elf,insns,cfg,lift] [--fuzz N [--seed S]] [paths...]
+//   node scripts/parity.ts [--root dir] [--bin rs-dump-binary] [--stages elf,insns,cfg,lift] [--idl] [--fuzz N [--seed S]] [paths...]
 //
 // paths: .so files or directories (their *.so); default: the standard sets under --root
 // (samples, samples/regress, compat/bin, bench/bin, eval/bin, corpus). Build the binary first:
 // (cd rs && cargo build --release). Exit status 1 when any stage differs.
 // --fuzz N: instead, N mutants of the given binaries (those under 512 KB): random e_flags (all sBPF
 // versions), random instructions in the text, sometimes corrupted headers or a truncated file.
+// --idl: only the binaries that have an Anchor IDL (X.json next to X.so, in ../idl/ or idl/; `name@variant.so`
+// also takes name.json), both dumpers given it (stage 5 on).
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { dumpAll, STAGES } from './dump.ts'
 import { parseElf } from '../src/elf.ts'
+import { parseIdl } from '../src/idl.ts'
 
 const args = process.argv.slice(2)
-let fuzz = 0, seed = 1
+let fuzz = 0, seed = 1, useIdl = false
 let root = '.', bin = '/tmp/claude-1000/rs-target/release/sbpf-dump', stages: readonly string[] = STAGES
 const paths: string[] = []
 for (let i = 0; i < args.length; i++) {
@@ -25,16 +28,28 @@ for (let i = 0; i < args.length; i++) {
 	else if (args[i] === '--fuzz') fuzz = +args[++i]
 	else if (args[i] === '--seed') seed = +args[++i]
 	else if (args[i] === '--stages') stages = args[++i].split(',')
+	else if (args[i] === '--idl') useIdl = true
 	else paths.push(args[i])
 }
 if (!paths.length) for (const d of ['samples', 'samples/regress', 'compat/bin', 'bench/bin', 'eval/bin', 'corpus']) paths.push(join(root, d))
 
-const files: string[] = []
+let files: string[] = []
 for (const p of paths) {
 	if (!existsSync(p)) { console.error(`(missing: ${p})`); continue }
 	if (statSync(p).isDirectory()) for (const f of readdirSync(p).sort()) { if (f.endsWith('.so')) files.push(join(p, f)) }
 	else files.push(p)
 }
+/** The IDL of a binary, if any (see --idl). */
+function idlOf(f: string): string | undefined {
+	const d = dirname(f), b = basename(f, '.so')
+	for (const n of new Set([b, b.replace(/@.*$/, '')])) for (const dd of [d, join(d, '..', 'idl'), join(d, 'idl')]) {
+		const c = join(dd, `${n}.json`)
+		if (existsSync(c)) return c
+	}
+	return undefined
+}
+const idls = new Map<string, string>()
+if (useIdl) { for (const f of files) { const i = idlOf(f); if (i) idls.set(f, i) } files = files.filter(f => idls.has(f)) }
 
 // xorshift32 (deterministic mutants)
 let rng = seed >>> 0 || 1
@@ -79,12 +94,13 @@ if (fuzz) {
 }
 const reached = new Map<string, number>() // stage -> cases whose TS dump has it without an error line
 for (const f of cases) {
-	const ts = dumpAll(new Uint8Array(readFileSync(f)), stages)
+	const idlFile = idls.get(f)
+	const ts = dumpAll(new Uint8Array(readFileSync(f)), stages, idlFile ? parseIdl(JSON.parse(readFileSync(idlFile, 'utf8'))) : undefined)
 	for (const [st, text] of ts) if (!text.includes('\n{"error":')) reached.set(st, (reached.get(st) ?? 0) + 1)
 	const out = join(tmp, 'rs')
 	rmSync(out, { recursive: true, force: true })
 	let rsErr = ''
-	try { execFileSync(bin, [f, '--stages', stages.join(','), out], { stdio: ['ignore', 'ignore', 'pipe'] }) } catch (e) { rsErr = String((e as { stderr?: Buffer }).stderr ?? e) }
+	try { execFileSync(bin, [f, ...(idlFile ? ['--idl', idlFile] : []), '--stages', stages.join(','), out], { stdio: ['ignore', 'ignore', 'pipe'] }) } catch (e) { rsErr = String((e as { stderr?: Buffer }).stderr ?? e) }
 	const diffs: string[] = []
 	if (rsErr) diffs.push(`rust failed: ${clip(rsErr.trim())}`)
 	else for (const st of stages) {
