@@ -538,7 +538,8 @@ struct Fx<'a, 'b> {
     facts: RefCell<FnFacts>,
     alias: HashMap<String, Option<String>>,
     label_cont: RefCell<HashMap<Label, bool>>,
-    ok_out: Option<Regex>,
+    /// the Ok out-parameter's name: `/^\s*(?:st64\(o, 0\)|o\.tag = 0)$/m` marks the Ok path
+    ok_out: Option<(String, String)>,
 }
 
 fn key(n: &SNode) -> NodeKey {
@@ -1771,10 +1772,13 @@ impl Fx<'_, '_> {
         let la = self.span(a);
         let lb = self.span(b);
         if !strict {
-            if let Some(ok) = &self.ok_out {
+            if let Some((ok1, ok2)) = &self.ok_out {
                 if la <= 8 {
                     let ta = self.text_of(a, 80);
-                    if ok.is_match(&ta)
+                    if ta.split('\n').any(|l| {
+                        let l = l.trim_start_matches(super::js_ws);
+                        l == ok1 || l == ok2
+                    })
                         && !error_mark(&ta)
                         && self.first_mark(b) <= 2.0
                         && error_raise(&self.text_of(b, 4))
@@ -2165,7 +2169,7 @@ pub fn function_facts(inp: &FnInput) -> FnFacts {
                 .captures(s)
                 .map(|m| m[1].to_string())
         })
-        .map(|o| super::jsre(&format!(r"(?m)^\s*(?:st64\({o}, 0\)|{o}\.tag = 0)$")));
+        .map(|o| (format!("st64({o}, 0)"), format!("{o}.tag = 0")));
     let fx = Fx {
         inp,
         facts: RefCell::new(FnFacts {

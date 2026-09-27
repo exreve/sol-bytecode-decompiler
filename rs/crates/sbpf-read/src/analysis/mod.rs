@@ -26,6 +26,20 @@ use regex::Regex;
 
 /// A JS regex source as a `regex` crate pattern: `\w` `\d` `\b` `\W` are ASCII in JS (`\s` is Unicode in both).
 pub fn jsre(p: &str) -> Regex {
+    // compiled once per thread and pattern (the callers build patterns from names: the same ones recur)
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<String, Regex>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    if let Some(r) = CACHE.with(|c| c.borrow().get(p).cloned()) {
+        return r;
+    }
+    let r = jsre0(p);
+    CACHE.with(|c| c.borrow_mut().insert(p.to_string(), r.clone()));
+    r
+}
+
+fn jsre0(p: &str) -> Regex {
     let mut o = String::with_capacity(p.len() + 16);
     let mut in_class = false;
     let mut it = p.chars();
