@@ -47,6 +47,16 @@ pub struct AuditFacts {
 }
 
 impl<'a> An<'a> {
+    /// auditIx (8b: in progress)
+    pub fn audit_ix(
+        &self,
+        _ix: &super::report::IxOut,
+        _info: &super::ixctx::IxInfo<'a>,
+        _s: &super::sources::SourceCtx<'a, '_>,
+    ) -> AuditFacts {
+        AuditFacts::default()
+    }
+
     /// evaluatorsFor(r, ctx)(fn): the Anchor evaluation context of a function of an instruction (its parameters
     /// bound up the call path; try_accounts' &AccountInfo variables)
     pub fn ev_for(&self, ctx: &IxCtx<'a>, fn_: i64) -> Option<Rc<ACtx<'a>>> {

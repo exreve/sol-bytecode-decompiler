@@ -17,7 +17,7 @@ pub struct PathInfo {
     pub op: usize,
     pub conds: Vec<PathCond>,
     pub not_required: Vec<(usize, Option<Vec<Loc>>)>,
-    pub truncated: bool,
+    pub truncated: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,8 +42,8 @@ pub struct ArithSite {
     pub kind: &'static str,
     pub status: &'static str,
     pub guard: Option<(Loc, String)>,
-    pub caller: bool,
-    pub unnamed: bool,
+    pub caller: Option<bool>,
+    pub unnamed: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,4 +74,20 @@ pub struct StateField {
     pub field: String,
     pub set_by: Vec<(String, String, Loc)>,
     pub checked_by: Vec<(String, String, Loc)>,
+}
+
+impl<'a> super::An<'a> {
+    /// phase3Ix (8b: in progress)
+    pub fn phase3_ix(
+        &self,
+        _a: &mut super::report::Analysis,
+        _xi: usize,
+        _info: &super::ixctx::IxInfo<'a>,
+        _s: &super::sources::SourceCtx<'a, '_>,
+    ) {
+    }
+    /// stateMachine
+    pub fn state_machine(&self, _a: &super::report::Analysis) -> Vec<StateField> {
+        vec![]
+    }
 }

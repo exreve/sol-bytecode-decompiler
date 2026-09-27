@@ -2,7 +2,7 @@
 
 use crate::enc::*;
 use sbpf_read::analysis::facts::{OpCpi, Pda};
-use sbpf_read::analysis::report::{Analysis, Loc, OpOut};
+use sbpf_read::analysis::report::{Analysis, IxOut, Loc, OpOut};
 use sbpf_read::analysis::An;
 
 fn jstr(s: &str) -> String {
@@ -228,6 +228,22 @@ pub fn analysis_lines(_an: &An, a: &Analysis) -> String {
         for o in &ix.ops {
             op_line(o, "op", true, &mut out);
         }
+        phase2_lines(ix, &mut out);
+    }
+    for s in a.states.iter().flatten() {
+        let row = |l: &[(String, String, Loc)], k: &str| {
+            arr(l.iter().map(|(ix, v, at)| {
+                let mut o = J::obj();
+                o.s("ix", ix).s(k, v).raw("at", &loc(at));
+                o.done()
+            }))
+        };
+        let mut j = J::obj();
+        j.s("t", "state")
+            .s("field", &s.field)
+            .raw("setBy", &row(&s.set_by, "value"))
+            .raw("checkedBy", &row(&s.checked_by, "cond"));
+        j.line(&mut out);
     }
     for x in &a.pdas {
         let mut j = J::obj();
@@ -260,8 +276,347 @@ pub fn analysis_lines(_an: &An, a: &Analysis) -> String {
             .raw("writtenBy", &sarr(wb));
         j.line(&mut out);
     }
+    for f in &a.findings {
+        let mut j = J::obj();
+        j.s("t", "finding")
+            .s("rule", f.rule)
+            .s("ix", &f.ix)
+            .s("confidence", f.confidence)
+            .f("weight", f.weight)
+            .s("title", f.title)
+            .raw("accounts", &sarr(&f.accounts))
+            .raw("path", &sarr(&f.path))
+            .raw("evidence", &sarr(&f.evidence));
+        j.line(&mut out);
+    }
+    for (f, w) in a.authority_fields.iter().flatten() {
+        let mut j = J::obj();
+        j.s("t", "authField")
+            .s("field", f)
+            .raw("writtenBy", &sarr(w));
+        j.line(&mut out);
+    }
+    for v in a.consistency.iter().flatten() {
+        let mut j = J::obj();
+        j.s("t", "role")
+            .s("role", &v.role)
+            .s("by", v.by)
+            .raw(
+                "members",
+                &arr(v.members.iter().map(|m| {
+                    let mut o = J::obj();
+                    o.s("ix", &m.ix)
+                        .s("account", &m.account)
+                        .raw("validations", &sarr(&m.validations))
+                        .raw("uses", &sarr(&m.uses));
+                    o.done()
+                })),
+            )
+            .raw(
+                "inconsistencies",
+                &arr(v.inconsistencies.iter().map(|x| {
+                    let mut o = J::obj();
+                    o.s("role", &x.role)
+                        .s("ix", &x.ix)
+                        .s("account", &x.account)
+                        .s("validation", &x.validation)
+                        .raw(
+                            "appliedIn",
+                            &arr(x.applied_in.iter().map(|(ix, ac, at)| {
+                                let mut y = J::obj();
+                                y.s("ix", ix)
+                                    .s("account", ac)
+                                    .or("at", at.as_ref().map(loc));
+                                y.done()
+                            })),
+                        )
+                        .n("others", x.others as i64)
+                        .raw("uses", &sarr(&x.uses))
+                        .f("weight", x.weight);
+                    o.done()
+                })),
+            );
+        j.line(&mut out);
+    }
     for o in &a.unattributed {
         op_line(o, "unattr", false, &mut out);
     }
     out
+}
+
+fn guard_j(g: &Option<(Loc, String)>) -> Option<String> {
+    g.as_ref().map(|(at, c)| {
+        let mut o = J::obj();
+        o.raw("at", &loc(at)).s("cond", c);
+        o.done()
+    })
+}
+
+fn rows_line(t: &str, rows: String, out: &mut String) {
+    let mut j = J::obj();
+    j.s("t", t).raw("rows", &rows);
+    j.line(out);
+}
+
+/// the phase 2 / 3 / audit rows of an instruction
+fn phase2_lines(ix: &IxOut, out: &mut String) {
+    if let Some(t) = &ix.trust {
+        rows_line(
+            "trust",
+            arr(t.iter().map(|x| {
+                let mut o = J::obj();
+                o.s("value", &x.value)
+                    .s("trust", x.trust)
+                    .raw("evidence", &sarr(&x.evidence));
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.relations {
+        rows_line(
+            "relations",
+            arr(r.iter().map(|x| {
+                let mut o = J::obj();
+                o.s("a", &x.a)
+                    .s("b", &x.b)
+                    .s("kind", x.kind)
+                    .s("status", x.status)
+                    .raw("at", &loc(&x.at));
+                if let Some(n) = x.negated {
+                    o.b("negated", n);
+                }
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.stored_keys {
+        rows_line(
+            "storedKeys",
+            arr(r.iter().map(|x| {
+                let mut o = J::obj();
+                o.s("account", &x.account)
+                    .os("type", x.ty.as_deref())
+                    .raw("compared", &sarr(&x.compared))
+                    .raw("referencedBy", &sarr(&x.referenced_by))
+                    .raw("never", &sarr(&x.never))
+                    .raw("gaps", &sarr(&x.gaps));
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.authority {
+        rows_line(
+            "authority",
+            arr(r.iter().map(|x| {
+                let mut o = J::obj();
+                o.n("op", x.op as i64).s("kind", &x.kind).raw(
+                    "enabledBy",
+                    &arr(x.enabled_by.iter().map(|e| {
+                        let mut y = J::obj();
+                        y.s("kind", e.kind)
+                            .s("what", &e.what)
+                            .os("status", e.status)
+                            .or("writtenBy", e.written_by.as_ref().map(|w| sarr(w)));
+                        y.done()
+                    })),
+                );
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.paths {
+        rows_line(
+            "paths",
+            arr(r.iter().map(|p| {
+                let mut o = J::obj();
+                o.n("op", p.op as i64)
+                    .raw(
+                        "conds",
+                        &arr(p.conds.iter().map(|c| {
+                            let mut y = J::obj();
+                            y.raw("at", &loc(&c.at))
+                                .s("cond", &c.cond)
+                                .b("holds", c.holds)
+                                .s("how", c.how)
+                                .on("check", c.check.map(|x| x as i64));
+                            y.done()
+                        })),
+                    )
+                    .raw(
+                        "notRequired",
+                        &arr(p.not_required.iter().map(|(c, path)| {
+                            let mut y = J::obj();
+                            y.n("check", *c as i64)
+                                .or("path", path.as_ref().map(|l| arr(l.iter().map(loc))));
+                            y.done()
+                        })),
+                    );
+                if let Some(t) = p.truncated {
+                    o.b("truncated", t);
+                }
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.chains {
+        rows_line(
+            "chains",
+            arr(r.iter().map(|c| {
+                let mut o = J::obj();
+                o.n("op", c.op as i64).raw(
+                    "steps",
+                    &arr(c.steps.iter().map(|s| {
+                        arr(s.iter().map(|x| {
+                            let mut y = J::obj();
+                            y.s("kind", x.kind)
+                                .s("what", &x.what)
+                                .os("status", x.status);
+                            y.done()
+                        }))
+                    })),
+                );
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.arith {
+        rows_line(
+            "arith",
+            arr(r.iter().map(|x| {
+                let mut o = J::obj();
+                o.raw("at", &loc(&x.at))
+                    .on("op", x.op.map(|v| v as i64))
+                    .s("target", &x.target)
+                    .s("expr", &x.expr)
+                    .s("kind", x.kind)
+                    .s("status", x.status)
+                    .or("guard", guard_j(&x.guard));
+                if let Some(c) = x.caller {
+                    o.b("caller", c);
+                }
+                if let Some(u) = x.unnamed {
+                    o.b("unnamed", u);
+                }
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.divs {
+        rows_line(
+            "divs",
+            arr(r.iter().map(|x| {
+                let mut o = J::obj();
+                o.raw("at", &loc(&x.at))
+                    .s("expr", &x.expr)
+                    .s("divisor", &x.divisor)
+                    .s("status", x.status)
+                    .or("guard", guard_j(&x.guard));
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(r) = &ix.proof {
+        rows_line(
+            "proof",
+            arr(r.iter().map(|p| {
+                let mut o = J::obj();
+                o.n("op", p.op as i64).s("kind", &p.kind).raw(
+                    "props",
+                    &arr(p.props.iter().map(|x| {
+                        let mut y = J::obj();
+                        y.s("prop", x.prop)
+                            .s("status", x.status)
+                            .s("evidence", &x.evidence);
+                        y.done()
+                    })),
+                );
+                o.done()
+            })),
+            out,
+        );
+    }
+    if let Some(au) = &ix.audit {
+        let mut j = J::obj();
+        j.s("t", "audit")
+            .raw("dataReads", &sarr(&au.data_reads))
+            .raw(
+                "bumps",
+                &arr(au.bumps.iter().map(|(op, s)| {
+                    let mut o = J::obj();
+                    o.n("op", *op as i64).s("source", s);
+                    o.done()
+                })),
+            )
+            .raw("ignored", &nums(au.ignored.iter().map(|x| *x as i64)))
+            .raw(
+                "casts",
+                &arr(au.casts.iter().map(|(op, e, bits, s)| {
+                    let mut o = J::obj();
+                    o.n("op", *op as i64)
+                        .s("expr", e)
+                        .n("bits", *bits as i64)
+                        .s("source", s);
+                    o.done()
+                })),
+            )
+            .raw("remChecked", &sarr(&au.rem_checked))
+            .or("ownerCmp", au.owner_cmp.as_ref().map(|x| sarr(x)))
+            .raw(
+                "reinit",
+                &arr(au.reinit.iter().map(|(op, a)| {
+                    let mut o = J::obj();
+                    o.n("op", *op as i64).s("acct", a);
+                    o.done()
+                })),
+            )
+            .or(
+                "sameType",
+                au.same_type.as_ref().map(|(f, n, t, accts)| {
+                    let mut o = J::obj();
+                    o.s("fn", f)
+                        .n("n", *n as i64)
+                        .os("type", t.as_deref())
+                        .raw("accts", &sarr(accts));
+                    o.done()
+                }),
+            )
+            .or(
+                "initWrites",
+                au.init_writes.as_ref().map(|l| {
+                    arr(l.iter().map(|x| {
+                        let mut o = J::obj();
+                        o.s("acct", &x.acct)
+                            .s("type", &x.ty)
+                            .raw("at", &loc(&x.at))
+                            .b("owner", x.owner)
+                            .os("field", x.field.as_deref())
+                            .os("tag", x.tag.as_deref());
+                        o.done()
+                    }))
+                }),
+            )
+            .or(
+                "sysvarReads",
+                au.sysvar_reads.as_ref().map(|l| {
+                    arr(l.iter().map(|x| {
+                        let mut o = J::obj();
+                        o.s("acct", &x.acct)
+                            .s("sysvar", x.sysvar)
+                            .raw("at", &loc(&x.at))
+                            .b("idCompared", x.id_compared);
+                        o.done()
+                    }))
+                }),
+            )
+            .or("initGated", au.init_gated.as_ref().map(|x| sarr(x)));
+        j.line(out);
+    }
 }

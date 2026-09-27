@@ -30,3 +30,10 @@ pub struct RoleView {
     pub members: Vec<RoleMember>,
     pub inconsistencies: Vec<Inconsistency>,
 }
+
+impl<'a> super::An<'a> {
+    /// consistency(a, r)
+    pub fn consistency(&self, _a: &super::report::Analysis) -> Vec<RoleView> {
+        vec![]
+    }
+}
