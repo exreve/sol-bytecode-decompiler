@@ -196,6 +196,73 @@ fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
 
+/// Role of a constant for its comment (constComment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Value,
+    Addr,
+    Ret,
+}
+
+/// The readable output's printing hooks (print.ts PrintCtx beyond names). Every method has the TS
+/// default (hook absent); `has_*` tell which optional hooks are present.
+#[allow(unused_variables)]
+pub trait Sugar {
+    /// viewExpr, the exprHook chain and frameRef, in that order: the expression written, its precedence.
+    fn expr(&self, pr: &mut Printer, e: E, o: &mut String) -> Option<u8> {
+        None
+    }
+    fn const_comment(&self, v: u64, role: Role) -> Option<String> {
+        None
+    }
+    fn has_str(&self) -> bool {
+        false
+    }
+    fn str_lit(&self, ptr: u64, len: u64, is_ptr: bool) -> Option<String> {
+        None
+    }
+    fn str_note(&self, ptr: u64, len: u64, is_ptr: bool) -> Option<String> {
+        None
+    }
+    fn has_key_at(&self) -> bool {
+        false
+    }
+    fn key_at(&self, ptr: u64) -> Option<String> {
+        None
+    }
+    fn drop_undef_args(&self) -> bool {
+        false
+    }
+    fn arg_note(&self, t: &CallTarget, i: usize, v: u64) -> Option<String> {
+        None
+    }
+    fn has_views(&self) -> bool {
+        false
+    }
+    fn view_lvalue(&self, pr: &mut Printer, size: u8, addr: E) -> Option<String> {
+        None
+    }
+    fn store_field(&self, pr: &mut Printer, size: u8, addr: E) -> Option<String> {
+        None
+    }
+    /// comment at the end of a statement's line (si: its index in the tree; prev: the statement printed
+    /// just before it)
+    fn stmt_tail(&self, pr: &Printer, si: u32, s: &Stmt, prev: Option<u32>) -> Option<String> {
+        None
+    }
+    fn var_type(&self, v: u32) -> Option<String> {
+        None
+    }
+    fn at_node(&self, n: &SNode) {}
+    /// the nodes list[i..] as a call of an outlined helper: name, arguments, returns a value
+    fn outline(&self, list: &Vec<SNode>, i: usize) -> Option<(String, Vec<E>, bool)> {
+        None
+    }
+    fn node_note(&self, pr: &mut Printer, n: &SNode) -> Option<String> {
+        None
+    }
+}
+
 /// The expression printer. Text is written into one buffer; a subexpression that needs parentheses
 /// (its precedence below the context's, or one of the TS-ambiguity rules looking at its text) is
 /// wrapped in place after it is written.
@@ -203,8 +270,10 @@ pub struct Printer<'a> {
     pub ir: &'a Ir,
     pub names: &'a ProgNames,
     pub vars: &'a [Option<String>],
-    addr_depth: u32,
+    pub addr_depth: u32,
     shl_call: bool,
+    pub ret_top: Option<E>,
+    pub sugar: Option<&'a dyn Sugar>,
 }
 
 fn wrap_at(o: &mut String, start: usize) {
@@ -220,7 +289,14 @@ impl<'a> Printer<'a> {
             vars,
             addr_depth: 0,
             shl_call: false,
+            ret_top: None,
+            sugar: None,
         }
+    }
+
+    pub fn with_sugar(mut self, s: &'a dyn Sugar) -> Self {
+        self.sugar = Some(s);
+        self
     }
 
     pub fn var_name_to(&self, id: u32, o: &mut String) {
@@ -236,7 +312,7 @@ impl<'a> Printer<'a> {
         s
     }
 
-    fn fn_addr_name(&self, v: u64) -> Option<&'a str> {
+    pub fn fn_addr_name(&self, v: u64) -> Option<&'a str> {
         self.names.by_addr.get(&v).map(|s| s.as_str())
     }
 
@@ -315,20 +391,36 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn const0(&self, v: u64, o: &mut String) -> u8 {
+    /// A constant (e: the node, for the `return` role).
+    fn const0(&self, e: Option<E>, v: u64, o: &mut String) -> u8 {
         if let Some(f) = self.fn_addr_name(v) {
             o.push_str(f);
             return P::PRIM;
         }
         let s = v as i64;
-        if s < 0 && s > -0x10000 {
+        let p = if s < 0 && s > -0x10000 {
             o.push('-');
             fmt_pos(s.unsigned_abs(), o);
             P::UNARY
         } else {
             fmt_pos(v, o);
             P::PRIM
+        };
+        if let Some(sg) = self.sugar {
+            let role = if self.addr_depth > 0 {
+                Role::Addr
+            } else if e.is_some() && e == self.ret_top {
+                Role::Ret
+            } else {
+                Role::Value
+            };
+            if let Some(cm) = sg.const_comment(v, role) {
+                o.push_str(" /* ");
+                o.push_str(&cm);
+                o.push_str(" */");
+            }
         }
+        p
     }
 
     /// Arguments joined as joinArgs does (written, then the rare `<`…`>` case rewritten).
@@ -346,8 +438,13 @@ impl<'a> Printer<'a> {
     }
 
     fn expr0(&mut self, e: E, o: &mut String) -> u8 {
+        if let Some(sg) = self.sugar {
+            if let Some(p) = sg.expr(self, e, o) {
+                return p;
+            }
+        }
         match self.ir.get(e) {
-            Node::Const(v) => self.const0(v, o),
+            Node::Const(v) => self.const0(Some(e), v, o),
             Node::Var(id) => {
                 self.var_name_to(id, o);
                 P::PRIM
@@ -363,7 +460,12 @@ impl<'a> Printer<'a> {
             Node::Bin(op, a, b) => self.bin(op, a, b, o),
             Node::Neg(a) => {
                 if let Node::Const(v) = self.ir.get(a) {
-                    return self.const0(v.wrapping_neg(), o);
+                    // (a new constant node, printed as one)
+                    if self.sugar.is_some() {
+                        let c = self.ir.c(v.wrapping_neg());
+                        return self.expr0(c, o);
+                    }
+                    return self.const0(None, v.wrapping_neg(), o);
                 }
                 let s = o.len();
                 self.u_to(a, P::UNARY + 1, true, o);
@@ -447,6 +549,29 @@ impl<'a> Printer<'a> {
                     }
                     o.push_str(", ");
                     o.push_str(&json_str(&b58(&b)));
+                    if let Some(sg) = self.sugar {
+                        if args.len > 1 {
+                            if let Node::Const(v1) = self.ir.get(self.ir.at(args, 1)) {
+                                if let Some(nm) = sg.const_comment(v1, Role::Value) {
+                                    if !nm.contains('[') {
+                                        o.push_str(" /* ");
+                                        o.push_str(&nm);
+                                        o.push_str(" */");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    o.push(')');
+                    return P::CALL;
+                }
+                let is_memeq = self.ir.with_name(n, |x| x == "memeq");
+                if is_memeq && self.sugar.is_some_and(|s| s.has_key_at()) {
+                    let argv = self.ir.to_vec(args);
+                    let mut a: Vec<String> = argv.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
+                    self.key_args(&argv, &mut a);
+                    o.push_str("memeq(");
+                    o.push_str(&join_args(&a));
                     o.push(')');
                     return P::CALL;
                 }
@@ -667,7 +792,88 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// keyArgs: (rodata pointer, 32) argument pairs shown with the key's base58.
+    pub fn key_args(&mut self, args: &[E], a: &mut [String]) {
+        let Some(sg) = self.sugar.filter(|s| s.has_key_at()) else {
+            return;
+        };
+        for i in 0..args.len() {
+            let Node::Const(x) = self.ir.get(args[i]) else { continue };
+            if a[i].contains("/*") || a[i].starts_with('"') {
+                continue;
+            }
+            let is32 = |k: usize| args.get(k).is_some_and(|&y| self.ir.get(y) == Node::Const(32));
+            if !is32(i + 1) && !is32(i + 2) {
+                continue;
+            }
+            if let Some(k) = sg.key_at(x) {
+                a[i] = format!("{} /* key {k} */", a[i]);
+            }
+        }
+    }
+
+    /// callText with the readable hooks (strings, keys, argument notes).
+    fn call_sugar(&mut self, sg: &dyn Sugar, t: &CallTarget, args: &[E], o: &mut String) {
+        let mut n = args.len();
+        if sg.drop_undef_args() {
+            while n > 0 && self.ir.get(args[n - 1]) == Node::Undef {
+                n -= 1;
+            }
+        }
+        let args = &args[..n];
+        let mut a: Vec<String> = args.iter().map(|&x| self.u(x, P::ASSIGN, true)).collect();
+        if sg.has_str() {
+            for i in 0..args.len().saturating_sub(1) {
+                if let (Node::Const(x), Node::Const(y)) = (self.ir.get(args[i]), self.ir.get(args[i + 1])) {
+                    let is_ptr = i == 0
+                        && matches!(t, CallTarget::Sys { name, .. } if &**name == "sol_log_" || &**name == "sol_panic_");
+                    if let Some(st) = sg.str_lit(x, y, is_ptr) {
+                        a[i] = json_str(&st);
+                    } else if let Some(nt) = sg.str_note(x, y, is_ptr) {
+                        if !a[i].contains("/*") {
+                            a[i] = format!("{} /* {} */", a[i], json_str(&nt).replace("*/", "*\\/"));
+                        }
+                    }
+                }
+            }
+        }
+        self.key_args(args, &mut a);
+        for (i, &x) in args.iter().enumerate() {
+            let Node::Const(v) = self.ir.get(x) else { continue };
+            if a[i].contains("/*") {
+                continue;
+            }
+            if let Some(nt) = sg.arg_note(t, i, v) {
+                a[i] = format!("{} /* {nt} */", a[i]);
+            }
+        }
+        match t {
+            CallTarget::Fn { pc } => {
+                o.push_str(&self.names.fn_name(*pc));
+                o.push('(');
+                o.push_str(&join_args(&a));
+                o.push(')');
+            }
+            CallTarget::Sys { name, .. } => {
+                o.push_str(self.names.sys_name(name));
+                o.push('(');
+                o.push_str(&join_args(&a));
+                o.push(')');
+            }
+            CallTarget::Ind { e } => {
+                let mut all = vec![self.u(*e, P::ASSIGN, true)];
+                all.extend(a);
+                o.push_str("callx(");
+                o.push_str(&join_args(&all));
+                o.push(')');
+            }
+        }
+    }
+
     pub fn call_to(&mut self, t: &CallTarget, args: &[E], o: &mut String) {
+        if let Some(sg) = self.sugar {
+            return self.call_sugar(sg, t, args, o);
+        }
         let mut items: Vec<(E, u8, bool)> = Vec::with_capacity(args.len() + 1);
         match t {
             CallTarget::Fn { pc } => match self.names.by_pc.get(pc) {
@@ -718,17 +924,33 @@ pub fn print_body(
     decls: &Decls,
     hoisted: &[u32],
 ) -> Vec<String> {
+    print_nodes(pr, tree, &tree.body, indent, decls, hoisted)
+}
+
+/// printBody of a node list (the body of `tree`, or a list replacing it).
+pub fn print_nodes(
+    pr: &mut Printer,
+    tree: &Tree,
+    body: &Vec<SNode>,
+    indent: &str,
+    decls: &Decls,
+    hoisted: &[u32],
+) -> Vec<String> {
     let mut b = BodyPrinter {
         pr,
         tree,
         indent,
         decls,
         out: Vec::new(),
+        prev: None,
     };
-    if !hoisted.is_empty() {
+    let sg = b.pr.sugar;
+    let vt = |v: u32| sg.and_then(|s| s.var_type(v));
+    let plain: Vec<u32> = hoisted.iter().copied().filter(|&v| vt(v).is_none()).collect();
+    if !plain.is_empty() {
         let mut l = b.line(0);
         l.push_str("let ");
-        for (i, &v) in hoisted.iter().enumerate() {
+        for (i, &v) in plain.iter().enumerate() {
             if i > 0 {
                 l.push_str(", ");
             }
@@ -737,7 +959,17 @@ pub fn print_body(
         l.push_str(": u64");
         b.out.push(l);
     }
-    b.rec(&tree.body, 0);
+    for &v in hoisted {
+        if let Some(t) = vt(v) {
+            let mut l = b.line(0);
+            l.push_str("let ");
+            b.pr.var_name_to(v, &mut l);
+            l.push_str(": ");
+            l.push_str(&t);
+            b.out.push(l);
+        }
+    }
+    b.rec(body, 0);
     b.out
 }
 
@@ -747,6 +979,19 @@ struct BodyPrinter<'p, 'a> {
     indent: &'p str,
     decls: &'p Decls,
     out: Vec<String>,
+    /// prevStmt: the statement printed just before (same list; leaks out of nested lists as in the TS)
+    prev: Option<u32>,
+}
+
+/// Does evaluating e read memory or call?
+fn has_load_or_call(ir: &Ir, e: E) -> bool {
+    let mut r = false;
+    ir.walk(e, &mut |_, x| {
+        if matches!(x, Node::Load { .. } | Node::Call(..) | Node::Fn(..)) {
+            r = true;
+        }
+    });
+    r
 }
 
 impl BodyPrinter<'_, '_> {
@@ -760,11 +1005,22 @@ impl BodyPrinter<'_, '_> {
         s
     }
     fn decl_to(&self, si: u32, v: i32, o: &mut String) {
-        if let Some(Some(k)) = self.decls.get(si as usize) {
+        let kw = self.decls.get(si as usize).copied().flatten();
+        if let Some(k) = kw {
             o.push_str(k);
             o.push(' ');
         }
         self.pr.var_name_to(v as u32, o);
+        if kw.is_some() {
+            if let Some(t) = self.pr.sugar.and_then(|s| s.var_type(v as u32)) {
+                o.push_str(": ");
+                o.push_str(&t);
+            }
+        }
+    }
+    fn tail(&self, si: u32) -> Option<String> {
+        let sg = self.pr.sugar?;
+        sg.stmt_tail(self.pr, si, self.tree.stmt(si), self.prev)
     }
     fn stmt(&mut self, si: u32, d: usize) {
         let n0 = self.out.len();
@@ -789,6 +1045,131 @@ impl BodyPrinter<'_, '_> {
                 self.decl_to(si, *dst, &mut o);
                 o.push_str(" = ");
                 self.pr.u_to(*e, P::ASSIGN, true, &mut o);
+            }
+            Stmt::Store { size, addr, v, .. } if self.pr.sugar.is_some() => {
+                let sg = self.pr.sugar.unwrap();
+                if let Some(lv) = sg.view_lvalue(self.pr, *size, *addr) {
+                    let tail = self.tail(si);
+                    o.push_str(&lv);
+                    o.push_str(" = ");
+                    self.pr.u_to(*v, P::ASSIGN, true, &mut o);
+                    if let Some(t) = tail {
+                        o.push_str(" // ");
+                        o.push_str(&t);
+                    }
+                    self.out.push(o);
+                    return;
+                }
+                self.pr.addr_depth += 1;
+                let mut a = self.pr.u(*addr, P::ASSIGN, true);
+                self.pr.addr_depth -= 1;
+                if let Some(fld) = sg.store_field(self.pr, *size, *addr) {
+                    if !a.contains("/*") {
+                        a.push_str(" /* ");
+                        a.push_str(&fld);
+                        a.push_str(" */");
+                    }
+                }
+                let tail = self.tail(si);
+                let vv = self.pr.u(*v, P::ASSIGN, true);
+                write!(o, "st{}(", *size as u32 * 8).unwrap();
+                o.push_str(&join_args(&[a, vv]));
+                o.push(')');
+                if let Some(t) = tail {
+                    o.push_str(" // ");
+                    o.push_str(&t);
+                }
+            }
+            Stmt::Stores {
+                size, addr, vals, ..
+            } if self.pr.sugar.is_some() => {
+                let sg = self.pr.sugar.unwrap();
+                let ir = self.pr.ir;
+                let vs = ir.to_vec(*vals);
+                let is_key = sg.has_key_at()
+                    && *size == 8
+                    && vs.len() == 4
+                    && vs
+                        .iter()
+                        .all(|&x| matches!(ir.get(x), Node::Const(c) if c > 1u64 << 48));
+                if sg.has_views() && !vs.iter().any(|&x| has_load_or_call(ir, x)) {
+                    let mut lvs: Vec<Option<String>> = Vec::new();
+                    for i in 0..vs.len() {
+                        let at = if i == 0 {
+                            *addr
+                        } else {
+                            let d = (i * *size as usize) as u64;
+                            match ir.get(*addr) {
+                                Node::Bin(BinOp::Add, a, b) if matches!(ir.get(b), Node::Const(_)) => {
+                                    let Node::Const(c) = ir.get(b) else { unreachable!() };
+                                    let c2 = ir.c(c.wrapping_add(d));
+                                    ir.bin(BinOp::Add, a, c2)
+                                }
+                                _ => {
+                                    let c2 = ir.c(d);
+                                    ir.bin(BinOp::Add, *addr, c2)
+                                }
+                            }
+                        };
+                        lvs.push(sg.view_lvalue(self.pr, *size, at));
+                    }
+                    if lvs.iter().all(|x| x.is_some()) && !is_key {
+                        let tail = self.tail(si);
+                        for (i, &v) in vs.iter().enumerate() {
+                            let mut l = if i == 0 { std::mem::take(&mut o) } else { self.line(d) };
+                            l.push_str(lvs[i].as_ref().unwrap());
+                            l.push_str(" = ");
+                            self.pr.u_to(v, P::ASSIGN, true, &mut l);
+                            if i == 0 {
+                                if let Some(t) = &tail {
+                                    l.push_str(" // ");
+                                    l.push_str(t);
+                                }
+                            }
+                            self.out.push(l);
+                        }
+                        return;
+                    }
+                }
+                self.pr.addr_depth += 1;
+                let a = self.pr.u(*addr, P::ASSIGN, true);
+                self.pr.addr_depth -= 1;
+                let key = if is_key {
+                    let mut b = [0u8; 32];
+                    for (i, &x) in vs.iter().enumerate() {
+                        let Node::Const(c) = ir.get(x) else { unreachable!() };
+                        b[i * 8..i * 8 + 8].copy_from_slice(&c.to_le_bytes());
+                    }
+                    format!(" // key {}", b58(&b))
+                } else {
+                    match self.tail(si) {
+                        Some(t) => format!(" // {t}"),
+                        None => String::new(),
+                    }
+                };
+                let mut parts = vec![a];
+                for &v in &vs {
+                    parts.push(self.pr.u(v, P::ASSIGN, true));
+                }
+                write!(o, "st{}(", *size as u32 * 8).unwrap();
+                o.push_str(&join_args(&parts));
+                o.push(')');
+                o.push_str(&key);
+            }
+            Stmt::Copy {
+                dst, src, n, rev, ..
+            } if self.pr.sugar.is_some_and(|s| s.has_key_at()) => {
+                let ir = self.pr.ir;
+                let mut a = vec![
+                    self.pr.u(*dst, P::ASSIGN, true),
+                    self.pr.u(*src, P::ASSIGN, true),
+                    fmt_const(*n),
+                ];
+                let nc = ir.c(*n);
+                self.pr.key_args(&[*dst, *src, nc], &mut a);
+                o.push_str(if *rev == Some(true) { "copyr(" } else { "copy(" });
+                o.push_str(&join_args(&a));
+                o.push(')');
             }
             Stmt::Store { size, addr, v, .. } => {
                 write!(o, "st{}(", *size as u32 * 8).unwrap();
@@ -880,9 +1261,54 @@ impl BodyPrinter<'_, '_> {
         }
         self.out.push(o);
     }
-    fn rec(&mut self, ns: &[SNode], d: usize) {
-        for n in ns {
-            self.node(n, d);
+    fn rec(&mut self, ns: &Vec<SNode>, d: usize) {
+        let Some(sg) = self.pr.sugar else {
+            for n in ns {
+                self.node(n, d);
+            }
+            return;
+        };
+        for (i, n) in ns.iter().enumerate() {
+            sg.at_node(n);
+            if let Some((name, args, value)) = sg.outline(ns, i) {
+                if let Some(note) = sg.node_note(self.pr, n) {
+                    let mut l = self.line(d);
+                    l.push_str("// ");
+                    l.push_str(&note);
+                    self.out.push(l);
+                }
+                let a: Vec<String> = args.iter().map(|&x| self.pr.u(x, P::ASSIGN, true)).collect();
+                let call = format!("{name}({})", join_args(&a));
+                let mut l = self.line(d);
+                if value {
+                    l.push_str("return ");
+                    l.push_str(&call);
+                    self.out.push(l);
+                } else {
+                    l.push_str(&call);
+                    self.out.push(l);
+                    let mut r = self.line(d);
+                    r.push_str("return");
+                    self.out.push(r);
+                }
+                self.prev = None;
+                return;
+            }
+            let prev = self.prev;
+            self.prev = None;
+            if let Some(note) = sg.node_note(self.pr, n) {
+                let mut l = self.line(d);
+                l.push_str("// ");
+                l.push_str(&note);
+                self.out.push(l);
+            }
+            if let SNode::Stmt(si) = n {
+                self.prev = prev;
+                self.stmt(*si, d);
+                self.prev = Some(*si);
+            } else {
+                self.node(n, d);
+            }
         }
     }
     fn push_label(o: &mut String, l: Option<sbpf_struct::Label>) {
@@ -906,6 +1332,9 @@ impl BodyPrinter<'_, '_> {
                     let SNode::If { c, then, els } = &el[0] else {
                         break;
                     };
+                    if let Some(sg) = self.pr.sugar {
+                        sg.at_node(&el[0]);
+                    }
                     let mut l = self.line(d);
                     l.push_str("} else if (");
                     self.pr.expr_to(*c, 0, &mut l);
@@ -956,6 +1385,9 @@ impl BodyPrinter<'_, '_> {
                 }
                 self.out.push(l);
                 self.rec(body, d + 1);
+                if let Some(sg) = self.pr.sugar {
+                    sg.at_node(n);
+                }
                 let mut l = self.line(d);
                 l.push('}');
                 if *form == Form::Do {
@@ -980,10 +1412,12 @@ impl BodyPrinter<'_, '_> {
             SNode::Return(e) => {
                 let mut l = self.line(d);
                 l.push_str("return");
+                self.pr.ret_top = *e;
                 if let Some(e) = e {
                     l.push(' ');
                     self.pr.u_to(*e, P::ASSIGN, true, &mut l);
                 }
+                self.pr.ret_top = None;
                 self.out.push(l);
             }
             SNode::Trap(msg) => {
@@ -1224,6 +1658,16 @@ impl DeclWalk<'_> {
 /// common to all references (and does not read the variable), else hoisted (sorted ids). Also the
 /// variables the body mentions (decompile's `used`: the same references).
 pub fn declarations(ir: &Ir, f: &Func, tree: &Tree) -> (Decls, Vec<u32>, Vec<bool>) {
+    declarations_of(ir, &f.vars, tree, &tree.body)
+}
+
+/// declarations over a node list of the tree (the body, or a list replacing it) and a variable table.
+pub fn declarations_of(
+    ir: &Ir,
+    vars: &[sbpf_program::VarInfo],
+    tree: &Tree,
+    body: &[SNode],
+) -> (Decls, Vec<u32>, Vec<bool>) {
     let mut w = DeclWalk {
         ir,
         tree,
@@ -1233,7 +1677,7 @@ pub fn declarations(ir: &Ir, f: &Func, tree: &Tree) -> (Decls, Vec<u32>, Vec<boo
         depth: Vec::new(),
         scratch: Vec::new(),
     };
-    w.walk(&tree.body, None);
+    w.walk(body, None);
     let mut decls: Decls = vec![None; tree.stmts.len()];
     let mut hoisted = Vec::new();
     for (v, r) in w.refs.iter().enumerate() {
@@ -1241,7 +1685,7 @@ pub fn declarations(ir: &Ir, f: &Func, tree: &Tree) -> (Decls, Vec<u32>, Vec<boo
             continue;
         }
         let v = v as u32;
-        if f.vars.get(v as usize).is_some_and(|x| x.param >= 0) {
+        if vars.get(v as usize).is_some_and(|x| x.param >= 0) {
             continue;
         }
         let top_def = r.first_def

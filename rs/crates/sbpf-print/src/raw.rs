@@ -118,7 +118,7 @@ pub fn structure_func(f: &mut Func) -> Tree {
 }
 
 /// Map over items on worker threads, results in input order.
-fn par_map<T: Send, R: Send>(items: Vec<T>, threads: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+pub fn par_map<T: Send, R: Send>(items: Vec<T>, threads: usize, f: impl Fn(T) -> R + Sync) -> Vec<R> {
     let n = items.len();
     if threads <= 1 || n <= 1 {
         return items.into_iter().map(f).collect();
@@ -209,8 +209,8 @@ const RESERVED: &[&str] = &[
 ];
 
 /// shortNames: f … z, then two letters (not reserved words), then v0, v1, …
-struct ShortNames {
-    k: usize,
+pub struct ShortNames {
+    pub k: usize,
 }
 
 impl Iterator for ShortNames {
@@ -240,7 +240,7 @@ impl Iterator for ShortNames {
     }
 }
 
-const PARAM_NAME: [&str; 11] = ["r0", "a", "b", "c", "d", "e", "r6", "r7", "r8", "r9", "fp"];
+pub const PARAM_NAME: [&str; 11] = ["r0", "a", "b", "c", "d", "e", "r6", "r7", "r8", "r9", "fp"];
 
 /// A function's printed text (decompile's phase 4, plain form).
 pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str>) -> String {
@@ -346,7 +346,7 @@ pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str
 // ---------------- single file (layout.ts renderSingle) ----------------
 
 /// Called names of a text (`\b([A-Za-z_][A-Za-z0-9_]*)\(`), in order of first appearance.
-fn called(text: &str, out: &mut IndexSet<String>) {
+pub fn called(text: &str, out: &mut IndexSet<String>) {
     let b = text.as_bytes();
     let w = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut i = 0;
@@ -366,7 +366,7 @@ fn called(text: &str, out: &mut IndexSet<String>) {
 }
 
 /// localeCompare of snake-case names (`_` before digits before letters, then by length).
-fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let key = |c: u8| match c {
         b'_' => (0u8, c),
         b'0'..=b'9' => (1, c),
