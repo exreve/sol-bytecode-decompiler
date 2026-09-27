@@ -25,7 +25,7 @@ stages are at 100% parity.
 | 1 | `elf`, `program`, `emu` (+ `murmur`, `syscalls`, `ir` types) | `elf`, `insns`, `cfg`, `lift` (pilot: done except `emu`) |
 | 2 | `dataflow`, `stack`, `stackargs` | `dataflow` (signatures, materialized blocks), `vars`, `stack`, `stackargs` (done) |
 | 3 | `simplify`, `cfgopt`, `ifconv`, `idioms`, `compact` (+ decompile's phase 2) | `opt`, `optir`, `compact` (done) |
-| 4 | `structure`, `stmtidioms`, `print` | `struct`, `text` (printed output) |
+| 4 | `structure`, `stmtidioms`, `print` (+ decompile's raw printing path, renderSingle) | `struct`, `text`, `rawfile` (done: raw output) |
 | 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state` | `views`, `accounts`, `layout` records |
 | 6 | `exec`, `cpiexec`, `cpi`, `builtins` | `exec`, `cpi` |
 | 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `fingerprint`, `semantics` |
@@ -432,8 +432,101 @@ only when provably order-preserving) and is left for later.
 The single-threaded per-function phase is **4.8–5.3× faster** than TS; on 8 threads **15–18×**
 (the profile's optimizeFunc + idioms + compact share, 15–22% of the TS run, drops to ~1–1.5%).
 
+## Stage 4 results
+
+Ported: `src/structure.ts` (computeRpo, dominators, stackifier structuring, `makeReducible` node
+splitting with its size budget, the dispatcher fallback, and every clean-up pass: tailPass, labelPass,
+ifPass, sameArmsPass, dupPass, loopPass, unlabel, dropLoopLabels, the 12-round fixpoint on `sameTree`),
+`src/stmtidioms.ts` → `sbpf-struct`; `src/print.ts` (expressions with the TS precedence and
+TS-ambiguity parenthesization, `fmtConst`, `joinArgs`, `wrapped`, the `shl()` fallback, statements,
+`printBody`), and of `src/decompile.ts` + `src/layout.ts` what the **raw** output (`decompile(bytes, {
+sugar: false, full: true })`, what `test/equiv.ts --raw` evaluates) needs → `sbpf-print`: function
+naming (`Semantics`' instruction-log scan and classification → `ix_*` names and processors, `nameThunks`,
+helper-name suffixes, symbol sanitizing with `// symbol:` notes), variable names (`shortNames`,
+parameters, entrypoint zero-init), `declarations`, the function text, `callsOf`, and `renderSingle`
+(header, instruction table with Anchor discriminators via a local SHA-256, used helpers / syscalls,
+handler grouping). ~4.5k lines of rustfmt-ed Rust. Dumps: `struct` (structured bodies), `text` (each
+function's text), `rawfile` (the whole single file); format in [`rs/README.md`](../rs/README.md).
+
+Raw mode includes no outlining (`ret_tail_N`/`tail_N` are readable-mode only: `findOutlines` is skipped
+when `sugar === false`), no views / accounts / strings / comments, no library stubs (`full`). The raw
+single file does contain one block the port cannot produce yet: the `// security summary` lines come
+from the analysis (`analyze`, stage 8). The `rawfile` dump drops that block on both sides; everything
+else in the file is compared.
+
+Design:
+
+- **Statement identity.** Tree nodes refer to statements by index into a per-function table
+  (`Tree::stmts`): a TS statement object is an index, a copy (`{ ...s }` in node splitting and `cloneNodes`,
+  the `eval` of an empty `if`, the `rc_*` calls) is a new entry. `declarations` keys its `let`/`const`
+  decisions by that index, as TS keys them by object.
+- **Structural comparisons** (`sameTree`, `samePcFree`) compare as plain data: equal indices / ids are
+  equal, otherwise statements and expressions are compared field by field (`Fx::json_eq`).
+- **Clean-up passes work in place** where the TS rebuilds an identical tree (tailPass, labelPass,
+  sameArmsPass, loopPass, unlabel, dropLoopLabels); ifPass and dupPass move nodes into a new list. Break
+  sets are chains through the enclosing frames (TS: a new `Set` per block), label reference counts are
+  arrays by block id.
+- **Printer**: writes one buffer; a subexpression is parenthesized in place after it is written (its
+  precedence, or a rule looking at its text: `wrapped`, `joinArgs`, the `<<`/`>` checks). Printing order
+  does not change the text (the TS prints an indirect call's arguments before its target).
+- **declarations** keeps, per variable, the first reference and the lowest common ancestor of the lists
+  of all references (the TS keeps each reference's path and takes the common prefix: same list).
+- Per-function structuring and printing run on the worker threads (`par_each`); output is identical for
+  any thread count (checked on jup, svault_v3, whirlpool with 1 and 8 threads).
+
+### Parity
+
+- All binary sets: **615 / 615 identical** on `struct`, `text` and `rawfile` (the first run was already
+  identical; re-run after the speed changes).
+- Fuzz: **6000 / 6000 identical** (1000 each: seeds 1, 7, 11 on samples + compat, seed 3 on corpus + bench +
+  eval; seed 13: 2000 on samples + compat + bench). 15–32% of the mutants get through the whole pipeline
+  (1103 of the 5000 counted; the others stop at an earlier stage's error, which both sides report
+  identically); `parity.ts` now prints how many cases reach each stage without an error.
+- Equivalence harness on the **Rust-printed** raw text: `test/equiv.ts`'s check with the program text
+  replaced by the Rust `rawfile` text (5 trials per function): token, memo, ata, token22, whirlpool,
+  svault_v3, jup — 4674 functions, 23 270 trials, **0 failing functions, 0 errors** (the same as the TS text).
+- No residual differences apart from the analysis summary block (stage 8), excluded by construction.
+
+### Speed
+
+Best of 10 (Rust) / 5 after warm-up (TS, Node 26), ms, same machine (`sbpf-dump --time4`,
+`scripts/stagetime.ts --stage4`), after the stage 3 pipeline: `struct` = structure + cleanup +
+statementIdioms, `print` = variable names + declarations + printBody + the function's lines (the TS
+side times a script-local copy of decompile's raw printing path, checked to produce decompile's text),
+each summed over all functions; `parallel` = the same on 8 worker threads (wall time).
+
+| program | | struct | print | total | parallel |
+|---|---|---:|---:|---:|---:|
+| token22 | TS | 54.5 | 67.9 | 122.4 | |
+| | Rust | 16.7 | 17.0 | 33.9 | 6.7 |
+| | speedup | 3.3× | 4.0× | **3.6×** | **18.2×** |
+| whirlpool | TS | 100.1 | 121.5 | 224.8 | |
+| | Rust | 33.0 | 36.4 | 69.7 | 12.4 |
+| | speedup | 3.0× | 3.3× | **3.2×** | **18.1×** |
+| jup | TS | 161.2 | 209.3 | 370.5 | |
+| | Rust | 47.6 | 55.4 | 104.2 | 17.3 |
+| | speedup | 3.4× | 3.8× | **3.6×** | **21.4×** |
+| svault_v3 | TS | 184.1 | 234.2 | 418.3 | |
+| | Rust | 65.4 | 71.1 | 138.6 | 21.7 |
+| | speedup | 2.8× | 3.3× | **3.0×** | **19.3×** |
+
+The first port (passes rebuilding the tree as the TS does, `format!`-per-subexpression printing) was only
+1.5–2× faster; the in-place passes and the buffer printer brought it to 3–4×. What remains is allocation
+(ifPass / dupPass lists, the per-round copy of the tree for the fixpoint test: about 35% of `struct`) and
+text building (~9 ns per output byte). Single-thread gains are lower than stage 3's because V8 is good at
+exactly this (short strings as ropes, small short-lived objects); the parallel driver matters more here.
+
 ## Plan changes
 
+- **Stage 4 is done for the raw output** (above): structuring, statement idioms, the printer and the raw
+  printing path (naming, declarations, function text, single file). The readable output's printing hooks
+  (strings, keys, typed views, frame objects, comments, `stripUndef`, outlining with `ret_tail_N`/`tail_N`)
+  belong to stage 5 with the views / accounts / semantics they read; the printer's structure (buffer
+  writer, `ProgNames`, statement indices) is where they plug in. The `rawfile` dump gets the analysis
+  summary block back when stage 8 lands.
+- **Semantics moved partly forward**: the raw output's function names need `Semantics`' instruction-log
+  classification (`ix_*` names, processors) and the Anchor flag; those are ported in `sbpf-print::names`
+  (stage 7 keeps the rest of `semantics.ts`).
 - **Stage 2 and stage 3 are done** (above). Stage 3's `opt`/`optir`/`compact` dumps check the composed
   per-function pipeline in its exact order, over all functions as `--full` builds them; the library skip
   (classification) arrives with stage 7, whose dump should then re-run stage 3 on user functions only.

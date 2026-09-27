@@ -77,8 +77,10 @@ if (fuzz) {
 	const bases = files.filter(f => statSync(f).size < 512 * 1024).map(f => new Uint8Array(readFileSync(f)))
 	for (let i = 0; i < fuzz; i++) { const f = join(tmp, `fuzz${i}.so`); writeFileSync(f, mutate(pick(bases))); cases.push(f) }
 }
+const reached = new Map<string, number>() // stage -> cases whose TS dump has it without an error line
 for (const f of cases) {
 	const ts = dumpAll(new Uint8Array(readFileSync(f)), stages)
+	for (const [st, text] of ts) if (!text.includes('\n{"error":')) reached.set(st, (reached.get(st) ?? 0) + 1)
 	const out = join(tmp, 'rs')
 	rmSync(out, { recursive: true, force: true })
 	let rsErr = ''
@@ -98,5 +100,6 @@ for (const f of cases) {
 	if (diffs.length) { bad.push(f); console.log(`DIFF ${f}\n  ${diffs.join('\n  ')}`) } else { same++; if (fuzz) rmSync(f) }
 }
 if (!fuzz || !bad.length) rmSync(tmp, { recursive: true, force: true })
+console.log(`reached (no error): ${stages.map(st => `${st} ${reached.get(st) ?? 0}`).join(', ')}`)
 console.log(`parity: ${same}/${cases.length} identical, ${bad.length} differing (stages ${stages.join(',')}; ${((performance.now() - t0) / 1000).toFixed(0)}s)`)
 process.exit(bad.length ? 1 : 0)
