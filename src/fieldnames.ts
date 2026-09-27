@@ -2,21 +2,30 @@
 //
 // Inferred views (structs.ts: `f0x18_u64`, `f0x10_ref`) and account layouts found by runs (anchorstate.ts:
 // `d0x49_u64`) name their fields after offset and size. This pass looks at how the program uses each such field
-// and renames it when one use says what it is (the offset stays in a comment, `// +0x18 [heur: …]`):
-//   * a 32-byte key compared (memeq / memcmp / keyeq) with a signer's key: `authority` (`owner_key` / `admin`
-//     when a message logged on the failing side says so); with the key of an account the Accounts struct names:
-//     that name (Anchor's has_one); with a well-known program id: its name (`token_program`); else the subject of
-//     the message logged when the comparison fails ("Invalid mint" → `mint`, "X is not owned by …" → `x_owner`).
-//     A key embedded in an inferred view with no field there gets one (`Pubkey`, its address);
+// (through typed variables, and through frame copies of a call's out object) and renames it when a use says what
+// it is; the offset stays in a comment (`// +0x18 [heur: …]`, `// data +0x49 …` for account data):
+//   * a 32-byte key (in place, or a pointer field holding its address) compared (memeq / memcmp / keyeq) with a
+//     signer's key: `authority` (`owner_key` / `admin` when the message logged on the failing side says so); with
+//     the key of an account the Accounts struct names: that name (Anchor's has_one); with a well-known program id:
+//     its name (`token_program`); else the subject of the message logged when the comparison fails ("Invalid
+//     mint" → `mint`, "X does not match …" → `x`, "X is not owned by …" → `x_owner`). A key in place in an
+//     inferred view with no field there gets one (`Pubkey`: its address); one over four u64 words names them
+//     `x_w0` … `x_w3`;
+//   * a value compared, the message on failure naming it: "Invalid X" / "X does not match …" / "X must be …" /
+//     "Insufficient X" → `x`, "X must be a signer" → `x_is_signer` (a flag in a copied AccountInfo);
 //   * a u64 stored from / compared with Clock.unix_timestamp: `updated_ts` / `deadline` (subtracted from it:
 //     `start_ts`), with Clock.slot: `updated_slot` / `slot`;
-//   * a field's address (or a byte copied from it) given as a 1-byte PDA seed: `bump`, as another seed: `seed`;
-//   * the field at offset 0 only ever written constants and compared with constants: `tag`; a byte only
-//     tested against 0 and written 0 / 1, set where it is tested or next to a message about initialization:
-//     `is_initialized`;
-//   * a u64 updated in place by ± 1: `count`, by another amount: `balance`; passed to a token CPI wrapper: `amount`.
-// Names are per view (one type: the same names in every function); a name taken twice gets a suffix.
-// Frequently called small functions are also named by role when unambiguous (`require_signer`, `keys_eq`).
+//   * a byte copied into a 1-byte seed of a PDA derivation or a signed CPI: `bump`; a field given as another seed:
+//     `seed`;
+//   * the field at offset 0 only ever written constants and compared with constants: `kind` (a variant tag); a
+//     byte only tested against 0 and written 0 / 1, set where it is tested or next to a message about
+//     initialization: `is_initialized`;
+//   * a u64 updated in place by ± 1: `count`, by another amount: `balance`; passed to a token CPI wrapper: `amount`;
+//   * a field copied from / to a named one (x.f = y.g): the same name.
+// Names are per view (one type: the same names in every function; the most specific evidence wins, then the most
+// frequent); a name taken twice in a view gets a suffix, names the analysis reads as AccountInfo fields (`owner`,
+// `key`, …) get `_key`. Layouts shared by unrelated objects (`S_u64_u64`) are not named.
+// Small unnamed functions are also named by role when unambiguous (`keys_eq`, `require_signer`).
 import type { VarFunc } from './dataflow.ts'
 import { type Expr, type Stmt, walkExpr, exprEq } from './ir.ts'
 import { stmtExprs } from './simplify.ts'
