@@ -16,7 +16,7 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-struct` | `src/structure.ts`, `src/stmtidioms.ts` | structured statement trees (`Tree`: `SNode`s + statement table), stackifier, node splitting, dispatcher, clean-up passes, Rc idioms |
 | `sbpf-print` | `src/print.ts`, decompile's raw printing path, `layout.ts` renderSingle | printer, declarations, function naming (instruction logs, thunks, symbols), `decompile_raw`, `render_single` |
 | `sbpf-exec` | `src/exec.ts` (+ SHA-256 / Keccak) | concrete interpreter of the built functions (CPI / account runs) |
-| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts` | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
+| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts`; `src/analysis/facts.ts`, `flow.ts`, `paths.ts`, `sources.ts` (`analysis/`) | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
 | `sbpf-lib` | `src/fingerprint.ts`, `src/library.ts` (+ `crateOf` of `src/demangle.ts`), `src/builtins.ts` | function fingerprints and signatures (local SHA-1), library classification against `data/libsigs.json` / `data/libnames.json` (crate-aware policy, behavioral names), u128 builtins recognized by behavior |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
@@ -35,6 +35,7 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --time4 --iters 5 a.so     # stage 4 timings (as stagetime.ts --stage4)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time5 --iters 5 a.so     # stage 5 timings (as stagetime.ts --stage5)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time7 --iters 5 a.so     # stage 7 timings (as stagetime.ts --stage7)
+/tmp/claude-1000/rs-target/release/sbpf-dump --time8 --iters 5 a.so     # analysis foundation (as stagetime.ts --stage8)
 /tmp/claude-1000/rs-target/release/sbpf-dump --timediff --iters 5 a.so b.so   # program diff timing (as stagetime.ts --diff)
 /tmp/claude-1000/rs-target/release/sbpf-dump --diff a.so b.so out_dir   # diff.jsonl (as dump.ts --diff)
 
@@ -45,7 +46,7 @@ node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutan
 node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir`, or `--diff a.so b.so out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow] out_dir`, or `--diff a.so b.so out_dir`
 (the IDL is read from stage 5 on).
 
 ## Stage dump format (format 1)
@@ -245,6 +246,33 @@ The default output is `decompile(bytes, { idl })`: library functions are classif
   two paths as labels), or an error line.
 
 A default-output error is an error line in each requested stage 7 dump.
+
+### `facts.jsonl`, `flow.jsonl` — the analysis foundation (stage 8a)
+
+Both on the default output (`decompile(bytes, { idl })`), dev dumps in `scripts/dump8.ts`. Expressions are the
+IR encoding above (`<Expr>`), in their function's arena.
+
+- `facts` (`src/analysis/facts.ts`, read before the single file's analysis adds to them: decompile's `debugHooks`),
+  per function in printing order: `{"t":"fn","pc","name"[,"wrapper":true],"at","types":[[name,type]...]}`, then
+  `{"t":"check","line"[,"pc"],"cond","failsIf","error","kinds","refs":[{"acct"[,"field"]}...][,"named"],"main"[,"before"][,"via":{"fn","kinds"}][,"c"][,"passPc"][,"cmp32":true][,"logRel":[a,b]][,"pubkeys":true]}`,
+  `{"t":"op","line"[,"pc"],"kinds","text","main","errPath"[,"cpi":{"program"[,"known"][,"checked"][,"seeds"],"fields","accounts":[{["role"],"text"[,"w"][,"s"]}...][,"src":{["program"],"accounts","fields"}][,"family"][,"ix"]}][,"target":{"acct"[,"field"]}][,"how"][,"value"][,"pda":{"fn","seeds","program"}][,"via"][,"ret"][,"exit"][,"handler"]}`,
+  `{"t":"call","line"[,"pc"][,"ret"],"callee","main","errPath"}`, `{"t":"hint","line","program","family","ix","how"[,"call":{"fn","pc"}]}`,
+  `{"t":"pcline","m":[[pc,line]...]}`, `{"t":"condline","m":[[<Expr>,line]...]}` (insertion order).
+- `flow` (`src/analysis/flow.ts`, `paths.ts`, `sources.ts`), after the analysis ran (TS; Rust: the same calls through
+  `decompile_read_hook`, in analyze0's order): `{"t":"exit","pc"[,"type"],"param","fields":[[off,size,name]...][,"subs"]}`
+  per exit function; `{"t":"xop","fn",…}` the facts ops the exit / callee writes added (op encoding); `{"t":"indirect","targets","byDisc"}`;
+  native: `{"t":"split","root","via","groups":[{"tags","name","source"[,"accounts"],"dispatchers","tag":[fn,var]}]}` and
+  `{"t":"allowed","name","fn","m":"0101…"}` (the group's blocks per dispatcher); Anchor: `{"t":"try","h","tryPc","layout":[[name,off,type,doc]...][,"boxInfo"][,"words"][,"ptrs"][,"seqs"]}`,
+  `{"t":"dataReads","h","accts"}`. Then every instruction context analyze0 builds (its loop mirrored in the dump, before the
+  report drops empty dispatch parts and sorts by score; the analysis' own contexts are checked against it), in creation order:
+  `{"t":"ix","name","handler","functions","parents":[[fn,parentFn,pc|null,ret|null]...][,"restricted"][,"tag"],"indirect","accounts":[[index,name,source,signer,writable,pda,optional,address]...]}`;
+  native: per function `{"t":"res","fn","byName","conds":[[block,refs,sides,cmp32,pdaEq,pdaBufs]...],"stores":[[pos,index,field,how]...]}`
+  (ctxResolver); per point the report reads (ops, checks' deciding blocks) `{"t":"path","fn","b","conds":[[fn,block,holds,how,panics]...]}`
+  (pathTo) and once per condition `{"t":"vk","fn","b","key","cmps"}` (valueKey, cmpsOf); per op with a pc
+  `{"t":"src","fn","pc","v":[[[source,kind,acct]...]...]}` (sourceCtx `of` of the stored value / each call argument).
+
+A default-output error is an error line in each requested stage 8 dump; an error of the TS flow walk is an error line
+after the flow header.
 
 ### Later stages (planned)
 

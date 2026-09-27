@@ -46,8 +46,8 @@ import { stmtExprs } from '../src/simplify.ts'
 const args = process.argv.slice(2)
 let iters = 5
 const files: string[] = []
-let stage3 = false, stage4 = false, stage5 = false, stage7 = false, diffMode = false
-for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else if (args[i] === '--stage5') stage5 = true; else if (args[i] === '--stage7') stage7 = true; else if (args[i] === '--diff') diffMode = true; else files.push(args[i]) }
+let stage3 = false, stage4 = false, stage5 = false, stage7 = false, stage8 = false, diffMode = false
+for (let i = 0; i < args.length; i++) { if (args[i] === '--iters') iters = +args[++i]; else if (args[i] === '--stage3') stage3 = true; else if (args[i] === '--stage4') stage4 = true; else if (args[i] === '--stage5') stage5 = true; else if (args[i] === '--stage7') stage7 = true; else if (args[i] === '--stage8') stage8 = true; else if (args[i] === '--diff') diffMode = true; else files.push(args[i]) }
 
 // ---- decompile.ts's raw printing path (script-local copy for timing; checked against decompile's text) ----
 const RESERVED = new Set(['do', 'if', 'in', 'as', 'of', 'fp', 'let', 'var', 'for', 'new', 'try', 'int', 'is', 'ld', 'st'])
@@ -142,6 +142,27 @@ if (diffMode) {
 		if (it) best = Math.min(best, performance.now() - t0)
 	}
 	console.log(`diff\t${basename(files[0])}\t${basename(files[1])}\t${best.toFixed(1)}`)
+	process.exit(0)
+}
+// With --stage8: the analysis foundation on the default output (the flow dump of scripts/dump8.ts, before the
+// single file's analysis: its exit writes, indirect targets, dispatch splits, instruction contexts, resolvers, paths,
+// sources).
+if (stage8) {
+	const { flowLines } = await import('./dump8.ts')
+	const { debugHooks } = await import('../src/decompile.ts')
+	console.log('file\tflow')
+	for (const f of files) {
+		const bytes = new Uint8Array(readFileSync(f))
+		let best = Infinity
+		for (let it = 0; it < iters + 1; it++) {
+			let ms = 0
+			debugHooks.beforeRender = r => { const t0 = performance.now(); flowLines(r, false); ms = performance.now() - t0 }
+			decompile(bytes)
+			debugHooks.beforeRender = undefined
+			if (it) best = Math.min(best, ms)
+		}
+		console.log([basename(f), best.toFixed(1)].join('\t'))
+	}
 	process.exit(0)
 }
 if (stage7) {

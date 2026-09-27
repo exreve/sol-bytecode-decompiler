@@ -358,6 +358,15 @@ fn real_main() {
         time7(files, iters);
         return;
     }
+    if args.first().map(|s| s.as_str()) == Some("--time8") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        time8(files, iters);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--timediff") {
         let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
             (args[2].parse().unwrap(), &args[3..])
@@ -595,6 +604,29 @@ fn time3(files: &[String], iters: usize) {
 /// raw / readable output, single file included, without the analysis), on 1 thread and on worker threads.
 /// Stage 7 timings (ms, best of `iters`): the --full readable output and the default output (library
 /// code as stubs), single file included, on one thread and on worker threads (as scripts/stagetime.ts --stage7).
+/// Stage 8 timings (ms, best of `iters`): the analysis foundation on the default output (the flow dump, as
+/// scripts/stagetime.ts --stage8).
+fn time8(files: &[String], iters: usize) {
+    println!("file\tflow");
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = f64::MAX;
+        for _ in 0..iters {
+            let ms = std::cell::Cell::new(0.0);
+            let hook = |an: &sbpf_read::analysis::An| {
+                let t = Instant::now();
+                let s = stage8::flow_lines(an);
+                ms.set(t.elapsed().as_secs_f64() * 1e3);
+                s
+            };
+            std::hint::black_box(sbpf_read::decompile::decompile_read_hook(&bytes, None, stage3::threads(), false, Some(&hook)).unwrap());
+            best = best.min(ms.get());
+        }
+        let name = std::path::Path::new(f).file_name().unwrap().to_string_lossy();
+        println!("{name}\t{best:.1}");
+    }
+}
+
 fn time7(files: &[String], iters: usize) {
     println!("file\tfull\tdefault\tfull_par\tdefault_par");
     let n = stage3::threads();

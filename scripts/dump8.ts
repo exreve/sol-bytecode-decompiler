@@ -7,7 +7,7 @@ import type { FnFacts } from '../src/analysis/facts.ts'
 import type { IdlInfo } from '../src/idl.ts'
 import { expr } from './dump.ts'
 import { analyze } from '../src/analysis/report.ts'
-import { exitFns, indirectTargets, splitDispatch, tryInfo, dataReads, ctxResolver, calleeOf, cfgOf, callOf, decisionBlock, type Side } from '../src/analysis/flow.ts'
+import { addExitWrites, exitFns, indirectTargets, splitDispatch, tryInfo, dataReads, ctxResolver, calleeOf, cfgOf, callOf, decisionBlock, type Side } from '../src/analysis/flow.ts'
 import { irOf, pathTo, blockAt, valueKey, cmpsOf, stmtAt } from '../src/analysis/paths.ts'
 import { sourceCtx } from '../src/analysis/sources.ts'
 import type { AccountRow, IxCtx, IxOut } from '../src/analysis/report.ts'
@@ -151,9 +151,12 @@ function ixContexts(r: Result): { name: string; fns: number[]; ctx: IxCtx; accou
  * the path conditions and value keys of the points the report reads (ops, checks), and the sources of the
  * ops' values.
  */
-export function flowLines(r: Result): string[] {
+export function flowLines(r: Result, check = true): string[] {
 	const out: string[] = []
-	const a = analyze(r)
+	// (check: after the analysis, its instruction contexts compared with the dump's; else (timing, before the analysis) the
+	// exit writes it starts with)
+	const a = check ? analyze(r) : undefined
+	if (!check) addExitWrites(r)
 	for (const [pc, ex] of exitFns(r)) out.push(line(obj([['t', 'exit'], ['pc', pc], ['type', ex.type], ['param', ex.param], ['fields', ex.fields.map(f => [f.off, f.size, f.name])],
 		['subs', ex.subs?.map(s => obj([['type', s.type], ['fields', s.fields.map(f => [f.off, f.size, f.name])], ['name', s.name]]))]])))
 	for (const [pc, ff] of r.facts) for (const o of ff.ops) if (o.exit !== undefined) out.push(...fnFactsLines(pc, { ...ff, checks: [], calls: [], ixHints: [], ops: [o], types: new Map(), pcLine: new Map(), condLine: new Map() }).slice(1, 2).map(l => l.replace('{"t":"op"', `{"t":"xop","fn":${pc}`)))
@@ -180,7 +183,7 @@ export function flowLines(r: Result): string[] {
 	const I = irOf(r)
 	const ixs = ixContexts(r)
 	// (the contexts the analysis built, for the instructions it kept, are these)
-	for (const ix of a.ixs) {
+	for (const ix of a?.ixs ?? []) {
 		const x = ixs.find(y => y.name === ix.name && y.ctx.handler === ix.ctx!.handler)
 		const fnames = x?.fns.map(pc => r.facts.get(pc)!.name)
 		if (!x || JSON.stringify(fnames) !== JSON.stringify(ix.functions) || JSON.stringify([...x.ctx.parents.keys()]) !== JSON.stringify([...ix.ctx!.parents.keys()])) throw new Error(`dump: instruction context mismatch (${ix.name})`)
