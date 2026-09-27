@@ -38,6 +38,12 @@ pub fn jsre(p: &str) -> Regex {
                     o.push(']');
                 }
                 ('s', true) => o.push_str(JS_WS),
+                ('S', false) => {
+                    o.push_str("[^");
+                    o.push_str(JS_WS);
+                    o.push(']');
+                }
+                ('D', false) => o.push_str("[^0-9]"),
                 _ => {
                     o.push('\\');
                     o.push(n);
