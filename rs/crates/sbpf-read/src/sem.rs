@@ -470,6 +470,39 @@ fn vocab_lookup(v: u64) -> Option<String> {
     None
 }
 
+/// selector.ts lookup: the name of an 8-byte discriminator given as 16 hex digits (`0x` optional), either
+/// byte order: the dataset's names, then `i:<verb>_<noun>` of the vocabulary (first in vocabulary order).
+pub fn selector_lookup(hex: &str) -> Option<String> {
+    let h = hex.strip_prefix("0x").unwrap_or(hex).to_ascii_lowercase();
+    if h.len() > 16 || !h.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let h = format!("{h:0>16}");
+    let be = u64::from_str_radix(&h, 16).ok()?;
+    let le_hex = format!("{:016x}", be.swap_bytes());
+    let db = sel_db();
+    for k in [&h, &le_hex] {
+        if let Some((_, n)) = db.names.iter().find(|(x, n)| x == k && !n.is_empty()) {
+            return Some(n.clone());
+        }
+    }
+    // (h8("global:" + name) as hex is the bytes in order: as a little-endian u64, the swapped value)
+    let t = vocab();
+    let mut best: Option<u32> = None;
+    for want in [be.swap_bytes(), be] {
+        let i = t.partition_point(|x| x.0 < want);
+        for x in &t[i..] {
+            if x.0 != want {
+                break;
+            }
+            if x.1 & 1 == 0 && best.is_none_or(|b| x.1 < b) {
+                best = Some(x.1);
+            }
+        }
+    }
+    best.map(|i| format!("i:{}", name_at(db, i as usize)))
+}
+
 // ---------------- Semantics ----------------
 
 /// The readable output's Semantics.
@@ -989,5 +1022,16 @@ mod tests {
     fn selectors_load() {
         let db = sel_db();
         assert!(!db.verbs.is_empty());
+    }
+    #[test]
+    fn selector_lookups() {
+        // (node src/selector.ts <hex>)
+        let l = |h: &str| selector_lookup(h);
+        assert_eq!(l("0xf8c69e91e17587c8").as_deref(), Some("i:swap"));
+        assert_eq!(l("afaf6d1f0d989bed").as_deref(), Some("i:initialize"));
+        assert_eq!(l("4834b68f43599db5").as_deref(), Some("i:add_liquidity"));
+        assert_eq!(l("0x1c8cee63e7a21595").as_deref(), Some("i:add_liquidity_by_weight"));
+        assert_eq!(l("0x0000000000000001"), None);
+        assert_eq!(l("e445a52e51cb9a1d"), None);
     }
 }
