@@ -996,7 +996,7 @@ function memberUnsigned(ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] {
 	const rel = ix.relations ?? []
 	const related = (t: string, m: string) => rel.some(r => r.kind !== 'member' && ((r.a.startsWith(`${t}.`) && r.b === `${m}.key`) || (r.a.startsWith(`${m}.`) && r.b === `${t}.key`) || (r.a === `${t}.key` && r.b === `${m}.key`)))
 	const created = (t: string) => { const row = ix.accounts.find(y => y.name === t); return !!row && ['zero', 'rent_exempt', 'pda', 'address'].some(k => row.constraints[k] && row.constraints[k].status !== 'not_found') }
-	return rel.filter(r => r.kind === 'member' && r.status === 'found').flatMap(r => {
+	return rel.filter(r => r.kind === 'member' && r.status === 'found').flatMap((r): Omit<Finding, 'rule' | 'title' | 'ix'>[] => {
 		const x = r.b.replace(/\.key$/, ''), m = r.a.split('.')[0], row = ix.accounts.find(y => y.name === x)
 		if (!row) return []
 		if (!row.expected.signer && !(row.constraints.signer && row.constraints.signer.status !== 'not_found'))
