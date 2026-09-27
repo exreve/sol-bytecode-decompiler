@@ -185,7 +185,22 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 	const fp = f.vars.find(v => v.param === 10)?.id
 	const defs = new Map<number, Expr | null>()
 	const defAt = new Map<number, [number, number]>() // (where a single-definition variable is assigned)
-	f.blocks.forEach((b, bi) => b.stmts.forEach((s, si) => { if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { defs.set(s.dst, defs.has(s.dst) || s.k === 'call' ? null : s.e); defAt.set(s.dst, [bi, si]) } }))
+	// (one pass: definitions; calls to the clock, to a log, deriving an address / signing a CPI)
+	let pda = false, logs = false
+	const clockArgs: Expr[] = []
+	for (let bi = 0; bi < f.blocks.length; bi++) {
+		const ss = f.blocks[bi].stmts
+		for (let si = 0; si < ss.length; si++) {
+			const s = ss[si]
+			if ((s.k === 'set' || s.k === 'call') && s.dst >= 0) { defs.set(s.dst, defs.has(s.dst) || s.k === 'call' ? null : s.e); defAt.set(s.dst, [bi, si]) }
+			const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
+			if (!c || c.t.k === 'ind') continue
+			const nm = c.t.k === 'sys' ? c.t.name : cfg.fnName(c.t.pc)
+			if (c.t.k === 'sys' ? nm === 'sol_log_' : /^(log|msg|sol_log)\w*$/.test(nm)) logs = true
+			if (/program_address|invoke_signed/.test(nm) || (c.t.k === 'fn' && /^cpi_/.test(nm))) pda = true
+			if ((c.t.k === 'sys' ? nm === 'sol_get_clock_sysvar' : /clock/i.test(nm)) && c.args.length) clockArgs.push(c.args[0])
+		}
+	}
 	let cur: [number, number] = [0, 0] // (the position of the statement looked at)
 	/** the expression a single-definition variable holds (a few levels) */
 	const val = (e: Expr, depth = 3): Expr => {
@@ -303,10 +318,15 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 		return undefined
 	}
 	// frame words stored once (four of them from the words of one 32-byte place: a key copied word by word)
-	const words = new Map<number, Expr | null>()
-	for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' || s.k === 'stores') && s.size === 8) {
-		const o = frameOff(s.addr)
-		if (o !== undefined) (s.k === 'store' ? [s.v] : s.vals).forEach((x, i) => words.set(o + 8 * i, words.has(o + 8 * i) ? null : x))
+	let words0: Map<number, Expr | null> | undefined
+	const words = () => {
+		if (words0) return words0
+		const w = (words0 = new Map())
+		for (const b of f.blocks) for (const s of b.stmts) if ((s.k === 'store' || s.k === 'stores') && s.size === 8) {
+			const o = frameOff(s.addr)
+			if (o !== undefined) (s.k === 'store' ? [s.v] : s.vals).forEach((x, i) => w.set(o + 8 * i, w.has(o + 8 * i) ? null : x))
+		}
+		return w
 	}
 	const exprKey = (e: Expr) => JSON.stringify(e, (_, v) => (typeof v === 'bigint' ? v.toString() : v))
 	/** an account: its AccountInfo (or input record) expression and index in an array of them */
@@ -325,7 +345,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 			if (w && 'src' in w) return keyOf(w.src, w.at, depth + 1)
 			if (w && 'view' in w) { const l = locIn(w.view, w.off); return l && (!l.field || (!l.rest && l.field.t.k !== 'ref')) ? { k: 'field', loc: l.field ? l : { ...l, key: true } } : undefined }
 			if (w && 'store' in w) {
-				const ls = [0, 8, 16, 24].map(i => words.get(o + i)).map(x => (x ? val(x) : undefined)).map(x => (x?.k === 'load' && x.size === 8 ? x.addr : undefined))
+				const ls = [0, 8, 16, 24].map(i => words().get(o + i)).map(x => (x ? val(x) : undefined)).map(x => (x?.k === 'load' && x.size === 8 ? x.addr : undefined))
 				const b0 = ls[0]
 				if (b0 && ls.every((x, i) => x && exprEq(x, add(b0, 8 * i)))) return keyOf(b0, at, depth + 1)
 			}
@@ -411,6 +431,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 		return c
 	}
 	const msgForVar = (v: number, depth = 0): string | undefined => {
+		if (!logs) return undefined
 		const bi = conds().condVars.get(v)
 		if (bi !== undefined) return branchMsg(bi)
 		// (through a variable computed from it: `f = bc as u32; if (f == 0)`)
@@ -418,6 +439,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 		return undefined
 	}
 	const msgFor = (e: Expr): string | undefined => {
+		if (!logs) return undefined
 		const bi = conds().condOf.get(e)
 		if (bi !== undefined) return branchMsg(bi)
 		const v = conds().setOf.get(e)
@@ -450,11 +472,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 
 	// ---- clock values ----
 	const clockSlots = new Map<number, true>()
-	for (const b of f.blocks) for (const s of b.stmts) {
-		const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
-		if (!c) continue
-		if ((c.t.k === 'sys' && c.t.name === 'sol_get_clock_sysvar') || (c.t.k === 'fn' && /clock/i.test(cfg.fnName(c.t.pc)))) { const o = c.args[0] && frameOff(c.args[0]); if (o !== undefined) clockSlots.set(o, true) }
-	}
+	for (const a of clockArgs) { const o = frameOff(a); if (o !== undefined) clockSlots.set(o, true) }
 	const clockOf = (e: Expr): 'ts' | 'slot' | undefined => {
 		e = val(e)
 		if (e.k !== 'load' || e.size !== 8) return undefined
@@ -464,6 +482,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 		return undefined
 	}
 	const hasClock = (e: Expr): 'ts' | 'slot' | undefined => {
+		if (!clockSlots.size) return undefined
 		let r: 'ts' | 'slot' | undefined
 		walkExpr(e, x => { r ??= clockOf(x) })
 		if (!r && e.k === 'var') r = clockOf(e)
@@ -472,12 +491,6 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 	}
 
 	// ---- PDA seeds: (ptr, len) pairs stored in the frame by a function deriving an address ----
-	let pda = false
-	for (const b of f.blocks) for (const s of b.stmts) {
-		const c = s.k === 'call' ? s : s.k === 'set' && s.e.k === 'call' ? s.e : undefined
-		// (deriving an address, or signing a CPI with seeds)
-		if (c && ((c.t.k === 'sys' && /program_address|invoke_signed/.test(c.t.name)) || (c.t.k === 'fn' && /program_address|invoke_signed|^cpi_/.test(cfg.fnName(c.t.pc))))) pda = true
-	}
 	const byteCopies = new Map<number, Loc>() // frame byte -> the u8 field copied there
 	if (pda) for (const [bi, b] of f.blocks.entries()) for (const [si, s] of b.stmts.entries()) {
 		cur = [bi, si]
@@ -535,7 +548,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 			if (n?.k === 'const' && n.v === 32n) keyCompare(keyOf(c.args[0], cur), keyOf(c.args[1], cur), (s.k === 'set' || s.k === 'call') && s.dst >= 0 ? msgForVar(s.dst) : undefined)
 		}
 	}
-	const onExpr = (e: Expr) => walkExpr(e, x => {
+	const onNode = (x: Expr) => {
 		if (x.k === 'fn' && x.name === 'memeq' && x.args.length === 3) {
 			const n = val(x.args[2])
 			if (n.k === 'const' && n.v === 32n) keyCompare(keyOf(x.args[0], cur), keyOf(x.args[1], cur), msgFor(x))
@@ -544,27 +557,20 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 			const k = keyOf(x.args[0], cur)
 			if (nm && nm !== 'SYSTEM_PROGRAM' && k?.k === 'field') keyCompare(k, { k: 'const', name: nm.toLowerCase() }, msgFor(x))
 		} else if (x.k === 'cmp' && x.op !== 'set') {
+			// (a value checked, a message naming it on failure: "Invalid X", "X mismatch", "Insufficient X")
+			const m = msgFor(x), sub = m ? msgSubject(m, true) : undefined
 			for (const [p, q] of [[x.a, x.b], [x.b, x.a]]) {
+				const ck = hasClock(q)
+				if (!ck && !sub) continue
 				const l = loadLoc(p)
 				if (!l || l.field!.t.k !== 'scalar') continue
-				const ck = hasClock(q)
 				if (ck && l.field!.t.size === 8) vote(l, ck === 'ts' ? 'deadline' : 'slot', 4, `compared with Clock.${ck === 'ts' ? 'unix_timestamp' : 'slot'} in ${fnm}`)
-				// (a value checked, a message naming it on failure: "Invalid X", "X mismatch", "Insufficient X")
-				else if (!loadLoc(q)) {
-					const m = msgFor(x), sub = m ? msgSubject(m, true) : undefined
-					if (sub) vote(l, sub, 2, `compared; "${m}" on failure in ${fnm}`)
-				}
+				else if (sub && !loadLoc(q)) vote(l, sub, 2, `compared; "${m}" on failure in ${fnm}`)
 			}
 		} else if (x.k === 'bin' && x.op === 'sub' && hasClock(x.a)) {
 			const l = loadLoc(x.b, 8)
 			if (l && l.field!.t.k === 'scalar') vote(l, hasClock(x.a) === 'ts' ? 'start_ts' : 'start_slot', 4, `subtracted from Clock.${hasClock(x.a) === 'ts' ? 'unix_timestamp' : 'slot'} in ${fnm}`)
 		}
-	})
-	for (const [bi, b] of f.blocks.entries()) {
-		for (const [si, s] of b.stmts.entries()) { cur = [bi, si]; onStmt(s); stmtExprs(s).forEach(onExpr) }
-		cur = [bi, b.stmts.length]
-		if (b.term.k === 'br') onExpr(b.term.c)
-		else if (b.term.k === 'ret' && b.term.e) onExpr(b.term.e)
 	}
 
 	// ---- tags and initialization flags: every use of the field in this function ----
@@ -578,7 +584,9 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 		const l = loc(ld.addr)
 		if (l?.field && !l.rest && l.field.t.k === 'scalar' && l.field.t.size === ld.size && GENERATED.test(l.field.name)) varField.set(v, l)
 	}
+	// (one walk of every expression: the uses above, and each use of a field for the tags and flags below)
 	const visit = (e: Expr, parent?: Expr) => {
+		onNode(e)
 		let l: Loc | undefined
 		if (e.k === 'load') { const x = loc(e.addr); if (x?.field && !x.rest && x.field.t.k === 'scalar' && x.field.t.size === e.size && GENERATED.test(x.field.name)) l = x }
 		else if (e.k === 'var') l = varField.get(e.id)
@@ -596,8 +604,12 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 			case 'call': case 'fn': for (const x of e.args) visit(x, e); break
 		}
 	}
-	for (const b of f.blocks) {
-		for (const s of b.stmts) {
+	for (let bi = 0; bi < f.blocks.length; bi++) {
+		const b = f.blocks[bi]
+		for (let si = 0; si < b.stmts.length; si++) {
+			const s = b.stmts[si]
+			cur = [bi, si]
+			onStmt(s)
 			if (s.k === 'store' || s.k === 'stores') {
 				const vals = s.k === 'store' ? [s.v] : s.vals
 				const ab = s.addr.k === 'bin' && s.addr.op === 'add' && s.addr.b.k === 'const' ? { a: s.addr.a, o: s.addr.b.v } : { a: s.addr, o: 0n }
@@ -610,6 +622,7 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 			if (s.k === 'set' && varField.has(s.dst)) { const ld = s.e.k === 'ext' ? s.e.a : s.e; if (ld.k === 'load') visit(ld.addr, ld); continue }
 			for (const e of stmtExprs(s)) visit(e)
 		}
+		cur = [bi, b.stmts.length]
 		if (b.term.k === 'br') { const c = b.term.c; const l = c.k === 'var' ? varField.get(c.id) : undefined; if (l) use(l).cmps.push(0n); else visit(c) }
 		else if (b.term.k === 'ret' && b.term.e) visit(b.term.e)
 	}
