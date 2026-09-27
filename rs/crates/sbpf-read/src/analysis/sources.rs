@@ -38,7 +38,11 @@ pub struct SourceCtx<'a, 'x> {
 
 fn terms_of(k: &str) -> String {
     match k.strip_prefix("(+ ") {
-        Some(inner) => inner[..inner.char_indices().last().map_or(0, |x| x.0)].split(' ').filter(|t| !t.starts_with('#')).collect::<Vec<_>>().join(" "),
+        Some(inner) => inner[..inner.char_indices().last().map_or(0, |x| x.0)]
+            .split(' ')
+            .filter(|t| !t.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" "),
         None => k.to_string(),
     }
 }
@@ -62,7 +66,9 @@ impl<'a> An<'a> {
                 let ir = fir(fo.f);
                 for (bi, b) in fo.f.blocks.iter().enumerate() {
                     for (i, s) in b.stmts.iter().enumerate() {
-                        let Stmt::Set { dst, e, .. } = s else { continue };
+                        let Stmt::Set { dst, e, .. } = s else {
+                            continue;
+                        };
                         if *dst as i64 != tv as i64 {
                             continue;
                         }
@@ -71,7 +77,13 @@ impl<'a> An<'a> {
                             _ => *e,
                         };
                         if let Node::Load { addr, .. } = ir.get(e) {
-                            bases.insert(terms_of(&self.value_key(Some(ctx), tfn, addr, pos_of(bi, i), 0)));
+                            bases.insert(terms_of(&self.value_key(
+                                Some(ctx),
+                                tfn,
+                                addr,
+                                pos_of(bi, i),
+                                0,
+                            )));
                         }
                     }
                 }
@@ -83,14 +95,21 @@ impl<'a> An<'a> {
                 for v in &h.f.vars {
                     let nm = h.names.get(v.id as usize).cloned().flatten();
                     let want = if h.f.stack_args.is_some() { 100 } else { 5 };
-                    if v.param >= 1 && (nm.as_deref() == Some("ix_args") || (h.name.starts_with("ix_") && v.param == want)) {
+                    if v.param >= 1
+                        && (nm.as_deref() == Some("ix_args")
+                            || (h.name.starts_with("ix_") && v.param == want))
+                    {
                         let k = self.value_key(Some(ctx), ctx.handler, ir.var(v.id), 0, 0);
                         bases.insert(k);
                     }
                 }
             }
         }
-        let ae = if self.anchor && self.fo(ctx.handler).is_some() { Some(self.anchor_eval(ctx.handler)) } else { None };
+        let ae = if self.anchor && self.fo(ctx.handler).is_some() {
+            Some(self.anchor_eval(ctx.handler))
+        } else {
+            None
+        };
         SourceCtx {
             an: self,
             ix,
@@ -108,15 +127,34 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
         self.bases.contains(&terms_of(k))
     }
     fn name_at(&self, i: f64) -> String {
-        self.ix.accounts.iter().find(|x| x.index == Some(i)).map_or_else(|| format!("account[{}]", crate::util::js_num(i)), |x| x.name.clone())
+        self.ix
+            .accounts
+            .iter()
+            .find(|x| x.index == Some(i))
+            .map_or_else(
+                || format!("account[{}]", crate::util::js_num(i)),
+                |x| x.name.clone(),
+            )
     }
     fn known(&self) -> f64 {
-        self.ix.accounts.iter().filter(|x| x.index.is_some()).count() as f64
+        self.ix
+            .accounts
+            .iter()
+            .filter(|x| x.index.is_some())
+            .count() as f64
     }
     fn callee_name(&self, t: &CallTarget) -> String {
         match t {
             CallTarget::Sys { name, .. } => name.to_string(),
-            CallTarget::Fn { pc } => format!("{} {}", self.an.pname(*pc), self.an.facts.borrow().get(pc).map_or(String::new(), |f| f.name.clone())),
+            CallTarget::Fn { pc } => format!(
+                "{} {}",
+                self.an.pname(*pc),
+                self.an
+                    .facts
+                    .borrow()
+                    .get(pc)
+                    .map_or(String::new(), |f| f.name.clone())
+            ),
             _ => String::new(),
         }
     }
@@ -171,7 +209,11 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
         let a = self.name_at(i);
         let known = self.known();
         if i >= known && known > 0.0 {
-            return Some(Source { source: "remaining accounts".into(), kind: "remaining", acct: Some(a) });
+            return Some(Source {
+                source: "remaining accounts".into(),
+                kind: "remaining",
+                acct: Some(a),
+            });
         }
         let kind = match field {
             "key" => "key",
@@ -188,7 +230,11 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
         } else {
             kind.to_string()
         };
-        Some(Source { source: format!("{a}.{what}"), kind, acct: Some(a) })
+        Some(Source {
+            source: format!("{a}.{what}"),
+            kind,
+            acct: Some(a),
+        })
     }
 
     fn anchor_src(&self, h: Option<HVal<'a>>, n: f64) -> Option<Source> {
@@ -203,7 +249,11 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                 if info {
                     return None;
                 }
-                Some(Source { source: format!("{acct}.{}", field.as_deref().unwrap_or("data")), kind: "data", acct: Some(acct) })
+                Some(Source {
+                    source: format!("{acct}.{}", field.as_deref().unwrap_or("data")),
+                    kind: "data",
+                    acct: Some(acct),
+                })
             }
             HVal::A(x) => {
                 let x = x.borrow();
@@ -217,18 +267,47 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                     HK::Data => "data",
                     _ => return None,
                 };
-                let field = if kind == "data" { ae.zc_field(x.ty.as_deref(), x.off, n).unwrap_or_else(|| "data".into()) } else { kind.to_string() };
+                let field = if kind == "data" {
+                    ae.zc_field(x.ty.as_deref(), x.off, n)
+                        .unwrap_or_else(|| "data".into())
+                } else {
+                    kind.to_string()
+                };
                 if x.acct.starts_with("remaining_accounts[") {
-                    return Some(Source { source: format!("{}.{field}", x.acct), kind: "remaining", acct: Some(x.acct.clone()) });
+                    return Some(Source {
+                        source: format!("{}.{field}", x.acct),
+                        kind: "remaining",
+                        acct: Some(x.acct.clone()),
+                    });
                 }
-                Some(Source { source: format!("{}.{field}", x.acct), kind, acct: Some(x.acct.clone()) })
+                Some(Source {
+                    source: format!("{}.{field}", x.acct),
+                    kind,
+                    acct: Some(x.acct.clone()),
+                })
             }
         }
     }
 
     /// the sources of expression e at position p of function fn
     pub fn of(&self, fn0: i64, e0: E, p0: Pos) -> Vec<Source> {
-        let k = (fn0, e0, p0, self.ix.accounts.iter().map(|x| format!("{}:{}", x.index.map_or("undefined".into(), crate::util::js_num), x.name)).collect::<Vec<_>>().join(","));
+        let k = (
+            fn0,
+            e0,
+            p0,
+            self.ix
+                .accounts
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{}:{}",
+                        x.index.map_or("undefined".into(), crate::util::js_num),
+                        x.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         if let Some(y) = self.of_memo.borrow().get(&k) {
             return y.clone();
         }
@@ -285,17 +364,27 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
         }
         match ir.get(e) {
             Node::Bin(BinOp::Add, a, b) if matches!(ir.get(b), Node::Const(_)) => {
-                let Node::Const(bv) = ir.get(b) else { unreachable!() };
+                let Node::Const(bv) = ir.get(b) else {
+                    unreachable!()
+                };
                 let x = self.val_of(fn_, a, p, d + 1)?;
                 let k = bv as i64;
                 Some(match x {
                     Loc::C(c) => Loc::C(c.wrapping_add(k as u64)),
-                    Loc::F { fn_, off, p } => Loc::F { fn_, off: off + k as f64, p },
+                    Loc::F { fn_, off, p } => Loc::F {
+                        fn_,
+                        off: off + k as f64,
+                        p,
+                    },
                 })
             }
             Node::Var(id) => {
                 if let Some((y, q)) = dd.def_at(&an.fl, id, p) {
-                    return if matches!(ir.get(y), Node::Call(..)) { None } else { self.val_of(fn_, y, q, d + 1) };
+                    return if matches!(ir.get(y), Node::Call(..)) {
+                        None
+                    } else {
+                        self.val_of(fn_, y, q, d + 1)
+                    };
                 }
                 let v = fo.f.vars.get(id as usize)?;
                 let ctx = &self.ix.ctx;
@@ -307,8 +396,15 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                 let pf = an.fo(par.fn_)?.f;
                 let pir = fir(pf);
                 let (t, args) = call_of(pir, &pf.blocks[b].stmts[i])?;
-                let idx = if v.param < 100 { v.param - 1 } else { 4 + (v.param - 100) };
-                if !matches!(t, CallTarget::Fn { pc } if pc == fn_) || idx < 0 || idx as u32 >= args.len {
+                let idx = if v.param < 100 {
+                    v.param - 1
+                } else {
+                    4 + (v.param - 100)
+                };
+                if !matches!(t, CallTarget::Fn { pc } if pc == fn_)
+                    || idx < 0
+                    || idx as u32 >= args.len
+                {
                     return None;
                 }
                 self.val_of(par.fn_, pir.at(args, idx as u32), pos_of(b, i), d + 1)
@@ -322,9 +418,17 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                         if img.region(c, 8).map(|r| r.exec) != Some(false) {
                             return None;
                         }
-                        Some(Loc::C(b.iter().enumerate().fold(0u64, |x, (j, &y)| x | ((y as u64) << (8 * j)))))
+                        Some(Loc::C(
+                            b.iter()
+                                .enumerate()
+                                .fold(0u64, |x, (j, &y)| x | ((y as u64) << (8 * j))),
+                        ))
                     }
-                    Loc::F { fn_: afn, off, p: ap } => {
+                    Loc::F {
+                        fn_: afn,
+                        off,
+                        p: ap,
+                    } => {
                         let da = an.defs_in(afn)?;
                         let (y, q) = da.reaching(&an.fl, slot(off), ap, false)?;
                         if matches!(da.ir.get(y), Node::Call(..)) {
@@ -371,7 +475,9 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                     }
                     let v = vs[((off - a) / sz).floor() as usize];
                     return match ir.get(v) {
-                        Node::Const(c) => Some(((c >> (8 * (((off - a) % sz) as u64))) & 0xff) as u8),
+                        Node::Const(c) => {
+                            Some(((c >> (8 * (((off - a) % sz) as u64))) & 0xff) as u8)
+                        }
                         _ => None,
                     };
                 }
@@ -385,7 +491,10 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                 _ => {}
             }
             if let Some((_, args)) = call_of(ir, st) {
-                if ir.items(args).any(|x| dd.fp_off(x).is_some_and(|o| o <= off)) {
+                if ir
+                    .items(args)
+                    .any(|x| dd.fp_off(x).is_some_and(|o| o <= off))
+                {
                     return None;
                 }
             }
@@ -443,7 +552,11 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
         }
     }
     fn ix_src(&self, t: &str) -> Source {
-        let g = self.s.args.iter().find(|x| super::jsre(&format!(r"\b{}\b", regex::escape(x))).is_match(t));
+        let g = self
+            .s
+            .args
+            .iter()
+            .find(|x| super::jsre(&format!(r"\b{}\b", regex::escape(x))).is_match(t));
         Source {
             source: g.map_or("instruction data".into(), |g| format!("ix.{g}")),
             kind: "ix",
@@ -458,7 +571,16 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
         let f = x.field?;
         self.s.acct_src(x.index, &f)
     }
-    fn call_src(&mut self, fn_: i64, t: &CallTarget, args: L, ir: &sbpf_ir::Ir, p: Pos, d: u32, via: &str) {
+    fn call_src(
+        &mut self,
+        fn_: i64,
+        t: &CallTarget,
+        args: L,
+        ir: &sbpf_ir::Ir,
+        p: Pos,
+        d: u32,
+        via: &str,
+    ) {
         let nm = self.s.callee_name(t);
         if let Some(sv) = crate::jre!(r"sol_get_(clock|rent|epoch_schedule|fees|epoch_rewards|last_restart_slot|stake_history)_sysvar|sol_get_sysvar|\b(Clock|Rent|EpochSchedule|Fees|EpochRewards|LastRestartSlot)::get\b|sysvar::(clock|rent)").captures(&nm) {
             let k = sv.get(1).or(sv.get(2)).or(sv.get(3)).map(|m| m.as_str().to_lowercase());
@@ -470,7 +592,11 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
             return;
         }
         if crate::jre!(r"sol_get_return_data|get_return_data").is_match(&nm) {
-            self.add(Source { source: "CPI return data".into(), kind: "return-data", acct: None });
+            self.add(Source {
+                source: "CPI return data".into(),
+                kind: "return-data",
+                acct: None,
+            });
             return;
         }
         for a in ir.items(args) {
@@ -487,13 +613,19 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
             return;
         }
         let an = self.s.an;
-        let (Some(fo), Some(dd)) = (an.fo(fn_), an.defs_in(fn_)) else { return };
+        let (Some(fo), Some(dd)) = (an.fo(fn_), an.defs_in(fn_)) else {
+            return;
+        };
         let ir = fir(fo.f);
         if matches!(ir.get(e), Node::Const(_) | Node::Undef | Node::Reg(_)) {
             return;
         }
         let ctx = &self.s.ix.ctx;
-        let sk = format!("{fn_}|{p}|{}{}", if ptr { "*" } else { "" }, an.value_key(Some(ctx), fn_, e, p, 0));
+        let sk = format!(
+            "{fn_}|{p}|{}{}",
+            if ptr { "*" } else { "" },
+            an.value_key(Some(ctx), fn_, e, p, 0)
+        );
         if self.seen.contains(&sk) {
             return;
         }
@@ -522,7 +654,9 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
                 _ => None,
             };
             if let Some(addr) = addr {
-                if dd.fp_off(addr).is_none() && self.s.is_ix(&an.value_key(Some(ctx), fn_, addr, p, 0)) {
+                if dd.fp_off(addr).is_none()
+                    && self.s.is_ix(&an.value_key(Some(ctx), fn_, addr, p, 0))
+                {
                     let s = self.ix_src(&via);
                     self.add(s);
                     return;
@@ -565,7 +699,11 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
                     if hb.k == HK::Info && hb.guess != Some(true) {
                         let a = hb.acct.clone();
                         drop(hb);
-                        self.add(Source { source: format!("{a}.key"), kind: "key", acct: Some(a) });
+                        self.add(Source {
+                            source: format!("{a}.key"),
+                            kind: "key",
+                            acct: Some(a),
+                        });
                         return;
                     }
                 }
@@ -584,27 +722,60 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
                     }
                     return;
                 }
-                let Some(v) = fo.f.vars.get(id as usize) else { return };
+                let Some(v) = fo.f.vars.get(id as usize) else {
+                    return;
+                };
                 if v.param >= 1 && v.param != 10 && !dd.multi.contains(&id) {
                     if fn_ == ctx.handler {
                         return;
                     }
-                    let Some(par) = ctx.parents.get(&fn_).copied() else { return };
+                    let Some(par) = ctx.parents.get(&fn_).copied() else {
+                        return;
+                    };
                     let Some(ppc) = par.pc else { return };
-                    let Some((b, i)) = an.stmt_at(par.fn_, ppc) else { return };
+                    let Some((b, i)) = an.stmt_at(par.fn_, ppc) else {
+                        return;
+                    };
                     let pf = an.fo(par.fn_).unwrap().f;
                     let pir = fir(pf);
-                    let Some((t, args)) = call_of(pir, &pf.blocks[b].stmts[i]) else { return };
-                    let idx = if v.param < 100 { v.param - 1 } else { 4 + (v.param - 100) };
-                    if matches!(t, CallTarget::Fn { pc } if pc == fn_) && idx >= 0 && (idx as u32) < args.len {
-                        self.walk(par.fn_, pir.at(args, idx as u32), pos_of(b, i), d + 1, via, ptr);
+                    let Some((t, args)) = call_of(pir, &pf.blocks[b].stmts[i]) else {
+                        return;
+                    };
+                    let idx = if v.param < 100 {
+                        v.param - 1
+                    } else {
+                        4 + (v.param - 100)
+                    };
+                    if matches!(t, CallTarget::Fn { pc } if pc == fn_)
+                        && idx >= 0
+                        && (idx as u32) < args.len
+                    {
+                        self.walk(
+                            par.fn_,
+                            pir.at(args, idx as u32),
+                            pos_of(b, i),
+                            d + 1,
+                            via,
+                            ptr,
+                        );
                     }
                 }
             }
             Node::Load { size, addr } => {
                 if let Some(o) = dd.fp_off(addr) {
-                    let y = if size == 8 { dd.reaching(&an.fl, slot(o), p, false) } else { None };
-                    let y = y.or_else(|| dd.reaching(&an.fl, slot(o - (crate::util::to_int32(o) & 7) as f64), p, true));
+                    let y = if size == 8 {
+                        dd.reaching(&an.fl, slot(o), p, false)
+                    } else {
+                        None
+                    };
+                    let y = y.or_else(|| {
+                        dd.reaching(
+                            &an.fl,
+                            slot(o - (crate::util::to_int32(o) & 7) as f64),
+                            p,
+                            true,
+                        )
+                    });
                     if let Some((y, q)) = y {
                         if let Node::Call(t, args) = ir.get(y) {
                             self.call_src(fn_, &ir.target(t), args, ir, q, d, &via);
@@ -623,7 +794,11 @@ impl<'s, 'a, 'x> Walk<'s, 'a, 'x> {
                     self.walk(fn_, x, p, d + 1, via.clone(), ptr && x != e);
                 }
             }
-            Node::Ext { a, .. } | Node::Neg(a) | Node::Not(a) | Node::Bswap { a, .. } | Node::Lnot(a) => self.walk(fn_, a, p, d + 1, via, false),
+            Node::Ext { a, .. }
+            | Node::Neg(a)
+            | Node::Not(a)
+            | Node::Bswap { a, .. }
+            | Node::Lnot(a) => self.walk(fn_, a, p, d + 1, via, false),
             Node::Sel(_, a, b) => {
                 self.walk(fn_, a, p, d + 1, via.clone(), false);
                 self.walk(fn_, b, p, d + 1, via, false);

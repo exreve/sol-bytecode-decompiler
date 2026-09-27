@@ -33,7 +33,10 @@ pub fn s_num(v: u64) -> f64 {
 }
 
 pub fn fp_of(f: &Func) -> i64 {
-    f.vars.iter().find(|v| v.param == 10).map_or(-1, |v| v.id as i64)
+    f.vars
+        .iter()
+        .find(|v| v.param == 10)
+        .map_or(-1, |v| v.id as i64)
 }
 
 /// offOf: e is `base` or `base + const`: the offset
@@ -55,7 +58,13 @@ pub fn param_var(f: &Func, n: i32) -> Option<u32> {
 
 /// the variable of a function holding its call's argument j (0-based)
 pub fn arg_param(f: &Func, j: usize) -> Option<u32> {
-    param_var(f, j as i32 + 1).or_else(|| if j >= 4 { param_var(f, 100 + j as i32 - 4) } else { None })
+    param_var(f, j as i32 + 1).or_else(|| {
+        if j >= 4 {
+            param_var(f, 100 + j as i32 - 4)
+        } else {
+            None
+        }
+    })
 }
 
 /// callOf: a call statement, a set / eval of a call expression: target, arguments
@@ -202,21 +211,51 @@ pub fn cond_key(ir: &Ir, e: E, d: u32) -> String {
                 }
                 _ => op.as_str().to_string(),
             };
-            format!("({o} {} {})", cond_key(ir, a, d + 1), cond_key(ir, b, d + 1))
+            format!(
+                "({o} {} {})",
+                cond_key(ir, a, d + 1),
+                cond_key(ir, b, d + 1)
+            )
         }
         Node::Var(id) => format!("v{id}"),
         Node::Const(v) => format!("{v}"),
         Node::Load { size, addr } => format!("ld{size}({})", cond_key(ir, addr, d + 1)),
-        Node::Bin(op, a, b) => format!("({} {} {})", op.as_str(), cond_key(ir, a, d + 1), cond_key(ir, b, d + 1)),
-        Node::Ext { signed, bits, a } => format!("x{}{bits}({})", if signed { "s" } else { "u" }, cond_key(ir, a, d + 1)),
-        Node::Land(a, b) => format!("(land {} {})", cond_key(ir, a, d + 1), cond_key(ir, b, d + 1)),
-        Node::Lor(a, b) => format!("(lor {} {})", cond_key(ir, a, d + 1), cond_key(ir, b, d + 1)),
+        Node::Bin(op, a, b) => format!(
+            "({} {} {})",
+            op.as_str(),
+            cond_key(ir, a, d + 1),
+            cond_key(ir, b, d + 1)
+        ),
+        Node::Ext { signed, bits, a } => format!(
+            "x{}{bits}({})",
+            if signed { "s" } else { "u" },
+            cond_key(ir, a, d + 1)
+        ),
+        Node::Land(a, b) => format!(
+            "(land {} {})",
+            cond_key(ir, a, d + 1),
+            cond_key(ir, b, d + 1)
+        ),
+        Node::Lor(a, b) => format!(
+            "(lor {} {})",
+            cond_key(ir, a, d + 1),
+            cond_key(ir, b, d + 1)
+        ),
         Node::Fn(n, args) => format!(
             "{}({})",
             ir.name(n),
-            ir.items(args).map(|a| cond_key(ir, a, d + 1)).collect::<Vec<_>>().join(",")
+            ir.items(args)
+                .map(|a| cond_key(ir, a, d + 1))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
-        Node::Call(_, args) => format!("call({})", ir.items(args).map(|a| cond_key(ir, a, d + 1)).collect::<Vec<_>>().join(",")),
+        Node::Call(_, args) => format!(
+            "call({})",
+            ir.items(args)
+                .map(|a| cond_key(ir, a, d + 1))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         n => node_kind(&n).to_string(),
     }
 }
@@ -246,7 +285,12 @@ pub fn node_kind(n: &Node) -> &'static str {
 
 /// The block deciding a check's condition: the branch whose condition is (a leaf of) it, else the fail
 /// side's branching predecessor.
-pub fn decision_block(g: &Cfg, c: Option<E>, fail_pc: Option<i64>, pass_pc: Option<i64>) -> Option<usize> {
+pub fn decision_block(
+    g: &Cfg,
+    c: Option<E>,
+    fail_pc: Option<i64>,
+    pass_pc: Option<i64>,
+) -> Option<usize> {
     let ir = fir(g.f);
     let mut leaves: Vec<usize> = Vec::new();
     fn leaf(g: &Cfg, ir: &Ir, e: E, out: &mut Vec<usize>) {
@@ -278,7 +322,14 @@ pub fn decision_block(g: &Cfg, c: Option<E>, fail_pc: Option<i64>, pass_pc: Opti
                     *ck = Some(m);
                 }
             }
-            let mut bs: Vec<usize> = g.cond_key.borrow().as_ref().unwrap().get(&cond_key(ir, c, 0)).cloned().unwrap_or_default();
+            let mut bs: Vec<usize> = g
+                .cond_key
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .get(&cond_key(ir, c, 0))
+                .cloned()
+                .unwrap_or_default();
             let leads = |mut s: usize, pc: i64| -> bool {
                 for _ in 0..4 {
                     let x = &g.f.blocks[s];
@@ -318,7 +369,12 @@ pub fn decision_block(g: &Cfg, c: Option<E>, fail_pc: Option<i64>, pass_pc: Opti
     let blocks = &g.f.blocks;
     for _ in 0..4 {
         let Some(bb) = b else { break };
-        let ps: Vec<usize> = blocks[bb].preds.iter().copied().filter(|&p| g.rpo[p] >= 0).collect();
+        let ps: Vec<usize> = blocks[bb]
+            .preds
+            .iter()
+            .copied()
+            .filter(|&p| g.rpo[p] >= 0)
+            .collect();
         if ps.len() != 1 {
             return None;
         }
@@ -331,7 +387,12 @@ pub fn decision_block(g: &Cfg, c: Option<E>, fail_pc: Option<i64>, pass_pc: Opti
 }
 
 /// A path from the function's entry to block `to` that avoids block `avoid`.
-pub fn bypass(g: &Cfg, avoid: usize, to: usize, allowed: Option<&dyn Fn(usize) -> bool>) -> Option<Vec<usize>> {
+pub fn bypass(
+    g: &Cfg,
+    avoid: usize,
+    to: usize,
+    allowed: Option<&dyn Fn(usize) -> bool>,
+) -> Option<Vec<usize>> {
     if avoid == 0 {
         return None;
     }
@@ -382,7 +443,10 @@ pub fn reaches(g: &Cfg, from: usize, to: usize, allowed: Option<&dyn Fn(usize) -
 
 /// The first statement pc of a block (its start when it has none).
 pub fn block_pc(g: &Cfg, b: usize) -> i64 {
-    g.f.blocks[b].stmts.first().map_or(g.f.blocks[b].start, stmt_pc)
+    g.f.blocks[b]
+        .stmts
+        .first()
+        .map_or(g.f.blocks[b].start, stmt_pc)
 }
 
 /// variables with a single definition (`set`): their expression
@@ -465,7 +529,11 @@ pub struct Callee<'a> {
 }
 
 impl<'a> Callee<'a> {
-    pub fn new(f: Box<dyn Fn(i64) -> Option<&'a Func> + 'a>, name: Box<dyn Fn(i64) -> String + 'a>, legacy: bool) -> Self {
+    pub fn new(
+        f: Box<dyn Fn(i64) -> Option<&'a Func> + 'a>,
+        name: Box<dyn Fn(i64) -> String + 'a>,
+        legacy: bool,
+    ) -> Self {
         Callee {
             f,
             name,
@@ -550,12 +618,19 @@ fn writes_info(f: &Func) -> WritesInfo {
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
-                Stmt::Store { size: 8, addr, v, .. } => {
+                Stmt::Store {
+                    size: 8, addr, v, ..
+                } => {
                     if let Some(z) = off_of(ir, *addr, fpv) {
                         fst.push((z, *v));
                     }
                 }
-                Stmt::Stores { size: 8, addr, vals, .. } => {
+                Stmt::Stores {
+                    size: 8,
+                    addr,
+                    vals,
+                    ..
+                } => {
                     if let Some(z) = off_of(ir, *addr, fpv) {
                         for (i, v) in ir.items(*vals).enumerate() {
                             fst.push((z + 8.0 * i as f64, v));
@@ -582,11 +657,15 @@ fn writes_info(f: &Func) -> WritesInfo {
         for s in &b.stmts {
             let (a, n) = match s {
                 Stmt::Store { size, addr, .. } if *size != 8 => (*addr, *size as f64),
-                Stmt::Stores { size, addr, vals, .. } if *size != 8 => (*addr, *size as f64 * vals.len as f64),
+                Stmt::Stores {
+                    size, addr, vals, ..
+                } if *size != 8 => (*addr, *size as f64 * vals.len as f64),
                 Stmt::Copy { dst, n, .. } => (*dst, *n as f64),
                 _ => continue,
             };
-            let Some(z) = off_of(ir, a, fpv) else { continue };
+            let Some(z) = off_of(ir, a, fpv) else {
+                continue;
+            };
             let hi = z + n;
             let (mut lo, mut up) = (0usize, ys.len());
             while lo < up {
@@ -606,7 +685,12 @@ fn writes_info(f: &Func) -> WritesInfo {
             }
         }
     }
-    WritesInfo { defs, fpv, fst, narrow: hitv }
+    WritesInfo {
+        defs,
+        fpv,
+        fst,
+        narrow: hitv,
+    }
 }
 
 /// How many bytes a call may write through its argument j (a pointer to the caller's frame).
@@ -640,7 +724,9 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
             lw
         };
     }
-    let CallTarget::Fn { pc } = t else { return 128.0 };
+    let CallTarget::Fn { pc } = t else {
+        return 128.0;
+    };
     if depth <= 0 {
         return 128.0;
     }
@@ -650,9 +736,22 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
     if let (Some(f), Some(pv)) = (f, pv) {
         let ir = fir(f);
         let w = fl.writes_info(f);
-        let WritesInfo { defs, fpv, fst, narrow } = &*w;
+        let WritesInfo {
+            defs,
+            fpv,
+            fst,
+            narrow,
+        } = &*w;
         let spill: RefCell<HashMap<FK, bool>> = RefCell::new(HashMap::new());
-        fn off(ir: &Ir, e: E, d: u32, pv: u32, defs: &HashMap<u32, Option<Vec<E>>>, fpv: i64, spill: &RefCell<HashMap<FK, bool>>) -> Option<f64> {
+        fn off(
+            ir: &Ir,
+            e: E,
+            d: u32,
+            pv: u32,
+            defs: &HashMap<u32, Option<Vec<E>>>,
+            fpv: i64,
+            spill: &RefCell<HashMap<FK, bool>>,
+        ) -> Option<f64> {
             if d > 8 {
                 return None;
             }
@@ -694,7 +793,9 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
         while ch && k < 4 {
             ch = false;
             for (z, v) in fst {
-                if spill.borrow().get(&FK::of(*z)).copied().unwrap_or(false) && offe(*v) != Some(0.0) {
+                if spill.borrow().get(&FK::of(*z)).copied().unwrap_or(false)
+                    && offe(*v) != Some(0.0)
+                {
                     spill.borrow_mut().insert(FK::of(*z), false);
                     ch = true;
                 }
@@ -704,7 +805,9 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
         for y in narrow {
             spill.borrow_mut().insert(FK::of(*y), false);
         }
-        let sp = |z: Option<f64>| z.is_some_and(|z| spill.borrow().get(&FK::of(z)).copied().unwrap_or(false));
+        let sp = |z: Option<f64>| {
+            z.is_some_and(|z| spill.borrow().get(&FK::of(z)).copied().unwrap_or(false))
+        };
         'outer: for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Store { size: 8, addr, .. } = s {
@@ -712,9 +815,19 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
                         continue;
                     }
                 }
-                if let Stmt::Stores { size: 8, addr, vals, .. } = s {
+                if let Stmt::Stores {
+                    size: 8,
+                    addr,
+                    vals,
+                    ..
+                } = s
+                {
                     if let Some(z) = off_of(ir, *addr, *fpv) {
-                        if ir.items(*vals).enumerate().all(|(i, v)| offe(v).is_none() || sp(Some(z + 8.0 * i as f64))) {
+                        if ir
+                            .items(*vals)
+                            .enumerate()
+                            .all(|(i, v)| offe(v).is_none() || sp(Some(z + 8.0 * i as f64)))
+                        {
                             continue;
                         }
                     }
@@ -729,7 +842,9 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
                             break 'outer;
                         }
                     }
-                    Stmt::Stores { size, addr, vals, .. } => {
+                    Stmt::Stores {
+                        size, addr, vals, ..
+                    } => {
                         if let Some(a) = offe(*addr) {
                             n = n.max(a + *size as f64 * vals.len as f64);
                         }
@@ -800,7 +915,9 @@ pub fn iter_advance(fl: &FlowCtx, pc: i64, j: usize, k: i64, depth: i32) -> i64 
         let is_var_pv = |e: E| matches!(ir.get(root(e)), Node::Var(id) if id == pv);
         let is_iter = |e: E| -> bool {
             let x = root(e);
-            let Node::Load { size: 8, addr } = ir.get(x) else { return false };
+            let Node::Load { size: 8, addr } = ir.get(x) else {
+                return false;
+            };
             if k == 0 && is_var_pv(addr) {
                 return true;
             }
@@ -815,7 +932,10 @@ pub fn iter_advance(fl: &FlowCtx, pc: i64, j: usize, k: i64, depth: i32) -> i64 
                 if n != 0 {
                     break 'o;
                 }
-                if let Stmt::Store { size: 8, addr, v, .. } = st {
+                if let Stmt::Store {
+                    size: 8, addr, v, ..
+                } = st
+                {
                     if is_iter(*addr) && add30(*v) {
                         n = 1;
                     }
@@ -842,7 +962,10 @@ pub fn iter_advance(fl: &FlowCtx, pc: i64, j: usize, k: i64, depth: i32) -> i64 
                     if n != 0 {
                         break;
                     }
-                    if let Stmt::Store { size: 8, addr, v, .. } = st {
+                    if let Stmt::Store {
+                        size: 8, addr, v, ..
+                    } = st
+                    {
                         if is_var_pv(*addr) && add30(*v) {
                             n = 1;
                         }
@@ -961,7 +1084,11 @@ impl<'a> Defs<'a> {
         let ir = self.ir;
         let k = (o - a) as i64 as u64;
         let addr = match self.fp_off(src) {
-            Some(s) => ir.bin(BinOp::Add, ir.var(self.fp as u32), ir.c((s + o - a) as i64 as u64)),
+            Some(s) => ir.bin(
+                BinOp::Add,
+                ir.var(self.fp as u32),
+                ir.c((s + o - a) as i64 as u64),
+            ),
             None => {
                 if k != 0 {
                     ir.bin(BinOp::Add, src, ir.c(k))
@@ -975,13 +1102,22 @@ impl<'a> Defs<'a> {
 
     /// What a statement does to a variable (key >= 0) / a frame slot (key < 0): Some(Some(value)),
     /// Some(None) (clobbered) or None (untouched).
-    fn effect(&self, fl: &FlowCtx, bi: usize, si: usize, key: f64, loose: bool) -> Option<Option<E>> {
+    fn effect(
+        &self,
+        fl: &FlowCtx,
+        bi: usize,
+        si: usize,
+        key: f64,
+        loose: bool,
+    ) -> Option<Option<E>> {
         let ir = self.ir;
         let s = &self.f.blocks[bi].stmts[si];
         if key >= 0.0 {
             return match s {
                 Stmt::Set { dst, e, .. } if *dst as f64 == key => Some(Some(*e)),
-                Stmt::Call { dst, t, args, .. } if *dst as f64 == key => Some(Some(call_expr(ir, t, *args))),
+                Stmt::Call { dst, t, args, .. } if *dst as f64 == key => {
+                    Some(Some(call_expr(ir, t, *args)))
+                }
                 _ => None,
             };
         }
@@ -992,9 +1128,15 @@ impl<'a> Defs<'a> {
                 if a == o {
                     return Some(if *size == 8 || loose { Some(*v) } else { None });
                 }
-                return if a < o + 8.0 && a + *size as f64 > o { Some(None) } else { None };
+                return if a < o + 8.0 && a + *size as f64 > o {
+                    Some(None)
+                } else {
+                    None
+                };
             }
-            Stmt::Stores { size, addr, vals, .. } => {
+            Stmt::Stores {
+                size, addr, vals, ..
+            } => {
                 let a = self.fp_off(*addr)?;
                 let n = vals.len as f64 * *size as f64;
                 if a >= o + 8.0 || a + n <= o {
@@ -1024,7 +1166,11 @@ impl<'a> Defs<'a> {
             _ => {}
         }
         let (ct, args) = call_of(ir, s)?;
-        let callee = if self.with_callee { Some(&fl.callee) } else { None };
+        let callee = if self.with_callee {
+            Some(&fl.callee)
+        } else {
+            None
+        };
         if let Some(mc) = memcpy_of(ir, &ct, args, callee) {
             let a = self.fp_off(mc.0)?;
             if a >= o + 8.0 || a + mc.2 <= o {
@@ -1037,9 +1183,17 @@ impl<'a> Defs<'a> {
         }
         for (j, a) in ir.items(args).enumerate() {
             if let Some(p) = self.fp_off(a) {
-                let w = if self.with_callee { call_writes(fl, &ct, j, 3) } else { 128.0 };
+                let w = if self.with_callee {
+                    call_writes(fl, &ct, j, 3)
+                } else {
+                    128.0
+                };
                 if p <= o && o < p + w {
-                    return Some(if loose { Some(call_expr(ir, &ct, args)) } else { None });
+                    return Some(if loose {
+                        Some(call_expr(ir, &ct, args))
+                    } else {
+                        None
+                    });
                 }
             }
         }
@@ -1048,8 +1202,12 @@ impl<'a> Defs<'a> {
             all.extend(ir.items(*x));
         }
         for a in all {
-            let Node::Call(t, cargs) = ir.get(a) else { continue };
-            let Some(nc) = memcpy_of(ir, &ir.target(t), cargs, callee) else { continue };
+            let Node::Call(t, cargs) = ir.get(a) else {
+                continue;
+            };
+            let Some(nc) = memcpy_of(ir, &ir.target(t), cargs, callee) else {
+                continue;
+            };
             let Some(d) = self.fp_off(nc.0) else { continue };
             if d >= o + 8.0 || d + nc.2 <= o {
                 continue;
@@ -1073,7 +1231,14 @@ impl<'a> Defs<'a> {
     }
 
     /// per call: the frame slots (iterator cursors) it advances, by the AccountInfos taken
-    fn advanced_at(&self, fl: &FlowCtx, bi: usize, si: usize, ct: &CallTarget, args: L) -> Option<Rc<Vec<(f64, i64)>>> {
+    fn advanced_at(
+        &self,
+        fl: &FlowCtx,
+        bi: usize,
+        si: usize,
+        ct: &CallTarget,
+        args: L,
+    ) -> Option<Rc<Vec<(f64, i64)>>> {
         let key = pos_of(bi, si);
         if let Some(x) = self.adv_memo.borrow().get(&key) {
             return x.clone();
@@ -1118,7 +1283,9 @@ impl<'a> Defs<'a> {
         let mut r = Vec::new();
         for (i, s) in self.f.blocks[b].stmts.iter().enumerate() {
             let hit = match s {
-                Stmt::Store { addr, .. } | Stmt::Stores { addr, .. } => self.fp_off(*addr).is_some(),
+                Stmt::Store { addr, .. } | Stmt::Stores { addr, .. } => {
+                    self.fp_off(*addr).is_some()
+                }
                 Stmt::Copy { dst, .. } => self.fp_off(*dst).is_some(),
                 _ => call_of(ir, s).is_some(),
             };
@@ -1138,7 +1305,9 @@ impl<'a> Defs<'a> {
         let mut r: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, s) in self.f.blocks[b].stmts.iter().enumerate() {
             match s {
-                Stmt::Set { dst, .. } | Stmt::Call { dst, .. } if *dst >= 0 => r.entry(*dst as u32).or_default().push(i),
+                Stmt::Set { dst, .. } | Stmt::Call { dst, .. } if *dst >= 0 => {
+                    r.entry(*dst as u32).or_default().push(i)
+                }
                 _ => {}
             }
         }
@@ -1149,9 +1318,19 @@ impl<'a> Defs<'a> {
 
     /// the last statement of block b before `to` affecting key: Some(Some(value, pos)), Some(None)
     /// (clobbered), None (none)
-    fn last(&self, fl: &FlowCtx, b: usize, to: usize, key: f64, loose: bool) -> Option<Option<(E, Pos)>> {
+    fn last(
+        &self,
+        fl: &FlowCtx,
+        b: usize,
+        to: usize,
+        key: f64,
+        loose: bool,
+    ) -> Option<Option<(E, Pos)>> {
         let cand: Vec<usize> = if key >= 0.0 {
-            self.var_stmts(b).get(&(key as u32)).cloned().unwrap_or_default()
+            self.var_stmts(b)
+                .get(&(key as u32))
+                .cloned()
+                .unwrap_or_default()
         } else {
             (*self.slot_stmts(b)).clone()
         };
@@ -1194,9 +1373,13 @@ impl<'a> Defs<'a> {
         }
         let mkey = FK::of(key * 2.0 + if loose { 1.0 } else { 0.0 });
         let n = self.f.blocks.len();
-        self.end_memo.borrow_mut().entry(mkey).or_insert_with(|| vec![None; n]);
+        self.end_memo
+            .borrow_mut()
+            .entry(mkey)
+            .or_insert_with(|| vec![None; n]);
         let known = |q: usize| self.end_memo.borrow()[&mkey][q];
-        let set_known = |q: usize, v: EndV| self.end_memo.borrow_mut().get_mut(&mkey).unwrap()[q] = Some(v);
+        let set_known =
+            |q: usize, v: EndV| self.end_memo.borrow_mut().get_mut(&mkey).unwrap()[q] = Some(v);
         let mut todo: Vec<usize> = Vec::new();
         let mut stack: Vec<usize> = self.f.blocks[b0].preds.clone();
         while let Some(q) = stack.pop() {
@@ -1205,10 +1388,13 @@ impl<'a> Defs<'a> {
             }
             let len = self.f.blocks[q].stmts.len();
             if let Some(x) = self.last(fl, q, len, key, loose) {
-                set_known(q, match x {
-                    Some((e, p)) => EndV::Def(e, p),
-                    None => EndV::Null,
-                });
+                set_known(
+                    q,
+                    match x {
+                        Some((e, p)) => EndV::Def(e, p),
+                        None => EndV::Null,
+                    },
+                );
                 continue;
             }
             let preds = &self.f.blocks[q].preds;
@@ -1221,7 +1407,8 @@ impl<'a> Defs<'a> {
             stack.extend(preds.iter().copied());
         }
         if !todo.is_empty() {
-            let cur: RefCell<HashMap<usize, EndV>> = RefCell::new(todo.iter().map(|&q| (q, EndV::Top)).collect());
+            let cur: RefCell<HashMap<usize, EndV>> =
+                RefCell::new(todo.iter().map(|&q| (q, EndV::Top)).collect());
             let val = |q: usize| -> Option<EndV> {
                 if self.open.borrow()[q] {
                     cur.borrow().get(&q).copied()
@@ -1286,7 +1473,9 @@ pub fn arith_how(fl: &FlowCtx, d: &Defs, e: E, p: Pos) -> &'static str {
                 e = a;
                 continue;
             }
-            Node::Bin(op @ (BinOp::Add | BinOp::Sub), _, b) if !matches!(ir.get(b), Node::Const(_)) => {
+            Node::Bin(op @ (BinOp::Add | BinOp::Sub), _, b)
+                if !matches!(ir.get(b), Node::Const(_)) =>
+            {
                 return if op == BinOp::Add { "+=" } else { "-=" };
             }
             Node::Var(id) => match d.def_at(fl, id, p) {
@@ -1420,7 +1609,8 @@ pub fn compare_accounts(
                     let y = if let Some(&x) = d.defs.get(&id) {
                         Some((x, d.def_pos[&id]))
                     } else if d.multi.contains(&id) {
-                        d.reaching(fl, id as f64, p, false).or_else(|| same_loads(fl, d, id))
+                        d.reaching(fl, id as f64, p, false)
+                            .or_else(|| same_loads(fl, d, id))
                     } else {
                         None
                     };
@@ -1485,10 +1675,34 @@ pub fn compare_accounts(
                 return Some((ia, direct));
             }
             if !direct && d.fp_off(v).is_some() {
-                return prov(fl, d, follow, calls, acct_var, infos, cp, v, cp, true, dd + 1);
+                return prov(
+                    fl,
+                    d,
+                    follow,
+                    calls,
+                    acct_var,
+                    infos,
+                    cp,
+                    v,
+                    cp,
+                    true,
+                    dd + 1,
+                );
             }
             return match ir.get(v) {
-                Node::Load { addr, .. } => prov(fl, d, follow, calls, acct_var, infos, cp, addr, q, direct, dd + 1),
+                Node::Load { addr, .. } => prov(
+                    fl,
+                    d,
+                    follow,
+                    calls,
+                    acct_var,
+                    infos,
+                    cp,
+                    addr,
+                    q,
+                    direct,
+                    dd + 1,
+                ),
                 _ => None,
             };
         }
@@ -1505,10 +1719,25 @@ pub fn compare_accounts(
             }
         }
         match ir.get(b) {
-            Node::Load { size: 8, addr } => prov(fl, d, follow, calls, acct_var, infos, cp, addr, q, false, dd + 1),
+            Node::Load { size: 8, addr } => prov(
+                fl,
+                d,
+                follow,
+                calls,
+                acct_var,
+                infos,
+                cp,
+                addr,
+                q,
+                false,
+                dd + 1,
+            ),
             _ => None,
         }
     }
-    let res: Vec<(String, bool)> = [ca.0, ca.1].iter().filter_map(|&a| prov(fl, d, &follow, calls, acct_var, infos, cp, a, cp, true, 0)).collect();
+    let res: Vec<(String, bool)> = [ca.0, ca.1]
+        .iter()
+        .filter_map(|&a| prov(fl, d, &follow, calls, acct_var, infos, cp, a, cp, true, 0))
+        .collect();
     Some(res)
 }

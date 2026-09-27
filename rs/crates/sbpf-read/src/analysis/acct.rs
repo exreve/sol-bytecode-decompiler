@@ -24,7 +24,12 @@ pub enum AV {
     /// Rc<RefCell<&mut ..>> of AccountInfo i (f: lamports | data)
     Rc { i: f64, f: &'static str, off: f64 },
     /// &lamports / &data[..] / &key / &owner of account i (vo: data at a variable offset past off)
-    Ptr { i: f64, f: String, off: f64, vo: bool },
+    Ptr {
+        i: f64,
+        f: String,
+        off: f64,
+        vo: bool,
+    },
     /// a field value read
     Val { i: f64, f: String },
     /// (first pass) a pointer variable
@@ -54,16 +59,28 @@ impl AV {
     }
     fn off(&self) -> Option<f64> {
         match self {
-            AV::Slice { off } | AV::Recs { off } | AV::Rec { off, .. } | AV::Rc { off, .. } | AV::Ptr { off, .. } => Some(*off),
-            AV::Base { off, .. } | AV::Elem { off, .. } | AV::Fr { off } | AV::Ext { off, .. } => Some(*off),
+            AV::Slice { off }
+            | AV::Recs { off }
+            | AV::Rec { off, .. }
+            | AV::Rc { off, .. }
+            | AV::Ptr { off, .. } => Some(*off),
+            AV::Base { off, .. } | AV::Elem { off, .. } | AV::Fr { off } | AV::Ext { off, .. } => {
+                Some(*off)
+            }
             AV::Val { .. } => None,
         }
     }
     fn with_off(&self, o: f64) -> AV {
         let mut x = self.clone();
         match &mut x {
-            AV::Slice { off } | AV::Recs { off } | AV::Rec { off, .. } | AV::Rc { off, .. } | AV::Ptr { off, .. } => *off = o,
-            AV::Base { off, .. } | AV::Elem { off, .. } | AV::Fr { off } | AV::Ext { off, .. } => *off = o,
+            AV::Slice { off }
+            | AV::Recs { off }
+            | AV::Rec { off, .. }
+            | AV::Rc { off, .. }
+            | AV::Ptr { off, .. } => *off = o,
+            AV::Base { off, .. } | AV::Elem { off, .. } | AV::Fr { off } | AV::Ext { off, .. } => {
+                *off = o
+            }
             AV::Val { .. } => {}
         }
         x
@@ -75,11 +92,25 @@ impl AV {
             AV::Slice { off } => format!(r#"{{"k":"slice","off":{}}}"#, n(*off)),
             AV::Recs { off } => format!(r#"{{"k":"recs","off":{}}}"#, n(*off)),
             AV::Rec { i, off } => format!(r#"{{"k":"rec","i":{},"off":{}}}"#, n(*i), n(*off)),
-            AV::Rc { i, f, off } => format!(r#"{{"k":"rc","i":{},"f":"{f}","off":{}}}"#, n(*i), n(*off)),
-            AV::Ptr { i, f, off, vo } => format!(r#"{{"k":"ptr","i":{},"f":{},"off":{}{}}}"#, n(*i), crate::util::json_str(f), n(*off), if *vo { r#","vo":true"# } else { "" }),
-            AV::Val { i, f } => format!(r#"{{"k":"val","i":{},"f":{}}}"#, n(*i), crate::util::json_str(f)),
+            AV::Rc { i, f, off } => {
+                format!(r#"{{"k":"rc","i":{},"f":"{f}","off":{}}}"#, n(*i), n(*off))
+            }
+            AV::Ptr { i, f, off, vo } => format!(
+                r#"{{"k":"ptr","i":{},"f":{},"off":{}{}}}"#,
+                n(*i),
+                crate::util::json_str(f),
+                n(*off),
+                if *vo { r#","vo":true"# } else { "" }
+            ),
+            AV::Val { i, f } => format!(
+                r#"{{"k":"val","i":{},"f":{}}}"#,
+                n(*i),
+                crate::util::json_str(f)
+            ),
             AV::Base { v, off } => format!(r#"{{"k":"base","v":{v},"off":{}}}"#, n(*off)),
-            AV::Elem { v, e, off } => format!(r#"{{"k":"elem","v":{v},"e":{},"off":{}}}"#, n(*e), n(*off)),
+            AV::Elem { v, e, off } => {
+                format!(r#"{{"k":"elem","v":{v},"e":{},"off":{}}}"#, n(*e), n(*off))
+            }
             AV::Fr { off } => format!(r#"{{"k":"fr","off":{}}}"#, n(*off)),
             AV::Ext { id, off } => format!(r#"{{"k":"ext","id":{id},"off":{}}}"#, n(*off)),
         }
@@ -286,16 +317,30 @@ impl<'a> AvEval<'a> {
     }
 
     /// what a call left in the object it got a pointer to: the callee's stores there
-    fn out_of(&self, fl: &FlowCtx<'a>, t: &CallTarget, args: &[E], o: f64, p: Pos, d: i32) -> Option<AV> {
-        let CallTarget::Fn { pc } = t else { return None };
+    fn out_of(
+        &self,
+        fl: &FlowCtx<'a>,
+        t: &CallTarget,
+        args: &[E],
+        o: f64,
+        p: Pos,
+        d: i32,
+    ) -> Option<AV> {
+        let CallTarget::Fn { pc } = t else {
+            return None;
+        };
         if self.depth <= 0 || !self.with_callee {
             return None;
         }
         let g = (fl.callee.f)(*pc)?;
         let dd = &self.d;
-        let j = args.iter().position(|&a| dd.fp_off(a).is_some_and(|q| q <= o && o < q + 128.0));
+        let j = args
+            .iter()
+            .position(|&a| dd.fp_off(a).is_some_and(|q| q <= o && o < q + 128.0));
         let pv = param_var(g, j.map_or(0, |j| j as i32 + 1));
-        let (Some(j), Some(pv)) = (j, pv) else { return None };
+        let (Some(j), Some(pv)) = (j, pv) else {
+            return None;
+        };
         let off = o - dd.fp_off(args[j]).unwrap();
         let gd = fl.defs_of(g, true);
         let gir = fir(g);
@@ -320,16 +365,24 @@ impl<'a> AvEval<'a> {
         let mut vs: Vec<(E, Pos)> = Vec::new();
         for (bi, b) in g.blocks.iter().enumerate() {
             for (i, s) in b.stmts.iter().enumerate() {
-                if let Stmt::Store { size: 8, addr, v, .. } = s {
+                if let Stmt::Store {
+                    size: 8, addr, v, ..
+                } = s
+                {
                     if at(gir, &gd, pv, *addr, 0) == Some(off) {
                         vs.push((*v, pos_of(bi, i)));
                     }
                 }
-                let mc = call_of(gir, s).and_then(|(ct, cargs)| memcpy_of(gir, &ct, cargs, Some(&fl.callee)));
+                let mc = call_of(gir, s)
+                    .and_then(|(ct, cargs)| memcpy_of(gir, &ct, cargs, Some(&fl.callee)));
                 if let Some(mc) = mc {
                     if let Some(a) = at(gir, &gd, pv, mc.0, 0) {
                         if a <= off && off + 8.0 <= a + mc.2 {
-                            let addr = if off > a { gir.bin(BinOp::Add, mc.1, gir.c((off - a) as i64 as u64)) } else { mc.1 };
+                            let addr = if off > a {
+                                gir.bin(BinOp::Add, mc.1, gir.c((off - a) as i64 as u64))
+                            } else {
+                                mc.1
+                            };
                             vs.push((gir.load(8, addr), pos_of(bi, i)));
                         }
                     }
@@ -341,7 +394,11 @@ impl<'a> AvEval<'a> {
         }
         let mut rs: IndexMap<u32, AV> = IndexMap::new();
         for (k, &a) in args.iter().enumerate() {
-            let x = if k == j { None } else { self.ev(fl, a, p, d + 1) };
+            let x = if k == j {
+                None
+            } else {
+                self.ev(fl, a, p, d + 1)
+            };
             let q = param_var(g, k as i32 + 1);
             let (Some(x), Some(q)) = (x, q) else { continue };
             if let AV::Fr { off } = x {
@@ -360,8 +417,21 @@ impl<'a> AvEval<'a> {
             return None;
         }
         let bud = self.bud.clone().unwrap_or_else(|| Rc::new(Cell::new(64)));
-        let gg = av_evaluator(g, gd, rs, None, true, self.depth - 1, false, None, Some(bud));
-        let xs: Vec<AV> = vs.iter().filter_map(|&(e, q)| gg.ev(fl, e, q, d + 1)).collect();
+        let gg = av_evaluator(
+            g,
+            gd,
+            rs,
+            None,
+            true,
+            self.depth - 1,
+            false,
+            None,
+            Some(bud),
+        );
+        let xs: Vec<AV> = vs
+            .iter()
+            .filter_map(|&(e, q)| gg.ev(fl, e, q, d + 1))
+            .collect();
         if !xs.is_empty() && xs.iter().all(|x| x.json() == xs[0].json()) {
             Some(xs[0].clone())
         } else {
@@ -391,10 +461,21 @@ impl<'a> AvEval<'a> {
             }
             *self.mdefs.borrow_mut() = Some(m);
         }
-        let ds: Vec<(Option<E>, Pos)> = self.mdefs.borrow().as_ref().unwrap().get(&id).cloned().unwrap_or_default();
+        let ds: Vec<(Option<E>, Pos)> = self
+            .mdefs
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
         let b = match &self.bud {
             Some(b) => b.clone(),
-            None => self.own.borrow_mut().get_or_insert_with(|| Rc::new(Cell::new(64))).clone(),
+            None => self
+                .own
+                .borrow_mut()
+                .get_or_insert_with(|| Rc::new(Cell::new(64)))
+                .clone(),
         };
         if ds.is_empty() || ds.len() > 4 || d > 6 {
             return None;
@@ -462,7 +543,14 @@ impl<'a> AvEval<'a> {
                     x.more.get_or_insert_with(HashMap::new).insert(p, r.clone());
                 }
             } else {
-                m.insert(e, EvMemo { p, x: r.clone(), more: None });
+                m.insert(
+                    e,
+                    EvMemo {
+                        p,
+                        x: r.clone(),
+                        more: None,
+                    },
+                );
             }
         }
         r
@@ -482,13 +570,25 @@ impl<'a> AvEval<'a> {
                     return Some(r.clone());
                 }
                 if let Some(&x) = dd.defs.get(&id) {
-                    return if matches!(ir.get(x), Node::Call(..)) { None } else { self.ev(fl, x, dd.def_pos[&id], d + 1) };
+                    return if matches!(ir.get(x), Node::Call(..)) {
+                        None
+                    } else {
+                        self.ev(fl, x, dd.def_pos[&id], d + 1)
+                    };
                 }
                 if dd.multi.contains(&id) {
                     if let Some((y, q)) = dd.reaching(fl, id as f64, p, false) {
-                        return if matches!(ir.get(y), Node::Call(..)) { None } else { self.ev(fl, y, q, d + 1) };
+                        return if matches!(ir.get(y), Node::Call(..)) {
+                            None
+                        } else {
+                            self.ev(fl, y, q, d + 1)
+                        };
                     }
-                    return if self.pass1 || self.depth > 1 { None } else { self.multi_val(fl, id, d) };
+                    return if self.pass1 || self.depth > 1 {
+                        None
+                    } else {
+                        self.multi_val(fl, id, d)
+                    };
                 }
                 if self.pass1 && id as i64 != dd.fp {
                     Some(AV::Base { v: id, off: 0.0 })
@@ -513,7 +613,12 @@ impl<'a> AvEval<'a> {
                         if !matches!(ir.get(y), Node::Const(_)) {
                             if let Some(AV::Ptr { i, f, off, .. }) = self.ev(fl, x, p, d + 1) {
                                 if f == "data" {
-                                    return Some(AV::Ptr { i, f, off, vo: true });
+                                    return Some(AV::Ptr {
+                                        i,
+                                        f,
+                                        off,
+                                        vo: true,
+                                    });
                                 }
                             }
                         }
@@ -529,7 +634,11 @@ impl<'a> AvEval<'a> {
             }
             Node::Load { size, addr } => {
                 let fo = dd.fp_off(addr);
-                let fa = if self.pass1 || fo.is_some() { None } else { self.ev(fl, addr, p, d + 1) };
+                let fa = if self.pass1 || fo.is_some() {
+                    None
+                } else {
+                    self.ev(fl, addr, p, d + 1)
+                };
                 let o = fo.or(match &fa {
                     Some(AV::Fr { off }) => Some(*off),
                     _ => None,
@@ -537,7 +646,10 @@ impl<'a> AvEval<'a> {
                 if let Some(o) = o {
                     if let Some(arr) = self.arr {
                         if size == 8 && o >= arr && jmod(o - arr, 8.0) == 0.0 && o - arr < 512.0 {
-                            return Some(AV::Rec { i: (o - arr) / 8.0, off: 0.0 });
+                            return Some(AV::Rec {
+                                i: (o - arr) / 8.0,
+                                off: 0.0,
+                            });
                         }
                     }
                     if let Some(infos) = self.infos {
@@ -545,31 +657,54 @@ impl<'a> AvEval<'a> {
                             let i = ((o - infos) / 56.0).floor();
                             if let Some(c) = c_info_field(jmod(o - infos, 56.0)) {
                                 if c.1 == size {
-                                    return Some(if c.1 == 1 || c.0 == "data_len" || c.0 == "rent_epoch" {
-                                        AV::Val { i, f: c.0.into() }
-                                    } else {
-                                        AV::Ptr { i, f: c.0.into(), off: 0.0, vo: false }
-                                    });
+                                    return Some(
+                                        if c.1 == 1 || c.0 == "data_len" || c.0 == "rent_epoch" {
+                                            AV::Val { i, f: c.0.into() }
+                                        } else {
+                                            AV::Ptr {
+                                                i,
+                                                f: c.0.into(),
+                                                off: 0.0,
+                                                vo: false,
+                                            }
+                                        },
+                                    );
                                 }
                             }
                         }
                     }
-                    let y = if size == 8 { dd.reaching(fl, slot(o), p, false) } else { None };
+                    let y = if size == 8 {
+                        dd.reaching(fl, slot(o), p, false)
+                    } else {
+                        None
+                    };
                     if let Some((y, q)) = y {
                         return self.ev(fl, y, q, d + 1);
                     }
-                    let z = if size == 8 && self.with_callee { dd.reaching(fl, slot(o), p, true) } else { None };
+                    let z = if size == 8 && self.with_callee {
+                        dd.reaching(fl, slot(o), p, true)
+                    } else {
+                        None
+                    };
                     let c = z.and_then(|(x, q)| match ir.get(x) {
                         Node::Call(t, cargs) => match ir.target(t) {
-                            CallTarget::Fn { pc } => Some((CallTarget::Fn { pc }, ir.to_vec(cargs), q)),
+                            CallTarget::Fn { pc } => {
+                                Some((CallTarget::Fn { pc }, ir.to_vec(cargs), q))
+                            }
                             _ => None,
                         },
                         _ => None,
                     });
-                    let Some((ct, cargs, zq)) = c else { return None };
-                    let CallTarget::Fn { pc } = ct else { unreachable!() };
+                    let Some((ct, cargs, zq)) = c else {
+                        return None;
+                    };
+                    let CallTarget::Fn { pc } = ct else {
+                        unreachable!()
+                    };
                     let nm = (fl.callee.name)(pc);
-                    if let Some(m) = crate::jre!(r"try_borrow_(?:mut_)?(data|lamports)").captures(&nm) {
+                    if let Some(m) =
+                        crate::jre!(r"try_borrow_(?:mut_)?(data|lamports)").captures(&nm)
+                    {
                         if cargs.first().and_then(|&a| dd.fp_off(a)) == Some(o - 8.0) {
                             let a = cargs.get(1).and_then(|&a1| self.ev(fl, a1, zq, d + 1));
                             return match a {
@@ -582,7 +717,11 @@ impl<'a> AvEval<'a> {
                             };
                         }
                     }
-                    return if !self.pass1 { self.out_of(fl, &ct, &cargs, o, zq, d) } else { None };
+                    return if !self.pass1 {
+                        self.out_of(fl, &ct, &cargs, o, zq, d)
+                    } else {
+                        None
+                    };
                 }
                 let a = match fa {
                     Some(x) => Some(x),
@@ -599,7 +738,11 @@ impl<'a> AvEval<'a> {
         match a {
             AV::Base { v, off } => {
                 if self.pass1 && size == 8 && off >= 0.0 && jmod(off, 8.0) == 0.0 {
-                    Some(AV::Elem { v, e: off / 8.0, off: 0.0 })
+                    Some(AV::Elem {
+                        v,
+                        e: off / 8.0,
+                        off: 0.0,
+                    })
                 } else {
                     None
                 }
@@ -612,10 +755,19 @@ impl<'a> AvEval<'a> {
                 let o = jmod(off, 48.0);
                 let fl_ = info_field(self.legacy(fl), o);
                 match fl_ {
-                    Some(f @ ("key" | "owner")) if size == 8 => Some(AV::Ptr { i, f: f.into(), off: 0.0, vo: false }),
+                    Some(f @ ("key" | "owner")) if size == 8 => Some(AV::Ptr {
+                        i,
+                        f: f.into(),
+                        off: 0.0,
+                        vo: false,
+                    }),
                     Some(f @ ("lamports" | "data")) if size == 8 => Some(AV::Rc { i, f, off: 0.0 }),
                     Some(f) => {
-                        let ok = if f == "rent_epoch" { size == 8 } else { o >= 40.0 && size == 1 };
+                        let ok = if f == "rent_epoch" {
+                            size == 8
+                        } else {
+                            o >= 40.0 && size == 1
+                        };
                         if ok {
                             Some(AV::Val { i, f: f.into() })
                         } else {
@@ -627,7 +779,10 @@ impl<'a> AvEval<'a> {
             }
             AV::Recs { off } => {
                 if size == 8 && off >= 0.0 && off < 512.0 && jmod(off, 8.0) == 0.0 {
-                    Some(AV::Rec { i: off / 8.0, off: 0.0 })
+                    Some(AV::Rec {
+                        i: off / 8.0,
+                        off: 0.0,
+                    })
                 } else {
                     None
                 }
@@ -637,7 +792,11 @@ impl<'a> AvEval<'a> {
                 if off >= 88.0 {
                     return Some(AV::Val {
                         i,
-                        f: format!("data[{}..{}]", js_num(off - 88.0), js_num(off - 88.0 + size as f64)),
+                        f: format!(
+                            "data[{}..{}]",
+                            js_num(off - 88.0),
+                            js_num(off - 88.0 + size as f64)
+                        ),
                     });
                 }
                 if let Some(x) = rec_field(off) {
@@ -647,23 +806,36 @@ impl<'a> AvEval<'a> {
                 }
                 for o in [8.0, 40.0] {
                     if off > o && off < o + 32.0 {
-                        return Some(AV::Val { i, f: rec_field(o).unwrap().0.into() });
+                        return Some(AV::Val {
+                            i,
+                            f: rec_field(o).unwrap().0.into(),
+                        });
                     }
                 }
                 None
             }
             AV::Rc { i, f, off } => {
                 if off == 24.0 && size == 8 {
-                    return Some(AV::Ptr { i, f: f.into(), off: 0.0, vo: false });
+                    return Some(AV::Ptr {
+                        i,
+                        f: f.into(),
+                        off: 0.0,
+                        vo: false,
+                    });
                 }
                 if f == "data" && off == 32.0 && size == 8 {
-                    Some(AV::Val { i, f: "data_len".into() })
+                    Some(AV::Val {
+                        i,
+                        f: "data_len".into(),
+                    })
                 } else {
                     None
                 }
             }
             AV::Ptr { i, f, off, vo } => {
-                if f != "data" && (off < 0.0 || off + size as f64 > if f == "lamports" { 8.0 } else { 32.0 }) {
+                if f != "data"
+                    && (off < 0.0 || off + size as f64 > if f == "lamports" { 8.0 } else { 32.0 })
+                {
                     return None;
                 }
                 let fld = if f == "data" {
@@ -696,16 +868,23 @@ fn cursor_arrays(f: &Func, input: u32, d: &Defs) -> (Option<f64>, Option<f64>) {
     let step = |v: u32, n: u64| {
         all.get(&v).is_some_and(|l| {
             l.iter().any(|&e| match ir.get(e) {
-                Node::Bin(BinOp::Add, a, b) => ir.get(a) == Node::Var(v) && ir.get(b) == Node::Const(n),
+                Node::Bin(BinOp::Add, a, b) => {
+                    ir.get(a) == Node::Var(v) && ir.get(b) == Node::Const(n)
+                }
                 _ => false,
             })
         })
     };
-    let start = |v: u32| all.get(&v).and_then(|l| l.iter().find_map(|&e| d.fp_off(e)));
+    let start = |v: u32| {
+        all.get(&v)
+            .and_then(|l| l.iter().find_map(|&e| d.fp_off(e)))
+    };
     let rec0 = |e: E| match ir.get(e) {
         Node::Var(id) => all.get(&id).is_some_and(|l| {
             l.iter().any(|&x| match ir.get(x) {
-                Node::Bin(BinOp::Add, a, b) => ir.get(a) == Node::Var(input) && ir.get(b) == Node::Const(8),
+                Node::Bin(BinOp::Add, a, b) => {
+                    ir.get(a) == Node::Var(input) && ir.get(b) == Node::Const(8)
+                }
                 _ => false,
             })
         }),
@@ -720,7 +899,9 @@ fn cursor_arrays(f: &Func, input: u32, d: &Defs) -> (Option<f64>, Option<f64>) {
         for s in &b.stmts {
             let (addr, size, vals) = match s {
                 Stmt::Store { addr, size, v, .. } => (*addr, *size, vec![*v]),
-                Stmt::Stores { addr, size, vals, .. } => (*addr, *size, ir.to_vec(*vals)),
+                Stmt::Stores {
+                    addr, size, vals, ..
+                } => (*addr, *size, ir.to_vec(*vals)),
                 _ => continue,
             };
             let (base, off) = match ir.get(addr) {
@@ -758,7 +939,10 @@ fn cursor_arrays(f: &Func, input: u32, d: &Defs) -> (Option<f64>, Option<f64>) {
     for (v, fl) in &flags {
         if let Some(o) = start(*v) {
             for &x in &flagv[v] {
-                if fl.contains(&FK::of(x + 1.0)) && fl.contains(&FK::of(x + 2.0)) && keys.get(v).is_some_and(|k| k.contains(&FK::of(x - 48.0))) {
+                if fl.contains(&FK::of(x + 1.0))
+                    && fl.contains(&FK::of(x + 2.0))
+                    && keys.get(v).is_some_and(|k| k.contains(&FK::of(x - 48.0)))
+                {
                     infos = Some(o + x - 48.0);
                     break;
                 }
@@ -778,7 +962,9 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
         return x;
     }
     fl.cache.wt.borrow_mut().insert(k, false);
-    let Some(pv) = param_var(g, n) else { return false };
+    let Some(pv) = param_var(g, n) else {
+        return false;
+    };
     if g.blocks.len() > 2000 {
         return false;
     }
@@ -787,8 +973,12 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
     fn of(ir: &Ir, d: &Defs, pv: u32, e: E, k: u32) -> bool {
         k < 6
             && match ir.get(e) {
-                Node::Var(id) => id == pv || d.defs.get(&id).is_some_and(|&x| of(ir, d, pv, x, k + 1)),
-                Node::Bin(BinOp::Add, a, b) => matches!(ir.get(b), Node::Const(_)) && of(ir, d, pv, a, k + 1),
+                Node::Var(id) => {
+                    id == pv || d.defs.get(&id).is_some_and(|&x| of(ir, d, pv, x, k + 1))
+                }
+                Node::Bin(BinOp::Add, a, b) => {
+                    matches!(ir.get(b), Node::Const(_)) && of(ir, d, pv, a, k + 1)
+                }
                 _ => false,
             }
     }
@@ -796,7 +986,9 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
     'o: for b in &g.blocks {
         for s in &b.stmts {
             match s {
-                Stmt::Store { addr, .. } | Stmt::Stores { addr, .. } if of(ir, &d, pv, *addr, 0) => {
+                Stmt::Store { addr, .. } | Stmt::Stores { addr, .. }
+                    if of(ir, &d, pv, *addr, 0) =>
+                {
                     r = true;
                     break 'o;
                 }
@@ -806,7 +998,9 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
                 }
                 _ => {}
             }
-            let Some((ct, args)) = call_of(ir, s) else { continue };
+            let Some((ct, args)) = call_of(ir, s) else {
+                continue;
+            };
             if let Some(mc) = memcpy_of(ir, &ct, args, Some(&fl.callee)) {
                 if of(ir, &d, pv, mc.0, 0) {
                     r = true;
@@ -819,7 +1013,11 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
                 _ => None,
             };
             if let Some(h) = h {
-                if !std::ptr::eq(h, g) && ir.items(args).enumerate().any(|(j, a)| of(ir, &d, pv, a, 0) && writes_through(fl, h, j as i32 + 1, depth - 1)) {
+                if !std::ptr::eq(h, g)
+                    && ir.items(args).enumerate().any(|(j, a)| {
+                        of(ir, &d, pv, a, 0) && writes_through(fl, h, j as i32 + 1, depth - 1)
+                    })
+                {
                     r = true;
                     break 'o;
                 }
@@ -832,19 +1030,39 @@ fn writes_through<'a>(fl: &FlowCtx<'a>, g: &'a Func, n: i32, depth: i32) -> bool
 
 /// the parameters (numbers) a function uses as an &[AccountInfo] by its own evidence
 fn slice_params<'a>(fl: &FlowCtx<'a>, g: &'a Func, depth: i32) -> Rc<Vec<i32>> {
-    let k = (g.pc, format!("{}{depth}", if fl.callee.legacy { "L" } else { "C" }));
+    let k = (
+        g.pc,
+        format!("{}{depth}", if fl.callee.legacy { "L" } else { "C" }),
+    );
     if let Some(r) = fl.cache.slice.borrow().get(&k) {
         return r.clone();
     }
-    fl.cache.slice.borrow_mut().insert(k.clone(), Rc::new(Vec::new()));
+    fl.cache
+        .slice
+        .borrow_mut()
+        .insert(k.clone(), Rc::new(Vec::new()));
     if g.blocks.len() > 4000 {
         return Rc::new(Vec::new());
     }
     let mut roots: IndexMap<u32, AV> = IndexMap::new();
-    classify_roots(fl, g, fl.defs_of(g, true), &mut roots, None, true, None, None, depth);
+    classify_roots(
+        fl,
+        g,
+        fl.defs_of(g, true),
+        &mut roots,
+        None,
+        true,
+        None,
+        None,
+        depth,
+    );
     let mut r: Vec<i32> = Vec::new();
     for v in &g.vars {
-        if v.param >= 1 && v.param <= 5 && matches!(roots.get(&v.id), Some(AV::Slice { off }) if *off == 0.0) && !r.contains(&v.param) {
+        if v.param >= 1
+            && v.param <= 5
+            && matches!(roots.get(&v.id), Some(AV::Slice { off }) if *off == 0.0)
+            && !r.contains(&v.param)
+        {
             r.push(v.param);
         }
     }
@@ -868,7 +1086,17 @@ fn classify_roots<'a>(
     depth: i32,
 ) -> Vec<u32> {
     let ir = fir(f);
-    let ev = av_evaluator(f, d.clone(), roots.clone(), arr, with_callee, 2, true, infos, None);
+    let ev = av_evaluator(
+        f,
+        d.clone(),
+        roots.clone(),
+        arr,
+        with_callee,
+        2,
+        true,
+        infos,
+        None,
+    );
     let legacy = with_callee && fl.callee.legacy;
     let mut hits: IndexMap<u32, IndexSet<FK>> = IndexMap::new();
     let mut elems: IndexMap<u32, IndexSet<FK>> = IndexMap::new();
@@ -884,7 +1112,8 @@ fn classify_roots<'a>(
     fn x30(ir: &Ir, d: &Defs, e: E, k: u32) -> bool {
         match ir.get(e) {
             Node::Bin(BinOp::Mul, a, b) => {
-                (ir.get(b) == Node::Const(0x30) && !matches!(ir.get(a), Node::Const(_))) || (ir.get(a) == Node::Const(0x30) && !matches!(ir.get(b), Node::Const(_)))
+                (ir.get(b) == Node::Const(0x30) && !matches!(ir.get(a), Node::Const(_)))
+                    || (ir.get(a) == Node::Const(0x30) && !matches!(ir.get(b), Node::Const(_)))
             }
             Node::Var(id) if k < 3 => d.defs.get(&id).is_some_and(|&x| x30(ir, d, x, k + 1)),
             _ => false,
@@ -900,7 +1129,8 @@ fn classify_roots<'a>(
     };
     for (bi, b) in f.blocks.iter().enumerate() {
         let mut p = pos_of(bi, 0);
-        let mut note = |x: E, p: Pos,
+        let mut note = |x: E,
+                        p: Pos,
                         hits: &mut IndexMap<u32, IndexSet<FK>>,
                         elems: &mut IndexMap<u32, IndexSet<FK>>,
                         rec_uses: &mut HashMap<u32, i64>,
@@ -919,17 +1149,29 @@ fn classify_roots<'a>(
                     }
                 }
             }
-            let Node::Load { size, addr } = ir.get(x) else { return };
+            let Node::Load { size, addr } = ir.get(x) else {
+                return;
+            };
             let a = ev.ev(fl, addr, p, 0);
             if let Some(AV::Base { v, off: c }) = &a {
                 if Some(*v) != input && *c >= 0.0 && *c < 48.0 * 64.0 {
                     let c = *c;
                     let fld = info_field(legacy, jmod(c, 48.0));
-                    let fits = if size == 8 { jmod(c, 8.0) == 0.0 } else { size == 1 && jmod(c, 48.0) >= 40.0 && jmod(c, 48.0) <= 42.0 };
+                    let fits = if size == 8 {
+                        jmod(c, 8.0) == 0.0
+                    } else {
+                        size == 1 && jmod(c, 48.0) >= 40.0 && jmod(c, 48.0) <= 42.0
+                    };
                     if !fits {
                         misfit.insert(*v);
                     }
-                    if fld.is_some() && (if size == 8 { jmod(c, 48.0) < 40.0 } else { size == 1 && jmod(c, 48.0) >= 40.0 }) {
+                    if fld.is_some()
+                        && (if size == 8 {
+                            jmod(c, 48.0) < 40.0
+                        } else {
+                            size == 1 && jmod(c, 48.0) >= 40.0
+                        })
+                    {
                         add_to(hits, *v, (c / 48.0).floor());
                     }
                     if size == 1 && jmod(c, 48.0) >= 40.0 && fld.is_some() {
@@ -942,15 +1184,26 @@ fn classify_roots<'a>(
             }
             let ef = elem_field(&a);
             if let Some(AV::Elem { v, e, off }) = &a {
-                let lim = if ef == Some("key") || ef == Some("owner") { 32.0 } else { 40.0 };
-                if ef.is_none() || ef == Some("rent_epoch") || *off < 0.0 || *off + size as f64 > lim {
+                let lim = if ef == Some("key") || ef == Some("owner") {
+                    32.0
+                } else {
+                    40.0
+                };
+                if ef.is_none()
+                    || ef == Some("rent_epoch")
+                    || *off < 0.0
+                    || *off + size as f64 > lim
+                {
                     misfit.insert(*v);
                 }
                 if size == 8 {
                     if ef == Some("data") && (*off == 24.0 || *off == 32.0) {
                         info_ev.insert(*v);
                     }
-                    if (ef == Some("key") || ef == Some("owner")) && *off < 32.0 && jmod(*off, 8.0) == 0.0 {
+                    if (ef == Some("key") || ef == Some("owner"))
+                        && *off < 32.0
+                        && jmod(*off, 8.0) == 0.0
+                    {
                         let w = key_words.entry((*v, FK::of(*e))).or_default();
                         w.insert(FK::of(*off));
                         if w.len() >= 2 {
@@ -985,14 +1238,25 @@ fn classify_roots<'a>(
                 let mut xs: Vec<E> = Vec::new();
                 ir.walk(e, &mut |x, _| xs.push(x));
                 for x in xs {
-                    note(x, p, &mut hits, &mut elems, &mut rec_uses, &mut info_ev, &mut misfit, &mut key_words, &mut several);
+                    note(
+                        x,
+                        p,
+                        &mut hits,
+                        &mut elems,
+                        &mut rec_uses,
+                        &mut info_ev,
+                        &mut misfit,
+                        &mut key_words,
+                        &mut several,
+                    );
                 }
             }
             let c = call_of(ir, s);
             if let Some((_, args)) = &c {
                 for a in ir.items(*args) {
                     let x = ev.ev(fl, a, p, 0);
-                    let ok = matches!(&x, Some(AV::Elem { off, .. }) if *off == 8.0 || *off == 40.0);
+                    let ok =
+                        matches!(&x, Some(AV::Elem { off, .. }) if *off == 8.0 || *off == 40.0);
                     rec_use(&mut rec_uses, &x, ok);
                     if let Some(AV::Elem { v, off, .. }) = &x {
                         if *off == 0.0 && matches!(elem_field(&x), Some("key" | "owner")) {
@@ -1041,7 +1305,17 @@ fn classify_roots<'a>(
             let mut xs: Vec<E> = Vec::new();
             ir.walk(*c, &mut |x, _| xs.push(x));
             for &x in &xs {
-                note(x, p, &mut hits, &mut elems, &mut rec_uses, &mut info_ev, &mut misfit, &mut key_words, &mut several);
+                note(
+                    x,
+                    p,
+                    &mut hits,
+                    &mut elems,
+                    &mut rec_uses,
+                    &mut info_ev,
+                    &mut misfit,
+                    &mut key_words,
+                    &mut several,
+                );
             }
             for &y in &xs {
                 cmp_note(y, p, &mut info_ev);
@@ -1084,11 +1358,20 @@ fn seed_key(ck: &str, seed: &IndexMap<u32, AV>) -> String {
     if seed.is_empty() {
         return ck.to_string();
     }
-    let v: Vec<String> = seed.iter().map(|(k, x)| format!("[{k},{}]", x.json())).collect();
+    let v: Vec<String> = seed
+        .iter()
+        .map(|(k, x)| format!("[{k},{}]", x.json()))
+        .collect();
     format!("{ck}[{}]", v.join(","))
 }
 
-pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<String>], with_callee: bool, seed: Option<&IndexMap<u32, AV>>) -> Rc<Resolver<'a>> {
+pub fn account_resolver<'a>(
+    fl: &FlowCtx<'a>,
+    f: &'a Func,
+    names: &[Option<String>],
+    with_callee: bool,
+    seed: Option<&IndexMap<u32, AV>>,
+) -> Rc<Resolver<'a>> {
     let ck = if with_callee {
         if fl.callee.legacy {
             "L"
@@ -1108,14 +1391,19 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
     let input = if f.is_entry { param_var(f, 1) } else { None };
     let d = fl.defs_of(f, with_callee);
     let rec0 = |x: Option<E>| {
-        let (Some(x), Some(inp)) = (x, input) else { return false };
+        let (Some(x), Some(inp)) = (x, input) else {
+            return false;
+        };
         matches!(ir.get(x), Node::Bin(BinOp::Add, a, b) if ir.get(a) == Node::Var(inp) && ir.get(b) == Node::Const(8))
     };
     let mut arr: Option<f64> = None;
     if input.is_some() {
         for b in &f.blocks {
             for s in &b.stmts {
-                if let Stmt::Store { size: 8, addr, v, .. } = s {
+                if let Stmt::Store {
+                    size: 8, addr, v, ..
+                } = s
+                {
                     let hit = rec0(Some(*v))
                         || match ir.get(*v) {
                             Node::Var(id) => rec0(d.defs.get(&id).copied()),
@@ -1142,16 +1430,27 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
         let k = {
             let v: Vec<String> = roots
                 .iter()
-                .map(|(v, x)| if matches!(x, AV::Ext { .. }) { format!(r#"[{v},"ext"]"#) } else { format!("[{v},{}]", x.json()) })
+                .map(|(v, x)| {
+                    if matches!(x, AV::Ext { .. }) {
+                        format!(r#"[{v},"ext"]"#)
+                    } else {
+                        format!("[{v},{}]", x.json())
+                    }
+                })
                 .collect();
             (f.pc, format!("{ck}[{}]", v.join(",")))
         };
         let hit = fl.cache.classify.borrow().get(&k).cloned();
         match hit {
             None => {
-                let set = classify_roots(fl, f, d.clone(), roots, arr, with_callee, infos, input, 2);
+                let set =
+                    classify_roots(fl, f, d.clone(), roots, arr, with_callee, infos, input, 2);
                 // (the entries whose value classify set, in the map's order)
-                let y: Vec<(u32, AV)> = roots.iter().filter(|(v, _)| set.contains(v)).map(|(v, x)| (*v, x.clone())).collect();
+                let y: Vec<(u32, AV)> = roots
+                    .iter()
+                    .filter(|(v, _)| set.contains(v))
+                    .map(|(v, x)| (*v, x.clone()))
+                    .collect();
                 fl.cache.classify.borrow_mut().insert(k, y);
             }
             Some(y) => {
@@ -1161,8 +1460,16 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
             }
         }
     };
-    let mut roots: IndexMap<u32, AV> = seed.iter().filter(|(_, x)| !matches!(x, AV::Ext { .. })).map(|(v, x)| (*v, x.clone())).collect();
-    let exts: Vec<(u32, AV)> = seed.iter().filter(|(_, x)| matches!(x, AV::Ext { .. })).map(|(v, x)| (*v, x.clone())).collect();
+    let mut roots: IndexMap<u32, AV> = seed
+        .iter()
+        .filter(|(_, x)| !matches!(x, AV::Ext { .. }))
+        .map(|(v, x)| (*v, x.clone()))
+        .collect();
+    let exts: Vec<(u32, AV)> = seed
+        .iter()
+        .filter(|(_, x)| matches!(x, AV::Ext { .. }))
+        .map(|(v, x)| (*v, x.clone()))
+        .collect();
     if !exts.is_empty() {
         let mut r1 = roots.clone();
         classify(&mut r1);
@@ -1176,21 +1483,53 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
     }
     classify(&mut roots);
     let has_roots = !roots.is_empty();
-    let ev = av_evaluator(f, d.clone(), roots.clone(), arr, with_callee, 2, false, infos, None);
+    let ev = av_evaluator(
+        f,
+        d.clone(),
+        roots.clone(),
+        arr,
+        with_callee,
+        2,
+        false,
+        infos,
+        None,
+    );
     let mut by_name: IndexMap<String, AcctRef> = IndexMap::new();
     if has_roots || arr.is_some() || infos.is_some() {
         for (v, e) in &d.defs {
-            let Some(Some(nm)) = names.get(*v as usize) else { continue };
-            let Some(a) = ev.ev(fl, *e, d.def_pos[v], 0) else { continue };
+            let Some(Some(nm)) = names.get(*v as usize) else {
+                continue;
+            };
+            let Some(a) = ev.ev(fl, *e, d.def_pos[v], 0) else {
+                continue;
+            };
             match a {
                 AV::Rec { i, off } if off == 0.0 => {
-                    by_name.insert(nm.clone(), AcctRef { index: i, field: None });
+                    by_name.insert(
+                        nm.clone(),
+                        AcctRef {
+                            index: i,
+                            field: None,
+                        },
+                    );
                 }
                 AV::Slice { off } if jmod(off, 48.0) == 0.0 => {
-                    by_name.insert(nm.clone(), AcctRef { index: off / 48.0, field: None });
+                    by_name.insert(
+                        nm.clone(),
+                        AcctRef {
+                            index: off / 48.0,
+                            field: None,
+                        },
+                    );
                 }
                 AV::Ptr { i, f, off, .. } if f == "key" && off == 0.0 => {
-                    by_name.insert(nm.clone(), AcctRef { index: i, field: None });
+                    by_name.insert(
+                        nm.clone(),
+                        AcctRef {
+                            index: i,
+                            field: None,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -1198,7 +1537,13 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
     }
     for (v, a) in &roots {
         if let (AV::Slice { .. }, Some(Some(nm))) = (a, names.get(*v as usize)) {
-            by_name.insert(nm.clone(), AcctRef { index: 0.0, field: None });
+            by_name.insert(
+                nm.clone(),
+                AcctRef {
+                    index: 0.0,
+                    field: None,
+                },
+            );
         }
     }
     let pm = {
@@ -1228,7 +1573,10 @@ pub fn account_resolver<'a>(fl: &FlowCtx<'a>, f: &'a Func, names: &[Option<Strin
 
 fn as_ref_(a: Option<AV>) -> Option<AcctRef> {
     match a? {
-        AV::Val { i, f } => Some(AcctRef { index: i, field: Some(f) }),
+        AV::Val { i, f } => Some(AcctRef {
+            index: i,
+            field: Some(f),
+        }),
         AV::Ptr { i, f, off, vo } => Some(AcctRef {
             index: i,
             field: Some(if f == "data" {
@@ -1245,11 +1593,18 @@ fn as_ref_(a: Option<AV>) -> Option<AcctRef> {
             if off >= 88.0 {
                 return Some(AcctRef {
                     index: i,
-                    field: Some(format!("data[{}..{}]", js_num(off - 88.0), js_num(off - 88.0 + 32.0))),
+                    field: Some(format!(
+                        "data[{}..{}]",
+                        js_num(off - 88.0),
+                        js_num(off - 88.0 + 32.0)
+                    )),
                 });
             }
             match rec_field(off) {
-                Some((n, 32)) => Some(AcctRef { index: i, field: Some(n.into()) }),
+                Some((n, 32)) => Some(AcctRef {
+                    index: i,
+                    field: Some(n.into()),
+                }),
                 _ => None,
             }
         }
@@ -1307,7 +1662,9 @@ impl<'a> Resolver<'a> {
                     continue;
                 }
                 Node::Var(id) => {
-                    let Some((y, q)) = self.d.def_at(fl, id, p) else { break };
+                    let Some((y, q)) = self.d.def_at(fl, id, p) else {
+                        break;
+                    };
                     let u = match ir.get(y) {
                         Node::Ext { a, .. } => a,
                         _ => y,
@@ -1325,7 +1682,9 @@ impl<'a> Resolver<'a> {
     }
     /// account fields an expression (a branch condition, else evaluated at the end of block b) reads
     pub fn refs(&self, fl: &FlowCtx<'a>, e: E, b: Option<usize>) -> Vec<AcctRef> {
-        let Some(p0) = self.at(e, b) else { return vec![] };
+        let Some(p0) = self.at(e, b) else {
+            return vec![];
+        };
         let ir = self.ir();
         let mut out: Vec<AcctRef> = Vec::new();
         let push = |out: &mut Vec<AcctRef>, r: Option<AcctRef>| {
@@ -1344,7 +1703,11 @@ impl<'a> Resolver<'a> {
                     push(&mut out, as_ref_(Some(a)));
                 }
             }
-            let (y, p) = if matches!(n, Node::Var(_)) { self.follow(fl, x, p0) } else { (x, p0) };
+            let (y, p) = if matches!(n, Node::Var(_)) {
+                self.follow(fl, x, p0)
+            } else {
+                (x, p0)
+            };
             if let Some((q0, q1)) = self.cmp_args(y) {
                 for q in [q0, q1] {
                     let r = as_ref_(self.av(fl, q, p));
@@ -1361,7 +1724,11 @@ impl<'a> Resolver<'a> {
         out
     }
     /// the account field a store writes (by the statement's position), how
-    pub fn store(&self, fl: &FlowCtx<'a>, p: Option<Pos>) -> Option<(AcctRef, Option<&'static str>)> {
+    pub fn store(
+        &self,
+        fl: &FlowCtx<'a>,
+        p: Option<Pos>,
+    ) -> Option<(AcctRef, Option<&'static str>)> {
         let p = p?;
         let r = self.store0(fl, p)?;
         let s = &self.f.blocks[(p >> 16) as usize].stmts[(p & 0xffff) as usize];
@@ -1398,7 +1765,10 @@ impl<'a> Resolver<'a> {
                     _ => None,
                 };
                 if let Some(AV::Ptr { i, vo: true, .. }) = &a {
-                    return Some(AcctRef { index: *i, field: Some("data".into()) });
+                    return Some(AcctRef {
+                        index: *i,
+                        field: Some("data".into()),
+                    });
                 }
                 let (i, o) = dd?;
                 return Some(AcctRef {
@@ -1425,7 +1795,10 @@ impl<'a> Resolver<'a> {
                         let x = self.av(fl, a, p);
                         if let Some(AV::Ptr { i, f, .. }) = &x {
                             if f == "data" && writes_through(fl, g, j as i32 + 1, 2) {
-                                return Some(AcctRef { index: *i, field: Some("data".into()) });
+                                return Some(AcctRef {
+                                    index: *i,
+                                    field: Some("data".into()),
+                                });
                             }
                         }
                     }
@@ -1434,15 +1807,21 @@ impl<'a> Resolver<'a> {
         }
         let (target, n) = match s {
             Stmt::Store { addr, size, .. } => (*addr, *size as f64),
-            Stmt::Stores { addr, size, vals, .. } => (*addr, *size as f64 * vals.len as f64),
+            Stmt::Stores {
+                addr, size, vals, ..
+            } => (*addr, *size as f64 * vals.len as f64),
             Stmt::Copy { dst, n, .. } => (*dst, *n as f64),
             _ => return None,
         };
         let a = self.av(fl, target, p);
         match &a {
             Some(AV::Ptr { i, f, off, vo }) => {
-                if f == "data" && !vo && *off == -8.0 && n == 8.0 && matches!(s, Stmt::Store { .. }) {
-                    return Some(AcctRef { index: *i, field: Some("data_len".into()) });
+                if f == "data" && !vo && *off == -8.0 && n == 8.0 && matches!(s, Stmt::Store { .. })
+                {
+                    return Some(AcctRef {
+                        index: *i,
+                        field: Some("data_len".into()),
+                    });
                 }
                 if f == "lamports" || f == "data" {
                     return Some(AcctRef {
@@ -1457,20 +1836,33 @@ impl<'a> Resolver<'a> {
                     });
                 }
                 if f == "owner" && *off >= 0.0 && off + n <= 32.0 {
-                    return Some(AcctRef { index: *i, field: Some("owner".into()) });
+                    return Some(AcctRef {
+                        index: *i,
+                        field: Some("owner".into()),
+                    });
                 }
             }
             Some(AV::Rec { i, off }) => {
                 if *off >= 40.0 && off + n <= 72.0 {
-                    return Some(AcctRef { index: *i, field: Some("owner".into()) });
+                    return Some(AcctRef {
+                        index: *i,
+                        field: Some("owner".into()),
+                    });
                 }
                 if *off == 72.0 && matches!(s, Stmt::Store { size: 8, .. }) {
-                    return Some(AcctRef { index: *i, field: Some("lamports".into()) });
+                    return Some(AcctRef {
+                        index: *i,
+                        field: Some("lamports".into()),
+                    });
                 }
                 if *off >= 88.0 {
                     return Some(AcctRef {
                         index: *i,
-                        field: Some(format!("data[{}..{}]", js_num(off - 88.0), js_num(off - 88.0 + n))),
+                        field: Some(format!(
+                            "data[{}..{}]",
+                            js_num(off - 88.0),
+                            js_num(off - 88.0 + n)
+                        )),
                     });
                 }
             }
@@ -1535,7 +1927,9 @@ impl<'a> Resolver<'a> {
                 let gir = fir(g);
                 g.blocks.iter().any(|b| {
                     b.stmts.iter().any(|s| match call_of(gir, s) {
-                        Some((ct, _)) => !matches!(ct, CallTarget::Ind { .. }) && self.pda_call(fl, &ct, d + 1),
+                        Some((ct, _)) => {
+                            !matches!(ct, CallTarget::Ind { .. }) && self.pda_call(fl, &ct, d + 1)
+                        }
                         None => false,
                     }) || match &b.term {
                         Term::Br { c, .. } => {
@@ -1575,12 +1969,16 @@ impl<'a> Resolver<'a> {
         if st {
             let w = self.av(fl, ir.load(8, e), p);
             if let Some(AV::Val { i, f }) = &w {
-                let m = crate::jre!(r"^data\[(\d+)\.\.\d+\]$").captures(f).map(|m| m[1].to_string());
+                let m = crate::jre!(r"^data\[(\d+)\.\.\d+\]$")
+                    .captures(f)
+                    .map(|m| m[1].to_string());
                 if m.is_some() || f == "key" || f == "owner" {
                     return Side::Acct(AcctRef {
                         index: *i,
                         field: Some(match m {
-                            Some(m) => format!("data[{m}..{}]", js_num(super::js_number(&m) + 32.0)),
+                            Some(m) => {
+                                format!("data[{m}..{}]", js_num(super::js_number(&m) + 32.0))
+                            }
                             None => f.clone(),
                         }),
                     });
@@ -1595,7 +1993,14 @@ impl<'a> Resolver<'a> {
         }
         match ir.get(e) {
             Node::Const(_) => Side::Const,
-            Node::Var(id) if matches!(self.d.defs.get(&id).map(|&x| ir.get(x)), Some(Node::Const(_))) => Side::Const,
+            Node::Var(id)
+                if matches!(
+                    self.d.defs.get(&id).map(|&x| ir.get(x)),
+                    Some(Node::Const(_))
+                ) =>
+            {
+                Side::Const
+            }
             _ => Side::None,
         }
     }
@@ -1616,7 +2021,9 @@ impl<'a> Resolver<'a> {
             }
             k += 1;
         }
-        let Node::Load { size: 8, addr } = ir.get(x) else { return None };
+        let Node::Load { size: 8, addr } = ir.get(x) else {
+            return None;
+        };
         let o = self.d.fp_off(addr)?;
         let (t, args) = self.origin(fl, addr, q, 0)?;
         if !self.pda_call(fl, &t, 0) {
@@ -1648,7 +2055,9 @@ impl<'a> Resolver<'a> {
         let mut xs: Vec<E> = Vec::new();
         ir.walk(c, &mut |x, _| xs.push(x));
         for x in xs {
-            let Node::Cmp(op, a, b) = ir.get(x) else { continue };
+            let Node::Cmp(op, a, b) = ir.get(x) else {
+                continue;
+            };
             if op != sbpf_ir::CmpOp::Eq && op != sbpf_ir::CmpOp::Ne {
                 continue;
             }
@@ -1674,12 +2083,20 @@ impl<'a> Resolver<'a> {
                     let mut seen: IndexMap<FK, (f64, HashSet<FK>)> = IndexMap::new();
                     for (bi, b) in self.f.blocks.iter().enumerate() {
                         if let Term::Br { c, .. } = &b.term {
-                            for (o, w, _) in self.pda_eqs(fl, *c, pos_of(bi, b.stmts.len())).iter() {
-                                seen.entry(FK::of(*o)).or_insert_with(|| (*o, HashSet::new())).1.insert(FK::of(*w));
+                            for (o, w, _) in self.pda_eqs(fl, *c, pos_of(bi, b.stmts.len())).iter()
+                            {
+                                seen.entry(FK::of(*o))
+                                    .or_insert_with(|| (*o, HashSet::new()))
+                                    .1
+                                    .insert(FK::of(*w));
                             }
                         }
                     }
-                    let v: Vec<f64> = seen.values().filter(|x| x.1.len() == 4).map(|x| x.0).collect();
+                    let v: Vec<f64> = seen
+                        .values()
+                        .filter(|x| x.1.len() == 4)
+                        .map(|x| x.0)
+                        .collect();
                     let v = Rc::new(v);
                     *self.pm.full.borrow_mut() = Some(v.clone());
                     v
@@ -1689,7 +2106,10 @@ impl<'a> Resolver<'a> {
         if full.is_empty() {
             return None;
         }
-        self.pda_eqs(fl, c, p).iter().find(|x| full.contains(&x.0)).map(|x| x.2)
+        self.pda_eqs(fl, c, p)
+            .iter()
+            .find(|x| full.contains(&x.0))
+            .map(|x| x.2)
     }
     /// the two sides of an equality (key / field compares)
     pub fn sides(&self, fl: &FlowCtx<'a>, c: E, b: Option<usize>) -> Option<(Side, Side)> {
@@ -1710,12 +2130,19 @@ impl<'a> Resolver<'a> {
             x = a;
         }
         if let Node::Land(a, bb) | Node::Lor(a, bb) = ir.get(x) {
-            let ss: Vec<(Side, Side)> = [self.sides(fl, a, b), self.sides(fl, bb, b)].into_iter().flatten().collect();
+            let ss: Vec<(Side, Side)> = [self.sides(fl, a, b), self.sides(fl, bb, b)]
+                .into_iter()
+                .flatten()
+                .collect();
             let obj = |s: &Side| matches!(s, Side::Acct(_));
             if let Some(s) = ss.iter().find(|s| obj(&s.0) && obj(&s.1)) {
                 return Some(s.clone());
             }
-            if let Some(s) = ss.iter().find(|s| [&s.0, &s.1].iter().any(|y| matches!(y, Side::Acct(r) if r.field.as_deref() == Some("key")))) {
+            if let Some(s) = ss.iter().find(|s| {
+                [&s.0, &s.1]
+                    .iter()
+                    .any(|y| matches!(y, Side::Acct(r) if r.field.as_deref() == Some("key")))
+            }) {
                 return Some(s.clone());
             }
             return ss.into_iter().next();
@@ -1733,7 +2160,10 @@ impl<'a> Resolver<'a> {
                 let ra = as_ref_(self.av(fl, a, p0));
                 let rb = as_ref_(self.av(fl, bb, p0));
                 if ra.is_some() || rb.is_some() {
-                    return Some((ra.map_or(Side::None, Side::Acct), rb.map_or(Side::None, Side::Acct)));
+                    return Some((
+                        ra.map_or(Side::None, Side::Acct),
+                        rb.map_or(Side::None, Side::Acct),
+                    ));
                 }
                 return None;
             }
@@ -1746,14 +2176,20 @@ impl<'a> Resolver<'a> {
     }
     /// a condition on a 32-byte comparison (memcmp / memeq)
     pub fn cmp32(&self, fl: &FlowCtx<'a>, c: E, b: Option<usize>) -> bool {
-        let Some(p0) = self.at(c, b) else { return false };
+        let Some(p0) = self.at(c, b) else {
+            return false;
+        };
         let ir = self.ir();
         let mut hit = false;
         let mut xs: Vec<E> = Vec::new();
         ir.walk(c, &mut |x, _| xs.push(x));
         for x in xs {
             if !hit && matches!(ir.get(x), Node::Var(_) | Node::Call(..) | Node::Fn(..)) {
-                let y = if matches!(ir.get(x), Node::Var(_)) { self.follow(fl, x, p0).0 } else { x };
+                let y = if matches!(ir.get(x), Node::Var(_)) {
+                    self.follow(fl, x, p0).0
+                } else {
+                    x
+                };
                 hit = self.cmp_args(y).is_some();
             }
         }
@@ -1763,11 +2199,16 @@ impl<'a> Resolver<'a> {
     pub fn pda_eq(&self, fl: &FlowCtx<'a>, c: E, b: Option<usize>) -> Option<f64> {
         let p0 = self.at(c, b)?;
         let x = self.pda_chain(fl, c, p0)?;
-        self.pda_eqs(fl, c, p0).iter().find(|y| y.2 == x).map(|y| y.1)
+        self.pda_eqs(fl, c, p0)
+            .iter()
+            .find(|y| y.2 == x)
+            .map(|y| y.1)
     }
     /// the PDA derivations a condition compares: the frame offsets of their calls' pointer arguments
     pub fn pda_bufs(&self, fl: &FlowCtx<'a>, c: E, b: Option<usize>) -> Vec<f64> {
-        let Some(p0) = self.at(c, b) else { return vec![] };
+        let Some(p0) = self.at(c, b) else {
+            return vec![];
+        };
         let ir = self.ir();
         let mut out: IndexSet<FK> = IndexSet::new();
         let mut outv: Vec<f64> = Vec::new();
@@ -1782,7 +2223,15 @@ impl<'a> Resolver<'a> {
         let mut seen: HashSet<E> = HashSet::new();
         let mut todo: Vec<(E, Pos, u32)> = vec![(c, p0, 0)];
         // (a walk per expression, in the TS order: depth-first, a variable's definition scanned where it is met)
-        fn scan<'a>(r: &Resolver<'a>, fl: &FlowCtx<'a>, e: E, p: Pos, d: u32, seen: &mut HashSet<E>, found: &mut Vec<f64>) {
+        fn scan<'a>(
+            r: &Resolver<'a>,
+            fl: &FlowCtx<'a>,
+            e: E,
+            p: Pos,
+            d: u32,
+            seen: &mut HashSet<E>,
+            found: &mut Vec<f64>,
+        ) {
             let ir = r.ir();
             let mut xs: Vec<E> = Vec::new();
             ir.walk(e, &mut |x, _| xs.push(x));
@@ -1794,7 +2243,11 @@ impl<'a> Resolver<'a> {
                 if let Some((a0, a1)) = r.cmp_args(x) {
                     for a in [a0, a1] {
                         let (y, q) = r.follow(fl, a, p);
-                        let g = if r.d.fp_off(y).is_some() { r.origin(fl, y, q, 0) } else { None };
+                        let g = if r.d.fp_off(y).is_some() {
+                            r.origin(fl, y, q, 0)
+                        } else {
+                            None
+                        };
                         if let Some((t, args)) = g {
                             if r.pda_call(fl, &t, 0) {
                                 for z in ir.items(args) {
@@ -1826,10 +2279,22 @@ impl<'a> Resolver<'a> {
 }
 
 /// seed: a callee's parameters bound to the caller's values at a call (see ctxResolver)
-pub fn seed_from<'a>(fl: &FlowCtx<'a>, pr: Option<&Rc<Resolver<'a>>>, pf: Option<&'a Func>, c: Option<(CallTarget, sbpf_ir::L)>, pos: Pos, fo: &'a Func, fn_: i64) -> IndexMap<u32, AV> {
+pub fn seed_from<'a>(
+    fl: &FlowCtx<'a>,
+    pr: Option<&Rc<Resolver<'a>>>,
+    pf: Option<&'a Func>,
+    c: Option<(CallTarget, sbpf_ir::L)>,
+    pos: Pos,
+    fo: &'a Func,
+    fn_: i64,
+) -> IndexMap<u32, AV> {
     let mut seed: IndexMap<u32, AV> = IndexMap::new();
-    let (Some(pr), Some(pf), Some((ct, args))) = (pr, pf, c) else { return seed };
-    let CallTarget::Fn { pc } = ct else { return seed };
+    let (Some(pr), Some(pf), Some((ct, args))) = (pr, pf, c) else {
+        return seed;
+    };
+    let CallTarget::Fn { pc } = ct else {
+        return seed;
+    };
     if pc != fn_ {
         return seed;
     }
@@ -1838,9 +2303,16 @@ pub fn seed_from<'a>(fl: &FlowCtx<'a>, pr: Option<&Rc<Resolver<'a>>>, pf: Option
     for (j, a) in pir.items(args).enumerate() {
         let v = pr.av(fl, a, pos);
         let pv = param_var(fo, j as i32 + 1);
-        let (Some(v), Some(pv)) = (v, pv) else { continue };
+        let (Some(v), Some(pv)) = (v, pv) else {
+            continue;
+        };
         match v {
-            AV::Slice { .. } | AV::Recs { .. } | AV::Rec { .. } | AV::Ptr { .. } | AV::Rc { .. } | AV::Ext { .. } => {
+            AV::Slice { .. }
+            | AV::Recs { .. }
+            | AV::Rec { .. }
+            | AV::Ptr { .. }
+            | AV::Rc { .. }
+            | AV::Ext { .. } => {
                 seed.insert(pv, v);
             }
             AV::Fr { off } => {

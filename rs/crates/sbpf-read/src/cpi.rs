@@ -2009,7 +2009,11 @@ pub fn token_ix_name(tag: u64) -> Option<&'static str> {
 
 /// A well-known program's instruction layouts (knownFamilies: the FAMILY entries in order): (known-id label,
 /// family label, [(tag, name, account roles)] by ascending tag).
-pub type KnownFamily = (&'static str, &'static str, Vec<(u64, &'static str, &'static [&'static str])>);
+pub type KnownFamily = (
+    &'static str,
+    &'static str,
+    Vec<(u64, &'static str, &'static [&'static str])>,
+);
 
 pub fn known_families() -> Vec<KnownFamily> {
     let fams = [
@@ -2022,7 +2026,9 @@ pub fn known_families() -> Vec<KnownFamily> {
     ];
     fams.iter()
         .map(|&(k, f)| {
-            let ixs = (0..1024u64).filter_map(|t| fam_ix(f, t).map(|l| (t, l.name, l.accounts))).collect();
+            let ixs = (0..1024u64)
+                .filter_map(|t| fam_ix(f, t).map(|l| (t, l.name, l.accounts)))
+                .collect();
             (k, fam_label(f), ixs)
         })
         .collect()

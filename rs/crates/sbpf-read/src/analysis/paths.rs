@@ -54,7 +54,11 @@ fn dominators_on(preds: &[Vec<usize>], order: &[usize], rpo: &[i32]) -> Vec<i32>
                 if idom[p] < 0 || rpo[p] < 0 {
                     continue;
                 }
-                nd = if nd < 0 { p as i32 } else { intersect(&idom, p as i32, nd) };
+                nd = if nd < 0 {
+                    p as i32
+                } else {
+                    intersect(&idom, p as i32, nd)
+                };
             }
             if nd >= 0 && idom[b] != nd {
                 idom[b] = nd;
@@ -172,9 +176,19 @@ impl<'a> An<'a> {
         let g = self.cfg(fn_);
         let blocks = &self.fo(fn_).unwrap().f.blocks;
         let ok = |x: usize| grp.allowed(fn_, x);
-        let mut order: Vec<usize> = (0..blocks.len()).filter(|&x| g.rpo[x] >= 0 && ok(x)).collect();
+        let mut order: Vec<usize> = (0..blocks.len())
+            .filter(|&x| g.rpo[x] >= 0 && ok(x))
+            .collect();
         order.sort_by_key(|&x| g.rpo[x]);
-        let preds: Vec<Vec<usize>> = (0..blocks.len()).map(|i| if ok(i) { blocks[i].preds.iter().copied().filter(|&p| ok(p)).collect() } else { vec![] }).collect();
+        let preds: Vec<Vec<usize>> = (0..blocks.len())
+            .map(|i| {
+                if ok(i) {
+                    blocks[i].preds.iter().copied().filter(|&p| ok(p)).collect()
+                } else {
+                    vec![]
+                }
+            })
+            .collect();
         let idom = Rc::new(dominators_on(&preds, &order, &g.rpo));
         ctx.ridom.borrow_mut().insert(fn_, idom.clone());
         Some(idom)
@@ -183,13 +197,21 @@ impl<'a> An<'a> {
     /// The branch conditions on every path to block b of a function (nearest first), and the dominating
     /// branches either side of which reaches it.
     pub fn conds_in(&self, fn_: i64, b: usize, ctx: Option<&IxCtx<'a>>, max: usize) -> Vec<IrCond> {
-        let Some(fo) = self.fo(fn_) else { return vec![] };
+        let Some(fo) = self.fo(fn_) else {
+            return vec![];
+        };
         let g = self.cfg(fn_);
         let blocks = &fo.f.blocks;
         let ridom = self.idom_of(fn_, ctx);
         let part = ridom.as_ref().is_some_and(|x| x[b] >= 0);
-        let idom: &[i32] = if part { ridom.as_ref().unwrap() } else { &g.idom };
-        let ok = |x: usize| g.rpo[x] >= 0 && (!part || ctx.unwrap().grp.as_ref().unwrap().allowed(fn_, x));
+        let idom: &[i32] = if part {
+            ridom.as_ref().unwrap()
+        } else {
+            &g.idom
+        };
+        let ok = |x: usize| {
+            g.rpo[x] >= 0 && (!part || ctx.unwrap().grp.as_ref().unwrap().allowed(fn_, x))
+        };
         let mut out: Vec<IrCond> = Vec::new();
         let mut x = b;
         let mut k = 0;
@@ -203,13 +225,31 @@ impl<'a> An<'a> {
                 if t != f {
                     let (t, f) = (*t as usize, *f as usize);
                     let pos = pos_of(d, blocks[d].stmts.len());
-                    let others: Option<Vec<usize>> = if x == t || x == f { Some(blocks[x].preds.iter().copied().filter(|&p| p != d && ok(p)).collect()) } else { None };
-                    if others.as_ref().is_some_and(|o| o.iter().all(|&p| dom_by(idom, x, p))) {
+                    let others: Option<Vec<usize>> = if x == t || x == f {
+                        Some(
+                            blocks[x]
+                                .preds
+                                .iter()
+                                .copied()
+                                .filter(|&p| p != d && ok(p))
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
+                    if others
+                        .as_ref()
+                        .is_some_and(|o| o.iter().all(|&p| dom_by(idom, x, p)))
+                    {
                         let others = others.unwrap();
-                        let lp = !others.is_empty() || blocks[d].preds.iter().any(|&p| ok(p) && dom_by(idom, d, p));
+                        let lp = !others.is_empty()
+                            || blocks[d].preds.iter().any(|&p| ok(p) && dom_by(idom, d, p));
                         let mut y = if x == t { f } else { t };
                         let mut j = 0;
-                        while j < 6 && matches!(blocks[y].term, Term::Jmp { .. }) && blocks[y].succs.len() == 1 {
+                        while j < 6
+                            && matches!(blocks[y].term, Term::Jmp { .. })
+                            && blocks[y].succs.len() == 1
+                        {
                             y = blocks[y].succs[0];
                             j += 1;
                         }
@@ -242,7 +282,13 @@ impl<'a> An<'a> {
     }
 
     /// conditions on the way to block b of a function: in it, then at the call sites up the call path
-    pub fn path_to(&self, ctx: Option<&IxCtx<'a>>, fn_: i64, b: Option<usize>, max: usize) -> Vec<IrCond> {
+    pub fn path_to(
+        &self,
+        ctx: Option<&IxCtx<'a>>,
+        fn_: i64,
+        b: Option<usize>,
+        max: usize,
+    ) -> Vec<IrCond> {
         let mut out: Vec<IrCond> = Vec::new();
         let mut cur = fn_;
         let mut b = b;
@@ -276,13 +322,19 @@ impl<'a> An<'a> {
             return h.clone();
         }
         let k = self.value_key0(ctx, fn_, e, p, d);
-        let stored = if crate::util::u16len(&k) > 600 { format!("{}…", js_slice(&k, 600)) } else { k.clone() };
+        let stored = if crate::util::u16len(&k) > 600 {
+            format!("{}…", js_slice(&k, 600))
+        } else {
+            k.clone()
+        };
         self.paths.keys.borrow_mut().insert(mk, stored);
         k
     }
 
     fn value_key0(&self, ctx: Option<&IxCtx<'a>>, fn_: i64, e: E, p: Pos, d: u32) -> String {
-        let (Some(dd), Some(fo)) = (self.defs_in(fn_), self.fo(fn_)) else { return "?".into() };
+        let (Some(dd), Some(fo)) = (self.defs_in(fn_), self.fo(fn_)) else {
+            return "?".into();
+        };
         let ir = fir(fo.f);
         let kk = |x: E, q: Pos| self.value_key(ctx, fn_, x, q, d + 1);
         match ir.get(e) {
@@ -293,7 +345,11 @@ impl<'a> An<'a> {
                 }
                 if let Some(&x) = dd.defs.get(&id) {
                     let dp = dd.def_pos[&id];
-                    return if matches!(ir.get(x), Node::Call(..)) { format!("call{fn_}@{dp}") } else { kk(x, dp) };
+                    return if matches!(ir.get(x), Node::Call(..)) {
+                        format!("call{fn_}@{dp}")
+                    } else {
+                        kk(x, dp)
+                    };
                 }
                 let v = fo.f.vars.get(id as usize);
                 if dd.multi.contains(&id) {
@@ -310,7 +366,9 @@ impl<'a> An<'a> {
                 }
                 if let Some(v) = v {
                     if v.param >= 1 && v.param != 10 {
-                        return self.param_key(ctx, fn_, v.param, d).unwrap_or_else(|| format!("p{fn_}.{}", v.param));
+                        return self
+                            .param_key(ctx, fn_, v.param, d)
+                            .unwrap_or_else(|| format!("p{fn_}.{}", v.param));
                     }
                 }
                 format!("v{fn_}.{id}")
@@ -319,7 +377,11 @@ impl<'a> An<'a> {
                 if let Some(o) = dd.fp_off(addr) {
                     if size == 8 {
                         if let Some((y, q)) = dd.reaching(&self.fl, slot(o), p, false) {
-                            return if matches!(ir.get(y), Node::Call(..)) { format!("call{fn_}@{q}") } else { kk(y, q) };
+                            return if matches!(ir.get(y), Node::Call(..)) {
+                                format!("call{fn_}@{q}")
+                            } else {
+                                kk(y, q)
+                            };
                         }
                     }
                     return format!("fs{fn_}@{}:{size}", crate::util::js_num(o));
@@ -331,7 +393,14 @@ impl<'a> An<'a> {
                 if op == BinOp::Add || is_sub_c {
                     let mut terms: Vec<String> = Vec::new();
                     let mut c: u64 = 0;
-                    fn flat(an: &An, ir: &sbpf_ir::Ir, x: E, terms: &mut Vec<String>, c: &mut u64, kk: &dyn Fn(E) -> String) {
+                    fn flat(
+                        an: &An,
+                        ir: &sbpf_ir::Ir,
+                        x: E,
+                        terms: &mut Vec<String>,
+                        c: &mut u64,
+                        kk: &dyn Fn(E) -> String,
+                    ) {
                         let _ = an;
                         match ir.get(x) {
                             Node::Bin(BinOp::Add, a, b) => {
@@ -341,7 +410,9 @@ impl<'a> An<'a> {
                             }
                             Node::Bin(BinOp::Sub, a, b) if matches!(ir.get(b), Node::Const(_)) => {
                                 flat(an, ir, a, terms, c, kk);
-                                let Node::Const(v) = ir.get(b) else { unreachable!() };
+                                let Node::Const(v) = ir.get(b) else {
+                                    unreachable!()
+                                };
                                 *c = c.wrapping_sub(v);
                                 return;
                             }
@@ -378,7 +449,15 @@ impl<'a> An<'a> {
                         return terms.pop().unwrap();
                     }
                     terms.sort();
-                    return format!("(+ {}{})", terms.join(" "), if c != 0 { format!(" {}", sconst(c)) } else { String::new() });
+                    return format!(
+                        "(+ {}{})",
+                        terms.join(" "),
+                        if c != 0 {
+                            format!(" {}", sconst(c))
+                        } else {
+                            String::new()
+                        }
+                    );
                 }
                 let (ka, kb) = (kk(a, p), kk(b, p));
                 let op = op.as_str();
@@ -444,15 +523,36 @@ impl<'a> An<'a> {
         if (reg >= 100 && f.stack_args.is_none()) || idx < 0 || idx as u32 >= args.len {
             return None;
         }
-        Some(self.value_key(Some(ctx), par.fn_, pir.at(args, idx as u32), pos_of(b, i), d + 1))
+        Some(self.value_key(
+            Some(ctx),
+            par.fn_,
+            pir.at(args, idx as u32),
+            pos_of(b, i),
+            d + 1,
+        ))
     }
 
     /// the comparisons of a condition (through && / || / !), as (op, left, right) of canonical keys
-    pub fn cmps_of(&self, ctx: Option<&IxCtx<'a>>, fn_: i64, c: E, p: Pos) -> Vec<(String, String, String)> {
+    pub fn cmps_of(
+        &self,
+        ctx: Option<&IxCtx<'a>>,
+        fn_: i64,
+        c: E,
+        p: Pos,
+    ) -> Vec<(String, String, String)> {
         let mut out: Vec<(String, String, String)> = Vec::new();
         let Some(fo) = self.fo(fn_) else { return out };
         let ir = fir(fo.f);
-        fn go<'a>(an: &An<'a>, ctx: Option<&IxCtx<'a>>, fn_: i64, ir: &sbpf_ir::Ir, x: E, k: u32, p: Pos, out: &mut Vec<(String, String, String)>) {
+        fn go<'a>(
+            an: &An<'a>,
+            ctx: Option<&IxCtx<'a>>,
+            fn_: i64,
+            ir: &sbpf_ir::Ir,
+            x: E,
+            k: u32,
+            p: Pos,
+            out: &mut Vec<(String, String, String)>,
+        ) {
             if k > 8 || out.len() > 8 {
                 return;
             }
@@ -466,7 +566,10 @@ impl<'a> An<'a> {
                     let dd = an.defs_in(fn_);
                     let y = dd.and_then(|d| d.defs.get(&id).copied());
                     if let Some(y) = y {
-                        if matches!(ir.get(y), Node::Cmp(..) | Node::Lnot(_) | Node::Land(..) | Node::Lor(..)) {
+                        if matches!(
+                            ir.get(y),
+                            Node::Cmp(..) | Node::Lnot(_) | Node::Land(..) | Node::Lor(..)
+                        ) {
                             go(an, ctx, fn_, ir, y, k + 1, p, out);
                         }
                     }
@@ -485,7 +588,9 @@ impl<'a> An<'a> {
 
     /// follow a variable to its (reaching) definition, through extensions
     pub fn follow_def(&self, fn_: i64, e: E, p: Pos, n: u32) -> (E, Pos) {
-        let Some(dd) = self.defs_in(fn_) else { return (e, p) };
+        let Some(dd) = self.defs_in(fn_) else {
+            return (e, p);
+        };
         let ir = dd.ir;
         let (mut e, mut p) = (e, p);
         for _ in 0..n {

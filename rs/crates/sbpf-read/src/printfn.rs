@@ -1677,7 +1677,11 @@ impl RegionCfg for RC<'_> {
 /// The analysis hook: given the result as the analysis reads it (after printing), its text output.
 pub type AnalysisHook<'h> = &'h dyn for<'a> Fn(&crate::analysis::An<'a>) -> String;
 
-pub fn run(mut dm: Dx, _name_fn: Option<i64>, hook: Option<AnalysisHook>) -> Result<ReadOut, String> {
+pub fn run(
+    mut dm: Dx,
+    _name_fn: Option<i64>,
+    hook: Option<AnalysisHook>,
+) -> Result<ReadOut, String> {
     let d = &dm;
     let n = d.fs.len();
     // finalBody: `x = undef` of variables never assigned anything else is dropped
@@ -1735,7 +1739,11 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>, hook: Option<AnalysisHook>) -> Res
         let fs: Vec<&Func> = d.fs.clone();
         let idx = d.idx.clone();
         let pn = d.pn.clone();
-        Callee::new(Box::new(move |pc| idx.get(&pc).map(|&i| fs[i])), Box::new(move |pc| pn.fn_name(pc)), d.legacy)
+        Callee::new(
+            Box::new(move |pc| idx.get(&pc).map(|&i| fs[i])),
+            Box::new(move |pc| pn.fn_name(pc)),
+            d.legacy,
+        )
     };
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
@@ -2386,7 +2394,9 @@ fn print_func<'p>(
             };
             let dd = cpi_desc(s, &mut env);
             // (not the undecoded CPI inside an invoke wrapper, decoded at its call sites)
-            let in_wrapper = !s.abi.is_pda() && d.invoke_wrappers.contains(&pc) && dd.as_ref().is_none_or(|x| x.family.is_none());
+            let in_wrapper = !s.abi.is_pda()
+                && d.invoke_wrappers.contains(&pc)
+                && dd.as_ref().is_none_or(|x| x.family.is_none());
             if s.abi != SiteKind::Call && !in_wrapper {
                 notes_w.borrow_mut().insert(
                     n as *const SNode,
@@ -2883,12 +2893,22 @@ fn print_func<'p>(
         let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
         let callee_name = |t: i64| d.fn_name(t);
         let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
-        let callee_path = |t: i64| d.libs.get(&t).filter(|i| i.lib).and_then(|i| i.hint.clone());
+        let callee_path = |t: i64| {
+            d.libs
+                .get(&t)
+                .filter(|i| i.lib)
+                .and_then(|i| i.hint.clone())
+        };
         let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
         let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
         // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
         let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
-        let cfg = || -> Rc<Cfg> { ir_cfg.borrow_mut().get_or_insert_with(|| Rc::new(cfg_of(f))).clone() };
+        let cfg = || -> Rc<Cfg> {
+            ir_cfg
+                .borrow_mut()
+                .get_or_insert_with(|| Rc::new(cfg_of(f)))
+                .clone()
+        };
         let res = || account_resolver(fl, f, &names_final, true, None);
         let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
             let r = res();
@@ -2905,18 +2925,33 @@ fn print_func<'p>(
         };
         let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
             let r = res();
-            let b = if fail.is_none() { None } else { decision_block(&cfg(), Some(e), fail, pass) };
+            let b = if fail.is_none() {
+                None
+            } else {
+                decision_block(&cfg(), Some(e), fail, pass)
+            };
             r.cmp32(fl, e, b)
         };
         let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
             let r = res();
-            let b = if fail.is_none() { None } else { decision_block(&cfg(), Some(e), fail, pass) };
+            let b = if fail.is_none() {
+                None
+            } else {
+                decision_block(&cfg(), Some(e), fail, pass)
+            };
             r.pda_eq(fl, e, b)
         };
         let ir_store = |si: u32| -> Option<StoreRef> {
             let r = res();
-            let p = tree.origin.get(&si).map(|&(b, i)| pos_of(b as usize, i as usize));
-            r.store(fl, p).map(|(a, how)| StoreRef { index: a.index, field: a.field, how })
+            let p = tree
+                .origin
+                .get(&si)
+                .map(|&(b, i)| pos_of(b as usize, i as usize));
+            r.store(fl, p).map(|(a, how)| StoreRef {
+                index: a.index,
+                field: a.field,
+                how,
+            })
         };
         let anchor = d.sem.anchor;
         let inp = FnInput {
@@ -2985,7 +3020,9 @@ fn seeds_at(d: &Dx, ptr: u64, n: u64) -> Option<String> {
             None
         };
         let l = a.and_then(|_| d.sem.read(at + 8, 8));
-        let (Some(a), Some(l)) = (a, l) else { return None };
+        let (Some(a), Some(l)) = (a, l) else {
+            return None;
+        };
         if l > 64 {
             return None;
         }
@@ -3347,7 +3384,10 @@ pub struct SugarSnap {
 }
 
 /// The expression printer of the printed functions (by function pc), as each one's printer left it.
-pub fn expr_printer<'a>(d: &'a Dx<'a>, snaps: Vec<SugarSnap>) -> Box<dyn Fn(i64, E) -> Option<String> + 'a> {
+pub fn expr_printer<'a>(
+    d: &'a Dx<'a>,
+    snaps: Vec<SugarSnap>,
+) -> Box<dyn Fn(i64, E) -> Option<String> + 'a> {
     let mut by_pc: HashMap<i64, (FnSugar<'a>, Vec<Option<String>>)> = HashMap::new();
     for sn in snaps {
         let f = d.fs[sn.fi];

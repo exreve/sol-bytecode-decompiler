@@ -37,7 +37,10 @@ impl<'a> An<'a> {
                 None
             }
         };
-        let ro = |a: u64| img.region(a, 8).is_some_and(|g| !g.exec && (g.name == ".rodata" || g.name == ".data.rel.ro"));
+        let ro = |a: u64| {
+            img.region(a, 8)
+                .is_some_and(|g| !g.exec && (g.name == ".rodata" || g.name == ".data.rel.ro"))
+        };
         let read = |a: u64, k: u64| a.checked_add(k).and_then(|x| img.read_const(x, 8));
         let discs: HashSet<u64> = self.instructions.iter().map(|i| i.disc).collect();
         let mut const_fns: HashMap<u64, Vec<i64>> = HashMap::new();
@@ -105,7 +108,9 @@ impl<'a> An<'a> {
             }
             for b in &f.blocks {
                 for s in &b.stmts {
-                    let Some((CallTarget::Ind { e }, _)) = call_of(ir, s) else { continue };
+                    let Some((CallTarget::Ind { e }, _)) = call_of(ir, s) else {
+                        continue;
+                    };
                     match ir.get(e) {
                         Node::Const(v) => {
                             if let Some(t) = fn_at(v) {
@@ -127,25 +132,33 @@ impl<'a> An<'a> {
                                 }
                                 continue;
                             }
-                            let Node::Var(bid) = ir.get(base) else { continue };
+                            let Node::Var(bid) = ir.get(base) else {
+                                continue;
+                            };
                             if other.contains(&bid) {
                                 continue;
                             }
                             for &(dv, db) in consts.get(&bid).map_or(&[][..], |v| &v[..]) {
-                                let Some(t) = read(dv, k).and_then(fn_at) else { continue };
+                                let Some(t) = read(dv, k).and_then(fn_at) else {
+                                    continue;
+                                };
                                 let cd = match &f.blocks[db].term {
                                     Term::Br { c, .. } => match ir.get(*c) {
-                                        Node::Cmp(CmpOp::Eq | CmpOp::Ne, ca, cb) => match (ir.get(ca), ir.get(cb)) {
-                                            (_, Node::Const(v)) => Some(v),
-                                            (Node::Const(v), _) => Some(v),
-                                            _ => None,
-                                        },
+                                        Node::Cmp(CmpOp::Eq | CmpOp::Ne, ca, cb) => {
+                                            match (ir.get(ca), ir.get(cb)) {
+                                                (_, Node::Const(v)) => Some(v),
+                                                (Node::Const(v), _) => Some(v),
+                                                _ => None,
+                                            }
+                                        }
                                         _ => None,
                                     },
                                     _ => None,
                                 };
                                 match cd {
-                                    Some(cd) if discs.contains(&cd) => by_disc.entry(cd).or_default().push(t),
+                                    Some(cd) if discs.contains(&cd) => {
+                                        by_disc.entry(cd).or_default().push(t)
+                                    }
                                     _ => {
                                         out.insert(t);
                                     }
@@ -265,7 +278,9 @@ impl<'a> An<'a> {
         for b in &f.blocks {
             if let Term::Br { c, .. } = &b.term {
                 leaves(ir, *c, &mut |x| {
-                    let Node::Cmp(op, ca, cb) = ir.get(x) else { return };
+                    let Node::Cmp(op, ca, cb) = ir.get(x) else {
+                        return;
+                    };
                     if op == CmpOp::Set {
                         return;
                     }
@@ -299,13 +314,20 @@ impl<'a> An<'a> {
         if primary.is_none() {
             let mut best = 0;
             for (&v, ks) in &cmp_consts {
-                if ks.len() > best && tag_like(v, false) && ks.iter().filter(|&&k| k <= 0xff).count() >= 2 {
+                if ks.len() > best
+                    && tag_like(v, false)
+                    && ks.iter().filter(|&&k| k <= 0xff).count() >= 2
+                {
                     best = ks.len();
                     primary = Some(v);
                 }
             }
             let pv = primary?;
-            if best < 3 && !defs[&pv].iter().any(|&e| matches!(ir.get(e), Node::Load { size: 1, .. })) {
+            if best < 3
+                && !defs[&pv]
+                    .iter()
+                    .any(|&e| matches!(ir.get(e), Node::Load { size: 1, .. }))
+            {
                 return None;
             }
         } else if cmp_consts.get(&primary.unwrap()).map_or(0, |s| s.len()) < 2 {
@@ -326,7 +348,14 @@ impl<'a> An<'a> {
         let mut in_s: Vec<Option<Tags>> = vec![None; n];
         in_s[0] = Some(new_tags(true));
         let mut mask_memo: HashMap<(E, bool), Option<Tags>> = HashMap::new();
-        fn narrow(ir: &Ir, family: &IndexSet<u32>, memo: &mut HashMap<(E, bool), Option<Tags>>, c: E, truth: bool, t: Tags) -> Tags {
+        fn narrow(
+            ir: &Ir,
+            family: &IndexSet<u32>,
+            memo: &mut HashMap<(E, bool), Option<Tags>>,
+            c: E,
+            truth: bool,
+            t: Tags,
+        ) -> Tags {
             match ir.get(c) {
                 Node::Lnot(a) => return narrow(ir, family, memo, a, !truth, t),
                 Node::Land(a, b) | Node::Lor(a, b) => {
@@ -342,7 +371,9 @@ impl<'a> An<'a> {
                 }
                 _ => {}
             }
-            let Node::Cmp(op, ca, cb) = ir.get(c) else { return t };
+            let Node::Cmp(op, ca, cb) = ir.get(c) else {
+                return t;
+            };
             if op == CmpOp::Set {
                 return t;
             }
@@ -371,7 +402,11 @@ impl<'a> An<'a> {
                                         a = (a as u128).wrapping_sub(1u128 << bits) as u64;
                                     }
                                 }
-                                let r = if swap { eval_cmp_n(op, k, a) } else { eval_cmp_n(op, a, k) };
+                                let r = if swap {
+                                    eval_cmp_n(op, k, a)
+                                } else {
+                                    eval_cmp_n(op, a, k)
+                                };
                                 if r == truth {
                                     o[nn >> 5] |= 1 << (nn & 31);
                                 }
@@ -424,7 +459,11 @@ impl<'a> An<'a> {
                     t = new_tags(false);
                     t[sv >> 5] |= 1 << (sv & 31);
                 }
-                let mut succ = |x: usize, tt: Tags, in_s: &mut Vec<Option<Tags>>, dirty: &mut Vec<bool>, any: &mut bool| {
+                let mut succ = |x: usize,
+                                tt: Tags,
+                                in_s: &mut Vec<Option<Tags>>,
+                                dirty: &mut Vec<bool>,
+                                any: &mut bool| {
                     match &mut in_s[x] {
                         None => in_s[x] = Some(tt),
                         Some(cur) => {
@@ -452,7 +491,12 @@ impl<'a> An<'a> {
             }
             sweep += 1;
         }
-        Some(TagStates { fo: pc, in_s, family, primary })
+        Some(TagStates {
+            fo: pc,
+            in_s,
+            family,
+            primary,
+        })
     }
 }
 
@@ -479,7 +523,9 @@ pub struct DispatchGroup {
 impl DispatchGroup {
     /// is block b of fn reachable with one of the group's tags? (true outside the dispatchers)
     pub fn allowed(&self, fn_: i64, b: usize) -> bool {
-        let Some(&i) = self.dsp.d_idx.get(&fn_) else { return true };
+        let Some(&i) = self.dsp.d_idx.get(&fn_) else {
+            return true;
+        };
         let before = self.dsp.before[i].get(b).copied().unwrap_or(false);
         match &self.mask {
             None => return before,
@@ -487,12 +533,16 @@ impl DispatchGroup {
             _ => {}
         }
         let mask = self.mask.unwrap();
-        let Some(Some(t)) = self.dsp.ds[i].in_s.get(b) else { return false };
+        let Some(Some(t)) = self.dsp.ds[i].in_s.get(b) else {
+            return false;
+        };
         (0..9).any(|j| t[j] & mask[j] != 0)
     }
     /// is code at pc of fn reachable with one of the group's tags?
     pub fn keep(&self, an: &An, fn_: i64, pc: i64) -> bool {
-        let Some(&i) = self.dsp.d_idx.get(&fn_) else { return true };
+        let Some(&i) = self.dsp.d_idx.get(&fn_) else {
+            return true;
+        };
         let g = an.cfg(self.dsp.ds[i].fo);
         match g.pc_block.get(&pc) {
             None => true,
@@ -530,7 +580,9 @@ impl<'a> An<'a> {
                 }
             }
             if d < 2 {
-                let calls: Vec<(i64, bool)> = self.facts.borrow().get(&pc).map_or(vec![], |f| f.calls.iter().map(|c| (c.callee, c.err_path)).collect());
+                let calls: Vec<(i64, bool)> = self.facts.borrow().get(&pc).map_or(vec![], |f| {
+                    f.calls.iter().map(|c| (c.callee, c.err_path)).collect()
+                });
                 for (callee, err) in calls {
                     if !err && !seen.contains(&callee) && !roots.contains(&callee) {
                         seen.insert(callee);
@@ -553,12 +605,16 @@ impl<'a> An<'a> {
             let mut add: Vec<TagStates> = Vec::new();
             for b in &f.blocks {
                 for s in &b.stmts {
-                    let Some((CallTarget::Fn { pc: cpc }, args)) = call_of(ir, s) else { continue };
+                    let Some((CallTarget::Fn { pc: cpc }, args)) = call_of(ir, s) else {
+                        continue;
+                    };
                     if tried.contains(&cpc) {
                         continue;
                     }
                     let fam = &ds[i].family;
-                    let k = ir.items(args).position(|a| leaf_var(ir, a).is_some_and(|v| fam.contains(&v)));
+                    let k = ir
+                        .items(args)
+                        .position(|a| leaf_var(ir, a).is_some_and(|v| fam.contains(&v)));
                     let callee = self.fo(cpc);
                     let pv = match (k, callee) {
                         (Some(k), Some(c)) => param_var(c.f, k as i32 + 1),
@@ -625,7 +681,9 @@ impl<'a> An<'a> {
                         }
                     }
                 }
-                (0..blocks.len()).map(|b| d.in_s[b].is_some() && !reach[b]).collect()
+                (0..blocks.len())
+                    .map(|b| d.in_s[b].is_some() && !reach[b])
+                    .collect()
             })
             .collect();
         let dsp = Rc::new(Dispatch { ds, before, d_idx });
@@ -638,7 +696,9 @@ impl<'a> An<'a> {
         };
         let line_text = |fn_: i64, pc: i64| -> String {
             let facts = self.facts.borrow();
-            let Some(ff) = facts.get(&fn_) else { return String::new() };
+            let Some(ff) = facts.get(&fn_) else {
+                return String::new();
+            };
             match ff.pc_line.get(&pc) {
                 Some(&l) => ff.lines.get((l - 1) as usize).cloned().unwrap_or_default(),
                 None => String::new(),
@@ -701,7 +761,9 @@ impl<'a> An<'a> {
                         if let Some((CallTarget::Sys { name, .. }, _)) = &c {
                             if name.contains("log") {
                                 let lt = line_text(d.fo, stmt_pc(s));
-                                if let Some(m) = crate::jre!(r#""Instruction: ([^"]+)""#).captures(&lt) {
+                                if let Some(m) =
+                                    crate::jre!(r#""Instruction: ([^"]+)""#).captures(&lt)
+                                {
                                     logs.insert(snake2(&m[1]));
                                 }
                             }
@@ -710,7 +772,11 @@ impl<'a> An<'a> {
                 }
             }
             if !other && acts != 0 && tags[0] < 256 {
-                cand.push(Cand { tags: tags.clone(), logs, acts });
+                cand.push(Cand {
+                    tags: tags.clone(),
+                    logs,
+                    acts,
+                });
             }
             if other && hs.len() == 1 && tags[0] < 256 {
                 let h = hs[0];
@@ -721,8 +787,15 @@ impl<'a> An<'a> {
                 }
             }
         }
-        let mut small: Vec<(Vec<u32>, IndexSet<String>, i64)> = cand.iter().filter(|c| c.tags.len() <= 4).map(|c| (c.tags.clone(), c.logs.clone(), c.acts)).collect();
-        let max_small: i64 = small.iter().flat_map(|c| c.0.iter().map(|&x| x as i64)).fold(-1, i64::max);
+        let mut small: Vec<(Vec<u32>, IndexSet<String>, i64)> = cand
+            .iter()
+            .filter(|c| c.tags.len() <= 4)
+            .map(|c| (c.tags.clone(), c.logs.clone(), c.acts))
+            .collect();
+        let max_small: i64 = small
+            .iter()
+            .flat_map(|c| c.0.iter().map(|&x| x as i64))
+            .fold(-1, i64::max);
         let rest = {
             let mut r: Vec<&Cand> = cand.iter().filter(|c| c.tags.len() > 16).collect();
             r.sort_by(|a, b| b.acts.cmp(&a.acts));
@@ -735,27 +808,48 @@ impl<'a> An<'a> {
                 rest_pushed = true;
             }
         }
-        let covered: HashSet<u32> = small.iter().flat_map(|c| c.0.iter().copied()).chain(via.values().flatten().copied()).collect();
+        let covered: HashSet<u32> = small
+            .iter()
+            .flat_map(|c| c.0.iter().copied())
+            .chain(via.values().flatten().copied())
+            .collect();
         for (h, t) in via_rest {
             if t > 0 && !via.contains_key(&h) && (0..t).all(|v| covered.contains(&v)) {
                 via.insert(h, vec![t]);
             }
         }
-        let dispatchers: Vec<String> = dsp.ds.iter().map(|d| self.fo(d.fo).unwrap().name.clone()).collect();
+        let dispatchers: Vec<String> = dsp
+            .ds
+            .iter()
+            .map(|d| self.fo(d.fo).unwrap().name.clone())
+            .collect();
         let tag = (dsp.ds[0].fo, dsp.ds[0].primary);
         let nsmall = small.len();
         let mut groups: Vec<DispatchGroup> = small
             .iter()
             .enumerate()
             .map(|(ci, c)| {
-                let is_rest = ci == nsmall - 1 && rest_pushed && c.0.len() == 1 && rest.as_ref().is_some_and(|r| c.0[0] == r.0[0]);
-                let mtags = if is_rest { rest.as_ref().unwrap().0.clone() } else { c.0.clone() };
+                let is_rest = ci == nsmall - 1
+                    && rest_pushed
+                    && c.0.len() == 1
+                    && rest.as_ref().is_some_and(|r| c.0[0] == r.0[0]);
+                let mtags = if is_rest {
+                    rest.as_ref().unwrap().0.clone()
+                } else {
+                    c.0.clone()
+                };
                 let name = if c.1.len() == 1 {
                     c.1[0].clone()
                 } else if c.0.len() == 1 {
                     format!("tag_{}", c.0[0])
                 } else {
-                    format!("tags_{}", c.0.iter().map(|x| x.to_string()).collect::<Vec<_>>().join("_"))
+                    format!(
+                        "tags_{}",
+                        c.0.iter()
+                            .map(|x| x.to_string())
+                            .collect::<Vec<_>>()
+                            .join("_")
+                    )
                 };
                 DispatchGroup {
                     tags: c.0.clone(),
@@ -774,8 +868,12 @@ impl<'a> An<'a> {
         }
         let d0f = self.fo(dsp.ds[0].fo).unwrap().f;
         let d0ir = fir(d0f);
-        let has_before = (0..dsp.ds[0].in_s.len())
-            .any(|b| dsp.before[0][b] && d0f.blocks[b].stmts.iter().any(|s| call_of_any(d0ir, s) || matches!(s, Stmt::Store { .. } | Stmt::Stores { .. })));
+        let has_before = (0..dsp.ds[0].in_s.len()).any(|b| {
+            dsp.before[0][b]
+                && d0f.blocks[b].stmts.iter().any(|s| {
+                    call_of_any(d0ir, s) || matches!(s, Stmt::Store { .. } | Stmt::Stores { .. })
+                })
+        });
         if has_before {
             groups.push(DispatchGroup {
                 tags: vec![],
@@ -789,18 +887,34 @@ impl<'a> An<'a> {
             });
         }
         if groups.iter().all(|x| x.source == "tag") {
-            let tag_set: Vec<u32> = groups.iter().filter(|x| x.tags.len() == 1).flat_map(|x| x.tags.iter().copied()).collect();
+            let tag_set: Vec<u32> = groups
+                .iter()
+                .filter(|x| x.tags.len() == 1)
+                .flat_map(|x| x.tags.iter().copied())
+                .collect();
             for (known, label, ixs) in crate::cpi::known_families() {
                 let has_ix = |t: u32| ixs.iter().any(|x| x.0 == t as u64);
                 let cover = tag_set.iter().filter(|&&t| has_ix(t)).count();
                 let named = || {
-                    let w: Vec<String> = label.to_lowercase().split(' ').take(2).map(|x| x.to_string()).collect();
+                    let w: Vec<String> = label
+                        .to_lowercase()
+                        .split(' ')
+                        .take(2)
+                        .map(|x| x.to_string())
+                        .collect();
                     let w = w.join(" ");
-                    self.funcs.iter().any(|x| x.text.to_lowercase().contains(&w))
+                    self.funcs
+                        .iter()
+                        .any(|x| x.text.to_lowercase().contains(&w))
                 };
-                let exact = ixs.len() == tag_set.len() && cover == ixs.len() && (ixs.len() >= 6 || named());
+                let exact =
+                    ixs.len() == tag_set.len() && cover == ixs.len() && (ixs.len() >= 6 || named());
                 let pat = format!("/* {known} */");
-                if !(exact || (cover as f64 >= 0.8 * tag_set.len() as f64 && cover >= 2 && self.funcs.iter().any(|x| x.text.contains(&pat)))) {
+                if !(exact
+                    || (cover as f64 >= 0.8 * tag_set.len() as f64
+                        && cover >= 2
+                        && self.funcs.iter().any(|x| x.text.contains(&pat))))
+                {
                     continue;
                 }
                 for x in groups.iter_mut() {

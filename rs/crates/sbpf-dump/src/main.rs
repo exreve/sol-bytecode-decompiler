@@ -619,10 +619,22 @@ fn time8(files: &[String], iters: usize) {
                 ms.set(t.elapsed().as_secs_f64() * 1e3);
                 s
             };
-            std::hint::black_box(sbpf_read::decompile::decompile_read_hook(&bytes, None, stage3::threads(), false, Some(&hook)).unwrap());
+            std::hint::black_box(
+                sbpf_read::decompile::decompile_read_hook(
+                    &bytes,
+                    None,
+                    stage3::threads(),
+                    false,
+                    Some(&hook),
+                )
+                .unwrap(),
+            );
             best = best.min(ms.get());
         }
-        let name = std::path::Path::new(f).file_name().unwrap().to_string_lossy();
+        let name = std::path::Path::new(f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
         println!("{name}\t{best:.1}");
     }
 }

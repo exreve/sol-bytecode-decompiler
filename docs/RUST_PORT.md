@@ -747,15 +747,37 @@ the points the report reads, sources of the ops' values).
 ### Parity
 
 - `facts`: **615 / 615 identical** (samples 8 + regress 2 + compat 20 + bench 164 + eval 19 + corpus 402).
-- `flow`: FLOWCOUNT
-- With IDL (`--idl`, `facts,flow`): IDLCOUNT
-- Fuzz (`facts,flow`, 1000 mutants each): FUZZCOUNT
+- `flow`: **615 / 615 identical** (same sets; before the fix below, 614: one corpus program hit the truncated-key bug).
+- With IDL (`--idl`, `facts,flow`, the 184 binaries that have one): **184 / 184 identical** (183 before the same fix).
+- Fuzz (`facts,flow`, 1000 mutants each): **4000 / 4000 identical** (seeds 1, 7, 11 on samples + compat, seed 3 on
+  corpus + bench + eval).
+- Bug found by the sweeps: a value key longer than 600 UTF-16 units is stored truncated with `…`; `slice(3, -1)`
+  of such a key (sum terms in `valueKey`, `termsOf` in sources) drops the ellipsis *character* (the Rust side cut a
+  byte inside it and panicked).
 
-Residual differences: RESIDUAL
+Residual differences: none on the foundation dumps. The analysis output itself (`security/`, the summary block of
+`rawfile` / `readfile`, the diff's native arms) is still TS-only (8b / 8c).
 
 ### Speed
 
-SPEED
+The foundation on the default output (`sbpf-dump --time8` / `scripts/stagetime.ts --stage8`): the whole `flow` dump
+walk after printing (exit writes, indirect targets, splits, every instruction context, resolvers of every function
+of every native instruction, path conditions / value keys of every op and check, sources of every op), single thread,
+best of 3 (Rust) / 2 after warm-up (TS), ms:
+
+| program | TS | Rust | speedup |
+|---|---:|---:|---:|
+| jup | 1334.1 | 616.7 | 2.2× |
+| whirlpool | 681.2 | 223.6 | 3.0× |
+| token22 | 293.4 | 141.9 | 2.1× |
+| svault_v3 | 1024.0 | 371.9 | 2.8× |
+| token | 670.0 | 335.0 | 2.0× |
+
+This times the dump's walk (heavier than the report: every function / point), not `analyze()`; the facts collected
+during printing are inside the stage 7 timings. It is a straight port: `String` keys for `valueKey` / memo keys,
+per-call `Vec` collections of walked nodes and cloned `Rc<Vec<_>>` candidate lists, `RefCell` memos. Targets for the
+performance pass: interned value keys, the `Defs` fixpoint's per-query allocations, `jsre` regexes built at run time
+in facts (`sliceAdvance`, TokenInstruction), the evaluator memos keyed by `E` in hash maps.
 
 ## Plan changes
 

@@ -6,11 +6,11 @@
 pub mod acct;
 pub mod anchor;
 pub mod dispatch;
+pub mod facts;
+pub mod flow;
 pub mod ixctx;
 pub mod paths;
 pub mod sources;
-pub mod facts;
-pub mod flow;
 
 use regex::Regex;
 
@@ -86,20 +86,14 @@ macro_rules! jre {
 pub fn js_ws(c: char) -> bool {
     matches!(
         c,
-        '\t' | '\n'
-            | '\u{b}'
-            | '\u{c}'
-            | '\r'
-            | ' '
-            | '\u{a0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202f}'
-            | '\u{205f}'
-            | '\u{3000}'
-            | '\u{feff}'
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
     )
 }
 
@@ -179,7 +173,10 @@ pub fn js_number(s: &str) -> f64 {
 
 /// `parseInt(s, 16)` of a string of hex digits
 pub fn parse_hex(s: &str) -> f64 {
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     let mut v = 0f64;
     for c in s.chars() {
         match c.to_digit(16) {
@@ -303,6 +300,9 @@ impl<'a> An<'a> {
     }
     /// r.program.funcs.get(pc)?.name ?? ''
     pub fn pname(&self, pc: i64) -> String {
-        self.p.funcs.get(&pc).map_or(String::new(), |f| f.name.clone())
+        self.p
+            .funcs
+            .get(&pc)
+            .map_or(String::new(), |f| f.name.clone())
     }
 }

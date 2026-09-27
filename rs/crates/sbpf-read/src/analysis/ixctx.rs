@@ -69,11 +69,17 @@ pub struct IxInfo<'a> {
 
 fn parse_idl_account(s: &str, i: usize) -> AccountRow {
     let (head, flags) = match crate::jre!(r"^(\S+)(?: \[(.*)\])?$").captures(s) {
-        Some(m) => (m[1].to_string(), m.get(2).map_or(String::new(), |x| x.as_str().to_string())),
+        Some(m) => (
+            m[1].to_string(),
+            m.get(2).map_or(String::new(), |x| x.as_str().to_string()),
+        ),
         None => (s.to_string(), String::new()),
     };
     let fl: Vec<&str> = flags.split(", ").collect();
-    let addr = fl.iter().find(|f| f.starts_with("= ")).map(|f| f[2..].to_string());
+    let addr = fl
+        .iter()
+        .find(|f| f.starts_with("= "))
+        .map(|f| f[2..].to_string());
     AccountRow {
         index: Some(i as f64),
         name: head.split('.').next_back().unwrap_or("").to_string(),
@@ -91,11 +97,17 @@ fn parse_idl_account(s: &str, i: usize) -> AccountRow {
 impl<'a> An<'a> {
     /// the functions a library function calls, in order
     fn lib_calls(&self, pc: i64) -> Vec<i64> {
-        let Some(f) = self.p.funcs.get(&pc) else { return vec![] };
+        let Some(f) = self.p.funcs.get(&pc) else {
+            return vec![];
+        };
         let mut l = Vec::new();
         for b in &f.blocks {
             for st in &b.stmts {
-                if let Stmt::Call { t: CallTarget::Fn { pc }, .. } = st {
+                if let Stmt::Call {
+                    t: CallTarget::Fn { pc },
+                    ..
+                } = st
+                {
                     l.push(*pc);
                 }
             }
@@ -106,14 +118,28 @@ impl<'a> An<'a> {
     /// the instruction handlers (roots) and their native dispatch splits
     pub fn roots(&self) -> Vec<i64> {
         let proc_names: HashSet<&str> = self.processors.iter().map(|x| x.0.as_str()).collect();
-        let mut roots: Vec<i64> = self.funcs.iter().filter(|f| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str())).map(|f| f.pc).collect();
+        let mut roots: Vec<i64> = self
+            .funcs
+            .iter()
+            .filter(|f| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str()))
+            .map(|f| f.pc)
+            .collect();
         if roots.is_empty() {
-            roots = self.funcs.iter().filter(|f| f.f.is_entry).map(|f| f.pc).collect();
+            roots = self
+                .funcs
+                .iter()
+                .filter(|f| f.f.is_entry)
+                .map(|f| f.pc)
+                .collect();
         }
         roots
     }
 
-    pub fn ix_contexts(&self, ind: &Indirect, splits: &IndexMap<i64, DispatchGroups>) -> Vec<IxInfo<'a>> {
+    pub fn ix_contexts(
+        &self,
+        ind: &Indirect,
+        splits: &IndexMap<i64, DispatchGroups>,
+    ) -> Vec<IxInfo<'a>> {
         let roots = self.roots();
         let root_pcs: HashSet<i64> = roots.iter().copied().collect();
         let mut out: Vec<IxInfo<'a>> = Vec::new();
@@ -138,7 +164,11 @@ impl<'a> An<'a> {
                     Some(g) => g.name.clone(),
                     None => h.name.strip_prefix("ix_").unwrap_or(&h.name).to_string(),
                 };
-                let info = if grp.is_some() { None } else { self.instructions.iter().find(|i| i.pc == hpc) };
+                let info = if grp.is_some() {
+                    None
+                } else {
+                    self.instructions.iter().find(|i| i.pc == hpc)
+                };
                 let facts = self.facts.borrow();
                 let keep = |fn_: i64, pc: Option<i64>| -> bool {
                     match (grp, pc) {
@@ -146,7 +176,13 @@ impl<'a> An<'a> {
                         (Some(g), Some(pc)) => g.keep(self, fn_, pc),
                     }
                 };
-                let is_disp = |fn_: i64| -> bool { grp.is_some_and(|g| g.dispatchers.iter().any(|d| Some(d) == facts.get(&fn_).map(|f| &f.name))) };
+                let is_disp = |fn_: i64| -> bool {
+                    grp.is_some_and(|g| {
+                        g.dispatchers
+                            .iter()
+                            .any(|d| Some(d) == facts.get(&fn_).map(|f| &f.name))
+                    })
+                };
                 let keep_call = |fn_: i64, pc: Option<i64>, ret: Option<E>| -> bool {
                     let Some(g) = grp else { return true };
                     if pc.is_some() {
@@ -192,7 +228,10 @@ impl<'a> An<'a> {
                         }
                         lib.insert(callee);
                         for t in lib_calls(callee) {
-                            reach(an, facts, root_pcs, hpc, lib_calls, main, lib, q, parents, from, t, false);
+                            reach(
+                                an, facts, root_pcs, hpc, lib_calls, main, lib, q, parents, from,
+                                t, false,
+                            );
                         }
                         return;
                     }
@@ -217,32 +256,93 @@ impl<'a> An<'a> {
                         if !ft.ops.is_empty() || !why.starts_with("function") {
                             indirect.push(format!("{} ({why})", ft.name));
                         }
-                        reach(self, &facts, &root_pcs, hpc, &lib_calls, main, lib, q, parents, from, t, false);
+                        reach(
+                            self, &facts, &root_pcs, hpc, &lib_calls, main, lib, q, parents, from,
+                            t, false,
+                        );
                     }
                 };
                 if let Some(info) = info {
                     for &t in ind.by_disc.get(&info.disc).map_or(&[][..], |v| &v[..]) {
-                        via_ptr(t, "entrypoint table entry chosen by the discriminator".into(), &mut main, &mut lib, &mut q, &mut parents, from, &mut indirect);
+                        via_ptr(
+                            t,
+                            "entrypoint table entry chosen by the discriminator".into(),
+                            &mut main,
+                            &mut lib,
+                            &mut q,
+                            &mut parents,
+                            from,
+                            &mut indirect,
+                        );
                     }
                 }
                 while let Some(x) = q.pop_front() {
                     let m = main[&x];
-                    let calls: Vec<(Option<i64>, Option<E>, i64, bool, bool)> = facts.get(&x).map_or(vec![], |f| f.calls.iter().map(|c| (c.pc, c.ret, c.callee, c.main, c.err_path)).collect());
+                    let calls: Vec<(Option<i64>, Option<E>, i64, bool, bool)> =
+                        facts.get(&x).map_or(vec![], |f| {
+                            f.calls
+                                .iter()
+                                .map(|c| (c.pc, c.ret, c.callee, c.main, c.err_path))
+                                .collect()
+                        });
                     for (cpc, cret, callee, cmain, err) in calls {
                         if (!err || is_disp(x)) && keep_call(x, cpc, cret) {
-                            from = Some(Parent { fn_: x, pc: cpc, ret: cret });
-                            reach(self, &facts, &root_pcs, hpc, &lib_calls, &mut main, &mut lib, &mut q, &mut parents, from, callee, m && (cmain || (generated && x == hpc)));
+                            from = Some(Parent {
+                                fn_: x,
+                                pc: cpc,
+                                ret: cret,
+                            });
+                            reach(
+                                self,
+                                &facts,
+                                &root_pcs,
+                                hpc,
+                                &lib_calls,
+                                &mut main,
+                                &mut lib,
+                                &mut q,
+                                &mut parents,
+                                from,
+                                callee,
+                                m && (cmain || (generated && x == hpc)),
+                            );
                         }
                     }
-                    from = Some(Parent { fn_: x, pc: None, ret: None });
-                    let xname = facts.get(&x).map_or("undefined".to_string(), |f| f.name.clone());
+                    from = Some(Parent {
+                        fn_: x,
+                        pc: None,
+                        ret: None,
+                    });
+                    let xname = facts
+                        .get(&x)
+                        .map_or("undefined".to_string(), |f| f.name.clone());
                     for &t in ind.targets.get(&x).map_or(&[][..], |v| &v[..]) {
-                        via_ptr(t, format!("function pointer in {xname}"), &mut main, &mut lib, &mut q, &mut parents, from, &mut indirect);
+                        via_ptr(
+                            t,
+                            format!("function pointer in {xname}"),
+                            &mut main,
+                            &mut lib,
+                            &mut q,
+                            &mut parents,
+                            from,
+                            &mut indirect,
+                        );
                     }
                 }
-                let fns: Vec<i64> = main.keys().copied().filter(|pc| facts.contains_key(pc)).collect();
-                let accounts: Vec<AccountRow> = match info.and_then(|i| i.accounts.as_ref()).filter(|a| !a.is_empty()) {
-                    Some(a) => a.iter().enumerate().map(|(i, s)| parse_idl_account(s, i)).collect(),
+                let fns: Vec<i64> = main
+                    .keys()
+                    .copied()
+                    .filter(|pc| facts.contains_key(pc))
+                    .collect();
+                let accounts: Vec<AccountRow> = match info
+                    .and_then(|i| i.accounts.as_ref())
+                    .filter(|a| !a.is_empty())
+                {
+                    Some(a) => a
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| parse_idl_account(s, i))
+                        .collect(),
                     None => match grp.and_then(|g| g.accounts.as_ref()) {
                         Some(a) => a
                             .iter()
@@ -256,10 +356,25 @@ impl<'a> An<'a> {
                             .collect(),
                         None => info
                             .and_then(|i| i.str_accounts.as_ref())
-                            .map_or(vec![], |a| a.iter().enumerate().map(|(i, n)| AccountRow { index: Some(i as f64), name: n.clone(), source: "str", expected: Expected::default() }).collect()),
+                            .map_or(vec![], |a| {
+                                a.iter()
+                                    .enumerate()
+                                    .map(|(i, n)| AccountRow {
+                                        index: Some(i as f64),
+                                        name: n.clone(),
+                                        source: "str",
+                                        expected: Expected::default(),
+                                    })
+                                    .collect()
+                            }),
                     },
                 };
-                let restricted = grp.map(|g| fns.iter().copied().filter(|pc| g.dispatchers.iter().any(|d| *d == facts[pc].name)).collect::<IndexSet<i64>>());
+                let restricted = grp.map(|g| {
+                    fns.iter()
+                        .copied()
+                        .filter(|pc| g.dispatchers.iter().any(|d| *d == facts[pc].name))
+                        .collect::<IndexSet<i64>>()
+                });
                 drop(facts);
                 let ctx = Rc::new(IxCtx {
                     id: next_id,
@@ -297,7 +412,11 @@ impl<'a> An<'a> {
         let fo = self.fo(fn_)?;
         let r0 = account_resolver(&self.fl, fo.f, &fo.names, true, None);
         ctx.res.borrow_mut().insert(fn_, Some(r0));
-        let par = if fn_ != ctx.handler && d < 6 { ctx.parents.get(&fn_).copied() } else { None };
+        let par = if fn_ != ctx.handler && d < 6 {
+            ctx.parents.get(&fn_).copied()
+        } else {
+            None
+        };
         let pr = match par {
             Some(p) if p.pc.is_some() => self.ctx_resolver(ctx, p.fn_, d + 1),
             _ => None,

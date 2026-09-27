@@ -12,7 +12,7 @@ use crate::jre;
 use crate::util::{call_of, js_num, json_str, stmt_exprs, stmt_pc, u16len};
 use indexmap::IndexMap;
 use regex::Regex;
-use sbpf_ir::{CallTarget, CmpOp, Ir, Node, Stmt, BinOp, E};
+use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E};
 use sbpf_struct::{Label, SNode, Tree};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -131,7 +131,14 @@ pub struct Op {
 }
 
 impl Op {
-    fn new(line: i64, pc: Option<i64>, kinds: Vec<&'static str>, text: String, main: bool, err: bool) -> Op {
+    fn new(
+        line: i64,
+        pc: Option<i64>,
+        kinds: Vec<&'static str>,
+        text: String,
+        main: bool,
+        err: bool,
+    ) -> Op {
         Op {
             line,
             pc,
@@ -260,9 +267,14 @@ fn anchor_mark(s: &str) -> bool {
             continue;
         }
         let rest = &s[j..];
-        let excluded = ["InstructionMissing", "InstructionFallbackNotFound", "InstructionDidNotDeserialize", "InstructionDidNotSerialize"]
-            .iter()
-            .any(|x| rest.starts_with(x) && rest.as_bytes().get(x.len()).is_none_or(|&c| !is_w(c)));
+        let excluded = [
+            "InstructionMissing",
+            "InstructionFallbackNotFound",
+            "InstructionDidNotDeserialize",
+            "InstructionDidNotSerialize",
+        ]
+        .iter()
+        .any(|x| rest.starts_with(x) && rest.as_bytes().get(x.len()).is_none_or(|&c| !is_w(c)));
         if !excluded {
             return true;
         }
@@ -309,7 +321,8 @@ fn is_temp(s: &str) -> bool {
 }
 
 fn authority(s: &str) -> bool {
-    jre!(r"(?i-u)authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate").is_match(s)
+    jre!(r"(?i-u)authority|admin|owner|manager|operator|governor|guardian|upgrade|signer|delegate")
+        .is_match(s)
 }
 
 fn helper_roles_of(family: &str, ix: &str) -> Option<&'static [&'static str]> {
@@ -391,7 +404,10 @@ pub fn cpi_kinds(fam: &str, ix: &str) -> Vec<&'static str> {
             k.push("BURN")
         } else if ix == "CloseAccount" {
             k.push("ACCOUNT_CLOSE")
-        } else if ix.starts_with("SetAuthority") || ix.starts_with("Approve") || ix.starts_with("Revoke") {
+        } else if ix.starts_with("SetAuthority")
+            || ix.starts_with("Approve")
+            || ix.starts_with("Revoke")
+        {
             k.push("AUTHORITY_WRITE")
         }
     } else if fam == "system" {
@@ -438,13 +454,18 @@ pub fn ref_of(path: &str, types: &IndexMap<String, String>) -> Option<Ref> {
     let acct = jre!(r"_(box|data|acc)$").replace(acct0, "").into_owned();
     Some(Ref {
         acct,
-        field: if rest.is_empty() { None } else { Some(rest.join(".")) },
+        field: if rest.is_empty() {
+            None
+        } else {
+            Some(rest.join("."))
+        },
     })
 }
 
 /// an input account record (the serialized account), not an AccountInfo
 fn is_record(path: &str, types: &IndexMap<String, String>) -> bool {
-    jre!(r"^input\.acc\d+$").is_match(path) || (!path.contains('.') && types.get(path).is_some_and(|t| t == "AccountRecord"))
+    jre!(r"^input\.acc\d+$").is_match(path)
+        || (!path.contains('.') && types.get(path).is_some_and(|t| t == "AccountRecord"))
 }
 
 /// `stN(...)` line parts: fo of a frame slot text `s<hex>[ + off]`
@@ -457,8 +478,12 @@ fn slot_off(x: &str) -> Option<f64> {
 fn def_rhs<'a>(line: &'a str, v: &str) -> Option<&'a str> {
     let t = line.trim_start_matches(js_ws);
     for pre in ["const ", "let ", ""] {
-        let Some(r) = t.strip_prefix(pre) else { continue };
-        let Some(r2) = r.strip_prefix(v) else { continue };
+        let Some(r) = t.strip_prefix(pre) else {
+            continue;
+        };
+        let Some(r2) = r.strip_prefix(v) else {
+            continue;
+        };
         if let Some(r3) = r2.strip_prefix(": ") {
             let w = r3.bytes().take_while(|&c| is_w(c)).count();
             if w > 0 {
@@ -478,11 +503,19 @@ fn def_rhs<'a>(line: &'a str, v: &str) -> Option<&'a str> {
     None
 }
 
-fn st64_words(lines: &[String], from: i64, to: i64, words: &mut HashMap<super::FK, String>, range: Option<(f64, f64)>) {
+fn st64_words(
+    lines: &[String],
+    from: i64,
+    to: i64,
+    words: &mut HashMap<super::FK, String>,
+    range: Option<(f64, f64)>,
+) {
     let mut k = from;
     while k < to {
         if let Some(line) = lines.get(k as usize) {
-            if let Some(m) = jre!(r"^\s*st64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?), (.*)\)$").captures(line) {
+            if let Some(m) =
+                jre!(r"^\s*st64\((s[0-9a-f]+(?: \+ (?:0x[0-9a-f]+|\d+))?), (.*)\)$").captures(line)
+            {
                 if let Some(o) = slot_off(&m[1]) {
                     let ok = match range {
                         Some((lo, hi)) => !(o < lo || o >= hi),
@@ -527,9 +560,19 @@ impl Fx<'_, '_> {
                 Some(d) => &path[..d],
                 None => &path[..],
             };
-            let Some(Some(a)) = self.alias.get(head) else { break };
-            let t = self.facts.borrow().types.get(head).cloned().unwrap_or_default();
-            if (t == "AccountInfo" || t == "AccountRecord") && ref_of(a, &self.facts.borrow().types).is_none() {
+            let Some(Some(a)) = self.alias.get(head) else {
+                break;
+            };
+            let t = self
+                .facts
+                .borrow()
+                .types
+                .get(head)
+                .cloned()
+                .unwrap_or_default();
+            if (t == "AccountInfo" || t == "AccountRecord")
+                && ref_of(a, &self.facts.borrow().types).is_none()
+            {
                 break;
             }
             path = format!("{a}{}", dot.map_or("", |d| &path[d..]));
@@ -564,13 +607,21 @@ impl Fx<'_, '_> {
     fn top_text(&self, ns: &[SNode], max: usize) -> String {
         let mut out: Vec<&str> = Vec::new();
         for n in ns {
-            if matches!(n, SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }) {
+            if matches!(
+                n,
+                SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }
+            ) {
                 continue;
             }
             if let Some(sp) = self.inp.spans.get(&key(n)) {
                 let mut i = sp.0;
                 while i < sp.1 && out.len() < max {
-                    out.push(self.inp.lines.get(self.inp.at + i).map_or("", |s| s.as_str()));
+                    out.push(
+                        self.inp
+                            .lines
+                            .get(self.inp.at + i)
+                            .map_or("", |s| s.as_str()),
+                    );
                     i += 1;
                 }
             }
@@ -580,13 +631,21 @@ impl Fx<'_, '_> {
     fn lead_text(&self, ns: &[SNode]) -> String {
         let mut out: Vec<&str> = Vec::new();
         for n in ns {
-            if matches!(n, SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }) {
+            if matches!(
+                n,
+                SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }
+            ) {
                 break;
             }
             if let Some(sp) = self.inp.spans.get(&key(n)) {
                 let mut i = sp.0;
                 while i < sp.1 && out.len() < 40 {
-                    out.push(self.inp.lines.get(self.inp.at + i).map_or("", |s| s.as_str()));
+                    out.push(
+                        self.inp
+                            .lines
+                            .get(self.inp.at + i)
+                            .map_or("", |s| s.as_str()),
+                    );
                     i += 1;
                 }
             }
@@ -641,7 +700,11 @@ impl Fx<'_, '_> {
     fn callees_of(&self, s: &Stmt) -> Vec<i64> {
         let ir = self.inp.ir;
         let mut out = Vec::new();
-        if let Stmt::Call { t: CallTarget::Fn { pc }, .. } = s {
+        if let Stmt::Call {
+            t: CallTarget::Fn { pc },
+            ..
+        } = s
+        {
             out.push(*pc);
         }
         for e in stmt_exprs(ir, s) {
@@ -691,7 +754,9 @@ impl Fx<'_, '_> {
             let (Some(pa), Some(len)) = (get(a + 16.0 * i), get(a + 16.0 * i + 8.0)) else {
                 return None;
             };
-            let lit = if jre!(r"^0x[0-9a-f]+$").is_match(pa) && jre!(r"^(0x[0-9a-f]+|\d+)$").is_match(len) {
+            let lit = if jre!(r"^0x[0-9a-f]+$").is_match(pa)
+                && jre!(r"^(0x[0-9a-f]+|\d+)$").is_match(len)
+            {
                 match (big_of(pa), big_of(len)) {
                     (Some(x), Some(y)) => (self.inp.str_at)(x, y),
                     _ => None,
@@ -700,7 +765,9 @@ impl Fx<'_, '_> {
                 None
             };
             out.push(match lit {
-                Some(l) if !l.is_empty() && l.chars().all(|c| (' '..='~').contains(&c)) => json_str(&l),
+                Some(l) if !l.is_empty() && l.chars().all(|c| (' '..='~').contains(&c)) => {
+                    json_str(&l)
+                }
                 _ => {
                     if len == "1" || len == "0x1" {
                         "(1 bytes)".into()
@@ -736,11 +803,17 @@ impl Fx<'_, '_> {
                 break;
             }
             let d = self.def_in(&vv, l);
-            let km = d.as_deref().and_then(|d| jre!(r"^([A-Za-z_]\w*)\.key$").captures(d).map(|m| m[1].to_string()));
+            let km = d.as_deref().and_then(|d| {
+                jre!(r"^([A-Za-z_]\w*)\.key$")
+                    .captures(d)
+                    .map(|m| m[1].to_string())
+            });
             if let Some(x) = km {
                 let xd = self.def_in(&x, l);
                 let am = xd.as_deref().and_then(|xd| {
-                    jre!(r"^(?:ld64\()?(?:accounts|\w+)\.([a-z_][a-z0-9_]*)\)?$").captures(xd).map(|m| m[1].to_string())
+                    jre!(r"^(?:ld64\()?(?:accounts|\w+)\.([a-z_][a-z0-9_]*)\)?$")
+                        .captures(xd)
+                        .map(|m| m[1].to_string())
                 });
                 return match am {
                     Some(a) => Some(a),
@@ -758,11 +831,22 @@ impl Fx<'_, '_> {
         None
     }
 
-    fn cpi_context(&self, ctx: &str, l: i64, roles: &[&str]) -> Option<(Vec<PartAcc>, Option<String>)> {
+    fn cpi_context(
+        &self,
+        ctx: &str,
+        l: i64,
+        roles: &[&str],
+    ) -> Option<(Vec<PartAcc>, Option<String>)> {
         let y = slot_off(ctx)?;
         let at = self.inp.at as i64;
         let mut words: HashMap<super::FK, String> = HashMap::new();
-        st64_words(self.inp.lines, at.max(l - 120), l, &mut words, Some((y, y + 512.0)));
+        st64_words(
+            self.inp.lines,
+            at.max(l - 120),
+            l,
+            &mut words,
+            Some((y, y + 512.0)),
+        );
         let get = |o: f64| words.get(&super::FK::of(o)).cloned();
         let mut infos: Vec<Option<String>> = Vec::new();
         let cap = 1 + if roles.is_empty() { 11 } else { roles.len() };
@@ -784,8 +868,13 @@ impl Fx<'_, '_> {
             .iter()
             .enumerate()
             .map(|(i, a)| {
-                let role = roles.get(i).map_or(format!("account{i}"), |r| r.to_string());
-                let s = matches!(roles.get(i).copied(), Some("authority" | "from" | "current_authority"));
+                let role = roles
+                    .get(i)
+                    .map_or(format!("account{i}"), |r| r.to_string());
+                let s = matches!(
+                    roles.get(i).copied(),
+                    Some("authority" | "from" | "current_authority")
+                );
                 PartAcc {
                     role: Some(role),
                     text: a.clone().unwrap_or_else(|| "?".into()),
@@ -796,7 +885,11 @@ impl Fx<'_, '_> {
             .collect();
         let seeds = match seed_len {
             Some(sl) if !(sl == "0" || sl == "0x0") => {
-                let x = if sl == "1" { self.signer_seeds(get(base).as_deref(), l) } else { None };
+                let x = if sl == "1" {
+                    self.signer_seeds(get(base).as_deref(), l)
+                } else {
+                    None
+                };
                 Some(x.unwrap_or_else(|| format!("? ({sl} seeds)")))
             }
             _ => None,
@@ -807,7 +900,9 @@ impl Fx<'_, '_> {
     fn helper_call(&self, n: &SNode, callee: i64, main: bool, err: bool) {
         let path = (self.inp.callee_path)(callee).unwrap_or_default();
         let l = self.line_of(n);
-        let t = self.line(l).map_or(String::new(), |s| js_trim(s).to_string());
+        let t = self
+            .line(l)
+            .map_or(String::new(), |s| js_trim(s).to_string());
         let stmt_pc_of = |n: &SNode| match n {
             SNode::Stmt(si) => Some(stmt_pc(self.inp.tree.stmt(*si))),
             _ => None,
@@ -898,19 +993,31 @@ impl Fx<'_, '_> {
             });
             return;
         }
-        if path.ends_with("TokenInstruction::pack") || (self.inp.callee_name)(callee).starts_with("TokenInstruction_pack") {
-            let Some(me) = jre!(r"\(([^,]+), ([^,)]+)\)$").captures(&t).map(|m| js_trim(&m[2]).to_string()) else {
+        if path.ends_with("TokenInstruction::pack")
+            || (self.inp.callee_name)(callee).starts_with("TokenInstruction_pack")
+        {
+            let Some(me) = jre!(r"\(([^,]+), ([^,)]+)\)$")
+                .captures(&t)
+                .map(|m| js_trim(&m[2]).to_string())
+            else {
                 return;
             };
             if me.is_empty() {
                 return;
             }
-            let re = super::jsre(&format!(r"^\s*st(?:8|16|32)\({}, (0x[0-9a-f]+|\d+)\b", regex::escape(&me)));
+            let re = super::jsre(&format!(
+                r"^\s*st(?:8|16|32)\({}, (0x[0-9a-f]+|\d+)\b",
+                regex::escape(&me)
+            ));
             let mut k = l - 1;
             while k >= 0.max(l - 40) {
                 if let Some(m) = self.line(k).and_then(|x| re.captures(x)) {
                     let tag = js_number(&m[1]);
-                    let ix = if tag >= 0.0 && tag.fract() == 0.0 && tag < 1e15 { crate::cpi::token_ix_name(tag as u64) } else { None };
+                    let ix = if tag >= 0.0 && tag.fract() == 0.0 && tag < 1e15 {
+                        crate::cpi::token_ix_name(tag as u64)
+                    } else {
+                        None
+                    };
                     if let Some(ix) = ix {
                         self.facts.borrow_mut().ix_hints.push(IxHint {
                             line: l + 1,
@@ -929,7 +1036,9 @@ impl Fx<'_, '_> {
     }
 
     fn site(&self, n: &SNode, main: bool, err: bool) {
-        let Some(s) = self.inp.sites.get(&key(n)) else { return };
+        let Some(s) = self.inp.sites.get(&key(n)) else {
+            return;
+        };
         let l = self.line_of(n);
         let pc = match n {
             SNode::Stmt(si) => Some(stmt_pc(self.inp.tree.stmt(*si))),
@@ -937,7 +1046,9 @@ impl Fx<'_, '_> {
         };
         let text = match &s.desc {
             Some(d) => d.text.clone(),
-            None => self.line(l).map_or(String::new(), |x| js_trim(x).to_string()),
+            None => self
+                .line(l)
+                .map_or(String::new(), |x| js_trim(x).to_string()),
         };
         let ir = self.inp.ir;
         if s.pda {
@@ -960,12 +1071,18 @@ impl Fx<'_, '_> {
             if pda.seeds.starts_with('?') {
                 if let Some((_, args)) = c {
                     let av: Vec<E> = ir.to_vec(args);
-                    if let (Some(Node::Const(a1)), Some(Node::Const(a2))) = (av.get(1).map(|&e| ir.get(e)), av.get(2).map(|&e| ir.get(e))) {
+                    if let (Some(Node::Const(a1)), Some(Node::Const(a2))) =
+                        (av.get(1).map(|&e| ir.get(e)), av.get(2).map(|&e| ir.get(e)))
+                    {
                         if let Some(seeds) = (self.inp.seeds_at)(a1, a2) {
                             pda.seeds = seeds;
                             if pda.program == "?" {
-                                let t = self.line(l).map_or(String::new(), |x| js_trim(x).to_string());
-                                pda.program = jre!(r", (\w+)\)$").captures(&t).map_or("?".into(), |m| m[1].to_string());
+                                let t = self
+                                    .line(l)
+                                    .map_or(String::new(), |x| js_trim(x).to_string());
+                                pda.program = jre!(r", (\w+)\)$")
+                                    .captures(&t)
+                                    .map_or("?".into(), |m| m[1].to_string());
                             }
                         }
                     }
@@ -977,7 +1094,10 @@ impl Fx<'_, '_> {
             return;
         }
         let d = s.desc.as_ref();
-        let known = d.and_then(|d| d.parts.as_ref()).and_then(|p| p.known.clone()).unwrap_or_default();
+        let known = d
+            .and_then(|d| d.parts.as_ref())
+            .and_then(|p| p.known.clone())
+            .unwrap_or_default();
         let mut kinds = cpi_kinds(
             d.and_then(|d| d.family.as_deref()).unwrap_or(""),
             d.and_then(|d| d.ix.as_deref()).unwrap_or(""),
@@ -986,7 +1106,11 @@ impl Fx<'_, '_> {
             kinds.push("PROGRAM_UPGRADE");
         }
         let signed = match d {
-            Some(d) => d.parts.as_ref().and_then(|p| p.seeds.as_ref()).is_some_and(|s| !s.is_empty()),
+            Some(d) => d
+                .parts
+                .as_ref()
+                .and_then(|p| p.seeds.as_ref())
+                .is_some_and(|s| !s.is_empty()),
             None => {
                 let mut sig = false;
                 let mut from = 0;
@@ -1001,7 +1125,10 @@ impl Fx<'_, '_> {
                 sig && !text.contains("no signer seeds")
             }
         };
-        if signed || jre!(r"(\b|_)invoke_signed(_unchecked)?(_[0-9a-f]+)?\(").is_match(self.line(l).unwrap_or("")) {
+        if signed
+            || jre!(r"(\b|_)invoke_signed(_unchecked)?(_[0-9a-f]+)?\(")
+                .is_match(self.line(l).unwrap_or(""))
+        {
             kinds.push("PDA_SIGNATURE");
         }
         let ret = match n {
@@ -1011,7 +1138,8 @@ impl Fx<'_, '_> {
         let text2 = if text.is_empty() {
             format!(
                 "CPI (instruction not decoded): {}",
-                self.line(l).map_or("undefined".to_string(), |x| js_trim(x).to_string())
+                self.line(l)
+                    .map_or("undefined".to_string(), |x| js_trim(x).to_string())
             )
         } else {
             text
@@ -1043,7 +1171,9 @@ impl Fx<'_, '_> {
         }
         let e = regex::escape(&b);
         let ptr = format!(r"(?:{e}\.(?:ptr|f0x18_u64)|ld64\({e} \+ 0x18\))");
-        let re = super::jsre(&format!(r"^(?:{e}\.(?:ptr|f0x18_u64) = (?:(\w+)$)?|st64\({e} \+ 0x18, (?:(\w+)\)$)?)"));
+        let re = super::jsre(&format!(
+            r"^(?:{e}\.(?:ptr|f0x18_u64) = (?:(\w+)$)?|st64\({e} \+ 0x18, (?:(\w+)\)$)?)"
+        ));
         for k in l - 2..=l + 2 {
             if k == l {
                 continue;
@@ -1084,17 +1214,30 @@ impl Fx<'_, '_> {
         }
         let pc = stmt_pc(s);
         let l = self.line_of(n);
-        let t = self.line(l).map_or(String::new(), |x| js_trim(x).to_string());
+        let t = self
+            .line(l)
+            .map_or(String::new(), |x| js_trim(x).to_string());
         let ir = self.inp.ir_store.and_then(|f| f(*si));
         if is_cs {
-            if let Some(ir) = ir.as_ref().filter(|x| x.field.as_ref().is_some_and(|f| !f.is_empty())) {
+            if let Some(ir) = ir
+                .as_ref()
+                .filter(|x| x.field.as_ref().is_some_and(|f| !f.is_empty()))
+            {
                 let a = jre!(r"\(([^,]+), ([^,]+), ([^)]+)\)").captures(&t);
                 let value = if t.contains("memset") {
                     a.as_ref().map_or("?".to_string(), |m| m[2].to_string())
                 } else {
-                    a.as_ref().map_or("?".to_string(), |m| format!("bytes at {}", &m[2]))
+                    a.as_ref()
+                        .map_or("?".to_string(), |m| format!("bytes at {}", &m[2]))
                 };
-                let mut op = Op::new(l + 1, Some(pc), vec!["ACCOUNT_DATA_WRITE"], t.clone(), main, err);
+                let mut op = Op::new(
+                    l + 1,
+                    Some(pc),
+                    vec!["ACCOUNT_DATA_WRITE"],
+                    t.clone(),
+                    main,
+                    err,
+                );
                 op.target = Some(Ref {
                     acct: format!("account[{}]", js_num(ir.index)),
                     field: ir.field.clone(),
@@ -1105,7 +1248,10 @@ impl Fx<'_, '_> {
             }
             return;
         }
-        if let Some(ir) = ir.as_ref().filter(|x| x.field.as_ref().is_some_and(|f| !f.is_empty())) {
+        if let Some(ir) = ir
+            .as_ref()
+            .filter(|x| x.field.as_ref().is_some_and(|f| !f.is_empty()))
+        {
             let field = ir.field.clone().unwrap();
             let v = match jre!(r"^st(?:8|16|32|64)\((.*)\)$").captures(&t) {
                 Some(m) => m[1].split(", ").skip(1).collect::<Vec<_>>().join(", "),
@@ -1126,14 +1272,20 @@ impl Fx<'_, '_> {
             let dre = jre!(r"^data\[(\d+)\.\.(\d+)\]$");
             let acct = format!("account[{}]", js_num(ir.index));
             let mut f = self.facts.borrow_mut();
-            let r = dre.captures(&field).map(|m| (m[1].to_string(), m[2].to_string()));
+            let r = dre
+                .captures(&field)
+                .map(|m| (m[1].to_string(), m[2].to_string()));
             if let Some(prev) = f.ops.last_mut() {
                 let pr = if prev.line == l
                     && prev.target.as_ref().is_some_and(|x| x.acct == acct)
                     && v.starts_with("ld64(")
                     && prev.value.as_deref().unwrap_or("").starts_with("ld64(")
                 {
-                    prev.target.as_ref().and_then(|x| x.field.as_deref()).and_then(|x| dre.captures(x)).map(|m| (m[1].to_string(), m[2].to_string()))
+                    prev.target
+                        .as_ref()
+                        .and_then(|x| x.field.as_deref())
+                        .and_then(|x| dre.captures(x))
+                        .map(|m| (m[1].to_string(), m[2].to_string()))
                 } else {
                     None
                 };
@@ -1150,17 +1302,25 @@ impl Fx<'_, '_> {
                 }
             }
             let mut op = Op::new(l + 1, Some(pc), kinds, t.clone(), main, err);
-            op.target = Some(Ref { acct, field: Some(field) });
+            op.target = Some(Ref {
+                acct,
+                field: Some(field),
+            });
             op.how = Some(ir.how.unwrap_or("="));
             op.value = Some(v);
             f.ops.push(op);
             return;
         }
-        let Some(m) = jre!(r"^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: //.*)?$").captures(&t) else {
+        let Some(m) =
+            jre!(r"^([A-Za-z_][\w]*(?:\.[A-Za-z_]\w*|\[\d+\])+) = (.*?)(?: //.*)?$").captures(&t)
+        else {
             let Some(d) = jre!(r"^st(8|16|32|64)\(([A-Za-z_][\w.]*)\.data(?: \+ (0x[0-9a-f]+|\d+))?(?: /\*[^*]*\*/)?, (.*)\)$").captures(&t) else {
                 return;
             };
-            let r = ref_of(&format!("{}.data", self.resolve(&d[2])), &self.facts.borrow().types);
+            let r = ref_of(
+                &format!("{}.data", self.resolve(&d[2])),
+                &self.facts.borrow().types,
+            );
             let Some(r) = r else { return };
             if !matches!(s, Stmt::Store { .. }) {
                 return;
@@ -1172,11 +1332,22 @@ impl Fx<'_, '_> {
                 r"^ld{}\({}\.data{}\) ([-+]) ",
                 &d[1],
                 d[2].replace('.', r"\."),
-                d.get(3).map_or(String::new(), |x| format!(r" \+ {}", x.as_str()))
+                d.get(3)
+                    .map_or(String::new(), |x| format!(r" \+ {}", x.as_str()))
             );
             let me = super::jsre(&pat).captures(&d[4]).map(|x| x[1].to_string());
-            let mut op = Op::new(l + 1, Some(pc), vec!["ACCOUNT_DATA_WRITE"], t.clone(), main, err);
-            op.target = Some(Ref { acct: r.acct, field: Some(field) });
+            let mut op = Op::new(
+                l + 1,
+                Some(pc),
+                vec!["ACCOUNT_DATA_WRITE"],
+                t.clone(),
+                main,
+                err,
+            );
+            op.target = Some(Ref {
+                acct: r.acct,
+                field: Some(field),
+            });
             op.how = Some(match me.as_deref() {
                 Some("+") => "+=",
                 Some(_) => "-=",
@@ -1194,10 +1365,15 @@ impl Fx<'_, '_> {
         if jre!(r"\.(lamports|data)\.f0x[0-9a-f]+_\w+$").is_match(&lv) {
             return;
         }
-        let Some(r) = ref_of(&lv, &self.facts.borrow().types) else { return };
-        let how = if rhs.starts_with(&format!("{} - ", &m[1])) || rhs.starts_with(&format!("{lv} - ")) {
+        let Some(r) = ref_of(&lv, &self.facts.borrow().types) else {
+            return;
+        };
+        let how = if rhs.starts_with(&format!("{} - ", &m[1]))
+            || rhs.starts_with(&format!("{lv} - "))
+        {
             "-="
-        } else if rhs.starts_with(&format!("{} + ", &m[1])) || rhs.starts_with(&format!("{lv} + ")) {
+        } else if rhs.starts_with(&format!("{} + ", &m[1])) || rhs.starts_with(&format!("{lv} + "))
+        {
             "+="
         } else {
             "="
@@ -1205,7 +1381,8 @@ impl Fx<'_, '_> {
         let mut kinds: Vec<&'static str> = Vec::new();
         let f = r.field.clone().unwrap_or_default();
         if jre!(r"^lamports\b").is_match(&f) || jre!(r"\.lamports(\.|$)").is_match(&lv) {
-            let rec = lv.ends_with(".lamports") && is_record(&lv[..lv.len() - 9], &self.facts.borrow().types);
+            let rec = lv.ends_with(".lamports")
+                && is_record(&lv[..lv.len() - 9], &self.facts.borrow().types);
             if !jre!(r"\.lamports\.value(\.amount)?$").is_match(&lv) && !rec {
                 return;
             }
@@ -1217,7 +1394,11 @@ impl Fx<'_, '_> {
                 return;
             }
             kinds.push("ACCOUNT_REALLOC");
-        } else if jre!(r"^(key|owner|is_signer|is_writable|executable|rent_epoch|data|original_data_len)$").is_match(&f) {
+        } else if jre!(
+            r"^(key|owner|is_signer|is_writable|executable|rent_epoch|data|original_data_len)$"
+        )
+        .is_match(&f)
+        {
             return;
         } else if jre!(r"^info(\.|$)").is_match(&f) {
             return;
@@ -1233,7 +1414,9 @@ impl Fx<'_, '_> {
         let mut op = Op::new(l + 1, Some(pc), kinds, t.clone(), main, err);
         op.target = Some(Ref {
             acct: r.acct,
-            field: r.field.map(|x| jre!(r"^lamports\..*").replace(&x, "lamports").into_owned()),
+            field: r
+                .field
+                .map(|x| jre!(r"^lamports\..*").replace(&x, "lamports").into_owned()),
         });
         op.how = Some(how);
         op.value = Some(rhs);
@@ -1251,9 +1434,13 @@ impl Fx<'_, '_> {
                 }
                 match x {
                     SNode::Stmt(si) => {
-                        if let Some((CallTarget::Fn { pc }, args)) = call_of(ir, fx.inp.tree.stmt(*si)) {
+                        if let Some((CallTarget::Fn { pc }, args)) =
+                            call_of(ir, fx.inp.tree.stmt(*si))
+                        {
                             if (fx.inp.custom_error)(pc) {
-                                if let Some(Node::Const(v)) = ir.to_vec(args).get(1).map(|&e| ir.get(e)) {
+                                if let Some(Node::Const(v)) =
+                                    ir.to_vec(args).get(1).map(|&e| ir.get(e))
+                                {
                                     if v < 0x400 {
                                         *r = Some(6000 + v as i64);
                                     }
@@ -1277,18 +1464,33 @@ impl Fx<'_, '_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn check(&self, n: &SNode, fail_nodes: &[SNode], fails_if: bool, main: bool, before: Option<i64>, pass_nodes: &[SNode]) {
+    fn check(
+        &self,
+        n: &SNode,
+        fail_nodes: &[SNode],
+        fails_if: bool,
+        main: bool,
+        before: Option<i64>,
+        pass_nodes: &[SNode],
+    ) {
         let SNode::If { c, .. } = n else { return };
         let c = *c;
         let ir = self.inp.ir;
         let l = self.line_of(n);
         let hl = self.line(l).unwrap_or("");
         let if_re = jre!(r"^\s*(?:\} else )?if \((.*)\) \{$");
-        let cond = match if_re.captures(hl).or_else(|| if_re.captures(self.line(l + 1).unwrap_or(""))) {
+        let cond = match if_re
+            .captures(hl)
+            .or_else(|| if_re.captures(self.line(l + 1).unwrap_or("")))
+        {
             Some(m) => m[1].to_string(),
             None => "?".into(),
         };
-        let ft = format!("{}\n{}", self.top_text(fail_nodes, 80), self.text_of(fail_nodes, 60));
+        let ft = format!(
+            "{}\n{}",
+            self.top_text(fail_nodes, 80),
+            self.text_of(fail_nodes, 60)
+        );
         let mut kinds: Vec<&'static str> = Vec::new();
         let add = |kinds: &mut Vec<&'static str>, k: &'static str| {
             if !kinds.contains(&k) {
@@ -1296,13 +1498,18 @@ impl Fx<'_, '_> {
             }
         };
         let mut refs: Vec<Ref> = Vec::new();
-        let clean = jre!(r#""(?:[^"\\]|\\.)*""#).replace_all(&cond, "\"\"").into_owned();
+        let clean = jre!(r#""(?:[^"\\]|\\.)*""#)
+            .replace_all(&cond, "\"\"")
+            .into_owned();
         for pm in jre!(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)").captures_iter(&clean) {
             let Some(r) = self.ref_(&pm[1]) else { continue };
             if !refs.iter().any(|x| x.acct == r.acct && x.field == r.field) {
                 refs.push(r.clone());
             }
-            let f0 = r.field.as_deref().map_or("", |f| f.split('.').next().unwrap_or(""));
+            let f0 = r
+                .field
+                .as_deref()
+                .map_or("", |f| f.split('.').next().unwrap_or(""));
             if let Some(k) = field_kind(f0) {
                 add(&mut kinds, k);
             } else if r.field.is_some() && !ACC_FIELDS.contains(&f0) {
@@ -1315,7 +1522,9 @@ impl Fx<'_, '_> {
                 e = a;
             }
             match ir.get(e) {
-                Node::Cmp(CmpOp::Eq | CmpOp::Ne, a, b) => [a, b].iter().any(|&y| matches!(ir.get(y), Node::Const(v) if v < 0x100)),
+                Node::Cmp(CmpOp::Eq | CmpOp::Ne, a, b) => [a, b]
+                    .iter()
+                    .any(|&y| matches!(ir.get(y), Node::Const(v) if v < 0x100)),
                 _ => false,
             }
         };
@@ -1330,19 +1539,37 @@ impl Fx<'_, '_> {
                 }
             }
         }
-        if jre!(r"\bkeyeq\(|(?:memeq|memcmp)\((?:[^()]|\([^()]*\))*, 0x20\)").is_match(&clean) && !kinds.contains(&"owner") {
+        if jre!(r"\bkeyeq\(|(?:memeq|memcmp)\((?:[^()]|\([^()]*\))*, 0x20\)").is_match(&clean)
+            && !kinds.contains(&"owner")
+        {
             add(&mut kinds, "key");
         }
         let lead = self.lead_text(fail_nodes);
-        let log_rel = vipers_log(&lead).map(|lr| (lr[1].to_string(), lr.get(2).or(lr.get(3)).map_or(String::new(), |x| x.as_str().to_string())));
+        let log_rel = vipers_log(&lead).map(|lr| {
+            (
+                lr[1].to_string(),
+                lr.get(2)
+                    .or(lr.get(3))
+                    .map_or(String::new(), |x| x.as_str().to_string()),
+            )
+        });
         if log_rel.is_some() {
             add(&mut kinds, "key");
         }
         let mut error = String::new();
-        let cm2 = jre!(r"\berror::(\w+)").find(&ft).map(|m| m.as_str().to_string());
-        let ams: Vec<String> = jre!(r"anchor::(\w+)").captures_iter(&ft).map(|x| x[1].to_string()).collect();
+        let cm2 = jre!(r"\berror::(\w+)")
+            .find(&ft)
+            .map(|m| m.as_str().to_string());
+        let ams: Vec<String> = jre!(r"anchor::(\w+)")
+            .captures_iter(&ft)
+            .map(|x| x[1].to_string())
+            .collect();
         let ak = ams.iter().find(|x| anchor_kind(x).is_some()).cloned();
-        let ce = if cm2.is_some() { None } else { self.custom_err_call(fail_nodes) };
+        let ce = if cm2.is_some() {
+            None
+        } else {
+            self.custom_err_call(fail_nodes)
+        };
         if let Some(cm2) = cm2 {
             error = cm2;
             add(&mut kinds, "custom");
@@ -1358,11 +1585,16 @@ impl Fx<'_, '_> {
             }
         } else if !ams.is_empty() {
             error = format!("anchor::{}", ams[0]);
-        } else if let Some(em) = jre!(r"\b(Err\([^)]*\)?\))").find(&ft).or_else(|| jre!(r"ProgramError::(\w+)").find(&ft)) {
+        } else if let Some(em) = jre!(r"\b(Err\([^)]*\)?\))")
+            .find(&ft)
+            .or_else(|| jre!(r"ProgramError::(\w+)").find(&ft))
+        {
             error = em.as_str().to_string();
         }
         if error.is_empty() {
-            error = if jre!(r"\btrap\(|\babort\(|panic").is_match(&ft) || matches!(fail_nodes.last(), Some(SNode::Trap(_))) {
+            error = if jre!(r"\btrap\(|\babort\(|panic").is_match(&ft)
+                || matches!(fail_nodes.last(), Some(SNode::Trap(_)))
+            {
                 "abort".into()
             } else {
                 "return".into()
@@ -1374,10 +1606,15 @@ impl Fx<'_, '_> {
         if kinds.is_empty() && error.contains("MissingRequiredSignature") {
             add(&mut kinds, "signer");
         }
-        if !kinds.contains(&"initialized") && (error.contains("AccountAlreadyInitialized") || error.contains("UninitializedAccount")) {
+        if !kinds.contains(&"initialized")
+            && (error.contains("AccountAlreadyInitialized")
+                || error.contains("UninitializedAccount"))
+        {
             add(&mut kinds, "initialized");
         }
-        let nm = jre!(r#"Error_with_account_name\([^\n]*?"(\w+)""#).captures(&ft).map(|m| m[1].to_string());
+        let nm = jre!(r#"Error_with_account_name\([^\n]*?"(\w+)""#)
+            .captures(&ft)
+            .map(|m| m[1].to_string());
         let sm = if nm.is_none() && self.inp.anchor {
             jre!(r#"\b\w+\([^\n]*?, "([a-z_][a-z0-9_]*)", (0x[0-9a-f]+|\d+)\)"#)
                 .captures_iter(&ft)
@@ -1395,7 +1632,12 @@ impl Fx<'_, '_> {
         } else {
             None
         };
-        let cmp32 = kinds.is_empty() && named.is_none() && self.inp.ir_cmp.is_some_and(|f| f(c, self.first_pc(fail_nodes), self.first_pc(pass_nodes)));
+        let cmp32 = kinds.is_empty()
+            && named.is_none()
+            && self
+                .inp
+                .ir_cmp
+                .is_some_and(|f| f(c, self.first_pc(fail_nodes), self.first_pc(pass_nodes)));
         if kinds.is_empty() && named.is_none() && !cmp32 {
             return;
         }
@@ -1454,7 +1696,9 @@ impl Fx<'_, '_> {
     }
 
     fn span(&self, ns: &[SNode]) -> i64 {
-        let (Some(f), Some(l)) = (ns.first(), ns.last()) else { return 0 };
+        let (Some(f), Some(l)) = (ns.first(), ns.last()) else {
+            return 0;
+        };
         match (self.inp.spans.get(&key(f)), self.inp.spans.get(&key(l))) {
             (Some(a), Some(b)) => b.1 as i64 - a.0 as i64,
             _ => 0,
@@ -1465,12 +1709,20 @@ impl Fx<'_, '_> {
             return f64::INFINITY;
         };
         for n in ns {
-            if matches!(n, SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }) {
+            if matches!(
+                n,
+                SNode::If { .. } | SNode::Block { .. } | SNode::Loop { .. } | SNode::Switch { .. }
+            ) {
                 continue;
             }
             if let Some(sp) = self.inp.spans.get(&key(n)) {
                 for i in sp.0..sp.1 {
-                    if error_mark(self.inp.lines.get(self.inp.at + i).map_or("undefined", |s| s.as_str())) {
+                    if error_mark(
+                        self.inp
+                            .lines
+                            .get(self.inp.at + i)
+                            .map_or("undefined", |s| s.as_str()),
+                    ) {
                         return i as f64 - s0.0 as f64;
                     }
                 }
@@ -1479,7 +1731,10 @@ impl Fx<'_, '_> {
         f64::INFINITY
     }
     fn marks(&self, ns: &[SNode]) -> i64 {
-        self.text_of(ns, 400).split('\n').filter(|l| error_mark(l)).count() as i64
+        self.text_of(ns, 400)
+            .split('\n')
+            .filter(|l| error_mark(l))
+            .count() as i64
     }
     fn cond_exits(ns: &[SNode]) -> i64 {
         ns.iter()
@@ -1518,14 +1773,21 @@ impl Fx<'_, '_> {
             if let Some(ok) = &self.ok_out {
                 if la <= 8 {
                     let ta = self.text_of(a, 80);
-                    if ok.is_match(&ta) && !error_mark(&ta) && self.first_mark(b) <= 2.0 && error_raise(&self.text_of(b, 4)) {
+                    if ok.is_match(&ta)
+                        && !error_mark(&ta)
+                        && self.first_mark(b) <= 2.0
+                        && error_raise(&self.text_of(b, 4))
+                    {
                         return Some(false);
                     }
                 }
             }
         }
         let quiet = |x: &[SNode], y: &[SNode]| -> bool {
-            self.inp.anchor && self.first_mark(y) == 0.0 && anchor_mark(&self.top_text(y, 80)) && !error_mark(&self.text_of(x, 400))
+            self.inp.anchor
+                && self.first_mark(y) == 0.0
+                && anchor_mark(&self.top_text(y, 80))
+                && !error_mark(&self.text_of(x, 400))
         };
         if !strict && la * 4 <= lb && la <= 40 && !quiet(a, b) {
             return Some(true);
@@ -1545,10 +1807,22 @@ impl Fx<'_, '_> {
             if mb0 == 0 && ma0 >= 2 && lb <= 60 && self.inline(b) {
                 return Some(false);
             }
-            if ma0 == 0 && mb0 == 1 && self.first_mark(b) > 0.0 && matches!(b.first(), Some(SNode::If { .. })) && la <= 60 && self.inline(a) {
+            if ma0 == 0
+                && mb0 == 1
+                && self.first_mark(b) > 0.0
+                && matches!(b.first(), Some(SNode::If { .. }))
+                && la <= 60
+                && self.inline(a)
+            {
                 return Some(true);
             }
-            if mb0 == 0 && ma0 == 1 && self.first_mark(a) > 0.0 && matches!(a.first(), Some(SNode::If { .. })) && lb <= 60 && self.inline(b) {
+            if mb0 == 0
+                && ma0 == 1
+                && self.first_mark(a) > 0.0
+                && matches!(a.first(), Some(SNode::If { .. }))
+                && lb <= 60
+                && self.inline(b)
+            {
                 return Some(false);
             }
         }
@@ -1570,10 +1844,12 @@ impl Fx<'_, '_> {
         if !strict && !self.inp.anchor {
             let ea = Self::cond_exits(a);
             let eb = Self::cond_exits(b);
-            if ea == 0 && eb >= 2 && la <= 16 && !a.iter().any(|n| matches!(n, SNode::Loop { .. })) {
+            if ea == 0 && eb >= 2 && la <= 16 && !a.iter().any(|n| matches!(n, SNode::Loop { .. }))
+            {
                 return Some(true);
             }
-            if eb == 0 && ea >= 2 && lb <= 16 && !b.iter().any(|n| matches!(n, SNode::Loop { .. })) {
+            if eb == 0 && ea >= 2 && lb <= 16 && !b.iter().any(|n| matches!(n, SNode::Loop { .. }))
+            {
                 return Some(false);
             }
         }
@@ -1609,17 +1885,27 @@ impl Fx<'_, '_> {
                             err_path: err,
                         });
                         let nm = (self.inp.callee_name)(c);
-                        if (nm.contains("find_program_address") || nm.contains("create_program_address")) && !self.inp.sites.contains_key(&key(n)) {
+                        if (nm.contains("find_program_address")
+                            || nm.contains("create_program_address"))
+                            && !self.inp.sites.contains_key(&key(n))
+                        {
                             let cc = call_of(ir, s);
                             let seeds = cc.and_then(|(_, args)| {
                                 let av = ir.to_vec(args);
-                                match (av.get(1).map(|&e| ir.get(e)), av.get(2).map(|&e| ir.get(e))) {
-                                    (Some(Node::Const(a)), Some(Node::Const(b))) => (self.inp.seeds_at)(a, b),
+                                match (av.get(1).map(|&e| ir.get(e)), av.get(2).map(|&e| ir.get(e)))
+                                {
+                                    (Some(Node::Const(a)), Some(Node::Const(b))) => {
+                                        (self.inp.seeds_at)(a, b)
+                                    }
                                     _ => None,
                                 }
                             });
-                            let t = self.line(ln - 1).map_or(String::new(), |x| js_trim(x).to_string());
-                            let prog = jre!(r", (\w+)\)$").captures(&t).map_or("?".to_string(), |m| m[1].to_string());
+                            let t = self
+                                .line(ln - 1)
+                                .map_or(String::new(), |x| js_trim(x).to_string());
+                            let prog = jre!(r", (\w+)\)$")
+                                .captures(&t)
+                                .map_or("?".to_string(), |m| m[1].to_string());
                             let mut op = Op::new(ln, Some(pc), vec!["PDA_DERIVE"], t, main, err);
                             op.pda = Some(Pda {
                                 fn_: jre!(r"_[0-9a-f]+$").replace(&nm, "").into_owned(),
@@ -1630,16 +1916,33 @@ impl Fx<'_, '_> {
                         }
                         self.helper_call(n, c, main, err);
                         if jre!(r"(?i-u)realloc|resize").is_match(&nm) {
-                            let t = self.line(ln - 1).map_or(String::new(), |x| js_trim(x).to_string());
-                            self.facts.borrow_mut().ops.push(Op::new(ln, Some(pc), vec!["ACCOUNT_REALLOC"], t, main, err));
+                            let t = self
+                                .line(ln - 1)
+                                .map_or(String::new(), |x| js_trim(x).to_string());
+                            self.facts.borrow_mut().ops.push(Op::new(
+                                ln,
+                                Some(pc),
+                                vec!["ACCOUNT_REALLOC"],
+                                t,
+                                main,
+                                err,
+                            ));
                         }
                     }
                     if !cs.is_empty() {
                         before = match s {
-                            Stmt::Call { t: CallTarget::Fn { pc }, .. } => Some(*pc),
-                            Stmt::Set { e, .. } if matches!(ir.get(*e), Node::Call(t, _) if matches!(ir.target(t), CallTarget::Fn { .. })) => {
-                                let Node::Call(t, _) = ir.get(*e) else { unreachable!() };
-                                let CallTarget::Fn { pc } = ir.target(t) else { unreachable!() };
+                            Stmt::Call {
+                                t: CallTarget::Fn { pc },
+                                ..
+                            } => Some(*pc),
+                            Stmt::Set { e, .. } if matches!(ir.get(*e), Node::Call(t, _) if matches!(ir.target(t), CallTarget::Fn { .. })) =>
+                            {
+                                let Node::Call(t, _) = ir.get(*e) else {
+                                    unreachable!()
+                                };
+                                let CallTarget::Fn { pc } = ir.target(t) else {
+                                    unreachable!()
+                                };
                                 Some(pc)
                             }
                             _ => cs.last().copied(),
@@ -1662,7 +1965,11 @@ impl Fx<'_, '_> {
                 SNode::If { c, then, els } => {
                     self.cond_lines(*c, self.line_of(n) + 1);
                     let rest = &ns[k + 1..];
-                    let after = if k + 1 < ns.len() { self.exits(ns, cont) } else { cont };
+                    let after = if k + 1 < ns.len() {
+                        self.exits(ns, cont)
+                    } else {
+                        cont
+                    };
                     let t_ex = self.exits(then, false);
                     let e_ex = !els.is_empty() && self.exits(els, false);
                     // 0: then, 1: else, 2: rest
@@ -1672,11 +1979,15 @@ impl Fx<'_, '_> {
                         if t_ex && !r_ex {
                             fail = Some(0)
                         } else if t_ex && r_ex {
-                            fail = self.pick_fail(then, rest, false).map(|x| if x { 0 } else { 2 })
+                            fail = self
+                                .pick_fail(then, rest, false)
+                                .map(|x| if x { 0 } else { 2 })
                         } else if then.is_empty() && r_ex {
                             fail = Some(2)
                         } else if !t_ex && r_ex && Self::has_exit(then) {
-                            fail = self.pick_fail(then, rest, true).map(|x| if x { 0 } else { 2 })
+                            fail = self
+                                .pick_fail(then, rest, true)
+                                .map(|x| if x { 0 } else { 2 })
                         }
                     } else if t_ex && !e_ex {
                         fail = Some(0)
@@ -1693,8 +2004,15 @@ impl Fx<'_, '_> {
                             xs.iter().any(|x| matches!(x, SNode::If { then, .. } if self.text_of(then, 60).contains("TryingToInitPayerAsProgramAccount")))
                         };
                         if let Some(fv) = fail {
-                            let (other, own) = if fv == 0 { (&els[..], &then[..]) } else { (&then[..], &els[..]) };
-                            if self.inp.anchor && init_alt(other) && !error_mark(&self.text_of(own, 400)) {
+                            let (other, own) = if fv == 0 {
+                                (&els[..], &then[..])
+                            } else {
+                                (&then[..], &els[..])
+                            };
+                            if self.inp.anchor
+                                && init_alt(other)
+                                && !error_mark(&self.text_of(own, 400))
+                            {
                                 fail = None;
                             }
                         }
@@ -1724,8 +2042,20 @@ impl Fx<'_, '_> {
                             then
                         };
                         self.check(n, fail_nodes, fv == 0, main, before, pass_nodes);
-                        self.walk(then, if fv == 0 { false } else { main }, err || fv == 0, after, fv == 2 || (rest.is_empty() && cont_fail));
-                        self.walk(els, if fv == 1 { false } else { main }, err || fv == 1, after, false);
+                        self.walk(
+                            then,
+                            if fv == 0 { false } else { main },
+                            err || fv == 0,
+                            after,
+                            fv == 2 || (rest.is_empty() && cont_fail),
+                        );
+                        self.walk(
+                            els,
+                            if fv == 1 { false } else { main },
+                            err || fv == 1,
+                            after,
+                            false,
+                        );
                         if fv == 2 {
                             self.walk(rest, false, true, cont, false);
                             return;
@@ -1746,7 +2076,11 @@ impl Fx<'_, '_> {
                     before = None;
                 }
                 SNode::Block { label, body } => {
-                    let after = if k + 1 < ns.len() { self.exits(ns, cont) } else { cont };
+                    let after = if k + 1 < ns.len() {
+                        self.exits(ns, cont)
+                    } else {
+                        cont
+                    };
                     self.label_cont.borrow_mut().insert(*label, after);
                     self.walk(body, main, err, after, false);
                     before = None;
@@ -1755,11 +2089,25 @@ impl Fx<'_, '_> {
                     if let Some(c) = c {
                         self.cond_lines(*c, self.line_of(n) + 1);
                     }
-                    self.walk(body, if *form == sbpf_struct::Form::Do { main } else { false }, err, false, false);
+                    self.walk(
+                        body,
+                        if *form == sbpf_struct::Form::Do {
+                            main
+                        } else {
+                            false
+                        },
+                        err,
+                        false,
+                        false,
+                    );
                     before = None;
                 }
                 SNode::Switch { cases, .. } => {
-                    let after = if k + 1 < ns.len() { self.exits(ns, cont) } else { cont };
+                    let after = if k + 1 < ns.len() {
+                        self.exits(ns, cont)
+                    } else {
+                        cont
+                    };
                     for (_, body) in cases {
                         self.walk(body, false, err, after, false);
                     }
@@ -1775,7 +2123,9 @@ pub fn function_facts(inp: &FnInput) -> FnFacts {
     let lines = inp.lines;
     let mut types: IndexMap<String, String> = IndexMap::new();
     let mut alias: HashMap<String, Option<String>> = HashMap::new();
-    let sig = lines.iter().find(|l| l.starts_with("function ") || l.starts_with("export function "));
+    let sig = lines
+        .iter()
+        .find(|l| l.starts_with("function ") || l.starts_with("export function "));
     if let Some(sig) = sig {
         for m in jre!(r"(\w+): (\w+)").captures_iter(sig) {
             types.insert(m[1].to_string(), m[2].to_string());
@@ -1785,7 +2135,9 @@ pub fn function_facts(inp: &FnInput) -> FnFacts {
         if !l.contains(" = ") {
             continue;
         }
-        if let Some(m) = jre!(r"^\s*(?:const |let )?(\w+)(?:: (\w+))? = ([A-Za-z_]\w*\.[\w.]+)$").captures(l) {
+        if let Some(m) =
+            jre!(r"^\s*(?:const |let )?(\w+)(?:: (\w+))? = ([A-Za-z_]\w*\.[\w.]+)$").captures(l)
+        {
             let k = m[1].to_string();
             let v = m[3].to_string();
             let nv = match alias.get(&k) {
@@ -1807,7 +2159,11 @@ pub fn function_facts(inp: &FnInput) -> FnFacts {
         }
     }
     let ok_out = sig
-        .and_then(|s| jre!(r"^(?:export )?function \w+\((\w+)").captures(s).map(|m| m[1].to_string()))
+        .and_then(|s| {
+            jre!(r"^(?:export )?function \w+\((\w+)")
+                .captures(s)
+                .map(|m| m[1].to_string())
+        })
         .map(|o| super::jsre(&format!(r"(?m)^\s*(?:st64\({o}, 0\)|{o}\.tag = 0)$")));
     let fx = Fx {
         inp,
@@ -1863,7 +2219,9 @@ pub fn callee_checks(
     let end = ctx.extent_of(pc);
     let mut i = pc;
     while i < end {
-        let Some(ins) = p.insns.get(i as usize) else { break };
+        let Some(ins) = p.insns.get(i as usize) else {
+            break;
+        };
         if matches!(ins.opc, 0xb7 | 0xb4 | 0x62 | 0x7a) && ins.imm >= 2000 && ins.imm <= 4200 {
             if let Some(e) = err_name(ins.imm as u64) {
                 let e = e.strip_prefix("anchor::").unwrap_or(&e).to_string();
