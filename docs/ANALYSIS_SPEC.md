@@ -346,6 +346,23 @@ Precision guards (eval/ blind review):
   a finding when the instruction has no signer check or the destination is named after a party that does not sign
   (maker_ata_b, the taker signing), else info.
 
+Helper-wrapped CPIs, custom errors, membership (src/analysis/libcpi.ts ctxAccounts, report.ts, phase2.ts):
+- a library CPI helper called from a function of the program given the accounts (transfer_tokens(from, to, ..)): the
+  CpiContext's AccountInfo copies by the IR evaluator up the call path; its signer seeds (ptr, len) after them: none
+  (a constant 0), a count, or the helper's parameters (`p<ptr>[..p<len>]`, a constant length resolved per call site);
+- the Accounts struct's account objects: of several words an account's try call leaves, the &AccountInfo is the one
+  the code reads a flag / key / owner through (an InterfaceAccount's after its data's first words; another account of
+  the same try call: the same word); a boxed object's by the same reads, else its view's AccountInfo field;
+- a branch raising the program's error through its #[error_code] constructor (6000 + / | its argument) is a `custom`
+  check; a PDA-signed move to recipients the state binds (stored key, constant, PDA, a token account such an account
+  owns), behind such a check, is a permissionless crank (value-move-no-signer: none);
+- a key compared in a loop with a boxed account's Vec field elements: kind `member`, relation `m.list[] ∋ s.key`;
+  signer-not-related: the member does not sign, or an account written is related to the list holder by no stored key;
+  two unbound accounts of the program whose data one condition compares, gating a write / CPI: likewise;
+- native: the first data byte compared with a constant, failing with an account error: a type tag (discriminator);
+  account-type-unchecked when another instruction tags that account (position) and here its data authorizes;
+- one finding at one place of a native dispatcher's code reached by several of its arms: reported once.
+
 Corpus noise (400 programs, programs with >= 1 finding): see bench/README.md.
 
 Known gaps: native programs dispatching through processors taking accounts via iterators / calls leave accounts in

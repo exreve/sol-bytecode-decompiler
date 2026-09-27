@@ -420,17 +420,26 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
-	// (native: one finding at a place inside the dispatcher itself found by several of its arms (instructions whose parts
-	// of the dispatcher are not told apart there): the first instruction's only)
+	// (native: one finding at one place found by several arms of a dispatcher (instructions whose parts of the dispatcher, or
+	// of the code all of them reach, are not told apart there): the first instruction's, naming the others; inside the
+	// dispatcher itself from two arms on, elsewhere from three)
 	const armOf = new Map(a.ixs.map(ix => [ix.name, /matched in (\w+)/.exec(ix.dispatch ?? '')?.[1]]))
-	const seen = new Set<string>()
-	for (let i = 0; i < findings.length; i++) {
-		const f = findings[i], d = armOf.get(f.ix)
-		if (!d || !f.path.length || !f.path.every(p => p.startsWith(`${d}:`))) continue
+	const groups = new Map<string, Finding[]>()
+	for (const f of findings) {
+		const d = armOf.get(f.ix)
+		if (!d || !f.path.length) continue
 		const k = `${f.rule}|${f.path.join(',')}|${d}`
-		if (seen.has(k)) findings.splice(i--, 1)
-		else seen.add(k)
+		const g = groups.get(k)
+		if (g) g.push(f); else groups.set(k, [f])
 	}
+	const drop = new Set<Finding>()
+	for (const [k, g] of groups) {
+		const d = k.slice(k.lastIndexOf('|') + 1)
+		if (g.length < (g[0].path.every(p => p.startsWith(`${d}:`)) ? 2 : 3)) continue
+		g.slice(1).forEach(f => drop.add(f))
+		g[0].evidence = [...g[0].evidence, `the same place in ${g.length} instructions of the dispatcher: ${g.slice(1, 6).map(f => f.ix).join(', ')}${g.length > 6 ? ', …' : ''}`]
+	}
+	for (let i = findings.length - 1; i >= 0; i--) if (drop.has(findings[i])) findings.splice(i, 1)
 	findings.push(...incidentFindings(a, r, findings))
 	a.fundMovers = fundMovers(a, r)
 	const rank = { high: 3, medium: 2, low: 1, info: 0 }
