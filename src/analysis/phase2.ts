@@ -420,6 +420,7 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
+	findings.push(...incidentFindings(a, r, findings))
 	// (native: one finding at one place found by several arms of a dispatcher (instructions whose parts of the dispatcher, or
 	// of the code all of them reach, are not told apart there): the first instruction's, naming the others; inside the
 	// dispatcher itself from two arms on, elsewhere from three)
@@ -440,7 +441,6 @@ export function phase2(a: Analysis, r: Result) {
 		g[0].evidence = [...g[0].evidence, `the same place in ${g.length} instructions of the dispatcher: ${g.slice(1, 6).map(f => f.ix).join(', ')}${g.length > 6 ? ', …' : ''}`]
 	}
 	for (let i = findings.length - 1; i >= 0; i--) if (drop.has(findings[i])) findings.splice(i, 1)
-	findings.push(...incidentFindings(a, r, findings))
 	a.fundMovers = fundMovers(a, r)
 	const rank = { high: 3, medium: 2, low: 1, info: 0 }
 	findings.sort((x, y) => rank[y.confidence] * 10 + y.weight - (rank[x.confidence] * 10 + x.weight) || x.ix.localeCompare(y.ix))
@@ -819,7 +819,7 @@ const RULES: Rule[] = [
 				// (the same account (by position) tag-checked by another instruction; here its data authorizes: a stored key compared
 				// with another account's key on every path)
 				const tagged = (x: string) => a.ixs.some(i => i !== ix && i.kind !== 'anchor' && i.checks.some(c => c.account === x && c.kinds.includes('discriminator') && c.status === 'found'))
-				const used = (x: string) => tagged(x) && ix.checks.some(c => c.account === x && c.status === 'found' && c.kinds.includes('key') && !c.kinds.includes('owner') && !c.kinds.includes('address') && !c.kinds.includes('pda'))
+				const used = (x: string) => tagged(x) && ix.ops.some(o => isValueOrAuth(o) && o.target?.startsWith(`${x}.`)) && ix.checks.some(c => c.account === x && c.status === 'found' && c.kinds.includes('key') && !c.kinds.includes('owner') && !c.kinds.includes('address') && !c.kinds.includes('pda'))
 				// (not an account the instruction creates: its owner compared with the system program, or a creation made here)
 				const created = (x: string) => ix.checks.some(c => c.account === x && c.kinds.includes('owner') && /"1{32}"|SYSTEM_PROGRAM/.test(c.cond)) || ix.ops.some(o => (o.kinds.includes('ACCOUNT_CREATE') && o.target?.startsWith(`${x}.`)) || (o.cpi?.family === 'system' && /^(CreateAccount|Allocate|Assign)/.test(o.cpi.ix ?? '') && o.cpi.accounts.some(y => y.text.replace(/^\*/, '') === x)))
 				return ix.accounts.filter(x => found(ix, x.name, 'owner') && !found(ix, x.name, 'discriminator') && used(x.name) && !created(x.name)).slice(0, 1).map(x => ({
@@ -878,12 +878,7 @@ const RULES: Rule[] = [
 			const tagged = new Set([...ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]), ...ix.audit?.initGated ?? []])
 			// (a raw constraint gates a write only when it can bind who calls: a key comparison (32 bytes) or a flag it reads;
 			// e.g. not two counters compared)
-			// (Anchor: a PDA's address checked gates nothing when that account neither signs nor is written: e.g. a program PDA meant
-			// to sign (seeds = [multisig.key()]) passed unsigned)
-			const written = new Set(ix.ops.map(o => o.target?.split('.')[0]).filter(Boolean))
-			// (Anchor: a check of the program's own (custom error) on no account and reading no account's field (e.g. an argument's
-			// length validated) binds nobody either)
-			const gates = (c: CheckOut) => c.kinds.some(k => gate.includes(k) && (k !== 'raw' || !!c.sides || /memcmp|memeq|keyeq|is_signer|, 0x20\)/.test(c.cond)) && (k !== 'pda' || ix.kind !== 'anchor' || !c.account || written.has(c.account) || c.kinds.some(x => x !== 'pda' && x !== 'key' && gate.includes(x))) && (k !== 'custom' || ix.kind !== 'anchor' || c.kinds.length > 1 || !!c.account || !!c.sides || /\b[a-z_]\w*\.[a-z_]\w*/.test(c.cond)))
+			const gates = (c: CheckOut) => c.kinds.some(k => gate.includes(k) && (k !== 'raw' || !!c.sides || /memcmp|memeq|keyeq|is_signer|, 0x20\)/.test(c.cond)))
 			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => gates(ix.checks[i])))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
