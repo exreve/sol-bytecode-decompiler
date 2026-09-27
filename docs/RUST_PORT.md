@@ -559,7 +559,7 @@ Design notes:
 
 - Without IDL, all binary sets: **615 / 615 identical** on `types`, `rtext` and `readfile` (samples,
   regress, compat, bench, eval: 213; corpus: 402).
-- With IDL (the 183 binaries that have one: samples/regress 2, bench, eval, corpus): **IDL_RESULT**.
+- With IDL (the 183 binaries that have one: samples/regress 2, bench, eval, corpus): **183 / 183 identical** (the first run had one difference, the NaN view size above).
 - Fuzz: **6000 / 6000 identical** (1000 each: seeds 1, 7, 11 on samples + compat, seed 3 on corpus + bench +
   eval; seed 13: 2000 on samples + compat + bench); 1409 of them reach the readable output without an
   error (the others stop at an earlier stage's error, reported identically).
