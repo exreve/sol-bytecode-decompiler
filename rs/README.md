@@ -16,7 +16,7 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-struct` | `src/structure.ts`, `src/stmtidioms.ts` | structured statement trees (`Tree`: `SNode`s + statement table), stackifier, node splitting, dispatcher, clean-up passes, Rc idioms |
 | `sbpf-print` | `src/print.ts`, decompile's raw printing path, `layout.ts` renderSingle | printer, declarations, function naming (instruction logs, thunks, symbols), `decompile_raw`, `render_single` |
 | `sbpf-exec` | `src/exec.ts` (+ SHA-256 / Keccak) | concrete interpreter of the built functions (CPI / account runs) |
-| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts`; `src/analysis/facts.ts`, `flow.ts`, `paths.ts`, `sources.ts` (`analysis/`) | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
+| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts`; `src/analysis/facts.ts`, `flow.ts`, `paths.ts`, `sources.ts`, `report.ts`, `phase2.ts`, `phase3.ts`, `audit.ts`, `consistency.ts`, `libcpi.ts` (`analysis/`) | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
 | `sbpf-lib` | `src/fingerprint.ts`, `src/library.ts` (+ `crateOf` of `src/demangle.ts`), `src/builtins.ts` | function fingerprints and signatures (local SHA-1), library classification against `data/libsigs.json` / `data/libnames.json` (crate-aware policy, behavioral names), u128 builtins recognized by behavior |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
@@ -46,7 +46,7 @@ node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutan
 node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow] out_dir`, or `--diff a.so b.so out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow,analysis] out_dir`, or `--diff a.so b.so out_dir`
 (the IDL is read from stage 5 on).
 
 ## Stage dump format (format 1)
@@ -274,11 +274,41 @@ IR encoding above (`<Expr>`), in their function's arena.
 A default-output error is an error line in each requested stage 8 dump; an error of the TS flow walk is an error line
 after the flow header.
 
+### `analysis.jsonl` — the report layer (stage 8b)
+
+The analysis (`report.ts` analyze0, `phase2.ts`, `phase3.ts`, `audit.ts`, `consistency.ts`, `libcpi.ts`) as it stands
+when phase 2 is about to run the incident rules (`phase2Hooks.beforeIncidents`, a dev hook unset in the CLI; Rust: the
+same state at the end of `An::analyze`): everything `renderJson` writes to `security/analysis.json` except the `where`
+file mapping (`file` / `file_line`, layout: 8c), fund movers and the incident findings (8c), plus the internal fields the
+rules read. `<Loc>` = `{"fn","line"[,"pc"]}`. Lines, all key orders fixed:
+
+- `{"t":"program","version","instructions","functions","anchor","idl"}`;
+- per instruction (sorted by score, then name by `localeCompare`): `{"t":"ix","name","handler","kind"[,"dispatch"],"score","effects","functions","indirect"}`,
+  `{"t":"acct"[,"index"],"name","source","expected":{["signer"],["writable"],["pda"],["address"],["optional"]},"constraints":[[kind,{"status"[,"at"][,"via"][,"note"]}]...]}`,
+  `{"t":"check","id","at","status"[,"account"],"kinds","cond","fails_if","error"[,"via"][,"sides"][,"pdaBufs"],"fnPc"[,"passPc"],"main"[,"keyCmp"][,"cross"]}`,
+  `{"t":"op","at","kinds","text","main"[,"target"][,"how"][,"value"][,"cpi":{"program"[,"known"][,"checked"][,"family"][,"ix"][,"seeds"],"fields","accounts":[{["role"],"text"[,"w"][,"s"]}...]}][,"pda":{"fn","seeds","program"}][,"fnPc"][,"anchorClose"][,"guards"][,"bypass":[{"check","path":[<Loc>...][,"strong"]}...]][,"sources":[{"param","source","trust"}...]]}`,
+  then `{"t":"trust","rows":[{"value","trust","evidence"}...]}`, `{"t":"relations","rows":[{"a","b","kind","status","at"}...]}`,
+  `{"t":"storedKeys","rows":[{"account"[,"type"],"compared","referencedBy","never","gaps"}...]}`,
+  `{"t":"authority","rows":[{"op","kind","enabledBy":[{"kind","what"[,"status"][,"writtenBy"]}...]}...]}`,
+  `{"t":"paths","rows":[{"op","conds":[{"at","cond","holds","how"[,"check"]}...],"notRequired":[{"check"[,"path"]}...][,"truncated"]}...]}`,
+  `{"t":"chains","rows":[{"op","steps":[[{"kind","what"[,"status"]}...]...]}...]}`,
+  `{"t":"arith","rows":[{"at"[,"op"],"target","expr","kind","status"[,"guard":{"at","cond"}][,"caller"][,"unnamed"]}...]}`,
+  `{"t":"divs","rows":[{"at","expr","divisor","status"[,"guard"]}...]}`, `{"t":"proof","rows":[{"op","kind","props":[{"prop","status","evidence"}...]}...]}`,
+  `{"t":"audit","dataReads","bumps":[{"op","source"}...],"ignored","casts":[{"op","expr","bits","source"}...],"remChecked"[,"ownerCmp"],"reinit":[{"op","acct"}...][,"sameType":{"fn","n"[,"type"],"accts"}][,"initWrites":[{"acct","type","at","owner"[,"field"][,"tag"]}...]][,"sysvarReads":[{"acct","sysvar","at","idCompared"}...]][,"initGated"]}`;
+- program views: `{"t":"state","field","setBy":[{"ix","value","at"}...],"checkedBy":[{"ix","cond","at"}...]}` (state machine),
+  `{"t":"pda","seeds","program","derivedIn","signsIn","accounts","compared"}`, `{"t":"writes","target","writes":[{"ix","how","at"}...]}`,
+  `{"t":"dep","target","readBy","writtenBy"}`, `{"t":"finding","rule","ix","confidence","weight","title","accounts","path","evidence"}`
+  (the rule engine's, in rule order: before the incident rules, the dispatcher grouping and the ranking),
+  `{"t":"authField","field","writtenBy"}`, `{"t":"role","role","by","members":[{"ix","account","validations","uses"}...],"inconsistencies":[{"role","ix","account","validation","appliedIn":[{"ix","account"[,"at"]}...],"others","uses","weight"}...]}`,
+  `{"t":"unattr","at","kinds","text"[,"target"][,"how"][,"value"][,"cpi"][,"pda"]}` (operations no handler reaches).
+
+A default-output error is an error line (as for the other stage 8 dumps); an exception of the TS analysis (or one the
+Rust side models, e.g. a sysvar read in a branch condition) is an error line after the header.
+
 ### Later stages (planned)
 
 Each later stage adds its own `<stage>.jsonl` with the same rules, e.g. `dataflow` (signatures:
 noreturn, nparams, extraIn, returns, stackArgs; materialized blocks), `optir` (IR per function after
 each optimization group, same node encoding plus `var`), `struct` (structured statement trees),
-`text` (the printed TS output, verbatim, as one JSON string per function), `analysis` (the analysis
-JSON, re-serialized with its own documented key order). Add the dumper to both `scripts/dump.ts`
+`text` (the printed TS output, verbatim, as one JSON string per function). Add the dumper to both `scripts/dump.ts`
 (`STAGES`) and `sbpf-dump`, bump `format` only when an existing stage's encoding changes.
