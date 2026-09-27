@@ -883,6 +883,19 @@ pub fn decompile_read_hook(
     full: bool,
     hook: Option<crate::printfn::AnalysisHook>,
 ) -> Result<ReadOut, String> {
+    decompile_read_opts(bytes, idl, threads, full, None, hook)
+}
+
+/// decompile(bytes, { full, idl, loader }): `loader` is the owner of the program account when known (fetched):
+/// BPFLoader1111… serializes the input unaligned (else the entrypoint's deserializer decides).
+pub fn decompile_read_opts(
+    bytes: &[u8],
+    idl: Option<&IdlInfo>,
+    threads: usize,
+    full: bool,
+    loader: Option<&str>,
+    hook: Option<crate::printfn::AnalysisHook>,
+) -> Result<ReadOut, String> {
     let PrepRead {
         mut pr,
         trees,
@@ -912,7 +925,10 @@ pub fn decompile_read_hook(
         }
     }
     // (read in phase 4 of the TS, where p.funcs are the built functions: recoverVars works in place)
-    let facts = reg_facts(&pr.p);
+    let mut facts = reg_facts(&pr.p);
+    if let Some(l) = loader {
+        facts.unaligned = l.starts_with("BPFLoader1111");
+    }
     let ctx = ProgCtx::new(&pr.p);
     let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
     let p = &pr.p;

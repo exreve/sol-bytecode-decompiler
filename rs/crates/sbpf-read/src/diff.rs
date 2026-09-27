@@ -2,6 +2,7 @@
 //! are matched by address-independent hash, then register-renamed hash, instruction / symbol name,
 //! and finally by coarse shape + call-graph neighbourhood.
 
+use crate::idl::IdlInfo;
 use crate::sem::SemR;
 use indexmap::{IndexMap, IndexSet};
 use sbpf_lib::fingerprint::{code_hash, fuzzy_sim, signatures, FnSig};
@@ -27,11 +28,12 @@ pub struct Profile {
 /// Instruction arms of a native program from the analysis' tag-dispatch split (and the functions each reaches).
 fn native_arms(
     bytes: &[u8],
+    idl: Option<&IdlInfo>,
     arms: &mut IndexMap<String, &'static str>,
     owners: &mut HashMap<i64, Vec<String>>,
 ) {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let Ok(r) = crate::decompile::decompile_read(bytes, None, threads, false) else {
+    let Ok(r) = crate::decompile::decompile_read(bytes, idl, threads, false) else {
         return;
     };
     let Some(an) = r.analysis.as_ref() else {
@@ -59,11 +61,11 @@ fn native_arms(
 }
 
 /// Everything the diff needs, from the first decompiler phase.
-pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
+pub fn profile(bytes: &[u8], idl: Option<&IdlInfo>) -> Result<Profile, String> {
     let mut p = load_program(bytes, true)?;
     sbpf_dataflow::infer_signatures(&mut p);
     let base = sbpf_print::names::semantics(&p);
-    let sem = SemR::new(&p, &base, None);
+    let sem = SemR::new(&p, &base, idl);
     let libs = classify(&p)?;
     let img = p.image();
     let sigs = signatures(&p, &img);
@@ -122,10 +124,17 @@ pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
             }
         }
     }
+    if let Some(idl) = idl {
+        for ix in &idl.instructions {
+            if !arms.contains_key(&ix.name) {
+                arms.insert(ix.name.clone(), "idl");
+            }
+        }
+    }
     if arms.is_empty() {
         // native programs (no names from logs / discriminators): the per-instruction split on the tag dispatch
         // (security analysis), which needs the full decompilation
-        native_arms(bytes, &mut arms, &mut owners);
+        native_arms(bytes, idl, &mut arms, &mut owners);
     }
     let mut callers: HashMap<i64, Vec<i64>> = HashMap::new();
     for s in sigs.values() {
@@ -675,8 +684,14 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
 }
 
 /// The diff report of two programs (`sbpf-decompile a.so b.so -o report.txt`): lines joined, trailing newline.
-pub fn diff_report(a: &[u8], b: &[u8], all: bool, labels: [&str; 2]) -> Result<String, String> {
-    let pa = profile(a)?;
-    let pb = profile(b)?;
+pub fn diff_report(
+    a: &[u8],
+    b: &[u8],
+    idls: [Option<&IdlInfo>; 2],
+    all: bool,
+    labels: [&str; 2],
+) -> Result<String, String> {
+    let pa = profile(a, idls[0])?;
+    let pb = profile(b, idls[1])?;
     Ok(diff_lines(&pa, &pb, all, labels).join("\n") + "\n")
 }

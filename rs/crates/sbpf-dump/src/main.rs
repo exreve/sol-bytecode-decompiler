@@ -384,7 +384,8 @@ fn real_main() {
         for _ in 0..iters {
             let t = Instant::now();
             std::hint::black_box(
-                sbpf_read::diff::diff_report(&a, &b, true, [&files[0], &files[1]]).unwrap(),
+                sbpf_read::diff::diff_report(&a, &b, [None, None], true, [&files[0], &files[1]])
+                    .unwrap(),
             );
             best = best.min(t.elapsed().as_secs_f64() * 1e3);
         }
@@ -494,51 +495,10 @@ fn real_main() {
     }
 }
 
-/// The CLI's output (dev driver until stage 9): `--cli prog.so [--idl x.json] [--full] [-o out.ts | -o dir/]`, as
-/// `sbpf-decompile` writes it (a project for a directory, else the single file; stdout without -o).
+/// The CLI's output: `--cli <sbpf-decompile arguments>`, the `sbpf-decompile` binary's entry (with the dumps'
+/// `SBPF_THREADS`).
 fn cli(args: &[String]) {
-    let (mut idl_file, mut out, mut full, mut input) = (None, None, false, None);
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--idl" => {
-                idl_file = Some(args[i + 1].clone());
-                i += 1;
-            }
-            "-o" => {
-                out = Some(args[i + 1].clone());
-                i += 1;
-            }
-            "--full" => full = true,
-            _ => input = Some(args[i].clone()),
-        }
-        i += 1;
-    }
-    let bytes = std::fs::read(input.expect("input")).expect("read input");
-    let idl = idl_file.map(|f| {
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(f).expect("read idl")).expect("idl json");
-        sbpf_read::idl::parse_idl(&v)
-    });
-    let r = match sbpf_read::decompile::decompile_read(&bytes, idl.as_ref(), stage3::threads(), full) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    };
-    match out {
-        Some(o) if o.ends_with('/') || std::path::Path::new(&o).is_dir() => {
-            for (path, text) in sbpf_read::layout::render_project(&r) {
-                let f = std::path::Path::new(&o).join(&path);
-                std::fs::create_dir_all(f.parent().unwrap()).expect("mkdir");
-                std::fs::write(f, text).expect("write");
-            }
-            eprintln!("wrote project to {o}");
-        }
-        Some(o) => std::fs::write(o, sbpf_read::decompile::render_read(&r)).expect("write"),
-        None => print!("{}", sbpf_read::decompile::render_read(&r)),
-    }
+    std::process::exit(sbpf_cli::run(args, stage3::threads()));
 }
 
 /// Whole CLI output timings (ms, best of `iters`): decompile + analysis + the single file + the project

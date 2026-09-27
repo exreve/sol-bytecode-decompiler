@@ -1,18 +1,21 @@
 [package]
-name = "sbpf-dump"
+name = "sbpf-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sbpf-decompile"
+path = "src/main.rs"
+
 [dependencies]
 serde_json.workspace = true
-sbpf-elf.workspace = true
+miniz_oxide.workspace = true
 sbpf-ir.workspace = true
 sbpf-program.workspace = true
-sbpf-dataflow.workspace = true
-sbpf-opt.workspace = true
-sbpf-struct.workspace = true
 sbpf-print.workspace = true
 sbpf-read.workspace = true
-sbpf-lib.workspace = true
-sbpf-cli.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }

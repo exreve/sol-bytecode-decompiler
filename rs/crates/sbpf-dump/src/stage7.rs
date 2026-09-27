@@ -124,7 +124,7 @@ pub fn dump_diff(a: &str, b: &str) -> String {
     let mut o = header("diff");
     let ba = std::fs::read(a).expect("read a");
     let bb = std::fs::read(b).expect("read b");
-    match sbpf_read::diff::diff_report(&ba, &bb, true, [a, b]) {
+    match sbpf_read::diff::diff_report(&ba, &bb, [None, None], true, [a, b]) {
         Ok(text) => {
             let mut j = J::obj();
             j.s("text", &text);

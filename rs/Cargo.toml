@@ -22,6 +22,7 @@ sbpf-print = { path = "crates/sbpf-print" }
 sbpf-exec = { path = "crates/sbpf-exec" }
 sbpf-read = { path = "crates/sbpf-read" }
 sbpf-lib = { path = "crates/sbpf-lib" }
+sbpf-cli = { path = "crates/sbpf-cli" }
 
 [profile.release]
 codegen-units = 1
