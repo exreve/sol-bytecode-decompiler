@@ -143,7 +143,7 @@ fn dump_cfg(p: &Program) -> String {
                 .n("start", b.start)
                 .n("end", b.end)
                 .n("stmts", b.stmts.len() as i64);
-            j.raw("term", &term(&b.term));
+            j.raw("term", &to_s(&p.ir, &b.term, term));
             j.raw("succs", &nums(b.succs.iter().map(|&s| s as i64)));
             j.raw("preds", &nums(b.preds.iter().map(|&s| s as i64)));
             j.line(&mut o);
@@ -155,10 +155,12 @@ fn dump_cfg(p: &Program) -> String {
 fn dump_lift(p: &Program) -> String {
     let mut o = header("lift");
     let mut syscalls = p.syscalls.clone();
+    let ir = sbpf_ir::Ir::new();
     let mut cx = Cx {
         insns: &p.insns,
         elf: &p.elf,
         syscalls: &mut syscalls,
+        ir: &ir,
     };
     let mut lifter = Lifter::new(p.version, p.insns.len());
     let no_lddw = p.version == 2;
@@ -167,18 +169,10 @@ fn dump_lift(p: &Program) -> String {
         let l = lifter.lift(&mut cx, pc as i64);
         let mut j = J::obj();
         j.n("pc", pc as i64);
-        let mut ss = String::from("[");
-        for (i, s) in l.stmts.iter().enumerate() {
-            if i > 0 {
-                ss.push(',');
-            }
-            ss.push_str(&stmt(s));
-        }
-        ss.push(']');
-        j.raw("stmts", &ss);
+        j.raw("stmts", &to_s(&ir, l.stmt.as_slice(), stmts));
         match &l.flow {
             Flow::Next(n) => j.n("next", *n),
-            Flow::Term(t) => j.raw("term", &term(t)),
+            Flow::Term(t) => j.raw("term", &to_s(&ir, t, term)),
         };
         j.line(&mut o);
         if p.insns[pc].opc == 0x18 && !no_lddw {
@@ -245,16 +239,18 @@ fn time(files: &[String], iters: usize) {
             let ta = Instant::now();
             let starts = instruction_starts(&q);
             let mut sc = q.syscalls.clone();
+            let ir = sbpf_ir::Ir::new();
             let mut cx = Cx {
                 insns: &q.insns,
                 elf: &q.elf,
                 syscalls: &mut sc,
+                ir: &ir,
             };
             let mut lifter = Lifter::new(q.version, q.insns.len());
             let mut cnt = 0usize;
             for pc in 0..q.insns.len() {
                 if starts[pc] != 0 {
-                    cnt += lifter.lift(&mut cx, pc as i64).stmts.len();
+                    cnt += lifter.lift(&mut cx, pc as i64).stmt.is_some() as usize;
                 }
             }
             std::hint::black_box(cnt);

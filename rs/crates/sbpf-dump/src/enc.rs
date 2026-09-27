@@ -1,6 +1,6 @@
 //! Canonical JSON encoding (rs/README.md): keys in a fixed order, compact, `JSON.stringify` escaping.
 
-use sbpf_ir::{CallTarget, Expr, Stmt, Term};
+use sbpf_ir::{CallTarget, Ir, Node, Stmt, Term, E, L};
 
 pub const FORMAT: i64 = 1;
 
@@ -34,11 +34,6 @@ impl J {
         self.0.push_str(&v.to_string());
         self
     }
-    pub fn u(&mut self, k: &str, v: u64) -> &mut Self {
-        self.key(k);
-        self.0.push_str(&v.to_string());
-        self
-    }
     /// a JS number (JSON.stringify format)
     pub fn f(&mut self, k: &str, v: f64) -> &mut Self {
         self.key(k);
@@ -68,6 +63,12 @@ impl J {
 }
 
 pub fn push_str(out: &mut String, s: &str) {
+    if s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\') {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+        return;
+    }
     out.push_str(&serde_json::to_string(s).unwrap());
 }
 
@@ -132,149 +133,274 @@ pub fn fnv64(b: &[u8]) -> String {
     format!("{h:016x}")
 }
 
-fn list(es: &[Expr]) -> String {
-    let mut s = String::from("[");
-    for (i, e) in es.iter().enumerate() {
+// ---------- IR (written straight into the output) ----------
+
+fn num(o: &mut String, v: i64) {
+    use std::fmt::Write;
+    let _ = write!(o, "{v}");
+}
+
+fn hexv(o: &mut String, v: u64) {
+    use std::fmt::Write;
+    let _ = write!(o, "\"0x{v:x}\"");
+}
+
+pub fn list(ir: &Ir, l: L, o: &mut String) {
+    o.push('[');
+    for (i, e) in ir.items(l).enumerate() {
         if i > 0 {
-            s.push(',');
+            o.push(',');
         }
-        s.push_str(&expr(e));
+        expr(ir, e, o);
     }
-    s.push(']');
-    s
+    o.push(']');
 }
 
-pub fn expr(e: &Expr) -> String {
-    let mut j = J::obj();
-    match e {
-        Expr::Const(v) => j.s("k", "const").h("v", *v),
-        Expr::Var(id) => j.s("k", "var").n("id", *id as i64),
-        Expr::Reg(r) => j.s("k", "reg").n("r", *r as i64),
-        Expr::Undef => j.s("k", "undef"),
-        Expr::Bin(op, a, b) => j
-            .s("k", "bin")
-            .s("op", op.as_str())
-            .raw("a", &expr(a))
-            .raw("b", &expr(b)),
-        Expr::Neg(a) => j.s("k", "neg").raw("a", &expr(a)),
-        Expr::Not(a) => j.s("k", "not").raw("a", &expr(a)),
-        Expr::Lnot(a) => j.s("k", "lnot").raw("a", &expr(a)),
-        Expr::Ext { signed, bits, a } => j
-            .s("k", "ext")
-            .b("signed", *signed)
-            .n("bits", *bits as i64)
-            .raw("a", &expr(a)),
-        Expr::Bswap { bits, a } => j.s("k", "bswap").n("bits", *bits as i64).raw("a", &expr(a)),
-        Expr::Load { size, addr } => j
-            .s("k", "load")
-            .n("size", *size as i64)
-            .raw("addr", &expr(addr)),
-        Expr::Cmp(op, a, b) => j
-            .s("k", "cmp")
-            .s("op", op.as_str())
-            .raw("a", &expr(a))
-            .raw("b", &expr(b)),
-        Expr::Land(a, b) => j.s("k", "land").raw("a", &expr(a)).raw("b", &expr(b)),
-        Expr::Lor(a, b) => j.s("k", "lor").raw("a", &expr(a)).raw("b", &expr(b)),
-        Expr::Sel { c, a, b } => j
-            .s("k", "sel")
-            .raw("c", &expr(c))
-            .raw("a", &expr(a))
-            .raw("b", &expr(b)),
-        Expr::Call { t, args } => j
-            .s("k", "call")
-            .raw("t", &target(t))
-            .raw("args", &list(args)),
-        Expr::Fn { name, args } => j.s("k", "fn").s("name", name).raw("args", &list(args)),
-    };
-    j.done()
+fn un(ir: &Ir, k: &str, a: E, o: &mut String) {
+    o.push_str("{\"k\":\"");
+    o.push_str(k);
+    o.push_str("\",\"a\":");
+    expr(ir, a, o);
+    o.push('}');
 }
 
-pub fn target(t: &CallTarget) -> String {
-    let mut j = J::obj();
-    match t {
-        CallTarget::Fn { pc } => j.s("k", "fn").n("pc", *pc),
-        CallTarget::Sys { name, hash } => j.s("k", "sys").s("name", name).n("hash", *hash as i64),
-        CallTarget::Ind { e } => j.s("k", "ind").raw("e", &expr(e)),
-    };
-    j.done()
+fn bi(ir: &Ir, k: &str, op: Option<&str>, a: E, b: E, o: &mut String) {
+    o.push_str("{\"k\":\"");
+    o.push_str(k);
+    if let Some(op) = op {
+        o.push_str("\",\"op\":\"");
+        o.push_str(op);
+    }
+    o.push_str("\",\"a\":");
+    expr(ir, a, o);
+    o.push_str(",\"b\":");
+    expr(ir, b, o);
+    o.push('}');
 }
 
-pub fn stmt(s: &Stmt) -> String {
-    let mut j = J::obj();
-    match s {
-        Stmt::Set { dst, e, pc } => j
-            .s("k", "set")
-            .n("dst", *dst as i64)
-            .raw("e", &expr(e))
-            .n("pc", *pc),
-        Stmt::Store { size, addr, v, pc } => j
-            .s("k", "store")
-            .n("size", *size as i64)
-            .raw("addr", &expr(addr))
-            .raw("v", &expr(v))
-            .n("pc", *pc),
-        Stmt::Call {
-            dst,
-            t,
-            args,
-            pc,
-            extra,
-        } => {
-            j.s("k", "call")
-                .n("dst", *dst as i64)
-                .raw("t", &target(t))
-                .raw("args", &list(args))
-                .n("pc", *pc);
-            if let Some(x) = extra {
-                j.raw("extra", &list(x));
-            }
-            &mut j
+pub fn expr(ir: &Ir, e: E, o: &mut String) {
+    match ir.get(e) {
+        Node::Const(v) => {
+            o.push_str("{\"k\":\"const\",\"v\":");
+            hexv(o, v);
+            o.push('}');
         }
-        Stmt::Eval { e, pc } => j.s("k", "eval").raw("e", &expr(e)).n("pc", *pc),
+        Node::Var(id) => {
+            o.push_str("{\"k\":\"var\",\"id\":");
+            num(o, id as i64);
+            o.push('}');
+        }
+        Node::Reg(r) => {
+            o.push_str("{\"k\":\"reg\",\"r\":");
+            num(o, r as i64);
+            o.push('}');
+        }
+        Node::Undef => o.push_str("{\"k\":\"undef\"}"),
+        Node::Bin(op, a, b) => bi(ir, "bin", Some(op.as_str()), a, b, o),
+        Node::Cmp(op, a, b) => bi(ir, "cmp", Some(op.as_str()), a, b, o),
+        Node::Land(a, b) => bi(ir, "land", None, a, b, o),
+        Node::Lor(a, b) => bi(ir, "lor", None, a, b, o),
+        Node::Neg(a) => un(ir, "neg", a, o),
+        Node::Not(a) => un(ir, "not", a, o),
+        Node::Lnot(a) => un(ir, "lnot", a, o),
+        Node::Ext { signed, bits, a } => {
+            o.push_str(if signed {
+                "{\"k\":\"ext\",\"signed\":true,\"bits\":"
+            } else {
+                "{\"k\":\"ext\",\"signed\":false,\"bits\":"
+            });
+            num(o, bits as i64);
+            o.push_str(",\"a\":");
+            expr(ir, a, o);
+            o.push('}');
+        }
+        Node::Bswap { bits, a } => {
+            o.push_str("{\"k\":\"bswap\",\"bits\":");
+            num(o, bits as i64);
+            o.push_str(",\"a\":");
+            expr(ir, a, o);
+            o.push('}');
+        }
+        Node::Load { size, addr } => {
+            o.push_str("{\"k\":\"load\",\"size\":");
+            num(o, size as i64);
+            o.push_str(",\"addr\":");
+            expr(ir, addr, o);
+            o.push('}');
+        }
+        Node::Sel(c, a, b) => {
+            o.push_str("{\"k\":\"sel\",\"c\":");
+            expr(ir, c, o);
+            o.push_str(",\"a\":");
+            expr(ir, a, o);
+            o.push_str(",\"b\":");
+            expr(ir, b, o);
+            o.push('}');
+        }
+        Node::Call(t, args) => {
+            o.push_str("{\"k\":\"call\",\"t\":");
+            target(ir, &ir.target(t), o);
+            o.push_str(",\"args\":");
+            list(ir, args, o);
+            o.push('}');
+        }
+        Node::Fn(name, args) => {
+            o.push_str("{\"k\":\"fn\",\"name\":");
+            push_str(o, &ir.name(name));
+            o.push_str(",\"args\":");
+            list(ir, args, o);
+            o.push('}');
+        }
+        Node::Item(_) => unreachable!("list item as expression"),
+    }
+}
+
+pub fn target(ir: &Ir, t: &CallTarget, o: &mut String) {
+    match t {
+        CallTarget::Fn { pc } => {
+            o.push_str("{\"k\":\"fn\",\"pc\":");
+            num(o, *pc);
+            o.push('}');
+        }
+        CallTarget::Sys { name, hash } => {
+            o.push_str("{\"k\":\"sys\",\"name\":");
+            push_str(o, name);
+            o.push_str(",\"hash\":");
+            num(o, *hash as i64);
+            o.push('}');
+        }
+        CallTarget::Ind { e } => {
+            o.push_str("{\"k\":\"ind\",\"e\":");
+            expr(ir, *e, o);
+            o.push('}');
+        }
+    }
+}
+
+pub fn stmt(ir: &Ir, s: &Stmt, o: &mut String) {
+    let pc = match s {
+        Stmt::Set { dst, e, pc } => {
+            o.push_str("{\"k\":\"set\",\"dst\":");
+            num(o, *dst as i64);
+            o.push_str(",\"e\":");
+            expr(ir, *e, o);
+            pc
+        }
+        Stmt::Store { size, addr, v, pc } => {
+            o.push_str("{\"k\":\"store\",\"size\":");
+            num(o, *size as i64);
+            o.push_str(",\"addr\":");
+            expr(ir, *addr, o);
+            o.push_str(",\"v\":");
+            expr(ir, *v, o);
+            pc
+        }
+        Stmt::Call {
+            dst, t, args, pc, ..
+        } => {
+            o.push_str("{\"k\":\"call\",\"dst\":");
+            num(o, *dst as i64);
+            o.push_str(",\"t\":");
+            target(ir, t, o);
+            o.push_str(",\"args\":");
+            list(ir, *args, o);
+            pc
+        }
+        Stmt::Eval { e, pc } => {
+            o.push_str("{\"k\":\"eval\",\"e\":");
+            expr(ir, *e, o);
+            pc
+        }
         Stmt::Stores {
             size,
             addr,
             vals,
             pc,
-        } => j
-            .s("k", "stores")
-            .n("size", *size as i64)
-            .raw("addr", &expr(addr))
-            .raw("vals", &list(vals))
-            .n("pc", *pc),
-        Stmt::Copy {
-            dst,
-            src,
-            n,
-            pc,
-            rev,
         } => {
-            j.s("k", "copy")
-                .raw("dst", &expr(dst))
-                .raw("src", &expr(src))
-                .u("n", *n)
-                .n("pc", *pc);
-            if let Some(r) = rev {
-                j.b("rev", *r);
-            }
-            &mut j
+            o.push_str("{\"k\":\"stores\",\"size\":");
+            num(o, *size as i64);
+            o.push_str(",\"addr\":");
+            expr(ir, *addr, o);
+            o.push_str(",\"vals\":");
+            list(ir, *vals, o);
+            pc
         }
-        Stmt::Trap { msg, pc } => j.s("k", "trap").s("msg", msg).n("pc", *pc),
+        Stmt::Copy {
+            dst, src, n, pc, ..
+        } => {
+            o.push_str("{\"k\":\"copy\",\"dst\":");
+            expr(ir, *dst, o);
+            o.push_str(",\"src\":");
+            expr(ir, *src, o);
+            o.push_str(",\"n\":");
+            o.push_str(&n.to_string());
+            pc
+        }
+        Stmt::Trap { msg, pc } => {
+            o.push_str("{\"k\":\"trap\",\"msg\":");
+            push_str(o, msg);
+            pc
+        }
     };
-    j.done()
+    o.push_str(",\"pc\":");
+    num(o, *pc);
+    match s {
+        Stmt::Call { extra: Some(x), .. } => {
+            o.push_str(",\"extra\":");
+            list(ir, *x, o);
+        }
+        Stmt::Copy { rev: Some(r), .. } => {
+            o.push_str(if *r { ",\"rev\":true" } else { ",\"rev\":false" });
+        }
+        _ => {}
+    }
+    o.push('}');
 }
 
-pub fn term(t: &Term) -> String {
-    let mut j = J::obj();
+pub fn stmts(ir: &Ir, ss: &[Stmt], o: &mut String) {
+    o.push('[');
+    for (i, s) in ss.iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        stmt(ir, s, o);
+    }
+    o.push(']');
+}
+
+pub fn term(ir: &Ir, t: &Term, o: &mut String) {
     match t {
-        Term::Jmp { to } => j.s("k", "jmp").n("to", *to),
-        Term::Br { c, t, f } => j.s("k", "br").raw("c", &expr(c)).n("t", *t).n("f", *f),
-        Term::Ret { e } => j
-            .s("k", "ret")
-            .raw("e", &e.as_ref().map_or("null".into(), expr)),
-        Term::Trap { msg } => j.s("k", "trap").s("msg", msg),
-        Term::Tail => j.s("k", "tail").raw("e", "null"),
-    };
-    j.done()
+        Term::Jmp { to } => {
+            o.push_str("{\"k\":\"jmp\",\"to\":");
+            num(o, *to);
+        }
+        Term::Br { c, t, f } => {
+            o.push_str("{\"k\":\"br\",\"c\":");
+            expr(ir, *c, o);
+            o.push_str(",\"t\":");
+            num(o, *t);
+            o.push_str(",\"f\":");
+            num(o, *f);
+        }
+        Term::Ret { e } => {
+            o.push_str("{\"k\":\"ret\",\"e\":");
+            match e {
+                Some(e) => expr(ir, *e, o),
+                None => o.push_str("null"),
+            }
+        }
+        Term::Trap { msg } => {
+            o.push_str("{\"k\":\"trap\",\"msg\":");
+            push_str(o, msg);
+        }
+        Term::Tail => o.push_str("{\"k\":\"tail\",\"e\":null"),
+    }
+    o.push('}');
+}
+
+/// `f(ir, x, out)` into a new string.
+pub fn to_s<T: ?Sized>(ir: &Ir, x: &T, f: fn(&Ir, &T, &mut String)) -> String {
+    let mut o = String::new();
+    f(ir, x, &mut o);
+    o
 }

@@ -6,7 +6,7 @@ pub mod syscalls;
 
 use indexmap::{IndexMap, IndexSet};
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
-use sbpf_ir::{b, c, cmp, r, x, BinOp, CallTarget, CmpOp, Expr, Stmt, Term};
+use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use syscalls::Syscall;
@@ -28,9 +28,10 @@ pub enum Flow {
     Term(Term),
 }
 
+/// (Lifting yields at most one statement per instruction.)
 #[derive(Clone, Debug)]
 pub struct Lifted {
-    pub stmts: Vec<Rc<Stmt>>,
+    pub stmt: Option<Stmt>,
     pub flow: Flow,
 }
 
@@ -39,8 +40,8 @@ pub struct Block {
     pub id: usize,
     pub start: i64,
     pub end: i64,
-    /// shared with the lifter's memo (TS shares the objects too)
-    pub stmts: Vec<Rc<Stmt>>,
+    /// expressions in the program's arena until variable recovery, then in the function's
+    pub stmts: Vec<Stmt>,
     pub term: Term,
     pub succs: Vec<usize>,
     pub preds: Vec<usize>,
@@ -87,6 +88,8 @@ pub struct Program {
     /// functions whose address is materialized (callx / fn pointers)
     pub address_taken: IndexSet<i64>,
     pub lazy: Option<LazyState>,
+    /// arena of the lifted IR (shared by all functions' blocks until variable recovery)
+    pub ir: Ir,
 }
 
 impl Program {
@@ -140,13 +143,14 @@ pub struct Cx<'a> {
     pub insns: &'a [Insn],
     pub elf: &'a Elf,
     pub syscalls: &'a mut IndexMap<String, Syscall>,
+    pub ir: &'a Ir,
 }
 
 pub struct Lifter {
     pub v: u32,
     pc_by_hash: HashMap<u32, i64>,
     /// lift() memoized per pc (see program.ts liftShared)
-    pub memo: Vec<Option<Rc<Lifted>>>,
+    pub memo: Vec<Option<Lifted>>,
     /// control flow of each memoized pc, packed for the discovery walks (Rust-only, derived from memo)
     steps: Vec<Step>,
 }
@@ -164,15 +168,12 @@ const NO_CALL: i64 = i64::MIN;
 impl Step {
     fn of(l: &Lifted) -> Step {
         let mut call = NO_CALL;
-        for s in &l.stmts {
-            if let Stmt::Call {
-                t: CallTarget::Fn { pc },
-                ..
-            } = &**s
-            {
-                debug_assert!(call == NO_CALL);
-                call = *pc;
-            }
+        if let Some(Stmt::Call {
+            t: CallTarget::Fn { pc },
+            ..
+        }) = &l.stmt
+        {
+            call = *pc;
         }
         let (kind, a, b) = match &l.flow {
             Flow::Next(n) => (1, *n, 0),
@@ -245,14 +246,13 @@ impl Lifter {
         self.pc_by_hash.get(&h).map(|&t| CallTarget::Fn { pc: t })
     }
 
-    pub fn lift_shared(&mut self, cx: &mut Cx, pc: i64) -> Rc<Lifted> {
-        if let Some(l) = &self.memo[pc as usize] {
-            return l.clone();
+    pub fn lift_shared(&mut self, cx: &mut Cx, pc: i64) -> &Lifted {
+        if self.memo[pc as usize].is_none() {
+            let l = self.lift(cx, pc);
+            self.steps[pc as usize] = Step::of(&l);
+            self.memo[pc as usize] = Some(l);
         }
-        let l = Rc::new(self.lift(cx, pc));
-        self.memo[pc as usize] = Some(l.clone());
-        self.steps[pc as usize] = Step::of(&l);
-        l
+        self.memo[pc as usize].as_ref().unwrap()
     }
 
     fn step(&mut self, cx: &mut Cx, pc: i64) -> Step {
@@ -282,49 +282,47 @@ impl Lifter {
         let v2 = v == 2;
         let (pqr, sx, swap_sub, no_neg, no_lddw, no_le, mov_mem) = (v2, v2, v2, v2, v2, v2, v2);
         let (static_sys, jmp32) = (v >= 3, v >= 3);
-        let d = || r(dst);
-        let s = || r(src);
-        let imm_s = || c(imm as i64 as u64); // imm as i64 as u64
-        let imm_u32 = || c(imm as u32 as u64); // imm as u32 as u64
-        let set = |e: Expr| Lifted {
-            stmts: vec![Rc::new(Stmt::Set {
+        let ir: &Ir = cx.ir;
+        let d = || ir.reg(dst);
+        let s = || ir.reg(src);
+        let imm_s = || ir.c(imm as i64 as u64); // imm as i64 as u64
+        let imm_u32 = || ir.c(imm as u32 as u64); // imm as u32 as u64
+        let set = |e: E| Lifted {
+            stmt: Some(Stmt::Set {
                 dst: dst as i32,
                 e,
                 pc,
-            })],
+            }),
             flow: Flow::Next(pc + 1),
         };
-        let ext32 = |e: Expr| x(!sx, 32, e); // `sign_extension()` helper of add32/sub32 (v0/v1 sign-extend!)
-        let z32 = |e: Expr| x(false, 32, e);
-        let addr = |base: Expr| {
+        let ext32 = |e: E| ir.ext(!sx, 32, e); // `sign_extension()` helper of add32/sub32 (v0/v1 sign-extend!)
+        let z32 = |e: E| ir.ext(false, 32, e);
+        let addr = |base: E| {
             if off == 0 {
                 base
             } else {
-                b(BinOp::Add, base, c(off as i64 as u64))
+                ir.bin(BinOp::Add, base, ir.c(off as i64 as u64))
             }
         };
         let load = |size: u8| {
-            set(Expr::Load {
-                size,
-                addr: Box::new(addr(s())),
-            })
+            set(ir.load(size, addr(s())))
         };
-        let store = |size: u8, val: Expr| Lifted {
-            stmts: vec![Rc::new(Stmt::Store {
+        let store = |size: u8, val: E| Lifted {
+            stmt: Some(Stmt::Store {
                 size,
                 addr: addr(d()),
                 v: val,
                 pc,
-            })],
+            }),
             flow: Flow::Next(pc + 1),
         };
-        let trap = |msg: String| Lifted {
-            stmts: vec![],
+        let trap = |msg: Rc<str>| Lifted {
+            stmt: None,
             flow: Flow::Term(Term::Trap { msg }),
         };
-        let bad = || trap(format!("invalid instruction 0x{:x} at pc {}", opc, pc));
-        let jmp = |cond: Expr| Lifted {
-            stmts: vec![],
+        let bad = || trap(format!("invalid instruction 0x{:x} at pc {}", opc, pc).into());
+        let jmp = |cond: E| Lifted {
+            stmt: None,
             flow: Flow::Term(Term::Br {
                 c: cond,
                 t: pc + 1 + off as i64,
@@ -384,51 +382,51 @@ impl Lifter {
             };
             let val = ((hi.imm as u32 as u64) << 32) | imm as u32 as u64;
             return Lifted {
-                stmts: vec![Rc::new(Stmt::Set {
+                stmt: Some(Stmt::Set {
                     dst: dst as i32,
-                    e: c(val),
+                    e: ir.c(val),
                     pc,
-                })],
+                }),
                 flow: Flow::Next(pc + 2),
             };
         }
 
         match opc {
             // ---- ALU32 ----
-            0x04 => return set(ext32(b(Add, d(), imm_s()))),
-            0x0c => return set(ext32(b(Add, d(), s()))),
+            0x04 => return set(ext32(ir.bin(Add, d(), imm_s()))),
+            0x0c => return set(ext32(ir.bin(Add, d(), s()))),
             0x14 => {
                 return set(if swap_sub {
-                    ext32(b(Sub, imm_s(), d()))
+                    ext32(ir.bin(Sub, imm_s(), d()))
                 } else {
-                    ext32(b(Sub, d(), imm_s()))
+                    ext32(ir.bin(Sub, d(), imm_s()))
                 })
             }
-            0x1c => return set(ext32(b(Sub, d(), s()))),
-            0x24 if !pqr => return set(x(true, 32, b(Mul, d(), imm_s()))),
-            0x2c if !pqr => return set(x(true, 32, b(Mul, d(), s()))),
-            0x34 if !pqr => return set(b(Udiv, z32(d()), imm_u32())),
-            0x3c if !pqr => return set(b(Udiv, z32(d()), z32(s()))),
-            0x44 => return set(z32(b(Or, d(), imm_s()))),
-            0x4c => return set(z32(b(Or, d(), s()))),
-            0x54 => return set(z32(b(And, d(), imm_s()))),
-            0x5c => return set(z32(b(And, d(), s()))),
-            0x64 => return set(z32(b(Shl, d(), c((imm & 31) as u64)))),
-            0x6c => return set(z32(b(Shl, d(), b(And, s(), c(31))))),
-            0x74 => return set(b(Lshr, z32(d()), c((imm & 31) as u64))),
-            0x7c => return set(b(Lshr, z32(d()), b(And, s(), c(31)))),
-            0x84 if !no_neg => return set(z32(Expr::Neg(Box::new(d())))),
-            0x94 if !pqr => return set(b(Urem, z32(d()), imm_u32())),
-            0x9c if !pqr => return set(b(Urem, z32(d()), z32(s()))),
-            0xa4 => return set(z32(b(Xor, d(), imm_s()))),
-            0xac => return set(z32(b(Xor, d(), s()))),
+            0x1c => return set(ext32(ir.bin(Sub, d(), s()))),
+            0x24 if !pqr => return set(ir.ext(true, 32, ir.bin(Mul, d(), imm_s()))),
+            0x2c if !pqr => return set(ir.ext(true, 32, ir.bin(Mul, d(), s()))),
+            0x34 if !pqr => return set(ir.bin(Udiv, z32(d()), imm_u32())),
+            0x3c if !pqr => return set(ir.bin(Udiv, z32(d()), z32(s()))),
+            0x44 => return set(z32(ir.bin(Or, d(), imm_s()))),
+            0x4c => return set(z32(ir.bin(Or, d(), s()))),
+            0x54 => return set(z32(ir.bin(And, d(), imm_s()))),
+            0x5c => return set(z32(ir.bin(And, d(), s()))),
+            0x64 => return set(z32(ir.bin(Shl, d(), ir.c((imm & 31) as u64)))),
+            0x6c => return set(z32(ir.bin(Shl, d(), ir.bin(And, s(), ir.c(31))))),
+            0x74 => return set(ir.bin(Lshr, z32(d()), ir.c((imm & 31) as u64))),
+            0x7c => return set(ir.bin(Lshr, z32(d()), ir.bin(And, s(), ir.c(31)))),
+            0x84 if !no_neg => return set(z32(ir.mk(Node::Neg(d())))),
+            0x94 if !pqr => return set(ir.bin(Urem, z32(d()), imm_u32())),
+            0x9c if !pqr => return set(ir.bin(Urem, z32(d()), z32(s()))),
+            0xa4 => return set(z32(ir.bin(Xor, d(), imm_s()))),
+            0xac => return set(z32(ir.bin(Xor, d(), s()))),
             0xb4 => return set(imm_u32()),
-            0xbc => return set(if sx { x(true, 32, s()) } else { z32(s()) }),
-            0xc4 => return set(z32(b(Ashr, x(true, 32, d()), c((imm & 31) as u64)))),
-            0xcc => return set(z32(b(Ashr, x(true, 32, d()), b(And, s(), c(31))))),
+            0xbc => return set(if sx { ir.ext(true, 32, s()) } else { z32(s()) }),
+            0xc4 => return set(z32(ir.bin(Ashr, ir.ext(true, 32, d()), ir.c((imm & 31) as u64)))),
+            0xcc => return set(z32(ir.bin(Ashr, ir.ext(true, 32, d()), ir.bin(And, s(), ir.c(31))))),
             0xd4 if !no_le => {
                 return match imm {
-                    16 => set(x(false, 16, d())),
+                    16 => set(ir.ext(false, 16, d())),
                     32 => set(z32(d())),
                     64 => set(d()),
                     _ => trap("invalid le width".into()),
@@ -436,46 +434,46 @@ impl Lifter {
             }
             0xdc => {
                 return match imm {
-                    16 | 32 | 64 => set(Expr::Bswap {
+                    16 | 32 | 64 => set(ir.mk(Node::Bswap {
                         bits: imm as u8,
-                        a: Box::new(d()),
-                    }),
+                        a: d(),
+                    })),
                     _ => trap("invalid be width".into()),
                 }
             }
             // ---- ALU64 ----
-            0x07 => return set(b(Add, d(), imm_s())),
-            0x0f => return set(b(Add, d(), s())),
+            0x07 => return set(ir.bin(Add, d(), imm_s())),
+            0x0f => return set(ir.bin(Add, d(), s())),
             0x17 => {
                 return set(if swap_sub {
-                    b(Sub, imm_s(), d())
+                    ir.bin(Sub, imm_s(), d())
                 } else {
-                    b(Sub, d(), imm_s())
+                    ir.bin(Sub, d(), imm_s())
                 })
             }
-            0x1f => return set(b(Sub, d(), s())),
-            0x27 if !pqr => return set(b(Mul, d(), imm_s())),
-            0x2f if !pqr => return set(b(Mul, d(), s())),
-            0x37 if !pqr => return set(b(Udiv, d(), imm_s())),
-            0x3f if !pqr => return set(b(Udiv, d(), s())),
-            0x47 => return set(b(Or, d(), imm_s())),
-            0x4f => return set(b(Or, d(), s())),
-            0x57 => return set(b(And, d(), imm_s())),
-            0x5f => return set(b(And, d(), s())),
-            0x67 => return set(b(Shl, d(), c((imm & 63) as u64))),
-            0x6f => return set(b(Shl, d(), s())),
-            0x77 => return set(b(Lshr, d(), c((imm & 63) as u64))),
-            0x7f => return set(b(Lshr, d(), s())),
-            0x87 if !no_neg => return set(Expr::Neg(Box::new(d()))),
-            0x97 if !pqr => return set(b(Urem, d(), imm_s())),
-            0x9f if !pqr => return set(b(Urem, d(), s())),
-            0xa7 => return set(b(Xor, d(), imm_s())),
-            0xaf => return set(b(Xor, d(), s())),
+            0x1f => return set(ir.bin(Sub, d(), s())),
+            0x27 if !pqr => return set(ir.bin(Mul, d(), imm_s())),
+            0x2f if !pqr => return set(ir.bin(Mul, d(), s())),
+            0x37 if !pqr => return set(ir.bin(Udiv, d(), imm_s())),
+            0x3f if !pqr => return set(ir.bin(Udiv, d(), s())),
+            0x47 => return set(ir.bin(Or, d(), imm_s())),
+            0x4f => return set(ir.bin(Or, d(), s())),
+            0x57 => return set(ir.bin(And, d(), imm_s())),
+            0x5f => return set(ir.bin(And, d(), s())),
+            0x67 => return set(ir.bin(Shl, d(), ir.c((imm & 63) as u64))),
+            0x6f => return set(ir.bin(Shl, d(), s())),
+            0x77 => return set(ir.bin(Lshr, d(), ir.c((imm & 63) as u64))),
+            0x7f => return set(ir.bin(Lshr, d(), s())),
+            0x87 if !no_neg => return set(ir.mk(Node::Neg(d()))),
+            0x97 if !pqr => return set(ir.bin(Urem, d(), imm_s())),
+            0x9f if !pqr => return set(ir.bin(Urem, d(), s())),
+            0xa7 => return set(ir.bin(Xor, d(), imm_s())),
+            0xaf => return set(ir.bin(Xor, d(), s())),
             0xb7 => return set(imm_s()),
             0xbf => return set(s()),
-            0xc7 => return set(b(Ashr, d(), c((imm & 63) as u64))),
-            0xcf => return set(b(Ashr, d(), s())),
-            0xf7 if no_lddw => return set(b(Or, d(), c((imm as u32 as u64) << 32))),
+            0xc7 => return set(ir.bin(Ashr, d(), ir.c((imm & 63) as u64))),
+            0xcf => return set(ir.bin(Ashr, d(), s())),
+            0xf7 if no_lddw => return set(ir.bin(Or, d(), ir.c((imm as u32 as u64) << 32))),
             _ => {}
         }
         if pqr {
@@ -496,15 +494,15 @@ impl Lifter {
                 };
                 if let Some(bop) = bop {
                     if is64 {
-                        return set(b(bop, d(), sv));
+                        return set(ir.bin(bop, d(), sv));
                     }
                     match bop {
-                        Mul => return set(z32(b(Mul, d(), sv))),
+                        Mul => return set(z32(ir.bin(Mul, d(), sv))),
                         Udiv | Urem => {
-                            return set(b(bop, z32(d()), if is_imm { sv } else { z32(sv) }))
+                            return set(ir.bin(bop, z32(d()), if is_imm { sv } else { z32(sv) }))
                         }
-                        Sdiv => return set(b(Sdiv32, d(), sv)),
-                        Srem => return set(b(Srem32, d(), sv)),
+                        Sdiv => return set(ir.bin(Sdiv32, d(), sv)),
+                        Srem => return set(ir.bin(Srem32, d(), sv)),
                         _ => {}
                     }
                 }
@@ -514,7 +512,7 @@ impl Lifter {
         // ---- jumps / calls ----
         if opc == 0x05 {
             return Lifted {
-                stmts: vec![],
+                stmt: None,
                 flow: Flow::Term(Term::Jmp {
                     to: pc + 1 + off as i64,
                 }),
@@ -523,12 +521,12 @@ impl Lifter {
         let jc = jcc(opc >> 4);
         if let Some(jc) = jc {
             if opc & 0x07 == 0x05 {
-                return jmp(cmp(jc, d(), if opc & 0x08 != 0 { s() } else { imm_s() }));
+                return jmp(ir.cmp(jc, d(), if opc & 0x08 != 0 { s() } else { imm_s() }));
             }
             if jmp32 && opc & 0x07 == 0x06 {
                 let signed = matches!(jc, CmpOp::Sgt | CmpOp::Sge | CmpOp::Slt | CmpOp::Sle);
-                let w = |e: Expr| x(signed, 32, e);
-                return jmp(cmp(
+                let w = |e: E| ir.ext(signed, 32, e);
+                return jmp(ir.cmp(
                     jc,
                     w(d()),
                     w(if opc & 0x08 != 0 { s() } else { imm_s() }),
@@ -540,7 +538,7 @@ impl Lifter {
                 if src == 0 {
                     return match self.syscall_by_imm(cx, imm) {
                         Some(t) => self.call(cx, pc, t),
-                        None => trap(format!("unknown syscall 0x{:x}", imm as u32)),
+                        None => trap(format!("unknown syscall 0x{:x}", imm as u32).into()),
                     };
                 }
                 let tp = pc + 1 + imm as i64;
@@ -551,7 +549,7 @@ impl Lifter {
             }
             return match self.call_target(cx, pc, imm) {
                 Some(t) => self.call(cx, pc, t),
-                None => trap(format!("unresolved call imm={} at pc {}", imm, pc)),
+                None => trap(format!("unresolved call imm={} at pc {}", imm, pc).into()),
             };
         }
         if opc == 0x8d {
@@ -570,42 +568,43 @@ impl Lifter {
                 cx,
                 pc,
                 CallTarget::Ind {
-                    e: Box::new(r(reg as u8)),
+                    e: ir.reg(reg as u8),
                 },
             );
         }
         if opc == 0x95 {
             return Lifted {
-                stmts: vec![],
-                flow: Flow::Term(Term::Ret { e: Some(r(0)) }),
+                stmt: None,
+                flow: Flow::Term(Term::Ret { e: Some(ir.reg(0)) }),
             };
         }
         bad()
     }
 
     fn call(&self, cx: &mut Cx, pc: i64, t: CallTarget) -> Lifted {
-        let mut args: Vec<Expr> = (1..=5).map(r).collect();
+        let ir = cx.ir;
+        let mut args: Vec<E> = (1..=5).map(|r| ir.reg(r)).collect();
         let mut noreturn = false;
         if let CallTarget::Sys { name, .. } = &t {
             let sc = &cx.syscalls[&**name];
             args.truncate(sc.params.len());
             noreturn = sc.noreturn;
         }
-        let st = Rc::new(Stmt::Call {
+        let st = Stmt::Call {
             dst: 0,
             t,
-            args,
+            args: ir.list(args),
             pc,
             extra: None,
-        });
+        };
         if noreturn {
             return Lifted {
-                stmts: vec![st],
-                flow: Flow::Term(Term::Trap { msg: String::new() }),
+                stmt: Some(st),
+                flow: Flow::Term(Term::Trap { msg: "".into() }),
             };
         }
         Lifted {
-            stmts: vec![st],
+            stmt: Some(st),
             flow: Flow::Next(pc + 1),
         }
     }
@@ -650,6 +649,7 @@ pub fn prepare(elf: Elf) -> Result<Program, String> {
         symbol_names,
         address_taken: IndexSet::new(),
         lazy: None,
+        ir: Ir::new(),
     })
 }
 
@@ -711,6 +711,7 @@ pub fn discover(p: &mut Program, lazy: bool) {
         insns: &p.insns,
         elf: &p.elf,
         syscalls: &mut p.syscalls,
+        ir: &p.ir,
     };
     for i in 0..cx.insns.len() {
         if starts[i] == 0 {
@@ -846,7 +847,7 @@ pub fn form_block(
         start,
         end: start,
         stmts: vec![],
-        term: Term::Trap { msg: String::new() },
+        term: Term::Trap { msg: "".into() },
         succs: vec![],
         preds: vec![],
     };
@@ -866,7 +867,9 @@ pub fn form_block(
             b.term = Term::Trap { msg: msg.into() };
             break;
         };
-        b.stmts.extend(l.stmts.iter().cloned());
+        if let Some(s) = &l.stmt {
+            b.stmts.push(s.clone());
+        }
         match &l.flow {
             Flow::Term(t) => {
                 b.term = t.clone();
