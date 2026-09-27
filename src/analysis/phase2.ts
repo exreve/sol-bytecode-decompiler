@@ -206,6 +206,9 @@ function opAccounts(o: OpOut): Set<string> {
 
 const ACCT_REF = /\b([A-Za-z_]\w*(?:\[\d+\])?)\.(key|owner|lamports|data|[a-z_][a-z0-9_]*(?:\[\d+\.\.\d+\])?)\b/g
 
+/** (dev dumps, scripts/dump8.ts: the analysis before the incident rules; unset in the CLI) */
+export const phase2Hooks: { beforeIncidents?: (a: Analysis, findings: Finding[]) => void } = {}
+
 export function phase2(a: Analysis, r: Result) {
 	const findings: Finding[] = []
 	const authFields = new Map<string, string[]>() // stored authority field -> instructions writing it
@@ -420,6 +423,7 @@ export function phase2(a: Analysis, r: Result) {
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
 	}
+	phase2Hooks.beforeIncidents?.(a, findings)
 	findings.push(...incidentFindings(a, r, findings))
 	// (native: one finding at one place found by several arms of a dispatcher (instructions whose parts of the dispatcher, or
 	// of the code all of them reach, are not told apart there): the first instruction's, naming the others; inside the
