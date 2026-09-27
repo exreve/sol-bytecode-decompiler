@@ -490,7 +490,6 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 	const onStmt = (s: Stmt) => {
 		if (pda && (s.k === 'store' || s.k === 'stores') && s.size === 8) {
 			const vals = s.k === 'store' ? [s.v] : s.vals
-			const o = frameOff(s.addr)
 			vals.forEach((x, i) => {
 				// (a seed: its address, then its length)
 				const len = i + 1 < vals.length ? val(vals[i + 1]) : undefined
@@ -498,9 +497,15 @@ function scan(cfg: FieldNameCfg, pc: number, f: VarFunc, vote: (loc: Loc | undef
 				const fo = frameOff(x)
 				const l = fo !== undefined ? (len.v === 1n ? byteCopies.get(fo) : undefined) : loc(val(x))
 				if (!l || (l.field && l.rest)) return
-				if (len.v === 1n) vote(l.field ? l : undefined, 'bump', 3, `given as a 1-byte PDA seed in ${fnm}`)
-				else vote(l.field || len.v !== 32n ? l : { ...l, key: true }, 'seed', 5, `given as a PDA seed (${len.v} bytes) in ${fnm}`)
-				void o
+				const why = `given as a PDA seed (${len.v} bytes) in ${fnm}`
+				if (len.v === 1n) { if (l.field?.t.k === 'scalar' && l.field.t.size === 1) vote(l, 'bump', 3, `given as a 1-byte PDA seed in ${fnm}`) }
+				else if (!l.field) { if (len.v === 32n) vote({ ...l, key: true }, 'seed', 5, why) }
+				else if (l.field.t.k === 'scalar' && BigInt(l.field.t.size) === len.v) vote(l, 'seed', 5, why)
+				else if (len.v === 32n && l.field.t.k === 'scalar') {
+					// (a key over four u64 words)
+					const ws = [0, 8, 16, 24].map(d => locIn(l.view, l.off + d))
+					if (ws.every(w => w?.field && !w.rest && w.field.t.k === 'scalar' && w.field.t.size === 8)) ws.forEach((w, i) => vote(w, `seed_w${i}`, 5, `${why} (word ${i} of the key)`))
+				}
 			})
 		}
 		if (s.k === 'store') {
