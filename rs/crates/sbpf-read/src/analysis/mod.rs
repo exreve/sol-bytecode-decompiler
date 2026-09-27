@@ -295,6 +295,8 @@ pub struct An<'a> {
     pub lib_cpi: RefCell<HashMap<i64, Option<libcpi::LibCpi>>>,
     /// phase2.ts lamportsGetter memo
     pub getters: RefCell<HashMap<i64, bool>>,
+    /// a TS exception the analysis would throw (its message; the analysis dump reports it)
+    pub err: RefCell<Option<String>>,
 }
 
 impl<'a> An<'a> {
@@ -338,6 +340,7 @@ impl<'a> An<'a> {
             ctx_ids: std::cell::Cell::new(1),
             lib_cpi: Default::default(),
             getters: Default::default(),
+            err: Default::default(),
         }
     }
     pub fn fo(&self, pc: i64) -> Option<&FnRef<'a>> {
@@ -352,6 +355,13 @@ impl<'a> An<'a> {
         let g = Rc::new(flow::cfg_of(f));
         self.cfgs.borrow_mut().insert(pc, g.clone());
         g
+    }
+    /// record the first exception the analysis would throw
+    pub fn set_err(&self, m: &str) {
+        let mut e = self.err.borrow_mut();
+        if e.is_none() {
+            *e = Some(m.to_string());
+        }
     }
     /// r.program.funcs.get(pc)?.name ?? ''
     pub fn pname(&self, pc: i64) -> String {

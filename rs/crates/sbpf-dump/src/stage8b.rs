@@ -148,7 +148,10 @@ fn op_line(o: &OpOut, t: &str, full: bool, out: &mut String) {
     j.line(out);
 }
 
-pub fn analysis_lines(_an: &An, a: &Analysis) -> String {
+pub fn analysis_lines(an: &An, a: &Analysis) -> String {
+    if let Some(e) = an.err.borrow().as_ref() {
+        return err_line(e);
+    }
     let mut out = String::new();
     let p = &a.program;
     let mut j = J::obj();
