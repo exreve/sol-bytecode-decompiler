@@ -16,7 +16,8 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-struct` | `src/structure.ts`, `src/stmtidioms.ts` | structured statement trees (`Tree`: `SNode`s + statement table), stackifier, node splitting, dispatcher, clean-up passes, Rc idioms |
 | `sbpf-print` | `src/print.ts`, decompile's raw printing path, `layout.ts` renderSingle | printer, declarations, function naming (instruction logs, thunks, symbols), `decompile_raw`, `render_single` |
 | `sbpf-exec` | `src/exec.ts` (+ SHA-256 / Keccak) | concrete interpreter of the built functions (CPI / account runs) |
-| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts` (read side) | the readable output: `decompile_read`, `render_read` |
+| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts`, `selector.ts` (lookup), `diff.ts` | the readable output (`decompile_read` with or without library classification, `render_read`, `render_fingerprints`), the program diff (`diff::diff_report`) |
+| `sbpf-lib` | `src/fingerprint.ts`, `src/library.ts` (+ `crateOf` of `src/demangle.ts`), `src/builtins.ts` | function fingerprints and signatures (local SHA-1), library classification against `data/libsigs.json` / `data/libnames.json` (crate-aware policy, behavioral names), u128 builtins recognized by behavior |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
 Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order), `serde_json` (string
@@ -33,6 +34,9 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --time3 --iters 5 a.so     # stage 3 timings (as stagetime.ts --stage3)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time4 --iters 5 a.so     # stage 4 timings (as stagetime.ts --stage4)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time5 --iters 5 a.so     # stage 5 timings (as stagetime.ts --stage5)
+/tmp/claude-1000/rs-target/release/sbpf-dump --time7 --iters 5 a.so     # stage 7 timings (as stagetime.ts --stage7)
+/tmp/claude-1000/rs-target/release/sbpf-dump --timediff --iters 5 a.so b.so   # program diff timing (as stagetime.ts --diff)
+/tmp/claude-1000/rs-target/release/sbpf-dump --diff a.so b.so out_dir   # diff.jsonl (as dump.ts --diff)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
@@ -41,7 +45,7 @@ node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutan
 node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir`, or `--diff a.so b.so out_dir`
 (the IDL is read from stage 5 on).
 
 ## Stage dump format (format 1)
@@ -223,6 +227,24 @@ classification; `--idl x.json` on both dumpers), per function in output order:
   summary block (stage 8), as `rawfile`.
 
 A `decompile` error is an error line in the first requested of these dumps.
+
+### `library.jsonl`, `fingerprint.jsonl`, `readfile.jsonl` line 3, `diff.jsonl` — library code and the default output (stage 7)
+
+The default output is `decompile(bytes, { idl })`: library functions are classified and not decompiled
+(one-line `declare function` stubs for those user code references).
+
+- `library`: `classify()` on a fresh program after inferSignatures, per function in `p.funcs` order:
+  `{"t":"func","pc","lib","families"[,"name"][,"hint"]}`; then, from the default output, the library functions'
+  final names `{"t":"lib","pc","name"}` (classification order: builtin names, renames included), the stubs
+  `{"t":"stub","text"}` and `{"t":"count","funcs":<decompiled>,"lib":<libCount>}`.
+- `fingerprint`: `{"text"}`, the project output's `security/fingerprints.json` (`layout.ts` fingerprints: per-function
+  hash / regfree / data / fuzzy signatures, library flags, the instructions whose handlers reach each function).
+- `readfile` gets a third line `{"lib":true,"text"}` (or `{"lib":true,"error"}`): the default single file, without the
+  analysis summary block, as line 2 for `--full`.
+- `diff` (`--diff a.so b.so out_dir`): `{"text"}`, the report of `sbpf-decompile a.so b.so -o report.txt` (all rows, the
+  two paths as labels), or an error line.
+
+A default-output error is an error line in each requested stage 7 dump.
 
 ### Later stages (planned)
 

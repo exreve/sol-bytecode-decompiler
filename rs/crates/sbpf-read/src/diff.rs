@@ -30,7 +30,7 @@ pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
     sbpf_dataflow::infer_signatures(&mut p);
     let base = sbpf_print::names::semantics(&p);
     let sem = SemR::new(&p, &base, None);
-    let libs = classify(&p);
+    let libs = classify(&p)?;
     let img = p.image();
     let sigs = signatures(&p, &img);
     let lib: IndexSet<i64> = libs.iter().filter(|x| x.1.lib).map(|x| *x.0).collect();

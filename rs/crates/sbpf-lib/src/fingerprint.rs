@@ -16,6 +16,20 @@ pub struct FnPrint {
     pub alt: Option<String>,
 }
 
+/// The fingerprints read `p.insns[pc]` of every pc of every block: a block reaching past the instructions
+/// (corrupt input) is the TS TypeError.
+pub fn check_pcs(p: &Program) -> Result<(), String> {
+    for f in p.funcs.values() {
+        if f.blocks
+            .iter()
+            .any(|b| b.end >= p.insns.len() as i64 && b.start <= b.end)
+        {
+            return Err("Cannot read properties of undefined (reading 'opc')".into());
+        }
+    }
+    Ok(())
+}
+
 /// Instructions of a function in address order (blocks sorted by start, stable).
 fn func_pcs(f: &Func) -> Vec<i64> {
     let mut bl: Vec<(i64, i64)> = f.blocks.iter().map(|b| (b.start, b.end)).collect();

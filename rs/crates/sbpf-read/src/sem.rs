@@ -1030,7 +1030,10 @@ mod tests {
         assert_eq!(l("0xf8c69e91e17587c8").as_deref(), Some("i:swap"));
         assert_eq!(l("afaf6d1f0d989bed").as_deref(), Some("i:initialize"));
         assert_eq!(l("4834b68f43599db5").as_deref(), Some("i:add_liquidity"));
-        assert_eq!(l("0x1c8cee63e7a21595").as_deref(), Some("i:add_liquidity_by_weight"));
+        assert_eq!(
+            l("0x1c8cee63e7a21595").as_deref(),
+            Some("i:add_liquidity_by_weight")
+        );
         assert_eq!(l("0x0000000000000001"), None);
         assert_eq!(l("e445a52e51cb9a1d"), None);
     }

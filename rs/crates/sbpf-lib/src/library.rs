@@ -250,7 +250,8 @@ pub fn lookup<'a>(m: &'a HashMap<String, impl Sized>, fp: &FnPrint) -> Option<&'
 }
 
 /// classify(p): library information per function (p.funcs order).
-pub fn classify(p: &Program) -> IndexMap<i64, LibInfo> {
+pub fn classify(p: &Program) -> Result<IndexMap<i64, LibInfo>, String> {
+    crate::fingerprint::check_pcs(p)?;
     let d = lib_db();
     let nm = lib_names();
     let img = p.image();
@@ -336,5 +337,5 @@ pub fn classify(p: &Program) -> IndexMap<i64, LibInfo> {
             }
         }
     }
-    out
+    Ok(out)
 }

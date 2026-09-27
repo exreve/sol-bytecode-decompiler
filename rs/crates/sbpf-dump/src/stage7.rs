@@ -27,19 +27,24 @@ pub fn dump_stage7(
             Err(e) => lib.push_str(&err_line(&e)),
             Ok(mut p) => {
                 sbpf_dataflow::infer_signatures(&mut p);
-                for (pc, i) in sbpf_lib::library::classify(&p) {
-                    let mut j = J::obj();
-                    j.s("t", "func")
-                        .n("pc", pc)
-                        .b("lib", i.lib)
-                        .f("families", i.families);
-                    if let Some(n) = &i.name {
-                        j.s("name", n);
+                match sbpf_lib::library::classify(&p) {
+                    Err(e) => lib.push_str(&err_line(&e)),
+                    Ok(libs) => {
+                        for (pc, i) in libs {
+                            let mut j = J::obj();
+                            j.s("t", "func")
+                                .n("pc", pc)
+                                .b("lib", i.lib)
+                                .f("families", i.families);
+                            if let Some(n) = &i.name {
+                                j.s("name", n);
+                            }
+                            if let Some(h) = &i.hint {
+                                j.s("hint", h);
+                            }
+                            j.line(&mut lib);
+                        }
                     }
-                    if let Some(h) = &i.hint {
-                        j.s("hint", h);
-                    }
-                    j.line(&mut lib);
                 }
             }
         }
