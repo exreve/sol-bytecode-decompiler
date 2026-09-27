@@ -15,10 +15,12 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-opt` | `src/simplify.ts`, `src/cfgopt.ts`, `src/ifconv.ts`, `src/idioms.ts`, `src/compact.ts`, decompile's phase 2 | per-function optimizer (`Fx`: arena + per-id caches), `phase2`, `finish` |
 | `sbpf-struct` | `src/structure.ts`, `src/stmtidioms.ts` | structured statement trees (`Tree`: `SNode`s + statement table), stackifier, node splitting, dispatcher, clean-up passes, Rc idioms |
 | `sbpf-print` | `src/print.ts`, decompile's raw printing path, `layout.ts` renderSingle | printer, declarations, function naming (instruction logs, thunks, symbols), `decompile_raw`, `render_single` |
+| `sbpf-exec` | `src/exec.ts` (+ SHA-256 / Keccak) | concrete interpreter of the built functions (CPI / account runs) |
+| `sbpf-read` | `src/views.ts`, `accounts.ts`, `structs.ts`, `frameregions.ts`, `fieldnames.ts`, `anchor.ts`, `anchorstate.ts`, `idl.ts`, `state.ts`, `cpi.ts`, `cpiexec.ts`, `outline.ts`, `taint.ts`, the rest of `decompile.ts`, `semantics.ts` (read side) | the readable output: `decompile_read`, `render_read` |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
-Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order) and `serde_json` (string
-escaping only).
+Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order), `serde_json` (string
+escaping; IDL parsing with `preserve_order`), `regex` and `miniz_oxide` (sbpf-read).
 
 ## Build and run
 
@@ -30,15 +32,17 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --time --iters 5 a.so b.so # stage timings (as scripts/stagetime.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time3 --iters 5 a.so     # stage 3 timings (as stagetime.ts --stage3)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time4 --iters 5 a.so     # stage 4 timings (as stagetime.ts --stage4)
+/tmp/claude-1000/rs-target/release/sbpf-dump --time5 --iters 5 a.so     # stage 5 timings (as stagetime.ts --stage5)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
 node scripts/parity.ts samples/token.so compat/bin                       # given files / dirs
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
+node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir`
-(the IDL is accepted for the later stages; the stages so far do not read it).
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir`
+(the IDL is read from stage 5 on).
 
 ## Stage dump format (format 1)
 
@@ -203,6 +207,22 @@ per function in `p.funcs` order:
   (`// security summary …` up to the blank line after it: stage 8).
 
 A `decompile` error is a `struct` error line (later stage 4 dumps absent).
+
+### `types.jsonl`, `rtext.jsonl`, `readfile.jsonl` — the readable output (stage 5)
+
+The readable decompiler output: `decompile(bytes, { full: true, idl })` (the CLI default without library
+classification; `--idl x.json` on both dumpers), per function in output order:
+
+- `types`: `{"t":"func","pc","name","names","types"}` — `names`: the variables' names by id (`FuncOut.names`,
+  holes as `null`, trailing `null`s dropped); `types`: `[[id, view]...]`, the typed-view assignment
+  (`FuncOut.varTypes`) in insertion order.
+- `rtext`: `{"t":"func","pc","name","text"}` — the function's printed text, verbatim (comments, typed views,
+  account fields, CPI / PDA notes, outlined-tail calls).
+- `readfile`: `{"text"}` — the single file (`renderSingle`: instruction table with IDL args / accounts,
+  helpers, typed-view declarations, syscalls, outlined tails, grouped functions) without the analysis
+  summary block (stage 8), as `rawfile`.
+
+A `decompile` error is an error line in the first requested of these dumps.
 
 ### Later stages (planned)
 
