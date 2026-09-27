@@ -22,9 +22,10 @@ import { fingerprints } from '../src/layout.ts'
 import { profile, diff } from '../src/diff.ts'
 import { parseIdl, type IdlInfo } from '../src/idl.ts'
 import type { Node } from '../src/structure.ts'
+import { dumpStage8 } from './dump8.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile', 'library', 'fingerprint'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile', 'library', 'fingerprint', 'facts'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -424,6 +425,7 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES, i
 	dumpStage4(bytes, stages, res)
 	dumpStage5(bytes, stages, res, idl)
 	dumpStage7(bytes, stages, res, idl)
+	dumpStage8(bytes, stages, res, idl)
 	return res
 }
 

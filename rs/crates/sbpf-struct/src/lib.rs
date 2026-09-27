@@ -104,6 +104,9 @@ pub struct Tree {
     pub stmts: Vec<Stmt>,
     pub body: Vec<SNode>,
     pub irreducible: bool,
+    /// statements copied from a block of the function (the same TS object as `f.blocks[b].stmts[i]`):
+    /// index -> (block, index in the block); copies made by later passes are not in it
+    pub origin: std::collections::HashMap<u32, (u32, u32)>,
 }
 
 impl Tree {
@@ -113,5 +116,11 @@ impl Tree {
     pub fn push(&mut self, s: Stmt) -> u32 {
         self.stmts.push(s);
         (self.stmts.len() - 1) as u32
+    }
+    /// push a block's statement (its origin recorded)
+    pub fn push_from(&mut self, s: Stmt, b: usize, i: usize) -> u32 {
+        let x = self.push(s);
+        self.origin.insert(x, (b as u32, i as u32));
+        x
     }
 }

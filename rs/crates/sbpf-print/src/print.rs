@@ -254,6 +254,8 @@ pub trait Sugar {
         None
     }
     fn at_node(&self, n: &SNode) {}
+    /// nodeLines: the lines [a, b) of the body's output node n printed as (its note included)
+    fn node_lines(&self, n: &SNode, a: usize, b: usize) {}
     /// the nodes list[i..] as a call of an outlined helper: name, arguments, returns a value
     fn outline(&self, list: &Vec<SNode>, i: usize) -> Option<(String, Vec<E>, bool)> {
         None
@@ -1300,6 +1302,7 @@ impl BodyPrinter<'_, '_> {
         for (i, n) in ns.iter().enumerate() {
             sg.at_node(n);
             if let Some((name, args, value)) = sg.outline(ns, i) {
+                let start = self.out.len();
                 if let Some(note) = sg.node_note(self.pr, n) {
                     let mut l = self.line(d);
                     l.push_str("// ");
@@ -1323,11 +1326,22 @@ impl BodyPrinter<'_, '_> {
                     r.push_str("return");
                     self.out.push(r);
                 }
+                fn span_all(sg: &dyn Sugar, ns: &[SNode], a: usize, b: usize) {
+                    for n in ns {
+                        sg.node_lines(n, a, b);
+                        if let SNode::If { then, els, .. } = n {
+                            span_all(sg, then, a, b);
+                            span_all(sg, els, a, b);
+                        }
+                    }
+                }
+                span_all(sg, &ns[i..], start, self.out.len());
                 self.prev = None;
                 return;
             }
             let prev = self.prev;
             self.prev = None;
+            let start = self.out.len();
             if let Some(note) = sg.node_note(self.pr, n) {
                 let mut l = self.line(d);
                 l.push_str("// ");
@@ -1341,6 +1355,7 @@ impl BodyPrinter<'_, '_> {
             } else {
                 self.node(n, d);
             }
+            sg.node_lines(n, start, self.out.len());
         }
     }
     fn push_label(o: &mut String, l: Option<sbpf_struct::Label>) {
@@ -1360,10 +1375,12 @@ impl BodyPrinter<'_, '_> {
                 self.out.push(l);
                 self.rec(then, d + 1);
                 let mut el = els;
+                let mut chain: Vec<(&SNode, usize)> = Vec::new();
                 while el.len() == 1 {
                     let SNode::If { c, then, els } = &el[0] else {
                         break;
                     };
+                    chain.push((&el[0], self.out.len()));
                     if let Some(sg) = self.pr.sugar {
                         sg.at_node(&el[0]);
                     }
@@ -1384,6 +1401,11 @@ impl BodyPrinter<'_, '_> {
                 let mut l = self.line(d);
                 l.push('}');
                 self.out.push(l);
+                if let Some(sg) = self.pr.sugar {
+                    for (e, at) in chain {
+                        sg.node_lines(e, at, self.out.len());
+                    }
+                }
             }
             SNode::Block { label, body } => {
                 let mut l = self.line(d);

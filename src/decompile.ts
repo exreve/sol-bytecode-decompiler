@@ -1604,9 +1604,13 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
     outlined.push({ name: h.name, text: [`// outlined: ${h.uses} places`, `function ${h.name}(${h.params.map(n => `${n}: u64`).join(', ')})${h.value ? ': u64' : ''} {`, ...printBody(hpr, hf, h.body, '\t', decls, hoisted), '}'].join('\n') });
   }
   const res: Result = { program: p, funcs, stubs, outlined, instructions, processors, anchor: sem.anchor, libCount: [...libs.values()].filter(l => l.lib).length, text: '', views, facts, legacyInfo, tryOf, acctLayouts, programId: stateIdl?.address, get sigs() { return (sigs ??= new Map(sigShapes.map(x => [x.pc, shapeSignature(p, x)]))); }, libPcs: new Set([...libs].filter(([, i]) => i.lib).map(([pc]) => pc)), idl: opts.idl };
+  debugHooks.beforeRender?.(res);
   res.text = renderSingle(res);
   return res;
 }
+
+/** (dev dumps only, scripts/dump8.ts: read the result before the single file's analysis runs; unset in the CLI) */
+export const debugHooks: { beforeRender?: (r: Result) => void } = {};
 
 const BUILTIN_VIEW: Record<string, View> = Object.fromEntries(BUILTIN_VIEWS.map(v => [v.name, v]));
 

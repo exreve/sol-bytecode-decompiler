@@ -411,8 +411,8 @@ impl Builder<'_> {
             let f = self.f;
             let b = &f.blocks[x];
             let mut out: Vec<SNode> = Vec::with_capacity(b.stmts.len() + 1);
-            for s in &b.stmts {
-                out.push(SNode::Stmt(self.tree.push(s.clone())));
+            for (i, s) in b.stmts.iter().enumerate() {
+                out.push(SNode::Stmt(self.tree.push_from(s.clone(), x, i)));
             }
             match b.term.clone() {
                 Term::Ret { e } => out.push(SNode::Return(e)),
@@ -523,8 +523,8 @@ fn dispatcher(f: &mut Func, order: &[usize], tree: &mut Tree) {
     for &id in order {
         let b = &f.blocks[id];
         let mut body: Vec<SNode> = Vec::with_capacity(b.stmts.len() + 2);
-        for s in &b.stmts {
-            body.push(SNode::Stmt(tree.push(s.clone())));
+        for (i, s) in b.stmts.iter().enumerate() {
+            body.push(SNode::Stmt(tree.push_from(s.clone(), id, i)));
         }
         match b.term.clone() {
             Term::Ret { e } => body.push(SNode::Return(e)),

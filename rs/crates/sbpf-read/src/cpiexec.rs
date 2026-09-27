@@ -734,6 +734,7 @@ fn model0<'c>(
             } else {
                 None
             },
+            src: None,
         });
     }
     // signer seeds

@@ -813,6 +813,47 @@ pub struct CpiDesc {
     pub family: Option<String>,
     pub ix: Option<String>,
     pub guessed: bool,
+    pub parts: Option<CpiParts>,
+}
+
+/// An account meta of a decoded CPI (CpiParts.accounts).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartAcc {
+    pub role: Option<String>,
+    pub text: String,
+    pub w: Option<N>,
+    pub s: Option<N>,
+}
+
+/// The decoded parts of a CPI (for the analysis): program, account metas by role, data fields, signer
+/// seeds; the expressions (at the call) the program id, account keys and fields come from.
+#[derive(Clone, Debug, Default)]
+pub struct CpiParts {
+    pub program: String,
+    pub known: Option<String>,
+    pub checked: Option<String>,
+    pub accounts: Vec<PartAcc>,
+    pub fields: Vec<(String, String)>,
+    pub seeds: Option<String>,
+    /// src: (program, accounts, fields); None when absent
+    pub src: Option<CpiSrc>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CpiSrc {
+    pub program: Option<E>,
+    pub accounts: Vec<Option<E>>,
+    pub fields: Vec<Option<E>>,
+}
+
+/// signerSeeds: the seeds text of a CPI's parts
+fn signer_seeds(s: &Option<String>) -> Option<String> {
+    match s {
+        Some(s) if !s.is_empty() && !s.starts_with("no signer seeds") => {
+            Some(s.strip_prefix("signer seeds ").unwrap_or(s).to_string())
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -841,6 +882,7 @@ pub struct Acc {
     pub text: String,
     pub w: Option<N>,
     pub s: Option<N>,
+    pub src: Option<E>,
 }
 
 /// The data of an instruction model: bytes relative to the data start.
@@ -1103,6 +1145,7 @@ pub fn cpi_desc(site: &CpiSite, env: &mut CpiEnv) -> Option<CpiDesc> {
                         text,
                         w: num(ir, at(mo + 16.0 * i + 8.0, 1)),
                         s: num(ir, at(mo + 16.0 * i + 9.0, 1)),
+                        src: pk,
                     });
                     i += 1.0;
                 }
@@ -1121,10 +1164,12 @@ pub fn cpi_desc(site: &CpiSite, env: &mut CpiEnv) -> Option<CpiDesc> {
                 while i < na {
                     let b = mo + 34.0 * i;
                     let k = fa.key_in_frame(env, b);
+                    let src = k.as_ref().and_then(|k| k.src);
                     accounts.push(Acc {
                         text: k.map_or("?".into(), |k| k.text),
                         w: num(ir, at(b + 33.0, 1)),
                         s: num(ir, at(b + 32.0, 1)),
+                        src,
                     });
                     i += 1.0;
                 }
@@ -1228,6 +1273,8 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                 continue;
             }
             let mut parts: Vec<String> = Vec::new();
+            let mut fields: Vec<(String, String)> = Vec::new();
+            let mut fsrc: Vec<Option<E>> = Vec::new();
             for (i, a) in accounts.iter().enumerate() {
                 let role = lay
                     .accounts
@@ -1249,6 +1296,7 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                 let v = match size {
                     Sz::Key => {
                         let k = data.key(env, off as N);
+                        fsrc.push(k.as_ref().and_then(|k| k.src));
                         let t = k.as_ref().map_or("?".to_string(), |k| k.text.clone());
                         let mark = match k.as_ref().and_then(|k| k.src) {
                             Some(s) if env.taint(s) => IXD,
@@ -1256,15 +1304,20 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                         };
                         format!("{t}{mark}")
                     }
-                    Sz::N(sz) => match data.at(env, off as N, sz) {
-                        Some(e) => {
-                            let t = env.ex(e);
-                            format!("{t}{}", if env.taint(e) { IXD } else { "" })
+                    Sz::N(sz) => {
+                        let e = data.at(env, off as N, sz);
+                        fsrc.push(e);
+                        match e {
+                            Some(e) => {
+                                let t = env.ex(e);
+                                format!("{t}{}", if env.taint(e) { IXD } else { "" })
+                            }
+                            None => "?".into(),
                         }
-                        None => "?".into(),
-                    },
+                    }
                 };
                 parts.push(format!("{name}: {v}"));
+                fields.push((name.to_string(), v));
             }
             let head = if fam.is_some() {
                 format!("{}.{}", program.text, lay.name)
@@ -1290,6 +1343,28 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                 family: Some(fam_name(program.known.as_deref(), f).into()),
                 ix: Some(lay.name.into()),
                 guessed: fam.is_none(),
+                parts: Some(CpiParts {
+                    program: program.text.clone(),
+                    known: program.known.clone(),
+                    checked: Some(check.trim().to_string()).filter(|x| !x.is_empty()),
+                    seeds: signer_seeds(&seeds),
+                    fields,
+                    accounts: accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| PartAcc {
+                            role: lay.accounts.get(i).map(|x| x.to_string()),
+                            text: a.text.clone(),
+                            w: a.w,
+                            s: a.s,
+                        })
+                        .collect(),
+                    src: Some(CpiSrc {
+                        program: program.src,
+                        accounts: accounts.iter().map(|a| a.src).collect(),
+                        fields: fsrc,
+                    }),
+                }),
             });
         }
     }
@@ -1340,6 +1415,31 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
             },
             parts.join(", ")
         ),
+        parts: Some(CpiParts {
+            program: program.text.clone(),
+            known: program.known.clone(),
+            checked: Some(check.trim().to_string()).filter(|x| !x.is_empty()),
+            seeds: signer_seeds(&seeds),
+            fields: if event {
+                vec![("event".into(), "emit_cpi!".into())]
+            } else {
+                vec![]
+            },
+            accounts: accounts
+                .iter()
+                .map(|a| PartAcc {
+                    role: None,
+                    text: a.text.clone(),
+                    w: a.w,
+                    s: a.s,
+                })
+                .collect(),
+            src: Some(CpiSrc {
+                program: program.src,
+                accounts: accounts.iter().map(|a| a.src).collect(),
+                fields: vec![],
+            }),
+        }),
         ..Default::default()
     })
 }
@@ -1900,4 +2000,9 @@ pub fn site_objects(
         }
         _ => out,
     }
+}
+
+/// The name of a TokenInstruction by its tag (knownFamilies' TOKEN_PROGRAM).
+pub fn token_ix_name(tag: u64) -> Option<&'static str> {
+    fam_ix(Fam::Token, tag).map(|l| l.name)
 }

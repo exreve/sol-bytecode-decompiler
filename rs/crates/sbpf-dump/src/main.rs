@@ -9,6 +9,7 @@ mod stage3;
 mod stage4;
 mod stage5;
 mod stage7;
+mod stage8;
 
 use enc::*;
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
@@ -17,7 +18,7 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 19] = [
+const STAGES: [&str; 20] = [
     "elf",
     "insns",
     "cfg",
@@ -37,6 +38,7 @@ const STAGES: [&str; 19] = [
     "readfile",
     "library",
     "fingerprint",
+    "facts",
 ];
 
 fn dump_elf(elf: &Elf) -> String {
@@ -247,6 +249,7 @@ fn dump_all(
     stage4::dump_stage4(bytes, stages, &mut res);
     stage5::dump_stage5(bytes, stages, idl, &mut res);
     stage7::dump_stage7(bytes, stages, idl, &mut res);
+    stage8::dump_stage8(bytes, stages, idl, &mut res);
     res
 }
 

@@ -3,6 +3,7 @@
 //! Result tags, stored strings, CPI / PDA / fmt notes), the function texts and the outlined helpers.
 
 use crate::accounts::{account_addr, account_field};
+use crate::analysis::facts::{function_facts, FnFacts, FnInput, NodeKey, SiteNote};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, site_objects, CpiEnv, CpiSite, SiteKind};
 use crate::cpiexec::{describe_model, ExecSiteKind};
 use crate::decompile::{
@@ -544,6 +545,8 @@ struct FnSugar<'a> {
     note: RefCell<Option<NoteFn<'a>>>,
     arg_notes: bool,
     ir: &'a Ir,
+    /// node -> printed lines (the analysis: facts.rs)
+    spans: RefCell<HashMap<NodeKey, (usize, usize)>>,
 }
 
 enum VF {
@@ -1000,6 +1003,9 @@ impl Sugar for FnSugar<'_> {
     }
     fn var_type(&self, v: u32) -> Option<String> {
         self.var_types.get(&v).cloned()
+    }
+    fn node_lines(&self, n: &SNode, a: usize, b: usize) {
+        self.spans.borrow_mut().insert(n as *const SNode, (a, b));
     }
     fn at_node(&self, n: &SNode) {
         let mut fr = self.frame.borrow_mut();
@@ -1680,6 +1686,7 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
             stmts: t.stmts.clone(),
             body,
             irreducible: t.irreducible,
+            origin: t.origin.clone(),
         });
     }
     // outlines
@@ -1723,6 +1730,29 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         funcs.push(print_func(&dm, i, &finals[i], &outl, &helper_names, v));
     }
     let d = &dm;
+    // the analysis facts; Anchor try-call checks: what the callee whose result they test checks
+    let mut facts: IndexMap<i64, FnFacts> = IndexMap::new();
+    for rf in funcs.iter_mut() {
+        if let Some(ff) = rf.facts.take() {
+            facts.insert(rf.pc, ff);
+        }
+    }
+    if d.sem.anchor {
+        let mut memo: HashMap<i64, Vec<&'static str>> = HashMap::new();
+        let en = |v: u64| d.sem.anchor_error(v);
+        for ff in facts.values_mut() {
+            for c in ff.checks.iter_mut() {
+                let Some(b) = c.before else { continue };
+                if !c.kinds.is_empty() || c.named.is_none() {
+                    continue;
+                }
+                let ks = crate::analysis::facts::callee_checks(d.ctx, b, &en, &mut memo, 2);
+                if !ks.is_empty() {
+                    c.via = Some((d.fn_name(b), ks));
+                }
+            }
+        }
+    }
     // the outlined helpers' definitions
     let mut outlined = Vec::new();
     for h in &outl.helpers {
@@ -1790,6 +1820,12 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         fn_names: d.p.funcs.keys().map(|&pc| (pc, d.fn_name(pc))).collect(),
         shapes: Vec::new(),
         program: None,
+        facts,
+        trees: finals,
+        legacy: d.legacy,
+        try_of: d.try_of.clone(),
+        acct_layouts: d.acct_layouts.clone(),
+        program_id: d.state_idl_address.clone(),
     })
 }
 
@@ -2210,6 +2246,7 @@ fn print_func(
         None => indexmap::IndexMap::new(),
     };
     let site_list: Vec<&CpiSite> = sites.values().map(|x| &x.1).collect();
+    let site_notes: Rc<RefCell<HashMap<NodeKey, SiteNote>>> = Rc::new(RefCell::new(HashMap::new()));
     TREE_STMTS.with(|t| *t.borrow_mut() = tree.stmts.clone());
     let sugar = FnSugar {
         d,
@@ -2224,6 +2261,7 @@ fn print_func(
         note: RefCell::new(None),
         arg_notes: !d.error_from.is_empty(),
         ir,
+        spans: RefCell::new(HashMap::new()),
     };
     let names_final = names.clone();
     // the CPI node notes
@@ -2237,6 +2275,7 @@ fn print_func(
         let sites_by_node: HashMap<*const SNode, CpiSite> =
             sites.iter().map(|(k, v)| (*k, v.1.clone())).collect();
         let tree_ref = tree;
+        let notes_w = site_notes.clone();
         let note = move |pr: &mut Printer, n: &SNode| -> Option<String> {
             let s = sites_by_node.get(&(n as *const SNode))?;
             let named = |e: E| -> E {
@@ -2293,6 +2332,18 @@ fn print_func(
                 tainted: Some(&tainted),
             };
             let dd = cpi_desc(s, &mut env);
+            // (not the undecoded CPI inside an invoke wrapper, decoded at its call sites)
+            let in_wrapper = !s.abi.is_pda() && d.invoke_wrappers.contains(&pc) && dd.as_ref().is_none_or(|x| x.family.is_none());
+            if s.abi != SiteKind::Call && !in_wrapper {
+                notes_w.borrow_mut().insert(
+                    n as *const SNode,
+                    SiteNote {
+                        pda: s.abi.is_pda(),
+                        desc: dd.clone(),
+                        via: None,
+                    },
+                );
+            }
             if let Some(CallTarget::Fn { pc: t }) = &s.t {
                 if d.pda_wrappers.contains_key(t) {
                     let s2 = CpiSite {
@@ -2367,7 +2418,16 @@ fn print_func(
                             }
                         };
                         if let Some(x) = r.0 {
-                            return Some(x.text);
+                            let t = x.text.clone();
+                            notes_w.borrow_mut().insert(
+                                n as *const SNode,
+                                SiteNote {
+                                    pda: false,
+                                    desc: Some(x),
+                                    via: None,
+                                },
+                            );
+                            return Some(t);
                         }
                     }
                 }
@@ -2380,7 +2440,7 @@ fn print_func(
     // (analysis only: CPIs made through small user functions wrapping invoke; runs with their own budget)
     if let Some(fpv) = fp_v {
         if !d.user_invoke.is_empty() && d.wrap_budget.borrow().steps > 0 {
-            wrapper_runs(d, f, tree, body, fpv, &mut pr);
+            wrapper_runs(d, f, tree, body, fpv, &mut pr, &site_notes);
         }
     }
     // stack objects
@@ -2760,9 +2820,47 @@ fn print_func(
             .collect();
         lines.push(format!("\tlet {}", z.join(", ")));
     }
+    let body_at = lines.len();
     lines.extend(body_lines);
     lines.push("}".into());
     drop(pr);
+    let facts = {
+        let spans = sugar.spans.borrow();
+        let notes = site_notes.borrow();
+        let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
+        let callee_name = |t: i64| d.fn_name(t);
+        let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
+        let callee_path = |t: i64| d.libs.get(&t).filter(|i| i.lib).and_then(|i| i.hint.clone());
+        let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
+        let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
+        let inp = FnInput {
+            pc,
+            name: &name,
+            ir,
+            tree,
+            body,
+            lines: &lines,
+            at: body_at,
+            spans: &spans,
+            sites: &notes,
+            noreturn: &noreturn,
+            callee_name: &callee_name,
+            anchor: d.sem.anchor,
+            seeds_at: &seeds_at,
+            ir_refs: None,
+            ir_cmp: None,
+            ir_pda: None,
+            ir_store: None,
+            callee_path: &callee_path,
+            str_at: &str_at,
+            custom_error: &custom_error,
+        };
+        let mut ff = function_facts(&inp);
+        if d.user_invoke.contains(&pc) {
+            ff.wrapper = true;
+        }
+        ff
+    };
     ReadFunc {
         pc,
         name,
@@ -2771,7 +2869,42 @@ fn print_func(
         is_entry: f.is_entry,
         var_types: var_types.into_iter().collect(),
         names,
+        facts: Some(facts),
     }
+}
+
+/// seedsAt: a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
+fn seeds_at(d: &Dx, ptr: u64, n: u64) -> Option<String> {
+    if n > 16 {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for i in 0..n {
+        let at = ptr as u128 + 16 * i as u128;
+        let a = if d.sem.region_exec(at, 16) == Some(false) {
+            d.sem.read(at, 8)
+        } else {
+            None
+        };
+        let l = a.and_then(|_| d.sem.read(at + 8, 8));
+        let (Some(a), Some(l)) = (a, l) else { return None };
+        if l > 64 {
+            return None;
+        }
+        if let Some(s) = d.sem.str_at(a, l, true) {
+            if s.chars().all(|c| (' '..='~').contains(&c)) {
+                out.push(json_str(&s));
+                continue;
+            }
+        }
+        let mut bytes = String::new();
+        for j in 0..l {
+            let b = d.sem.read(a as u128 + j as u128, 1)?;
+            bytes.push_str(&format!("{b:02x}"));
+        }
+        out.push(format!("0x{bytes}"));
+    }
+    Some(format!("[{}]", out.join(", ")))
 }
 
 /// argsVar: the variable holding a handler's instruction data, for an argument view.
@@ -2980,7 +3113,15 @@ pub fn map_expr(ir: &Ir, e: E, f: &mut dyn FnMut(E) -> E) -> E {
 }
 
 /// The wrapper-CPI runs of the analysis (budget only: nothing printed).
-fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mut Printer) {
+fn wrapper_runs(
+    d: &Dx,
+    f: &Func,
+    tree: &Tree,
+    body: &[SNode],
+    fpv: u32,
+    pr: &mut Printer,
+    notes: &RefCell<HashMap<NodeKey, SiteNote>>,
+) {
     let ir = f.ir.as_ref().unwrap();
     let pc = f.pc;
     let taint = d.taint.get(&pc);
@@ -2992,6 +3133,7 @@ fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mu
         fpv: u32,
         pr: &mut Printer,
         taint: Option<&crate::taint::FnTaint>,
+        notes: &RefCell<HashMap<NodeKey, SiteNote>>,
     ) {
         let ir = f.ir.as_ref().unwrap();
         for n in ns {
@@ -3031,20 +3173,27 @@ fn wrapper_runs(d: &Dx, f: &Func, tree: &Tree, body: &[SNode], fpv: u32, pr: &mu
                                     &mut b,
                                 )
                             };
-                            if let Some(m) = m {
-                                let _ = m.format(&mut env);
+                            if let Some(x) = m.and_then(|m| m.format(&mut env)) {
+                                notes.borrow_mut().insert(
+                                    n as *const SNode,
+                                    SiteNote {
+                                        pda: false,
+                                        desc: Some(x),
+                                        via: Some(d.fn_name(t)),
+                                    },
+                                );
                             }
                         }
                     }
                 }
             }
             for c in child_lists(n) {
-                visit(d, f, tree, c, fpv, pr, taint);
+                visit(d, f, tree, c, fpv, pr, taint, notes);
             }
         }
     }
     let _ = ir;
-    visit(d, f, tree, body, fpv, pr, taint);
+    visit(d, f, tree, body, fpv, pr, taint, notes);
 }
 
 #[allow(dead_code)]

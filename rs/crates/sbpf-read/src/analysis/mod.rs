@@ -1,0 +1,188 @@
+//! Stage 8: the program analysis (`src/analysis/*`). 8a: the foundation — per-function facts collected
+//! while printing (facts.rs), the IR-level flow support (flow.rs: CFGs, dominators, reaching definitions,
+//! the account models, exit writes, dispatch splits, function pointers), value sources (sources.rs) and
+//! path conditions (paths.rs).
+
+pub mod facts;
+
+use regex::Regex;
+
+/// A JS regex source as a `regex` crate pattern: `\w` `\d` `\b` `\W` are ASCII in JS (`\s` is Unicode in both).
+pub fn jsre(p: &str) -> Regex {
+    let mut o = String::with_capacity(p.len() + 16);
+    let mut in_class = false;
+    let mut it = p.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            let Some(n) = it.next() else {
+                o.push('\\');
+                break;
+            };
+            match (n, in_class) {
+                ('w', false) => o.push_str("[0-9A-Za-z_]"),
+                ('w', true) => o.push_str("0-9A-Za-z_"),
+                ('W', false) => o.push_str("[^0-9A-Za-z_]"),
+                ('d', false) => o.push_str("[0-9]"),
+                ('d', true) => o.push_str("0-9"),
+                ('b', false) => o.push_str("(?-u:\\b)"),
+                ('s', false) => {
+                    o.push('[');
+                    o.push_str(JS_WS);
+                    o.push(']');
+                }
+                ('s', true) => o.push_str(JS_WS),
+                _ => {
+                    o.push('\\');
+                    o.push(n);
+                }
+            }
+            continue;
+        }
+        if c == '[' && !in_class {
+            in_class = true;
+            o.push(c);
+            continue;
+        }
+        if c == ']' && in_class {
+            in_class = false;
+        }
+        o.push(c);
+    }
+    Regex::new(&o).unwrap_or_else(|e| panic!("regex {p}: {e}"))
+}
+
+/// JS `\s` as class members
+const JS_WS: &str = r"\t\n\x0B\x0C\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}";
+
+/// A static JS regex (compiled once).
+#[macro_export]
+macro_rules! jre {
+    ($p:expr) => {{
+        static R: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        R.get_or_init(|| $crate::analysis::jsre($p))
+    }};
+}
+
+/// JS whitespace (`\s`, String.prototype.trim)
+pub fn js_ws(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n'
+            | '\u{b}'
+            | '\u{c}'
+            | '\r'
+            | ' '
+            | '\u{a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+/// String.prototype.trim
+pub fn js_trim(s: &str) -> &str {
+    s.trim_matches(js_ws)
+}
+
+/// `Number(s)` of a string (NaN when not a number).
+pub fn js_number(s: &str) -> f64 {
+    let t = js_trim(s);
+    if t.is_empty() {
+        return 0.0;
+    }
+    let radix = |p: &str, r: u32| -> f64 {
+        if p.is_empty() {
+            return f64::NAN;
+        }
+        let mut v = 0f64;
+        for c in p.chars() {
+            match c.to_digit(r) {
+                Some(d) => v = v * r as f64 + d as f64,
+                None => return f64::NAN,
+            }
+        }
+        v
+    };
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return radix(h, 16);
+    }
+    if let Some(h) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return radix(h, 8);
+    }
+    if let Some(h) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return radix(h, 2);
+    }
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if body == "Infinity" {
+        return if t.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    let b = body.as_bytes();
+    let mut i = 0;
+    let mut digits = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+        digits += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits > 0 && i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let s = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == s {
+            return f64::NAN;
+        }
+    }
+    if digits == 0 || i != b.len() {
+        return f64::NAN;
+    }
+    t.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// `parseInt(s, 16)` of a string of hex digits
+pub fn parse_hex(s: &str) -> f64 {
+    let mut v = 0f64;
+    for c in s.chars() {
+        match c.to_digit(16) {
+            Some(d) => v = v * 16.0 + d as f64,
+            None => break,
+        }
+    }
+    v
+}
+
+/// `BigInt(s)` of a `0x…` / decimal literal as a u64 (None when it does not fit)
+pub fn big_of(s: &str) -> Option<u64> {
+    match s.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).ok(),
+        None => s.parse::<u64>().ok(),
+    }
+}
+
+/// f64 map key (JS Map semantics for numbers: -0 is 0)
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FK(pub u64);
+impl FK {
+    pub fn of(x: f64) -> FK {
+        FK(if x == 0.0 { 0 } else { x.to_bits() })
+    }
+}

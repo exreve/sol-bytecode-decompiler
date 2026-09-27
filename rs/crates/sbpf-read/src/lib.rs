@@ -3,6 +3,7 @@
 //! concrete runs, `sbpf-exec`), frame objects and regions, outlined tails, comments, and the single file.
 
 pub mod accounts;
+pub mod analysis;
 pub mod anchor;
 pub mod anchorstate;
 pub mod cpi;

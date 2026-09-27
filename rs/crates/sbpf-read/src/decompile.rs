@@ -229,6 +229,8 @@ pub struct ReadFunc {
     pub var_types: Vec<(u32, String)>,
     /// the variables' names (by id)
     pub names: Vec<Option<String>>,
+    /// the analysis facts (src/analysis/facts.ts)
+    pub facts: Option<crate::analysis::facts::FnFacts>,
 }
 
 pub struct IxRow {
@@ -261,6 +263,15 @@ pub struct ReadOut {
     pub shapes: Vec<SigShape>,
     /// the program (for the signatures)
     pub program: Option<Program>,
+    /// the analysis facts by function pc (printing order)
+    pub facts: IndexMap<i64, crate::analysis::facts::FnFacts>,
+    /// the built functions' final structured bodies (funcs order)
+    pub trees: Vec<Tree>,
+    /// the pre-repr(C) AccountInfo layout
+    pub legacy: bool,
+    pub try_of: IndexMap<i64, i64>,
+    pub acct_layouts: IndexMap<i64, Vec<Field>>,
+    pub program_id: Option<String>,
 }
 
 pub const GENERIC_RESULT: &str =
@@ -291,6 +302,8 @@ pub struct Dx<'p> {
     pub heur_names: IndexMap<i64, String>,
     pub fn_notes: IndexMap<i64, Vec<String>>,
     pub error_from: IndexSet<i64>,
+    /// (analysis only) constructors storing 6000 | their second argument
+    pub error_or: IndexSet<i64>,
     pub abi_names: IndexMap<i64, IndexMap<u32, String>>,
     pub taint: IndexMap<i64, FnTaint>,
     pub invoke_thunks: IndexMap<i64, SiteKind>,
@@ -808,6 +821,7 @@ fn new_dx<'p>(
         heur_names: IndexMap::new(),
         fn_notes: IndexMap::new(),
         error_from: IndexSet::new(),
+        error_or: IndexSet::new(),
         abi_names: IndexMap::new(),
         taint: IndexMap::new(),
         invoke_thunks: facts.invoke_thunks.clone(),
@@ -1575,6 +1589,33 @@ fn anchor_names(d: &mut Dx) -> (Option<i64>, Vec<i64>) {
         }
         if !hit {
             // (6000 | variant: analysis only)
+            for x in &f.blocks {
+                for st in &x.stmts {
+                    let vals: Vec<E> = match st {
+                        Stmt::Store { v, .. } => vec![*v],
+                        Stmt::Stores { vals, .. } => ir.to_vec(*vals),
+                        _ => continue,
+                    };
+                    for v in vals {
+                        ir.walk(v, &mut |_, n| {
+                            if let Node::Bin(BinOp::Or, a, c) = n {
+                                let (na, nc) = (ir.get(a), ir.get(c));
+                                let k = match (na, nc) {
+                                    (Node::Var(x), Node::Const(k)) if x == b => Some(k),
+                                    (Node::Const(k), Node::Var(x)) if x == b => Some(k),
+                                    _ => None,
+                                };
+                                if k == Some(6000) {
+                                    hit = true;
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            if hit {
+                d.error_or.insert(pc);
+            }
             continue;
         }
         let mut nm = "program_error_from".to_string();
