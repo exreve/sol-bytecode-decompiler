@@ -15,7 +15,7 @@ pub fn dump_stage5(
     let Some(first) = ["types", "rtext", "readfile"].into_iter().find(|s| want(s)) else {
         return;
     };
-    let r = match decompile_read(bytes, idl, threads()) {
+    let r = match decompile_read(bytes, idl, threads(), true) {
         Ok(r) => r,
         Err(e) => {
             res.push((first, header(first) + &err_line(&e)));

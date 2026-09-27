@@ -8,6 +8,7 @@ pub mod anchorstate;
 pub mod cpi;
 pub mod cpiexec;
 pub mod decompile;
+pub mod diff;
 pub mod fieldnames;
 pub mod frameregions;
 pub mod idl;

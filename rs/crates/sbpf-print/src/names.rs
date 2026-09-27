@@ -395,7 +395,19 @@ fn sanitize(n: &str) -> String {
 /// names, helper suffixes, sanitized symbols. Returns the original symbol names of the renamed
 /// ones (symNotes).
 pub fn name_functions(p: &mut Program, sem: &Sem) -> IndexMap<i64, String> {
+    name_functions_lib(p, sem, &|_| false)
+}
+
+/// name_functions with library classification: handler names are not given to library functions.
+pub fn name_functions_lib(
+    p: &mut Program,
+    sem: &Sem,
+    is_lib: &dyn Fn(i64) -> bool,
+) -> IndexMap<i64, String> {
     for (pc, ix) in &sem.ix_names {
+        if is_lib(*pc) {
+            continue;
+        }
         if let Some(f) = p.funcs.get_mut(pc) {
             f.name = format!("ix_{ix}");
         }

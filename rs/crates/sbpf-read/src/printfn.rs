@@ -1286,7 +1286,7 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
                     extent: None,
                 });
         } else if let (Some(o0), CallTarget::Fn { pc }) = (o0, t) {
-            if d.out_params.contains(pc) && args.len() > 1 {
+            if (d.is_lib(*pc) || d.out_params.contains(pc)) && args.len() > 1 {
                 v.generic.entry(K::of(o0)).or_default().push(FrameClaim {
                     name: "res".into(),
                     ty: Some("Result64".into()),
@@ -1562,7 +1562,24 @@ impl RegionCfg for RC<'_> {
                 reused: true,
             });
         }
-        let _ = args;
+        if self.d.is_lib(*tp) && args.len() > 1 {
+            return Some(Root {
+                name: "res".into(),
+                copy_name: "res_copy".into(),
+                ty: Some(
+                    self.d
+                        .lib_out
+                        .get(tp)
+                        .cloned()
+                        .unwrap_or_else(|| "Result64".into()),
+                ),
+                shift: None,
+                size: None,
+                why: "the result of the library call writing it (per call where the slot is reused)"
+                    .into(),
+                reused: true,
+            });
+        }
         None
     }
     fn arg_root(&self, t: &CallTarget, _args: &[E], _pc: i64, i: usize) -> Option<Root> {
@@ -1766,6 +1783,12 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         instructions,
         processors,
         anchor: d.sem.anchor,
+        stubs: d.stubs.clone(),
+        lib_count: d.libs.values().filter(|i| i.lib).count(),
+        lib_pcs: d.libs.iter().filter(|x| x.1.lib).map(|x| *x.0).collect(),
+        fn_names: d.p.funcs.keys().map(|&pc| (pc, d.fn_name(pc))).collect(),
+        shapes: Vec::new(),
+        program: None,
     })
 }
 
@@ -2837,12 +2860,17 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
 
 /// callsOf: direct callees and function-address constants.
 fn calls_of(d: &Dx, f: &Func) -> Vec<i64> {
-    let ir = f.ir.as_ref().unwrap();
     let pc_by_addr: HashMap<u64, i64> =
         d.p.funcs
             .keys()
             .map(|&pc| (sbpf_program::fn_addr(d.p, pc), pc))
             .collect();
+    calls_of_with(f, &pc_by_addr)
+}
+
+/// callsOf with the function-address table given.
+pub fn calls_of_with(f: &Func, pc_by_addr: &HashMap<u64, i64>) -> Vec<i64> {
+    let ir = f.ir.as_ref().unwrap();
     let mut out: IndexSet<i64> = IndexSet::new();
     let visit = |e: E, out: &mut IndexSet<i64>| {
         ir.walk(e, &mut |_, n| match n {

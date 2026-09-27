@@ -14,3 +14,4 @@ sbpf-opt.workspace = true
 sbpf-struct.workspace = true
 sbpf-print.workspace = true
 sbpf-read.workspace = true
+sbpf-lib.workspace = true

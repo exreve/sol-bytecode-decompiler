@@ -1488,8 +1488,8 @@ impl StructCfg for SCfg<'_, '_> {
     fn func(&self, pc: i64) -> Option<&Func> {
         self.d.f(pc)
     }
-    fn skip(&self, _pc: i64) -> bool {
-        false
+    fn skip(&self, pc: i64) -> bool {
+        self.d.is_lib(pc)
     }
     fn typed(&self, pc: i64, v: u32) -> bool {
         self.d
@@ -1841,7 +1841,17 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                 let CallTarget::Fn { pc: cpc } = t else {
                     continue;
                 };
-                if tried.contains(&cpc) || args.len < 3 || !d.out_params.contains(&cpc) {
+                // (a user function writing only its out parameter, or a library deserializer)
+                let lib = d.is_lib(cpc);
+                if tried.contains(&cpc)
+                    || args.len < 3
+                    || !(if lib {
+                        let n = d.fn_name(cpc).to_lowercase();
+                        n.contains("unpack") || n.contains("from_slice") || n.contains("deserialize")
+                    } else {
+                        d.out_params.contains(&cpc)
+                    })
+                {
                     continue;
                 }
                 let cell_field = |e: E, off: u64| -> bool {
@@ -1912,6 +1922,33 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                 }
                 let m = d.state_ctx.probe_deserializer(cpc, &lens);
                 let Some(m) = m else { continue };
+                if lib {
+                    // (a library function: a view of its out object from the run alone)
+                    let fields: Vec<Field> = copy_leaves(&m, 0)
+                        .into_values()
+                        .map(|l| Field {
+                            id: fid(),
+                            name: l.leaf.path.clone(),
+                            off: l.mem,
+                            t: FT::Scalar(l.leaf.size as u8),
+                            doc: None,
+                            count: None,
+                        })
+                        .collect();
+                    let fname = d.fn_name(cpc);
+                    let name = format!("Deser_{fname}");
+                    if fields.len() >= 2 && !d.views.map.contains_key(&name) {
+                        d.views.add(View {
+                            name: name.clone(),
+                            doc: format!("[heur] the out object of {fname} (a library deserializer of account data): the data bytes a run on bit-pattern data copies there (dN_uS: the bytes at offset N of the account data, at their natural alignment; other bytes not described)"),
+                            size: None,
+                            fields,
+                            builtin: false,
+                        });
+                        d.lib_out.insert(cpc, name);
+                    }
+                    continue;
+                }
                 let v = d.param_view(cpc, 1);
                 let Some(v) = v.filter(|v| synth.contains(v)) else {
                     continue;

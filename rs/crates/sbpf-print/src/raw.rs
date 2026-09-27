@@ -418,6 +418,9 @@ pub struct SingleIn<'a> {
     pub views: &'a dyn Fn(&IndexSet<String>) -> Vec<String>,
     /// the outlined helpers' texts
     pub outlined: Vec<&'a str>,
+    /// recognized library functions (libCount) and the stubs of those user code references
+    pub lib_count: usize,
+    pub stubs: &'a [String],
 }
 
 /// renderSingle without the analysis summary (`// security summary …` block).
@@ -469,6 +472,8 @@ pub fn render_single(r: &Raw) -> String {
         processors,
         views: &no_views,
         outlined: vec![],
+        lib_count: 0,
+        stubs: &[],
     })
 }
 
@@ -581,11 +586,12 @@ pub fn render_single_of(r: &SingleIn) -> String {
 
     let mut out: Vec<String> = vec![PRELUDE.to_string(), PROVENANCE.to_string()];
     out.push(format!(
-        "// program: sBPF v{}, {} instructions, {} functions ({} decompiled, 0 library)",
+        "// program: sBPF v{}, {} instructions, {} functions ({} decompiled, {} library)",
         r.version,
         r.n_insns,
         r.n_funcs,
-        r.funcs.len()
+        r.funcs.len(),
+        r.lib_count
     ));
     if !r.ixs.is_empty() {
         out.push(if r.anchor {
@@ -693,6 +699,11 @@ pub fn render_single_of(r: &SingleIn) -> String {
     }
     if !sys.is_empty() {
         out.extend(sys);
+        out.push(String::new());
+    }
+    if !r.stubs.is_empty() {
+        out.push("// library functions (recognized, not decompiled):".into());
+        out.extend(r.stubs.iter().cloned());
         out.push(String::new());
     }
     if !r.outlined.is_empty() {

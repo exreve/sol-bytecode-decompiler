@@ -278,7 +278,7 @@ export function renderSingle(r: Result): string {
 }
 
 /** security/fingerprints.json, functions tagged with the instructions whose handlers reach them (as grouped in ix/). */
-function fingerprints(r: Result): string {
+export function fingerprints(r: Result): string {
 	const { owners } = handlerOwners(r)
 	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
 	const inline = new Map(r.processors.map(x => [x.fn, x.names]))

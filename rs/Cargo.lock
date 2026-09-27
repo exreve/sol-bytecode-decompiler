@@ -123,6 +123,7 @@ dependencies = [
  "sbpf-dataflow",
  "sbpf-elf",
  "sbpf-ir",
+ "sbpf-lib",
  "sbpf-opt",
  "sbpf-print",
  "sbpf-program",
@@ -149,6 +150,21 @@ dependencies = [
 [[package]]
 name = "sbpf-ir"
 version = "0.1.0"
+
+[[package]]
+name = "sbpf-lib"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "regex",
+ "sbpf-elf",
+ "sbpf-exec",
+ "sbpf-ir",
+ "sbpf-opt",
+ "sbpf-print",
+ "sbpf-program",
+ "serde_json",
+]
 
 [[package]]
 name = "sbpf-opt"
@@ -194,6 +210,7 @@ dependencies = [
  "sbpf-elf",
  "sbpf-exec",
  "sbpf-ir",
+ "sbpf-lib",
  "sbpf-opt",
  "sbpf-print",
  "sbpf-program",

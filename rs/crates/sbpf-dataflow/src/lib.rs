@@ -933,8 +933,16 @@ pub fn apply_recovered(f: &mut Func, r: Recovered) {
 
 /// recoverVars of every function (in `p.funcs` order); the first error stops.
 pub fn recover_all(p: &mut Program) -> Result<(), String> {
+    recover_some(p, &|_| true)
+}
+
+/// recoverVars of the functions `pick` selects (by index, in `p.funcs` order); the first error stops.
+pub fn recover_some(p: &mut Program, pick: &dyn Fn(usize) -> bool) -> Result<(), String> {
     let sigs = sigs_of(p);
     for fi in 0..p.funcs.len() {
+        if !pick(fi) {
+            continue;
+        }
         let r = recover_vars(&Ctx::of(p), &sigs, &p.ir, fi)?;
         apply_recovered(&mut p.funcs[fi], r);
     }

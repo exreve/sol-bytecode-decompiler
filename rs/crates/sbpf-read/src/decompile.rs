@@ -19,9 +19,11 @@ use crate::views::{expr_type, fid, legacy_info_view, unaligned_views, Field, Vie
 use indexmap::{IndexMap, IndexSet};
 use sbpf_exec::{call_target_name, ProgCtx};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
-use sbpf_print::names::{name_functions, semantics};
+use sbpf_lib::fingerprint::{sig_shape, SigShape};
+use sbpf_lib::library::LibInfo;
+use sbpf_print::names::{name_functions_lib, semantics};
 use sbpf_print::print::ProgNames;
-use sbpf_print::raw::{prog_names, structure_all, Prepared};
+use sbpf_print::raw::{prog_names, Prepared};
 use sbpf_program::{fn_addr, load_program, Func, Program};
 use sbpf_struct::{SNode, Tree};
 use std::cell::RefCell;
@@ -112,38 +114,99 @@ fn reg_facts(p: &Program) -> RegFacts {
     }
 }
 
-/// The raw pipeline's stages 1–4, with the facts the TS reads of the built functions in phase 4.
-pub fn prepare_read(
-    bytes: &[u8],
-    threads: usize,
-) -> Result<(Prepared, RegFacts, Vec<Tree>), String> {
+/// The pipeline's stages 1–4 (decompile's phases 1–2): with library classification unless `full`
+/// (library functions keep their register-level blocks and are not built).
+pub struct PrepRead {
+    pub pr: Prepared,
+    /// built (user) functions' trees, in p.funcs order
+    pub trees: Vec<Tree>,
+    /// library classification by function pc (empty when `full`)
+    pub libs: IndexMap<i64, LibInfo>,
+    /// what the signatures read of the lifted blocks (phase 1 snapshot)
+    pub shapes: Vec<SigShape>,
+}
+
+pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead, String> {
     let mut p = load_program(bytes, true)?;
     sbpf_dataflow::infer_signatures(&mut p);
     let sem = semantics(&p);
-    let sym_notes = name_functions(&mut p, &sem);
+    let mut libs = if full {
+        IndexMap::new()
+    } else {
+        sbpf_lib::library::classify(&p)
+    };
+    let shapes: Vec<SigShape> = p.funcs.values().map(sig_shape).collect();
+    // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior)
+    if libs.values().any(|i| i.lib && i.name.is_none() && i.hint.is_none()) {
+        let ctx = ProgCtx::new(&p);
+        let mut taken: HashSet<String> = libs.values().filter_map(|i| i.name.clone()).collect();
+        let text_addr = p.elf.text().addr;
+        for (pc, info) in libs.iter_mut() {
+            if !info.lib || info.name.is_some() || info.hint.is_some() {
+                continue;
+            }
+            let Some((name, hint)) = sbpf_lib::builtins::builtin_name(&ctx, *pc)? else {
+                continue;
+            };
+            let nm = if taken.contains(&name) {
+                format!("{name}_{}", sbpf_lib::library::addr_hex(text_addr, *pc))
+            } else {
+                name.clone()
+            };
+            taken.insert(nm.clone());
+            info.name = Some(nm);
+            info.hint = Some(format!("{name} [heur] {hint}"));
+        }
+    }
+    for (pc, info) in &libs {
+        if let (true, Some(n)) = (info.lib, &info.name) {
+            p.funcs.get_mut(pc).unwrap().name = n.clone();
+        }
+    }
+    let lib_at: Vec<bool> = p
+        .funcs
+        .keys()
+        .map(|pc| libs.get(pc).is_some_and(|i| i.lib))
+        .collect();
+    let sym_notes = name_functions_lib(&mut p, &sem, &|pc| libs.get(&pc).is_some_and(|i| i.lib));
     let names = prog_names(&p);
-    sbpf_dataflow::recover_all(&mut p)?;
+    sbpf_dataflow::recover_some(&mut p, &|fi| !lib_at[fi])?;
     {
         let img = sbpf_elf::Image::new(&p.elf);
-        sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| {
+        let fs: Vec<&mut Func> = p
+            .funcs
+            .values_mut()
+            .zip(&lib_at)
+            .filter(|x| !*x.1)
+            .map(|x| x.0)
+            .collect();
+        sbpf_opt::par_each(fs, threads, |f| {
             sbpf_opt::phase2(f, Some(&img), false, |_, _| {});
         });
     }
-    let built: Vec<usize> = (0..p.funcs.len()).collect();
+    let built: Vec<usize> = (0..p.funcs.len()).filter(|&i| !lib_at[i]).collect();
     sbpf_dataflow::stackargs::rewrite_stack_args(&mut p.funcs, &built);
-    sbpf_opt::par_each(p.funcs.values_mut().collect(), threads, |f| {
-        sbpf_opt::finish(f, false)
-    });
-    let mut pr = Prepared {
-        p,
-        sem,
-        sym_notes,
-        names,
-    };
-    let trees = structure_all(&mut pr, threads);
-    // (read in phase 4 of the TS, where p.funcs are the built functions: recoverVars works in place)
-    let facts = reg_facts(&pr.p);
-    Ok((pr, facts, trees))
+    fn user<'a>(p: &'a mut Program, lib_at: &[bool]) -> Vec<&'a mut Func> {
+        p.funcs
+            .values_mut()
+            .zip(lib_at)
+            .filter(|x| !*x.1)
+            .map(|x| x.0)
+            .collect()
+    }
+    sbpf_opt::par_each(user(&mut p, &lib_at), threads, |f| sbpf_opt::finish(f, false));
+    let trees = sbpf_opt::par_each(user(&mut p, &lib_at), threads, sbpf_print::raw::structure_func);
+    Ok(PrepRead {
+        pr: Prepared {
+            p,
+            sem,
+            sym_notes,
+            names,
+        },
+        trees,
+        libs,
+        shapes,
+    })
 }
 
 /// A readable function.
@@ -178,6 +241,17 @@ pub struct ReadOut {
     pub instructions: Vec<IxRow>,
     pub processors: Vec<(String, Vec<String>)>,
     pub anchor: bool,
+    /// `declare function` lines of the library functions user code references
+    pub stubs: Vec<String>,
+    pub lib_count: usize,
+    /// recognized library functions (classification order)
+    pub lib_pcs: IndexSet<i64>,
+    /// every function's final name, p.funcs order
+    pub fn_names: IndexMap<i64, String>,
+    /// what the signatures read of the lifted blocks (phase 1), p.funcs order
+    pub shapes: Vec<SigShape>,
+    /// the program (for the signatures)
+    pub program: Option<Program>,
 }
 
 pub const GENERIC_RESULT: &str =
@@ -236,6 +310,9 @@ pub struct Dx<'p> {
     pub state_ctx: StateCtx<'p>,
     pub acct_field_view: IndexMap<(String, K), (String, bool)>,
     pub state_idl_address: Option<String>,
+    /// library classification (empty: --full)
+    pub libs: &'p IndexMap<i64, LibInfo>,
+    pub stubs: Vec<String>,
     global_idents: RefCell<Option<HashSet<String>>>,
     var_acc: RefCell<HashMap<usize, HashMap<u32, Vec<(N, u8)>>>>,
     spill: RefCell<HashMap<usize, HashMap<K, E>>>,
@@ -314,6 +391,10 @@ pub const RESERVED_TS: &[&str] = &[
 impl<'p> Dx<'p> {
     pub fn f(&self, pc: i64) -> Option<&'p Func> {
         self.idx.get(&pc).map(|&i| self.fs[i])
+    }
+    /// isLib: a recognized library function (not built)
+    pub fn is_lib(&self, pc: i64) -> bool {
+        self.libs.get(&pc).is_some_and(|i| i.lib)
     }
     pub fn tree(&self, pc: i64) -> &'p Tree {
         &self.trees[self.idx[&pc]]
@@ -687,27 +768,32 @@ pub fn pascal_ix(ix: &str) -> String {
     o
 }
 
-/// decompile(bytes, { full: true, idl }): the readable output.
-pub fn decompile_read(
-    bytes: &[u8],
-    idl: Option<&IdlInfo>,
-    threads: usize,
-) -> Result<ReadOut, String> {
-    let (pr, facts, trees) = prepare_read(bytes, threads)?;
+#[allow(clippy::too_many_arguments)]
+fn new_dx<'p>(
+    pr: &'p Prepared,
+    trees: &'p [Tree],
+    ctx: &'p ProgCtx<'p>,
+    idl: Option<&'p IdlInfo>,
+    libs: &'p IndexMap<i64, LibInfo>,
+    facts: &RegFacts,
+) -> Dx<'p> {
     let p = &pr.p;
-    let ctx = ProgCtx::new(p);
-    let fs: Vec<&Func> = p.funcs.values().collect();
+    let fs: Vec<&Func> = p
+        .funcs
+        .values()
+        .filter(|f| !libs.get(&f.pc).is_some_and(|i| i.lib))
+        .collect();
     let idx: HashMap<i64, usize> = fs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
     let def_counts: Vec<Vec<u32>> = fs.iter().map(|f| def_counts(f)).collect();
-    let mut d = Dx {
+    Dx {
         p,
         fs,
         idx,
-        trees: &trees,
+        trees,
         pn: pr.names.clone(),
         sem: SemR::new(p, &pr.sem, idl),
         idl,
-        ctx: &ctx,
+        ctx,
         views: Views::new(),
         sym_notes: pr.sym_notes.clone(),
         heur_names: IndexMap::new(),
@@ -738,16 +824,61 @@ pub fn decompile_read(
         exec_budget: RefCell::new(ExecBudget { steps: 250_000 }),
         wrap_budget: RefCell::new(ExecBudget { steps: 150_000 }),
         def_counts,
-        state_ctx: StateCtx::new(&ctx),
+        state_ctx: StateCtx::new(ctx),
         acct_field_view: IndexMap::new(),
         state_idl_address: None,
+        libs,
+        stubs: Vec::new(),
         global_idents: RefCell::new(None),
         var_acc: RefCell::new(HashMap::new()),
         spill: RefCell::new(HashMap::new()),
         frame_offs: RefCell::new(HashMap::new()),
-    };
+    }
+}
+
+/// decompile(bytes, { full, idl }): the readable output (`full`: library functions decompiled too; else
+/// library code as one-line stubs).
+pub fn decompile_read(
+    bytes: &[u8],
+    idl: Option<&IdlInfo>,
+    threads: usize,
+    full: bool,
+) -> Result<ReadOut, String> {
+    let PrepRead {
+        mut pr,
+        trees,
+        libs,
+        shapes,
+    } = prepare_read(bytes, threads, full)?;
+    // the library functions the Anchor error-constructor search builds (recoverVars + optimizeFunc, in
+    // place: later phases read them in that form); a first pass up to that point finds them
+    if libs.values().any(|i| i.lib) {
+        let cands = {
+            let ctx = ProgCtx::new(&pr.p);
+            let facts = RegFacts {
+                invoke_thunks: IndexMap::new(),
+                pda_info: Vec::new(),
+                unaligned: false,
+            };
+            let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+            phase3(&mut d);
+            anchor_names(&mut d).1
+        };
+        for pc in cands {
+            let fi = pr.p.funcs.get_index_of(&pc).unwrap();
+            sbpf_dataflow::recover_some(&mut pr.p, &|i| i == fi)?;
+            let img = sbpf_elf::Image::new(&pr.p.elf);
+            let f = &mut pr.p.funcs[fi];
+            sbpf_opt::optimize_only(f, Some(&img));
+        }
+    }
+    // (read in phase 4 of the TS, where p.funcs are the built functions: recoverVars works in place)
+    let facts = reg_facts(&pr.p);
+    let ctx = ProgCtx::new(&pr.p);
+    let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+    let p = &pr.p;
     phase3(&mut d);
-    let name_fn = anchor_names(&mut d);
+    let name_fn = anchor_names(&mut d).0;
     selector_dispatch(&mut d);
     anchor_dispatch(&mut d);
     // instruction-data taint from the handlers' ix_args
@@ -765,6 +896,7 @@ pub fn decompile_read(
             d.taint = instruction_taint(&funcs, &seeds);
         }
     }
+    stubs(&mut d);
     wrappers(&mut d, &facts);
     d.legacy = {
         let m: HashMap<i64, &Func> = d.fs.iter().map(|f| (f.pc, *f)).collect();
@@ -785,7 +917,153 @@ pub fn decompile_read(
         d.data_vars = account_data_vars(&d.fs, &discs, &mut d.views);
     }
     crate::types::anchor_accounts(&mut d, name_fn);
-    crate::printfn::run(d, name_fn)
+    let mut r = crate::printfn::run(d, name_fn)?;
+    drop(ctx);
+    r.shapes = shapes;
+    r.program = Some(pr.p);
+    Ok(r)
+}
+
+/// The library stubs referenced from user code (`declare function` lines, by pc).
+fn stubs(d: &mut Dx) {
+    if d.libs.is_empty() {
+        return;
+    }
+    let pc_by_addr: HashMap<u64, i64> =
+        d.p.funcs.keys().map(|&pc| (fn_addr(d.p, pc), pc)).collect();
+    let mut called: IndexSet<i64> = IndexSet::new();
+    for f in &d.fs {
+        for t in crate::printfn::calls_of_with(f, &pc_by_addr) {
+            if d.is_lib(t) {
+                called.insert(t);
+            }
+        }
+    }
+    let mut called: Vec<i64> = called.into_iter().collect();
+    called.sort();
+    let mut out = Vec::new();
+    for pc in called {
+        let f = &d.p.funcs[&pc];
+        let info = &d.libs[&pc];
+        let mut params: Vec<String> = (0..f.nparams as usize)
+            .map(|i| format!("{}: u64", &"abcde"[i..i + 1]))
+            .collect();
+        params.extend(f.extra_in.iter().map(|r| format!("r{r}: u64")));
+        let mut hint = info.hint.clone();
+        if hint.is_none() {
+            // unnamed library code: say what it uses (named callees, syscalls)
+            let mut uses: IndexSet<String> = IndexSet::new();
+            for b in &f.blocks {
+                for st in &b.stmts {
+                    if let Stmt::Call { t, .. } = st {
+                        match t {
+                            CallTarget::Sys { name, .. } => {
+                                uses.insert(d.sem.syscall_name(name).to_string());
+                            }
+                            CallTarget::Fn { pc } => {
+                                if d.p.funcs.contains_key(pc) {
+                                    let n = d.fn_name(*pc);
+                                    if !n.starts_with("fn_") {
+                                        uses.insert(n);
+                                    }
+                                }
+                            }
+                            CallTarget::Ind { .. } => {
+                                uses.insert("callx".into());
+                            }
+                        }
+                    }
+                }
+            }
+            if !uses.is_empty() {
+                let v: Vec<&str> = uses.iter().take(4).map(|s| s.as_str()).collect();
+                hint = Some(format!(
+                    "uses {}{}",
+                    v.join(", "),
+                    if uses.len() > 4 { ", …" } else { "" }
+                ));
+            }
+        }
+        if let Some(h) = d.heur_names.get(&pc) {
+            hint = Some(match hint {
+                Some(x) => format!("{h}; {x}"),
+                None => h.clone(),
+            });
+        }
+        if let Some(s) = d.sym_notes.get(&pc) {
+            hint = Some(match hint {
+                Some(x) => format!("symbol {s}; {x}"),
+                None => format!("symbol {s}"),
+            });
+        }
+        out.push(format!(
+            "declare function {}({}){} // lib{}",
+            d.fn_name(pc),
+            params.join(", "),
+            if f.noreturn {
+                ": never"
+            } else if f.returns {
+                ": u64"
+            } else {
+                ": void"
+            },
+            hint.map_or(String::new(), |h| format!(" {h}"))
+        ));
+    }
+    d.stubs = out;
+}
+
+/// security/fingerprints.json of a default-output result (layout.ts fingerprints).
+pub fn render_fingerprints(r: &ReadOut) -> String {
+    let p = r.program.as_ref().unwrap();
+    let img = p.image();
+    let sigs: IndexMap<i64, sbpf_lib::fingerprint::FnSig> = r
+        .shapes
+        .iter()
+        .map(|x| (x.pc, sbpf_lib::fingerprint::shape_signature(p, &img, x)))
+        .collect();
+    // handlerOwners: the handlers (ix_* and inline processors) reaching each function
+    let by_pc: HashMap<i64, &ReadFunc> = r.funcs.iter().map(|f| (f.pc, f)).collect();
+    let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0.as_str()).collect();
+    let is_root =
+        |f: &ReadFunc| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str());
+    let mut owners: HashMap<i64, IndexSet<i64>> = HashMap::new();
+    for h in r.funcs.iter().filter(|f| is_root(f)) {
+        let mut seen: HashSet<i64> = HashSet::from([h.pc]);
+        let mut q = vec![h.pc];
+        while let Some(x) = q.pop() {
+            owners.entry(x).or_default().insert(h.pc);
+            for &t in by_pc.get(&x).map_or(&[][..], |f| &f.calls[..]) {
+                if by_pc.contains_key(&t) && !seen.contains(&t) && !is_root(by_pc[&t]) {
+                    seen.insert(t);
+                    q.push(t);
+                }
+            }
+        }
+    }
+    let inline: HashMap<&str, &Vec<String>> =
+        r.processors.iter().map(|x| (x.0.as_str(), &x.1)).collect();
+    let ixs = |pc: i64| -> Vec<String> {
+        let mut out: IndexSet<String> = IndexSet::new();
+        for h in owners.get(&pc).into_iter().flatten() {
+            let n = &by_pc[h].name;
+            if let Some(x) = n.strip_prefix("ix_") {
+                out.insert(x.to_string());
+            } else if let Some(ns) = inline.get(n.as_str()) {
+                out.extend(ns.iter().cloned());
+            }
+        }
+        let mut v: Vec<String> = out.into_iter().collect();
+        v.sort_by(|a, b| sbpf_lib::js_str_cmp(a, b));
+        v
+    };
+    sbpf_lib::fingerprint::render_fingerprints(
+        p,
+        &sigs,
+        &r.lib_pcs,
+        &|pc| r.fn_names.get(&pc).cloned(),
+        &ixs,
+    )
 }
 
 // ---------------- phase 3: constants, Result layouts, out parameters ----------------
@@ -1167,9 +1445,11 @@ fn out_param_tags(d: &Dx) -> IndexMap<i64, u32> {
 
 // ---------------- Anchor error helpers ----------------
 
-fn anchor_names(d: &mut Dx) -> Option<i64> {
+/// The Anchor error helpers' names; also the library functions the error-constructor search builds
+/// (user code calls them with a small constant second argument).
+fn anchor_names(d: &mut Dx) -> (Option<i64>, Vec<i64>) {
     if !d.sem.anchor {
-        return None;
+        return (None, Vec::new());
     }
     let name_fn = {
         let sa = |p: u64, n: u64| d.str_at(p, n, false);
@@ -1228,10 +1508,38 @@ fn anchor_names(d: &mut Dx) -> Option<i64> {
             rename(d, b, "anchor_error_from", "the callee most often given an anchor_lang ErrorCode as its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from");
         }
     }
-    let pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
-    for pc in pcs {
-        let f = d.f(pc).unwrap();
+    // (library functions: those user code calls with a small constant second argument, built here)
+    let mut lib_cands: Vec<i64> = Vec::new();
+    for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
+        for x in &f.blocks {
+            for st in &x.stmts {
+                let (t, args) = match st {
+                    Stmt::Call { t, args, .. } => (t.clone(), ir.to_vec(*args)),
+                    Stmt::Set { e, .. } => match ir.get(*e) {
+                        Node::Call(t, args) => (ir.target(t), ir.to_vec(args)),
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                let CallTarget::Fn { pc: t } = t else { continue };
+                if d.idx.contains_key(&t) || lib_cands.contains(&t) || !d.is_lib(t) {
+                    continue;
+                }
+                let Some(&a1) = args.get(1) else { continue };
+                if !matches!(ir.get(a1), Node::Const(v) if v < 0x400) || !is_hex_fn(&d.fn_name(t))
+                {
+                    continue;
+                }
+                lib_cands.push(t);
+            }
+        }
+    }
+    let mut pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
+    pcs.extend(lib_cands.iter().copied());
+    for pc in pcs {
+        let f = d.f(pc).or_else(|| d.p.funcs.get(&pc)).unwrap();
+        let Some(ir) = f.ir.as_ref() else { continue };
         let Some(b) = param_var(f, 2) else { continue };
         let nst: usize = f.blocks.iter().map(|x| x.stmts.len()).sum();
         if f.is_entry || nst > 80 {
@@ -1271,7 +1579,7 @@ fn anchor_names(d: &mut Dx) -> Option<i64> {
             d.error_from.insert(pc);
         }
     }
-    name_fn
+    (name_fn, lib_cands)
 }
 
 // ---------------- selector dispatcher without instruction logs ----------------
@@ -1352,6 +1660,9 @@ fn selector_dispatch(d: &mut Dx) {
                 }
                 let mut call = |t: &CallTarget| {
                     if let CallTarget::Fn { pc } = t {
+                        if d.is_lib(*pc) {
+                            return;
+                        }
                         out.push(*pc);
                         seen.entry(*pc).or_default().insert(ix.clone());
                     }
@@ -1589,7 +1900,49 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
             );
         }
     }
-    // (library wrappers: none without library classification) user functions passing their account infos on
+    // library code reaching the CPI syscall within two calls
+    fn reaches(d: &Dx, pc: i64, depth: u32) -> bool {
+        let Some(f) = d.p.funcs.get(&pc) else {
+            return false;
+        };
+        if !d.is_lib(pc) {
+            return false;
+        }
+        static INVOKE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = INVOKE.get_or_init(|| {
+            regex::Regex::new(r"^(?:program_invoke(?:_signed)?|invoke(?:_signed)?(?:_unchecked)?|solana_cpi_invoke[A-Za-z0-9_]*)(?:_?[0-9a-f]+)?$").unwrap()
+        });
+        if re.is_match(&d.fn_name(pc)) {
+            return true;
+        }
+        for b in &f.blocks {
+            for st in &b.stmts {
+                if let Stmt::Call { t, .. } = st {
+                    match t {
+                        CallTarget::Sys { name, .. }
+                            if &**name == "sol_invoke_signed_rust"
+                                || &**name == "sol_invoke_signed_c" =>
+                        {
+                            return true
+                        }
+                        CallTarget::Fn { pc: t } if depth > 0 && reaches(d, *t, depth - 1) => {
+                            return true
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    }
+    let lib_pcs: Vec<i64> = d.libs.keys().copied().collect();
+    for pc in lib_pcs {
+        let Some(f) = d.p.funcs.get(&pc) else { continue };
+        if (f.nparams >= 4 || f.stack_args.is_some_and(|n| n != 0)) && reaches(d, pc, 2) {
+            d.invoke_wrappers.insert(pc);
+        }
+    }
+    // CPI wrappers not recognized as library code: user functions passing their account infos on
     for _round in 0..2 {
         let pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
         for pc in pcs {
@@ -1826,5 +2179,7 @@ pub fn render_read(r: &ReadOut) -> String {
         processors,
         views: &views,
         outlined: r.outlined.iter().map(|x| x.1.as_str()).collect(),
+        lib_count: r.lib_count,
+        stubs: &r.stubs,
     })
 }

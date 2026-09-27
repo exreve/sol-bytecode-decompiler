@@ -1088,6 +1088,13 @@ pub fn phase2(
     settled
 }
 
+/// optimizeFunc alone (decompile's library error-constructor candidates), with memory folding on the image.
+pub fn optimize_only(f: &mut Func, img: Option<&Image>) {
+    let mut x = Fx::new(f.ir.take().expect("variable IR"), img);
+    optimize_func(&mut x, f);
+    f.ir = Some(x.ir);
+}
+
 /// Runs `f` on every function, on `threads` worker threads (functions are independent in the
 /// per-function phase: each owns its arena; the image is shared read-only). Results in input order.
 pub fn par_each<T: Send>(

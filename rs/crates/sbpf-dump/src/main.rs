@@ -1,6 +1,6 @@
 //! Stage dumps, byte-identical to `scripts/dump.ts` (encoding: rs/README.md), and a stage timer.
 //!
-//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir
+//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir
 //!   sbpf-dump --time [--iters N] prog.so...
 
 mod enc;
@@ -8,6 +8,7 @@ mod stage2;
 mod stage3;
 mod stage4;
 mod stage5;
+mod stage7;
 
 use enc::*;
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
@@ -16,7 +17,7 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 17] = [
+const STAGES: [&str; 19] = [
     "elf",
     "insns",
     "cfg",
@@ -34,6 +35,8 @@ const STAGES: [&str; 17] = [
     "types",
     "rtext",
     "readfile",
+    "library",
+    "fingerprint",
 ];
 
 fn dump_elf(elf: &Elf) -> String {
@@ -243,6 +246,7 @@ fn dump_all(
     stage3::dump_stage3(bytes, stages, &mut res);
     stage4::dump_stage4(bytes, stages, &mut res);
     stage5::dump_stage5(bytes, stages, idl, &mut res);
+    stage7::dump_stage7(bytes, stages, idl, &mut res);
     res
 }
 
@@ -402,8 +406,17 @@ fn real_main() {
         }
         i += 1;
     }
+    if pos.len() == 4 && pos[0] == "--diff" {
+        std::fs::create_dir_all(&pos[3]).expect("mkdir");
+        std::fs::write(
+            std::path::Path::new(&pos[3]).join("diff.jsonl"),
+            stage7::dump_diff(&pos[1], &pos[2]),
+        )
+        .expect("write");
+        return;
+    }
     if pos.len() != 2 {
-        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir");
+        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir");
         std::process::exit(2);
     }
     let bytes = std::fs::read(&pos[0]).expect("read input");
@@ -558,7 +571,7 @@ fn time5(files: &[String], iters: usize) {
                 let r = sbpf_print::raw::decompile_raw(&bytes, th).unwrap();
                 std::hint::black_box(sbpf_print::raw::render_single(&r));
                 let t1 = Instant::now();
-                let r = sbpf_read::decompile::decompile_read(&bytes, None, th).unwrap();
+                let r = sbpf_read::decompile::decompile_read(&bytes, None, th, true).unwrap();
                 std::hint::black_box(sbpf_read::decompile::render_read(&r));
                 best[k] = best[k].min((t1 - t).as_secs_f64() * 1e3);
                 best[k + 1] = best[k + 1].min(t1.elapsed().as_secs_f64() * 1e3);

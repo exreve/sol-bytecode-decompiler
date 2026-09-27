@@ -2,7 +2,8 @@
 // stage, byte-compared against `rs/` (sbpf-dump) by scripts/parity.ts. The encoding is specified in
 // rs/README.md; any change here must be mirrored in rs/crates/sbpf-dump.
 //
-//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir
+//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir
+//   node scripts/dump.ts --diff a.so b.so out_dir     (diff.jsonl: the program diff report)
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseElf, Image, type Elf } from '../src/elf.ts'
@@ -16,11 +17,14 @@ import { optimizeFunc, setFoldImage, isSettled } from '../src/simplify.ts'
 import { recognizeIdioms } from '../src/idioms.ts'
 import { compactStores, sinkFrameLoads } from '../src/compact.ts'
 import { decompile } from '../src/decompile.ts'
+import { classify } from '../src/library.ts'
+import { fingerprints } from '../src/layout.ts'
+import { profile, diff } from '../src/diff.ts'
 import { parseIdl, type IdlInfo } from '../src/idl.ts'
 import type { Node } from '../src/structure.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile', 'library', 'fingerprint'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -101,7 +105,8 @@ const line = (v: unknown) => JSON.stringify(v) + '\n'
 const header = (stage: string) => line({ stage, format: FORMAT })
 
 /** Error line: our own `throw new Error(msg)` keeps its message; runtime errors (DataView bounds) are "out of bounds". */
-const errLine = (e: unknown) => line({ error: e instanceof RangeError ? 'out of bounds' : (e as Error).message })
+const errMsg = (e: unknown) => (e instanceof RangeError ? 'out of bounds' : (e as Error).message)
+const errLine = (e: unknown) => line({ error: errMsg(e) })
 
 export function dumpElf(elf: Elf): string {
 	const out: string[] = [header('elf')]
@@ -359,6 +364,51 @@ export function dumpStage5(bytes: Uint8Array, stages: readonly string[], res: Ma
 	if (stages.includes('readfile')) res.set('readfile', header('readfile') + line({ text: withoutAnalysis(r.text) }))
 }
 
+/**
+ * Stage 7: library classification and the default output (`decompile(bytes, { idl })`: library code as
+ * one-line stubs). `library` = classify() of a fresh program after inferSignatures (per function: lib,
+ * families, name, hint), then from the default output the library functions' final names, the stubs and
+ * the counts; `fingerprint` = security/fingerprints.json; `readfile` gets a second line, the default
+ * single file (as the first, without the analysis summary).
+ */
+export function dumpStage7(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>, idl?: IdlInfo) {
+	const want = ['library', 'fingerprint', 'readfile'].filter(s => stages.includes(s))
+	if (!want.length) return
+	if (stages.includes('library')) {
+		const out = [header('library')]
+		try {
+			const p = loadProgram(bytes, { lazyBlocks: true })
+			inferSignatures(p)
+			for (const [pc, i] of classify(p)) out.push(line({ t: 'func', pc, lib: i.lib, families: i.families, name: i.name, hint: i.hint }))
+		} catch (e) { out.push(errLine(e)) }
+		res.set('library', out.join(''))
+	}
+	let r: ReturnType<typeof decompile>
+	try { r = decompile(bytes, { idl }) } catch (e) {
+		for (const st of want) res.set(st, (res.get(st) ?? header(st)) + (st === 'readfile' ? line({ lib: true, error: errMsg(e) }) : errLine(e)))
+		return
+	}
+	if (stages.includes('library')) {
+		const out = [res.get('library')!]
+		for (const pc of r.libPcs) out.push(line({ t: 'lib', pc, name: r.program.funcs.get(pc)!.name }))
+		for (const s of r.stubs) out.push(line({ t: 'stub', text: s }))
+		out.push(line({ t: 'count', funcs: r.funcs.length, lib: r.libCount }))
+		res.set('library', out.join(''))
+	}
+	if (stages.includes('fingerprint')) res.set('fingerprint', header('fingerprint') + line({ text: fingerprints(r) }))
+	if (stages.includes('readfile')) res.set('readfile', (res.get('readfile') ?? header('readfile')) + line({ lib: true, text: withoutAnalysis(r.text) }))
+}
+
+/** The program diff report (`sbpf-decompile a.so b.so -o report.txt`: all rows, the paths as labels). */
+export function dumpDiff(a: string, b: string): string {
+	let text: string
+	try {
+		const d = diff(profile(new Uint8Array(readFileSync(a))), profile(new Uint8Array(readFileSync(b))), { all: true, labels: [a, b] })
+		text = d.lines.join('\n') + '\n'
+	} catch (e) { return header('diff') + errLine(e) }
+	return header('diff') + line({ text })
+}
+
 export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES, idl?: IdlInfo): Map<string, string> {
 	const res = new Map<string, string>()
 	let elf: Elf
@@ -373,6 +423,7 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES, i
 	dumpStage3(bytes, stages, res)
 	dumpStage4(bytes, stages, res)
 	dumpStage5(bytes, stages, res, idl)
+	dumpStage7(bytes, stages, res, idl)
 	return res
 }
 
@@ -386,6 +437,7 @@ if (import.meta.main) {
 		else if (args[i] === '--stages') stages = args[++i].split(',')
 		else pos.push(args[i])
 	}
+	if (pos[0] === '--diff' && pos.length === 4) { mkdirSync(pos[3], { recursive: true }); writeFileSync(join(pos[3], 'diff.jsonl'), dumpDiff(pos[1], pos[2])); process.exit(0) }
 	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile] out_dir'); process.exit(2) }
 	const [file, dir] = pos
 	mkdirSync(dir, { recursive: true })
