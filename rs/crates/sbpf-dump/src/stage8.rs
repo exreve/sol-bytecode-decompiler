@@ -3,8 +3,13 @@
 use crate::enc::*;
 use crate::stage3::threads;
 use sbpf_ir::{Ir, E};
+use sbpf_read::analysis::acct::{AcctRef, Side};
+use sbpf_read::analysis::anchor::XField;
 use sbpf_read::analysis::facts::FnFacts;
-use sbpf_read::decompile::{decompile_read, ReadOut};
+use sbpf_read::analysis::An;
+use sbpf_read::decompile::{decompile_read_hook, ReadOut};
+use sbpf_read::views::FT;
+use std::collections::HashSet;
 use sbpf_read::idl::IdlInfo;
 
 fn ex(ir: &Ir, e: E) -> String {
@@ -199,6 +204,301 @@ pub fn fn_facts_lines(ir: &Ir, pc: i64, ff: &FnFacts, out: &mut String) {
     j.line(out);
 }
 
+fn num(x: f64) -> String {
+    js_num(x)
+}
+
+fn nopt(x: Option<f64>) -> String {
+    x.map_or("null".into(), num)
+}
+
+fn sopt(x: Option<&str>) -> String {
+    x.map_or("null".into(), jstr)
+}
+
+fn acct_ref(x: &AcctRef) -> String {
+    format!("[{},{}]", num(x.index), sopt(x.field.as_deref()))
+}
+
+fn side_j(s: &Side) -> String {
+    match s {
+        Side::None => "null".into(),
+        Side::Stack => jstr("stack"),
+        Side::Pda => jstr("pda"),
+        Side::Const => jstr("const"),
+        Side::Acct(a) => acct_ref(a),
+    }
+}
+
+/// scripts/dump8.ts flowLines: the flow layer's outputs
+pub fn flow_lines(an: &An) -> String {
+    let mut out = String::new();
+    // (analyze0's foundation calls, in its order)
+    an.add_exit_writes();
+    let ind = an.indirect_targets();
+    let splits = an.splits();
+    let ixs = an.ix_contexts(&ind, &splits);
+    let fir = |pc: i64| an.fo(pc).map(|f| sbpf_read::analysis::flow::fir(f.f));
+    for (pc, ex) in an.exit_fns().iter() {
+        let fields = |fs: &[XField]| arr(fs.iter().map(|f| format!("[{},{},{}]", num(f.off), num(f.size), jstr(&f.name))));
+        let mut j = J::obj();
+        j.s("t", "exit").n("pc", *pc);
+        if let Some(t) = &ex.ty {
+            j.s("type", t);
+        }
+        j.n("param", ex.param as i64).raw("fields", &fields(&ex.fields));
+        if let Some(subs) = &ex.subs {
+            j.raw(
+                "subs",
+                &arr(subs.iter().map(|s| {
+                    let mut o = J::obj();
+                    if let Some(t) = &s.ty {
+                        o.s("type", t);
+                    }
+                    o.raw("fields", &fields(&s.fields));
+                    if let Some(n) = &s.name {
+                        o.s("name", n);
+                    }
+                    o.done()
+                })),
+            );
+        }
+        j.line(&mut out);
+    }
+    for (pc, ff) in an.facts.borrow().iter() {
+        let ir = fir(*pc).unwrap();
+        for o in &ff.ops {
+            if o.exit.is_none() {
+                continue;
+            }
+            let one = FnFacts {
+                pc: *pc,
+                name: ff.name.clone(),
+                ops: vec![o.clone()],
+                ..Default::default()
+            };
+            let mut s = String::new();
+            fn_facts_lines(ir, *pc, &one, &mut s);
+            let l = s.lines().nth(1).unwrap();
+            out.push_str(&l.replacen("{\"t\":\"op\"", &format!("{{\"t\":\"xop\",\"fn\":{pc}"), 1));
+            out.push('\n');
+        }
+    }
+    {
+        let mut j = J::obj();
+        j.s("t", "indirect")
+            .raw("targets", &arr(ind.targets.iter().map(|(k, v)| format!("[{k},{}]", nums(v.iter().copied())))))
+            .raw("byDisc", &arr(ind.by_disc.iter().map(|(k, v)| format!("[\"0x{k:x}\",{}]", nums(v.iter().copied())))));
+        j.line(&mut out);
+    }
+    for (root, g) in &splits {
+        let mut j = J::obj();
+        j.s("t", "split")
+            .n("root", *root)
+            .raw("via", &arr(g.via.iter().map(|(h, t)| format!("[{h},{}]", nums(t.iter().map(|&x| x as i64))))))
+            .raw(
+                "groups",
+                &arr(g.groups.iter().map(|x| {
+                    let mut o = J::obj();
+                    o.raw("tags", &nums(x.tags.iter().map(|&t| t as i64))).s("name", &x.name).s("source", x.source);
+                    if let Some(a) = &x.accounts {
+                        o.raw("accounts", &strs(a.iter().map(|s| s.as_str())));
+                    }
+                    o.raw("dispatchers", &strs(x.dispatchers.iter().map(|s| s.as_str())));
+                    o.raw("tag", &format!("[{},{}]", x.tag.0, x.tag.1));
+                    o.done()
+                })),
+            );
+        j.line(&mut out);
+        for x in &g.groups {
+            for fo in &an.funcs {
+                if x.dispatchers.contains(&fo.name) {
+                    let m: String = (0..fo.f.blocks.len()).map(|b| if x.allowed(fo.pc, b) { '1' } else { '0' }).collect();
+                    let mut j = J::obj();
+                    j.s("t", "allowed").s("name", &x.name).n("fn", fo.pc).s("m", &m);
+                    j.line(&mut out);
+                }
+            }
+        }
+    }
+    if an.anchor {
+        for fo in &an.funcs {
+            if !fo.name.starts_with("ix_") {
+                continue;
+            }
+            if let Some(ti) = an.try_info(fo.pc) {
+                let mut j = J::obj();
+                j.s("t", "try").n("h", fo.pc).n("tryPc", ti.try_pc).raw(
+                    "layout",
+                    &arr(ti.layout.iter().map(|x| {
+                        let t = match &x.t {
+                            FT::Ref(to) => to.clone(),
+                            FT::Embed(ty) => format!("embed {ty}"),
+                            FT::Scalar(z) => format!("scalar {z}"),
+                        };
+                        format!("[{},{},{},{}]", jstr(&x.name), num(x.off), jstr(&t), sopt(x.doc.as_deref()))
+                    })),
+                );
+                if let Some(b) = &ti.box_info {
+                    j.raw("boxInfo", &arr(b.iter().map(|(n, o)| format!("[{},{}]", jstr(n), num(*o)))));
+                }
+                if let Some(w) = &ti.words {
+                    j.raw("words", &arr(w.values().map(|(o, n, x)| format!("[{},{},{}]", num(*o), jstr(n), num(*x)))));
+                }
+                if let Some(p) = &ti.ptrs {
+                    j.raw("ptrs", &arr(p.iter().map(|(v, n)| format!("[{v},{}]", jstr(n)))));
+                }
+                if let Some(s) = &ti.seqs {
+                    j.raw("seqs", &arr(s.iter().map(|(v, n)| format!("[{v},{}]", strs(n.iter().map(|x| x.as_str()))))));
+                }
+                j.line(&mut out);
+            }
+            if let Some(dr) = an.memo.data_reads.borrow().get(&fo.pc) {
+                let mut j = J::obj();
+                j.s("t", "dataReads").n("h", fo.pc).raw("accts", &strs(dr.iter().map(|s| s.as_str())));
+                j.line(&mut out);
+            }
+        }
+    }
+    for ix in &ixs {
+        let ctx = &ix.ctx;
+        let mut j = J::obj();
+        j.s("t", "ix")
+            .s("name", &ix.name)
+            .n("handler", ctx.handler)
+            .raw("functions", &nums(ix.fns.iter().copied()))
+            .raw(
+                "parents",
+                &arr(ctx.parents.iter().map(|(f, p)| {
+                    format!(
+                        "[{f},{},{},{}]",
+                        p.fn_,
+                        p.pc.map_or("null".into(), |x| x.to_string()),
+                        p.ret.map_or("null".into(), |e| ex(fir(p.fn_).unwrap(), e))
+                    )
+                })),
+            );
+        if let Some(r) = &ctx.restricted {
+            j.raw("restricted", &nums(r.iter().copied()));
+        }
+        if let Some((f, v)) = ctx.tag {
+            j.raw("tag", &format!("[{f},{v}]"));
+        }
+        j.raw("indirect", &strs(ix.indirect.iter().map(|s| s.as_str())));
+        j.raw(
+            "accounts",
+            &arr(ix.accounts.iter().map(|x| {
+                format!(
+                    "[{},{},{},{},{},{},{},{}]",
+                    nopt(x.index),
+                    jstr(&x.name),
+                    jstr(x.source),
+                    x.expected.signer,
+                    x.expected.writable,
+                    x.expected.pda,
+                    x.expected.optional,
+                    sopt(x.expected.address.as_deref())
+                )
+            })),
+        );
+        j.line(&mut out);
+        if !an.anchor {
+            for &fnpc in &ix.fns {
+                let r = an.ctx_resolver(ctx, fnpc, 0);
+                let (Some(r), Some(fo)) = (r, an.fo(fnpc)) else { continue };
+                let fl = &an.fl;
+                let mut conds: Vec<String> = Vec::new();
+                let mut stores: Vec<String> = Vec::new();
+                for (bi, b) in fo.f.blocks.iter().enumerate() {
+                    for i in 0..b.stmts.len() {
+                        let p = sbpf_read::analysis::flow::pos_of(bi, i);
+                        if let Some((x, how)) = r.store(fl, Some(p)) {
+                            stores.push(format!("[{p},{},{},{}]", num(x.index), sopt(x.field.as_deref()), sopt(how)));
+                        }
+                    }
+                    if let sbpf_ir::Term::Br { c, .. } = &b.term {
+                        let refs = arr(r.refs(fl, *c, None).iter().map(acct_ref));
+                        let sides = r.sides(fl, *c, None).map_or("null".into(), |(a, b)| format!("[{},{}]", side_j(&a), side_j(&b)));
+                        let c32 = r.cmp32(fl, *c, None);
+                        let pe = nopt(r.pda_eq(fl, *c, None));
+                        let pb = arr(r.pda_bufs(fl, *c, None).into_iter().map(num));
+                        conds.push(format!("[{bi},{refs},{sides},{c32},{pe},{pb}]"));
+                    }
+                }
+                let mut j = J::obj();
+                j.s("t", "res")
+                    .n("fn", fnpc)
+                    .raw("byName", &arr(r.by_name.iter().map(|(n, x)| format!("[{},{},{}]", jstr(n), num(x.index), sopt(x.field.as_deref())))))
+                    .raw("conds", &format!("[{}]", conds.join(",")))
+                    .raw("stores", &format!("[{}]", stores.join(",")));
+                j.line(&mut out);
+            }
+        }
+        // (the points the report reads: ops and checks of the instruction's functions)
+        let mut pts: Vec<(i64, Option<usize>)> = Vec::new();
+        for &fnpc in &ix.fns {
+            let facts = an.facts.borrow();
+            let ff = &facts[&fnpc];
+            for o in &ff.ops {
+                pts.push((fnpc, an.block_at(fnpc, o.pc, o.ret)));
+            }
+            for c in &ff.checks {
+                let b = an.fo(fnpc).and_then(|_| sbpf_read::analysis::flow::decision_block(&an.cfg(fnpc), c.c, c.pc, c.pass_pc));
+                pts.push((fnpc, b));
+            }
+        }
+        let mut seen_pt: HashSet<(i64, usize)> = HashSet::new();
+        let mut seen_c: HashSet<(i64, usize)> = HashSet::new();
+        for (fnpc, b) in pts {
+            let Some(b) = b else { continue };
+            if !seen_pt.insert((fnpc, b)) {
+                continue;
+            }
+            let cs = an.path_to(Some(ctx), fnpc, Some(b), 80);
+            let mut j = J::obj();
+            j.s("t", "path").n("fn", fnpc).n("b", b as i64).raw(
+                "conds",
+                &arr(cs.iter().map(|c| format!("[{},{},{},{},{}]", c.fn_, c.b, c.holds.map_or("null".into(), |h| h.to_string()), jstr(c.how), c.panics))),
+            );
+            j.line(&mut out);
+            for c in &cs {
+                if !seen_c.insert((c.fn_, c.b)) {
+                    continue;
+                }
+                let key = an.value_key(Some(ctx), c.fn_, c.c, c.pos, 0);
+                let cmps = an.cmps_of(Some(ctx), c.fn_, c.c, c.pos);
+                let mut j = J::obj();
+                j.s("t", "vk")
+                    .n("fn", c.fn_)
+                    .n("b", c.b as i64)
+                    .s("key", &key)
+                    .raw("cmps", &arr(cmps.iter().map(|(o, a, b)| format!("[{},{},{}]", jstr(o), jstr(a), jstr(b)))));
+                j.line(&mut out);
+            }
+        }
+        let sc = an.source_ctx(ix);
+        for &fnpc in &ix.fns {
+            let ops: Vec<i64> = an.facts.borrow()[&fnpc].ops.iter().filter_map(|o| o.pc).collect();
+            for opc in ops {
+                let Some((b, i)) = an.stmt_at(fnpc, opc) else { continue };
+                let f = an.fo(fnpc).unwrap().f;
+                let ir = fir(fnpc).unwrap();
+                let s = &f.blocks[b].stmts[i];
+                let p = sbpf_read::analysis::flow::pos_of(b, i);
+                let vals: Vec<sbpf_ir::E> = match s {
+                    sbpf_ir::Stmt::Store { v, .. } => vec![*v],
+                    _ => sbpf_read::analysis::flow::call_of(ir, s).map_or(vec![], |(_, a)| ir.to_vec(a)),
+                };
+                let v = arr(vals.iter().map(|&v| arr(sc.of(fnpc, v, p).iter().map(|x| format!("[{},{},{}]", jstr(&x.source), jstr(x.kind), sopt(x.acct.as_deref()))))));
+                let mut j = J::obj();
+                j.s("t", "src").n("fn", fnpc).n("pc", opc).raw("v", &v);
+                j.line(&mut out);
+            }
+        }
+    }
+    out
+}
+
 pub fn facts_lines(r: &ReadOut, out: &mut String) {
     let p = r.program.as_ref().unwrap();
     for (pc, ff) in &r.facts {
@@ -210,17 +510,26 @@ pub fn facts_lines(r: &ReadOut, out: &mut String) {
 
 pub fn dump_stage8(bytes: &[u8], stages: &[String], idl: Option<&IdlInfo>, res: &mut Vec<(&'static str, String)>) {
     let want = |s: &str| stages.iter().any(|x| x == s);
-    if !want("facts") {
+    let wanted: Vec<&'static str> = ["facts", "flow"].into_iter().filter(|s| want(s)).collect();
+    if wanted.is_empty() {
         return;
     }
-    let r = match decompile_read(bytes, idl, threads(), false) {
+    let hook = |an: &An| flow_lines(an);
+    let r = match decompile_read_hook(bytes, idl, threads(), false, if want("flow") { Some(&hook) } else { None }) {
         Ok(r) => r,
         Err(e) => {
-            res.push(("facts", header("facts") + &err_line(&e)));
+            for st in wanted {
+                res.push((st, header(st) + &err_line(&e)));
+            }
             return;
         }
     };
-    let mut o = header("facts");
-    facts_lines(&r, &mut o);
-    res.push(("facts", o));
+    if want("facts") {
+        let mut o = header("facts");
+        facts_lines(&r, &mut o);
+        res.push(("facts", o));
+    }
+    if want("flow") {
+        res.push(("flow", header("flow") + r.flow.as_deref().unwrap_or("")));
+    }
 }

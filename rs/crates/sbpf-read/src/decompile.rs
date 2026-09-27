@@ -233,6 +233,7 @@ pub struct ReadFunc {
     pub facts: Option<crate::analysis::facts::FnFacts>,
 }
 
+#[derive(Clone, Debug)]
 pub struct IxRow {
     pub name: String,
     pub pc: i64,
@@ -265,6 +266,8 @@ pub struct ReadOut {
     pub program: Option<Program>,
     /// the analysis facts by function pc (printing order)
     pub facts: IndexMap<i64, crate::analysis::facts::FnFacts>,
+    /// the analysis hook's output (dumps)
+    pub flow: Option<String>,
     /// the built functions' final structured bodies (funcs order)
     pub trees: Vec<Tree>,
     /// the pre-repr(C) AccountInfo layout
@@ -867,6 +870,17 @@ pub fn decompile_read(
     threads: usize,
     full: bool,
 ) -> Result<ReadOut, String> {
+    decompile_read_hook(bytes, idl, threads, full, None)
+}
+
+/// decompile_read with an analysis hook run on the result (ReadOut::flow)
+pub fn decompile_read_hook(
+    bytes: &[u8],
+    idl: Option<&IdlInfo>,
+    threads: usize,
+    full: bool,
+    hook: Option<crate::printfn::AnalysisHook>,
+) -> Result<ReadOut, String> {
     let PrepRead {
         mut pr,
         trees,
@@ -940,7 +954,7 @@ pub fn decompile_read(
         d.data_vars = account_data_vars(&d.fs, &discs, &mut d.views);
     }
     crate::types::anchor_accounts(&mut d, name_fn);
-    let mut r = crate::printfn::run(d, name_fn)?;
+    let mut r = crate::printfn::run(d, name_fn, hook)?;
     drop(ctx);
     r.shapes = shapes;
     r.program = Some(pr.p);

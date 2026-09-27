@@ -1674,7 +1674,10 @@ impl RegionCfg for RC<'_> {
 }
 
 /// Printing of every function, the outlined helpers, and the output tables.
-pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
+/// The analysis hook: given the result as the analysis reads it (after printing), its text output.
+pub type AnalysisHook<'h> = &'h dyn for<'a> Fn(&crate::analysis::An<'a>) -> String;
+
+pub fn run(mut dm: Dx, _name_fn: Option<i64>, hook: Option<AnalysisHook>) -> Result<ReadOut, String> {
     let d = &dm;
     let n = d.fs.len();
     // finalBody: `x = undef` of variables never assigned anything else is dropped
@@ -1810,13 +1813,48 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
             }
         })
         .collect();
-    let processors = d
+    let processors: Vec<(String, Vec<String>)> = d
         .sem
         .processors
         .iter()
         .filter(|(pc, _)| d.idx.contains_key(pc))
         .map(|(pc, names)| (d.fn_name(*pc), names.clone()))
         .collect();
+    // the analysis (stage 8: the dumps' hook only for now)
+    let flow = match hook {
+        Some(h) => {
+            let dx = shorten_dx(&dm);
+            let fnrefs: Vec<crate::analysis::FnRef> = funcs
+                .iter()
+                .enumerate()
+                .map(|(i, rf)| crate::analysis::FnRef {
+                    pc: rf.pc,
+                    name: rf.name.clone(),
+                    f: dx.fs[i],
+                    text: rf.text.clone(),
+                    names: rf.names.clone(),
+                })
+                .collect();
+            let an = Box::new(crate::analysis::An::new(
+                dx.p,
+                fl,
+                fnrefs,
+                facts.clone(),
+                instructions.clone(),
+                processors.clone(),
+                dx.sem.anchor,
+                dx.idl,
+                &dx.views,
+                dx.legacy,
+                dx.try_of.clone(),
+                dx.acct_layouts.clone(),
+                expr_printer(dx, snaps),
+            ));
+            Some(h(&an))
+        }
+        None => None,
+    };
+    let d = &dm;
     Ok(ReadOut {
         version: d.p.version,
         n_insns: d.p.insns.len(),
@@ -1834,6 +1872,7 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
         shapes: Vec::new(),
         program: None,
         facts,
+        flow,
         trees: finals,
         legacy: d.legacy,
         try_of: d.try_of.clone(),
