@@ -532,7 +532,7 @@ fn phase2_lines(ix: &IxOut, out: &mut String) {
                     "props",
                     &arr(p.props.iter().map(|x| {
                         let mut y = J::obj();
-                        y.s("prop", x.prop)
+                        y.s("prop", &x.prop)
                             .s("status", x.status)
                             .s("evidence", &x.evidence);
                         y.done()
