@@ -26,6 +26,7 @@ sbpf-cli = { path = "crates/sbpf-cli" }
 
 [profile.release]
 codegen-units = 1
+lto = "fat"
 debug = false
 
 # `cargo build --profile profiling`: release + line tables, for sampling profilers (samply).
