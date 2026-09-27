@@ -300,7 +300,8 @@ promoteStack → optimizeFunc → idioms → rewriteStackArgs.
   variable (`find(undefined)` is `undefined`, a valid `Map` key) when the read is a whole expression
   (`rwUse`), and throws `internal: unmapped register use` when it is nested (`rwLeaf`). The Rust side
   models exactly that (`Rw` in `sbpf-dataflow`), so the `vars` stage fails with the same error line.
-- No residual differences.
+- No residual differences. A full parity run over the 615 binaries now takes ~10 min (all eight stages);
+  a 1000-mutant fuzz run ~4 min.
 
 Other details that had to be modelled (all in the code comments):
 
@@ -368,3 +369,9 @@ none of it changes the order of anything, so it can be tightened later without p
 - **IR decision is final**: plain arena, no hash-consing (above). Later stages keep TS's object identity
   semantics by comparing ids; any structural sharing index is an add-on.
 - The stage order is unchanged (it follows data dependencies).
+- **End state (clarified):** only the decompiler implementation moves to Rust; its output stays the
+  TypeScript it is today (same text, `lib.d.ts` runtime model, project layout), byte for byte. The TS
+  implementation is then removed, so every design is Rust-native (no FFI or callbacks into TS, no JS
+  runtime), and before the removal the oracle's outputs must be frozen as regression fixtures: the whole
+  CLI output (`-o dir/`) and the stage dumps of every corpus binary, which the Rust tests then compare
+  against instead of `scripts/parity.ts`.
