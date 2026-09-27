@@ -24,6 +24,40 @@ pub struct Profile {
     pub code_hash: String,
 }
 
+/// Instruction arms of a native program from the analysis' tag-dispatch split (and the functions each reaches).
+fn native_arms(
+    bytes: &[u8],
+    arms: &mut IndexMap<String, &'static str>,
+    owners: &mut HashMap<i64, Vec<String>>,
+) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let Ok(r) = crate::decompile::decompile_read(bytes, None, threads, false) else {
+        return;
+    };
+    let Some(an) = r.analysis.as_ref() else {
+        return;
+    };
+    let mut by_name: HashMap<&str, i64> = HashMap::new();
+    for f in &r.funcs {
+        by_name.insert(&f.name, f.pc);
+    }
+    for ix in &an.a.ixs {
+        if ix.kind != "native" {
+            continue;
+        }
+        arms.insert(ix.name.clone(), "tag");
+        for f in &ix.functions {
+            let Some(&pc) = by_name.get(f.as_str()) else {
+                continue;
+            };
+            let o = owners.entry(pc).or_default();
+            if !o.contains(&ix.name) {
+                o.push(ix.name.clone());
+            }
+        }
+    }
+}
+
 /// Everything the diff needs, from the first decompiler phase.
 pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
     let mut p = load_program(bytes, true)?;
@@ -62,7 +96,7 @@ pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
             );
         }
     }
-    let owners = handler_reach(&sigs, &lib, &roots);
+    let mut owners = handler_reach(&sigs, &lib, &roots);
     let mut arms: IndexMap<String, &'static str> = IndexMap::new();
     for ix in sem.ix_names.values() {
         arms.insert(ix.clone(), "log");
@@ -89,10 +123,9 @@ pub fn profile(bytes: &[u8]) -> Result<Profile, String> {
         }
     }
     if arms.is_empty() {
-        // (native programs: the per-instruction split of the security analysis, stage 8)
-        return Err(
-            "unsupported: native instruction arms (the analysis' tag-dispatch split)".into(),
-        );
+        // native programs (no names from logs / discriminators): the per-instruction split on the tag dispatch
+        // (security analysis), which needs the full decompilation
+        native_arms(bytes, &mut arms, &mut owners);
     }
     let mut callers: HashMap<i64, Vec<i64>> = HashMap::new();
     for s in sigs.values() {
