@@ -3,7 +3,9 @@
 //! Result tags, stored strings, CPI / PDA / fmt notes), the function texts and the outlined helpers.
 
 use crate::accounts::{account_addr, account_field};
-use crate::analysis::facts::{function_facts, FnFacts, FnInput, NodeKey, SiteNote};
+use crate::analysis::acct::account_resolver;
+use crate::analysis::facts::{function_facts, FnFacts, FnInput, NodeKey, SiteNote, StoreRef};
+use crate::analysis::flow::{cfg_of, decision_block, pos_of, Callee, Cfg, FlowCtx};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, site_objects, CpiEnv, CpiSite, SiteKind};
 use crate::cpiexec::{describe_model, ExecSiteKind};
 use crate::decompile::{
@@ -1725,9 +1727,17 @@ pub fn run(mut dm: Dx, _name_fn: Option<i64>) -> Result<ReadOut, String> {
     };
     let helper_names: HashSet<String> = outl.helpers.iter().map(|h| h.name.clone()).collect();
     let mut funcs: Vec<ReadFunc> = Vec::new();
+    // the analysis' flow layer (native account resolution: what calls write through frame pointers)
+    let callee = {
+        let fs: Vec<&Func> = d.fs.clone();
+        let idx = d.idx.clone();
+        let pn = d.pn.clone();
+        Callee::new(Box::new(move |pc| idx.get(&pc).map(|&i| fs[i])), Box::new(move |pc| pn.fn_name(pc)), d.legacy)
+    };
+    let fl = FlowCtx::new(callee);
     for i in 0..n {
         let v = add_args_view(&mut dm, i);
-        funcs.push(print_func(&dm, i, &finals[i], &outl, &helper_names, v));
+        funcs.push(print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl));
     }
     let d = &dm;
     // the analysis facts; Anchor try-call checks: what the callee whose result they test checks
@@ -1837,13 +1847,14 @@ fn is_short_temp(n: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_func(
-    d: &Dx,
+fn print_func<'p>(
+    d: &Dx<'p>,
     fi: usize,
     tree: &Tree,
     outl: &Outlines,
     helper_names: &HashSet<String>,
     args_view: Option<String>,
+    fl: &FlowCtx<'p>,
 ) -> ReadFunc {
     let f = d.fs[fi];
     let pc = f.pc;
@@ -2833,6 +2844,39 @@ fn print_func(
         let callee_path = |t: i64| d.libs.get(&t).filter(|i| i.lib).and_then(|i| i.hint.clone());
         let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
         let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
+        // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
+        let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
+        let cfg = || -> Rc<Cfg> { ir_cfg.borrow_mut().get_or_insert_with(|| Rc::new(cfg_of(f))).clone() };
+        let res = || account_resolver(fl, f, &names_final, true, None);
+        let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
+            let r = res();
+            let x = r.refs(fl, e, None);
+            let x = if !x.is_empty() || fail.is_none() {
+                x
+            } else {
+                match decision_block(&cfg(), Some(e), fail, pass) {
+                    Some(b) => r.refs(fl, e, Some(b)),
+                    None => x,
+                }
+            };
+            x.into_iter().map(|y| y.field).collect()
+        };
+        let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
+            let r = res();
+            let b = if fail.is_none() { None } else { decision_block(&cfg(), Some(e), fail, pass) };
+            r.cmp32(fl, e, b)
+        };
+        let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
+            let r = res();
+            let b = if fail.is_none() { None } else { decision_block(&cfg(), Some(e), fail, pass) };
+            r.pda_eq(fl, e, b)
+        };
+        let ir_store = |si: u32| -> Option<StoreRef> {
+            let r = res();
+            let p = tree.origin.get(&si).map(|&(b, i)| pos_of(b as usize, i as usize));
+            r.store(fl, p).map(|(a, how)| StoreRef { index: a.index, field: a.field, how })
+        };
+        let anchor = d.sem.anchor;
         let inp = FnInput {
             pc,
             name: &name,
@@ -2847,10 +2891,10 @@ fn print_func(
             callee_name: &callee_name,
             anchor: d.sem.anchor,
             seeds_at: &seeds_at,
-            ir_refs: None,
-            ir_cmp: None,
-            ir_pda: None,
-            ir_store: None,
+            ir_refs: if anchor { None } else { Some(&ir_refs) },
+            ir_cmp: if anchor { None } else { Some(&ir_cmp) },
+            ir_pda: if anchor { None } else { Some(&ir_pda) },
+            ir_store: if anchor { None } else { Some(&ir_store) },
             callee_path: &callee_path,
             str_at: &str_at,
             custom_error: &custom_error,

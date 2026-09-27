@@ -31,7 +31,7 @@ pub type NodeKey = *const SNode;
 /// A store's account field (flow.ts accountResolver.store)
 #[derive(Clone, Debug)]
 pub struct StoreRef {
-    pub index: i64,
+    pub index: f64,
     pub field: Option<String>,
     pub how: Option<&'static str>,
 }
@@ -1096,7 +1096,7 @@ impl Fx<'_, '_> {
                 };
                 let mut op = Op::new(l + 1, Some(pc), vec!["ACCOUNT_DATA_WRITE"], t.clone(), main, err);
                 op.target = Some(Ref {
-                    acct: format!("account[{}]", ir.index),
+                    acct: format!("account[{}]", js_num(ir.index)),
                     field: ir.field.clone(),
                 });
                 op.how = Some("=");
@@ -1124,7 +1124,7 @@ impl Fx<'_, '_> {
                 kinds.push("ACCOUNT_CLOSE");
             }
             let dre = jre!(r"^data\[(\d+)\.\.(\d+)\]$");
-            let acct = format!("account[{}]", ir.index);
+            let acct = format!("account[{}]", js_num(ir.index));
             let mut f = self.facts.borrow_mut();
             let r = dre.captures(&field).map(|m| (m[1].to_string(), m[2].to_string()));
             if let Some(prev) = f.ops.last_mut() {
@@ -1904,3 +1904,12 @@ pub fn callee_checks(
 
 #[allow(dead_code)]
 fn unused(_: &HashSet<u8>) {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn short_name_to() {
+        let t = "\t\tst16(u, 0x6f74)\n\t\tvoid ld64(v)\n\t\tst64(v + 0x10, u, 2)\n";
+        assert_eq!(super::short_name(t).as_deref(), Some("to"));
+    }
+}

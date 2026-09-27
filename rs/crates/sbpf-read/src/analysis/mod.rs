@@ -3,7 +3,9 @@
 //! the account models, exit writes, dispatch splits, function pointers), value sources (sources.rs) and
 //! path conditions (paths.rs).
 
+pub mod acct;
 pub mod facts;
+pub mod flow;
 
 use regex::Regex;
 
@@ -40,6 +42,12 @@ pub fn jsre(p: &str) -> Regex {
         }
         if c == '[' && !in_class {
             in_class = true;
+            o.push(c);
+            continue;
+        }
+        if in_class && matches!(c, '[' | '&' | '~') {
+            // (literal in a JS class; nested classes / set operations in the regex crate)
+            o.push('\\');
             o.push(c);
             continue;
         }
@@ -160,6 +168,7 @@ pub fn js_number(s: &str) -> f64 {
 
 /// `parseInt(s, 16)` of a string of hex digits
 pub fn parse_hex(s: &str) -> f64 {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
     let mut v = 0f64;
     for c in s.chars() {
         match c.to_digit(16) {
