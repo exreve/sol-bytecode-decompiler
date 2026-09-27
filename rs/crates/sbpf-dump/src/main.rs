@@ -1,10 +1,11 @@
 //! Stage dumps, byte-identical to `scripts/dump.ts` (encoding: rs/README.md), and a stage timer.
 //!
-//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir
+//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir
 //!   sbpf-dump --time [--iters N] prog.so...
 
 mod enc;
 mod stage2;
+mod stage3;
 
 use enc::*;
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
@@ -13,7 +14,7 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 8] = [
+const STAGES: [&str; 11] = [
     "elf",
     "insns",
     "cfg",
@@ -22,6 +23,9 @@ const STAGES: [&str; 8] = [
     "vars",
     "stack",
     "stackargs",
+    "opt",
+    "optir",
+    "compact",
 ];
 
 fn dump_elf(elf: &Elf) -> String {
@@ -224,6 +228,7 @@ fn dump_all(bytes: &[u8], stages: &[String]) -> Vec<(&'static str, String)> {
     }
     drop(p);
     stage2::dump_stage2(bytes, stages, &mut res);
+    stage3::dump_stage3(bytes, stages, &mut res);
     res
 }
 
@@ -310,6 +315,17 @@ fn time(files: &[String], iters: usize) {
 }
 
 fn main() {
+    // deep expression trees are walked recursively (TS runs with --stack-size=65500)
+    let t = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(real_main)
+        .expect("spawn");
+    if t.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("--time") {
         let mut iters = 5;
@@ -342,7 +358,7 @@ fn main() {
         i += 1;
     }
     if pos.len() != 2 {
-        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir");
+        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir");
         std::process::exit(2);
     }
     let bytes = std::fs::read(&pos[0]).expect("read input");

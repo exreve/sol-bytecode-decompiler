@@ -2,7 +2,7 @@
 // stage, byte-compared against `rs/` (sbpf-dump) by scripts/parity.ts. The encoding is specified in
 // rs/README.md; any change here must be mirrored in rs/crates/sbpf-dump.
 //
-//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir
+//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseElf, Image, type Elf } from '../src/elf.ts'
@@ -12,9 +12,12 @@ import type { Block } from '../src/program.ts'
 import { inferSignatures, recoverVars, type VarFunc } from '../src/dataflow.ts'
 import { promoteStack } from '../src/stack.ts'
 import { rewriteStackArgs } from '../src/stackargs.ts'
+import { optimizeFunc, setFoldImage, isSettled } from '../src/simplify.ts'
+import { recognizeIdioms } from '../src/idioms.ts'
+import { compactStores, sinkFrameLoads } from '../src/compact.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -221,6 +224,57 @@ export function dumpStage2(bytes: Uint8Array, stages: readonly string[], res: Ma
 	}
 }
 
+/**
+ * Stage 3 on a fresh lazily loaded program: decompile's per-function phase (phase 2) over every
+ * function (as `--full` builds them: library classification is stage 7), in its exact order.
+ * `opt` = each function after recoverVars + optimizeFunc; `optir` = after the whole per-function
+ * phase (optimizeFunc, promoteStack + optimizeFunc, recognizeIdioms + optimizeFunc); `compact` =
+ * after rewriteStackArgs over all functions, then sinkFrameLoads + compactStores per function (the
+ * IR structuring starts from). Read-only memory folding uses the program image (setFoldImage).
+ */
+export function dumpStage3(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>) {
+	const want = ['opt', 'optir', 'compact'].filter(s => stages.includes(s))
+	if (!want.length) return
+	const fail = (st: string, e: unknown) => { res.set(st, header(st) + errLine(e)) }
+	const q = loadProgram(bytes, { lazyBlocks: true })
+	try { inferSignatures(q) } catch { return }
+	const funcs = [...q.funcs.values()] as VarFunc[]
+	try { for (const f of funcs) recoverVars(q, f) } catch (e) { fail('opt', e); return }
+	const fline = (f: VarFunc) => line({ t: 'func', pc: f.pc, settled: isSettled(f), vars: varsOf(f) }) + f.blocks.map(blockLine).join('')
+	setFoldImage(q.image)
+	try {
+		const opt: string[] = [header('opt')], optir: string[] = [header('optir')]
+		try {
+			for (const f of funcs) {
+				optimizeFunc(f)
+				opt.push(fline(f))
+				if (promoteStack(f)) optimizeFunc(f)
+				const idi = { real: false }
+				if (recognizeIdioms(f, idi) && (idi.real || !isSettled(f))) optimizeFunc(f)
+				optir.push(fline(f))
+			}
+		} catch (e) { fail('opt', e); return }
+		if (stages.includes('opt')) res.set('opt', opt.join(''))
+		if (stages.includes('optir')) res.set('optir', optir.join(''))
+		if (!stages.includes('compact')) return
+		try {
+			const out: string[] = [header('compact')]
+			const nstack = rewriteStackArgs(q, new Map(funcs.map(f => [f.pc, { f }])))
+			for (const [pc, n] of nstack) out.push(line({ t: 'nstack', pc, n }))
+			for (const f of funcs) {
+				sinkFrameLoads(f)
+				compactStores(f)
+				const o: Record<string, unknown> = { t: 'func', pc: f.pc }
+				if (f.stackArgs !== undefined) o.stackArgs = f.stackArgs
+				if (f.argAreaElided !== undefined) o.argAreaElided = f.argAreaElided
+				o.vars = varsOf(f)
+				out.push(line(o), ...f.blocks.map(blockLine))
+			}
+			res.set('compact', out.join(''))
+		} catch (e) { fail('compact', e) }
+	} finally { setFoldImage(null) }
+}
+
 export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): Map<string, string> {
 	const res = new Map<string, string>()
 	let elf: Elf
@@ -232,6 +286,7 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): 
 	if (stages.includes('cfg')) res.set('cfg', dumpCfg(p, lazy))
 	if (stages.includes('lift')) res.set('lift', dumpLift(p))
 	dumpStage2(bytes, stages, res)
+	dumpStage3(bytes, stages, res)
 	return res
 }
 
@@ -244,7 +299,7 @@ if (import.meta.main) {
 		else if (args[i] === '--stages') stages = args[++i].split(',')
 		else pos.push(args[i])
 	}
-	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir'); process.exit(2) }
+	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir'); process.exit(2) }
 	const [file, dir] = pos
 	mkdirSync(dir, { recursive: true })
 	for (const [stage, text] of dumpAll(new Uint8Array(readFileSync(file)), stages)) writeFileSync(join(dir, `${stage}.jsonl`), text)

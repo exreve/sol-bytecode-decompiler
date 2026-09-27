@@ -254,6 +254,11 @@ impl Ir {
         // SAFETY: see `len`
         unsafe { (&*self.names.get())[i as usize].clone() }
     }
+    /// Calls `f` with the intrinsic name `i` (no clone).
+    pub fn with_name<R>(&self, i: u32, f: impl FnOnce(&str) -> R) -> R {
+        // SAFETY: see `len`; `f` only gets a `&str` and cannot reach the arena mutably through it
+        unsafe { f(&(&*self.names.get())[i as usize]) }
+    }
     pub fn mk_name(&self, s: Rc<str>) -> u32 {
         // SAFETY: see `len`
         unsafe {

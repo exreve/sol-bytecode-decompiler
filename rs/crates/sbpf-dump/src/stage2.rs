@@ -21,7 +21,7 @@ fn block_line(ir: &Ir, b: &Block, o: &mut String) {
     j.line(o);
 }
 
-fn func_ir(f: &Func) -> String {
+pub fn func_ir(f: &Func) -> String {
     let ir = f.ir.as_ref().expect("variable IR");
     let mut o = String::new();
     for b in &f.blocks {
@@ -30,7 +30,7 @@ fn func_ir(f: &Func) -> String {
     o
 }
 
-fn vars_of(f: &Func) -> String {
+pub fn vars_of(f: &Func) -> String {
     let mut s = String::from("[");
     for (i, v) in f.vars.iter().enumerate() {
         if i > 0 {

@@ -70,6 +70,7 @@ dependencies = [
  "sbpf-dataflow",
  "sbpf-elf",
  "sbpf-ir",
+ "sbpf-opt",
  "sbpf-program",
  "serde_json",
 ]
@@ -84,6 +85,16 @@ dependencies = [
 [[package]]
 name = "sbpf-ir"
 version = "0.1.0"
+
+[[package]]
+name = "sbpf-opt"
+version = "0.1.0"
+dependencies = [
+ "sbpf-dataflow",
+ "sbpf-elf",
+ "sbpf-ir",
+ "sbpf-program",
+]
 
 [[package]]
 name = "sbpf-program"
