@@ -10,6 +10,8 @@ import { analyze } from '../src/analysis/report.ts'
 import { exitFns, indirectTargets, splitDispatch, tryInfo, dataReads, ctxResolver, calleeOf, cfgOf, callOf, decisionBlock, type Side } from '../src/analysis/flow.ts'
 import { irOf, pathTo, blockAt, valueKey, cmpsOf, stmtAt } from '../src/analysis/paths.ts'
 import { sourceCtx } from '../src/analysis/sources.ts'
+import type { AccountRow, IxCtx, IxOut } from '../src/analysis/report.ts'
+import type { DispatchGroups } from '../src/analysis/flow.ts'
 
 const line = (v: unknown) => JSON.stringify(v) + '\n'
 const header = (stage: string) => line({ stage, format: 1 })
@@ -60,6 +62,86 @@ const hex = (v: bigint) => '0x' + v.toString(16)
 const acctRef = (x: { index: number; field?: string } | undefined) => (x ? [x.index, x.field ?? null] : null)
 const sideJ = (s: Side) => (s === undefined ? null : typeof s === 'string' ? s : acctRef(s))
 
+/** (report.ts parseIdlAccount) */
+function parseIdlAccount(s: string, i: number): AccountRow {
+	const m = /^(\S+)(?: \[(.*)\])?$/.exec(s)!
+	const flags = (m[2] ?? '').split(', ')
+	const addr = flags.find(f => f.startsWith('= '))
+	return {
+		index: i, name: m[1].split('.').pop()!, source: 'idl', constraints: {},
+		expected: { signer: flags.includes('signer') || undefined, writable: flags.includes('mut') || undefined, pda: flags.includes('pda') || undefined, optional: flags.includes('optional') || undefined, address: addr?.slice(2) },
+	}
+}
+
+/**
+ * Every instruction context the report's analyze0 builds (its instruction loop, contexts only: before the
+ * report drops the dispatch parts without checks or operations and sorts the instructions by score), in
+ * creation order.
+ */
+function ixContexts(r: Result): { name: string; fns: number[]; ctx: IxCtx; accounts: AccountRow[]; indirect: string[] }[] {
+	const facts = r.facts, p = r.program
+	const ind = indirectTargets(r)
+	const byPc = new Map(r.funcs.map(f => [f.pc, f]))
+	const procNames = new Set(r.processors.map(x => x.fn))
+	let roots = r.funcs.filter(f => f.name.startsWith('ix_') || procNames.has(f.name))
+	if (!roots.length) roots = r.funcs.filter(f => f.f.isEntry)
+	const rootPcs = new Set(roots.map(f => f.pc))
+	const splits = new Map<number, DispatchGroups>()
+	if (!r.anchor) for (const h of roots) if (!h.name.startsWith('ix_')) { const g = splitDispatch(r, h, rootPcs); if (g) splits.set(h.pc, g) }
+	const libCalls = (pc: number): number[] => {
+		const l: number[] = []
+		for (const b of p.funcs.get(pc)!.blocks) for (const st of b.stmts) if (st.k === 'call' && st.t.k === 'fn') l.push(st.t.pc)
+		return l
+	}
+	const out: { name: string; fns: number[]; ctx: IxCtx; accounts: AccountRow[]; indirect: string[] }[] = []
+	for (const h of roots) for (const grp of splits.get(h.pc) ?? [undefined]) {
+		const name = grp ? grp.name : h.name.startsWith('ix_') ? h.name.slice(3) : h.name
+		const info = grp ? undefined : r.instructions.find(i => i.pc === h.pc)
+		const keep = (fn: number, pc: number | undefined) => !grp || pc === undefined || grp.keep(fn, pc)
+		const isDisp = (fn: number) => !!grp && grp.dispatchers.includes(facts.get(fn)?.name ?? '')
+		const keepCall = (fn: number, c: { pc?: number; ret?: Expr }) => {
+			if (!grp || c.pc !== undefined) return keep(fn, c.pc)
+			const fo = byPc.get(fn), b = fo && c.ret ? cfgOf(fo).retBlock.get(c.ret) : undefined
+			return b === undefined || grp.allowed(fn, b)
+		}
+		const main = new Map<number, boolean>([[h.pc, true]])
+		const lib = new Set<number>()
+		const q = [h.pc]
+		const parents: IxCtx['parents'] = new Map()
+		let from: { fn: number; pc?: number; ret?: Expr } | undefined
+		const reach = (callee: number, cm: boolean) => {
+			if (rootPcs.has(callee)) return
+			if (from && !parents.has(callee) && callee !== h.pc) parents.set(callee, from)
+			if (!facts.has(callee)) {
+				if (lib.has(callee) || !p.funcs.has(callee)) return
+				lib.add(callee)
+				for (const t of libCalls(callee)) reach(t, false)
+				return
+			}
+			const prev = main.get(callee)
+			if (prev === undefined || (cm && !prev)) { main.set(callee, cm); q.push(callee) }
+		}
+		const generated = h.name.startsWith('ix_') && r.anchor
+		const indirect: string[] = []
+		const viaPtr = (t: number, why: string) => { if (!main.has(t) && !rootPcs.has(t) && facts.has(t)) { if (facts.get(t)!.ops.length || !why.startsWith('function')) indirect.push(`${facts.get(t)!.name} (${why})`); reach(t, false) } }
+		if (info) for (const t of ind.byDisc.get(info.disc) ?? []) viaPtr(t, 'entrypoint table entry chosen by the discriminator')
+		while (q.length) {
+			const x = q.shift()!
+			const m = main.get(x)!
+			for (const c of facts.get(x)?.calls ?? []) if ((!c.errPath || isDisp(x)) && keepCall(x, c)) { from = { fn: x, pc: c.pc, ret: c.ret }; reach(c.callee, m && (c.main || (generated && x === h.pc))) }
+			from = { fn: x }
+			for (const t of ind.targets.get(x) ?? []) viaPtr(t, `function pointer in ${facts.get(x)?.name}`)
+		}
+		const fns = [...main.keys()].filter(pc => facts.has(pc))
+		const accounts: AccountRow[] = info?.accounts?.length ? info.accounts.map(parseIdlAccount)
+			: grp?.accounts ? grp.accounts.map((n, i) => ({ index: i, name: n, source: 'known' as const, expected: {}, constraints: {} }))
+			: (info?.strAccounts ?? []).map((n, i) => ({ index: i, name: n, source: 'str' as const, expected: {}, constraints: {} }))
+		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(facts.get(f)!.name))), tag: grp?.tag }
+		out.push({ name, fns, ctx, accounts, indirect })
+	}
+	return out
+}
+
 /**
  * The flow layer's outputs (after the analysis ran, as the report consumed them): exit functions, the ops
  * the exit / callee writes added to the facts, indirect targets, native dispatch splits (with their allowed
@@ -96,14 +178,19 @@ export function flowLines(r: Result): string[] {
 		if (dr) out.push(line({ t: 'dataReads', h: f.pc, accts: [...dr] }))
 	}
 	const I = irOf(r)
-	const pcOf = new Map<string, number>()
-	for (const [pc, ff] of r.facts) if (!pcOf.has(ff.name)) pcOf.set(ff.name, pc)
+	const ixs = ixContexts(r)
+	// (the contexts the analysis built, for the instructions it kept, are these)
 	for (const ix of a.ixs) {
-		const ctx = ix.ctx!
-		const fns = ix.functions.map(n => pcOf.get(n)!)
+		const x = ixs.find(y => y.name === ix.name && y.ctx.handler === ix.ctx!.handler)
+		const fnames = x?.fns.map(pc => r.facts.get(pc)!.name)
+		if (!x || JSON.stringify(fnames) !== JSON.stringify(ix.functions) || JSON.stringify([...x.ctx.parents.keys()]) !== JSON.stringify([...ix.ctx!.parents.keys()])) throw new Error(`dump: instruction context mismatch (${ix.name})`)
+	}
+	for (const ix of ixs) {
+		const ctx = ix.ctx
+		const fns = ix.fns
 		out.push(line(obj([['t', 'ix'], ['name', ix.name], ['handler', ctx.handler], ['functions', fns], ['parents', [...ctx.parents].map(([fn, p]) => [fn, p.fn, p.pc ?? null, p.ret ? expr(p.ret) : null])],
 			['restricted', ctx.restricted ? [...ctx.restricted] : undefined], ['tag', ctx.tag ? [ctx.tag.fn, ctx.tag.v] : undefined], ['indirect', ix.indirect],
-			['accounts', ix.accounts.filter(x => x.source !== 'code').map(x => [x.index ?? null, x.name, x.source, x.expected.signer ?? false, x.expected.writable ?? false, x.expected.pda ?? false, x.expected.optional ?? false, x.expected.address ?? null])]])))
+			['accounts', ix.accounts.map(x => [x.index ?? null, x.name, x.source, x.expected.signer ?? false, x.expected.writable ?? false, x.expected.pda ?? false, x.expected.optional ?? false, x.expected.address ?? null])]])))
 		if (!r.anchor) for (const fn of fns) {
 			const R = ctxResolver({ byPc }, calleeOf(r), ctx, fn)
 			const fo = byPc.get(fn)
@@ -136,7 +223,7 @@ export function flowLines(r: Result): string[] {
 				out.push(line({ t: 'vk', fn: c.fn, b: c.b, key: valueKey(I, ctx, c.fn, c.c, c.pos), cmps: cmpsOf(I, ctx, c.fn, c.c, c.pos) }))
 			}
 		}
-		const S = sourceCtx(r, ix)
+		const S = sourceCtx(r, ix as unknown as IxOut)
 		for (const fn of fns) for (const o of r.facts.get(fn)!.ops) {
 			if (o.pc === undefined) continue
 			const st = stmtAt(I, fn, o.pc)
