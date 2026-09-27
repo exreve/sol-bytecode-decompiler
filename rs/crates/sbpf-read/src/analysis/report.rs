@@ -1461,6 +1461,7 @@ impl<'a> An<'a> {
                                     text: a.clone().unwrap_or_else(|| "?".into()),
                                     w: None,
                                     s: None,
+                                    ord: Default::default(),
                                 })
                                 .collect();
                             if let Some(Some(p0)) = ba.first() {
@@ -1732,7 +1733,10 @@ impl<'a> An<'a> {
                                         } else {
                                             None
                                         },
+                                        ord: crate::cpi::KeyOrd([3, 0, 1, 9]),
                                     });
+                                    base.ord.ensure(0);
+                                    base.ord.ensure(1);
                                     base.role = Some(role.to_string());
                                     base.text =
                                         if b.known

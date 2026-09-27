@@ -823,6 +823,35 @@ pub struct PartAcc {
     pub text: String,
     pub w: Option<N>,
     pub s: Option<N>,
+    /// the TS object's key order (security/analysis.json serializes it as-is)
+    pub ord: KeyOrd,
+}
+
+/// Key order of an account meta object: role 0, text 1, w 2, s 3 (9: no such key).
+#[derive(Clone, Copy, Debug)]
+pub struct KeyOrd(pub [u8; 4]);
+
+impl Default for KeyOrd {
+    fn default() -> Self {
+        KeyOrd([0, 1, 2, 3])
+    }
+}
+
+impl PartialEq for KeyOrd {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl KeyOrd {
+    /// `{ ...x, k: … }`: the key keeps its place, else it is added last
+    pub fn ensure(&mut self, k: u8) {
+        if !self.0.contains(&k) {
+            if let Some(i) = self.0.iter().position(|&x| x == 9) {
+                self.0[i] = k;
+            }
+        }
+    }
 }
 
 /// The decoded parts of a CPI (for the analysis): program, account metas by role, data fields, signer
@@ -1357,6 +1386,7 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                             text: a.text.clone(),
                             w: a.w,
                             s: a.s,
+                            ord: KeyOrd::default(),
                         })
                         .collect(),
                     src: Some(CpiSrc {
@@ -1432,6 +1462,7 @@ pub fn format_ix(m: IxModel, env: &mut CpiEnv) -> Option<CpiDesc> {
                     text: a.text.clone(),
                     w: a.w,
                     s: a.s,
+                    ord: KeyOrd([1, 2, 3, 9]),
                 })
                 .collect(),
             src: Some(CpiSrc {

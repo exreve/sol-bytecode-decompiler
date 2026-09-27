@@ -253,6 +253,7 @@ impl<'a> An<'a> {
                         text: acc.get(i).cloned().flatten().unwrap_or_else(|| "?".into()),
                         w: None,
                         s: None,
+                        ord: Default::default(),
                     })
                     .collect();
                 let mut fields: Vec<(String, String)> = Vec::new();

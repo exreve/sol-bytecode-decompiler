@@ -880,6 +880,7 @@ impl Fx<'_, '_> {
                     text: a.clone().unwrap_or_else(|| "?".into()),
                     w: None,
                     s: if s { Some(1.0) } else { None },
+                    ord: Default::default(),
                 }
             })
             .collect();

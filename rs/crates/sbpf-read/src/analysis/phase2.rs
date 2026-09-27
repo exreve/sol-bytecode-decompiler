@@ -465,6 +465,7 @@ impl<'a> An<'a> {
                 nc.family = Some(fam.to_string());
                 nc.ix = Some(ixn.to_string());
                 for (i, x) in nc.accounts.iter_mut().enumerate() {
+                    x.ord.ensure(0);
                     if x.role.is_none() {
                         x.role = roles.get(i).map(|r| r.to_string());
                     }
