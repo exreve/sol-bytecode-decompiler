@@ -4,6 +4,7 @@
 //! path conditions (paths.rs).
 
 pub mod acct;
+pub mod anchor;
 pub mod facts;
 pub mod flow;
 
@@ -193,5 +194,99 @@ pub struct FK(pub u64);
 impl FK {
     pub fn of(x: f64) -> FK {
         FK(if x == 0.0 { 0 } else { x.to_bits() })
+    }
+}
+
+use crate::decompile::IxRow;
+use crate::idl::IdlInfo;
+use crate::views::{Field, Views};
+use facts::FnFacts;
+use flow::{Cfg, FlowCtx};
+use indexmap::IndexMap;
+use sbpf_program::{Func, Program};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+/// A built function as the analysis reads it (decompile.ts FuncOut).
+pub struct FnRef<'a> {
+    pub pc: i64,
+    pub name: String,
+    pub f: &'a Func,
+    pub text: String,
+    pub names: Vec<Option<String>>,
+}
+
+/// The decompiler's result as the analysis reads it (decompile.ts Result), with the flow layer's state
+/// (shared with the printing phase: the same memos, as the TS's WeakMaps keyed by the same functions).
+pub struct An<'a> {
+    pub p: &'a Program,
+    pub fl: FlowCtx<'a>,
+    pub funcs: Vec<FnRef<'a>>,
+    pub by_pc: HashMap<i64, usize>,
+    pub facts: RefCell<IndexMap<i64, FnFacts>>,
+    pub instructions: Vec<IxRow>,
+    pub processors: Vec<(String, Vec<String>)>,
+    pub anchor: bool,
+    pub idl: Option<&'a IdlInfo>,
+    pub views: &'a Views,
+    pub legacy: bool,
+    pub try_of: IndexMap<i64, i64>,
+    pub acct_layouts: IndexMap<i64, Vec<Field>>,
+    cfgs: RefCell<HashMap<i64, Rc<Cfg<'a>>>>,
+    pub memo: anchor::AnchorMemo<'a>,
+}
+
+impl<'a> An<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        p: &'a Program,
+        fl: FlowCtx<'a>,
+        funcs: Vec<FnRef<'a>>,
+        facts: IndexMap<i64, FnFacts>,
+        instructions: Vec<IxRow>,
+        processors: Vec<(String, Vec<String>)>,
+        anchor: bool,
+        idl: Option<&'a IdlInfo>,
+        views: &'a Views,
+        legacy: bool,
+        try_of: IndexMap<i64, i64>,
+        acct_layouts: IndexMap<i64, Vec<Field>>,
+    ) -> Self {
+        let by_pc = funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
+        An {
+            p,
+            fl,
+            funcs,
+            by_pc,
+            facts: RefCell::new(facts),
+            instructions,
+            processors,
+            anchor,
+            idl,
+            views,
+            legacy,
+            try_of,
+            acct_layouts,
+            cfgs: RefCell::new(HashMap::new()),
+            memo: Default::default(),
+        }
+    }
+    pub fn fo(&self, pc: i64) -> Option<&FnRef<'a>> {
+        self.by_pc.get(&pc).map(|&i| &self.funcs[i])
+    }
+    /// cfgOf(fo), memoized per function
+    pub fn cfg(&self, pc: i64) -> Rc<Cfg<'a>> {
+        if let Some(g) = self.cfgs.borrow().get(&pc) {
+            return g.clone();
+        }
+        let f = self.fo(pc).unwrap().f;
+        let g = Rc::new(flow::cfg_of(f));
+        self.cfgs.borrow_mut().insert(pc, g.clone());
+        g
+    }
+    /// r.program.funcs.get(pc)?.name ?? ''
+    pub fn pname(&self, pc: i64) -> String {
+        self.p.funcs.get(&pc).map_or(String::new(), |f| f.name.clone())
     }
 }
