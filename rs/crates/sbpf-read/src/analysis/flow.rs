@@ -1308,6 +1308,7 @@ pub struct FlowCtx<'a> {
     pub callee: Callee<'a>,
     defs: RefCell<HashMap<(i64, bool), Rc<Defs<'a>>>>,
     winfo: RefCell<HashMap<i64, Rc<WritesInfo>>>,
+    same: RefCell<HashMap<(i64, bool, u32), Option<(E, Pos)>>>,
     pub ev_cuts: Cell<u64>,
     pub cache: super::acct::AcctCache<'a>,
 }
@@ -1318,6 +1319,7 @@ impl<'a> FlowCtx<'a> {
             callee,
             defs: RefCell::new(HashMap::new()),
             winfo: RefCell::new(HashMap::new()),
+            same: RefCell::new(HashMap::new()),
             ev_cuts: Cell::new(0),
             cache: Default::default(),
         }
@@ -1339,4 +1341,174 @@ impl<'a> FlowCtx<'a> {
         self.winfo.borrow_mut().insert(f.pc, w.clone());
         w
     }
+}
+
+/// a variable defined on several paths by loads of one frame word holding the same value at each: that load
+fn same_loads(fl: &FlowCtx, d: &Defs, id: u32) -> Option<(E, Pos)> {
+    let k = (d.f.pc, d.with_callee, id);
+    if let Some(x) = fl.same.borrow().get(&k) {
+        return *x;
+    }
+    fl.same.borrow_mut().insert(k, None);
+    let ir = d.ir;
+    let mut ds: Vec<(E, Pos)> = Vec::new();
+    for (bi, b) in d.f.blocks.iter().enumerate() {
+        for (i, st) in b.stmts.iter().enumerate() {
+            if let Stmt::Set { dst, e, .. } = st {
+                if *dst as i64 == id as i64 {
+                    ds.push((*e, pos_of(bi, i)));
+                }
+            }
+        }
+    }
+    if ds.len() < 2 || ds.len() > 8 {
+        return None;
+    }
+    let mut val: Option<E> = None;
+    for &(e, q) in &ds {
+        let o = match ir.get(e) {
+            Node::Load { size: 8, addr } => d.fp_off(addr),
+            _ => None,
+        };
+        let y = o.and_then(|o| d.reaching(fl, slot(o), q, true));
+        let Some((y, _)) = y else { return None };
+        if val.is_some_and(|v| v != y) {
+            return None;
+        }
+        val = Some(y);
+    }
+    fl.same.borrow_mut().insert(k, Some(ds[0]));
+    Some(ds[0])
+}
+
+/// Anchor try_accounts: the accounts two 32-byte comparisons read (compareAccounts); None: no comparison
+pub fn compare_accounts(
+    fl: &FlowCtx,
+    d: &Defs,
+    c: E,
+    p0: Pos,
+    calls: &HashMap<Pos, String>,
+    acct_var: Option<&dyn Fn(u32) -> Option<String>>,
+    infos: Option<(&HashMap<Pos, String>, &HashMap<u32, String>)>,
+) -> Option<Vec<(String, bool)>> {
+    let ir = d.ir;
+    let mut x = c;
+    while let Node::Lnot(a) = ir.get(x) {
+        x = a;
+    }
+    let cmp_args = |e: E| -> Option<(E, E)> {
+        let args = match ir.get(e) {
+            Node::Call(_, a) => a,
+            Node::Fn(n, a) if &*ir.name(n) == "memeq" => a,
+            _ => return None,
+        };
+        if args.len >= 3 && ir.get(ir.at(args, 2)) == Node::Const(0x20) {
+            Some((ir.at(args, 0), ir.at(args, 1)))
+        } else {
+            None
+        }
+    };
+    let follow = |e: E, p: Pos| -> (E, Pos) {
+        let (mut e, mut p) = (e, p);
+        for _ in 0..6 {
+            match ir.get(e) {
+                Node::Ext { a, .. } => {
+                    e = a;
+                    continue;
+                }
+                Node::Var(id) => {
+                    let y = if let Some(&x) = d.defs.get(&id) {
+                        Some((x, d.def_pos[&id]))
+                    } else if d.multi.contains(&id) {
+                        d.reaching(fl, id as f64, p, false).or_else(|| same_loads(fl, d, id))
+                    } else {
+                        None
+                    };
+                    let Some(y) = y else { break };
+                    (e, p) = y;
+                }
+                _ => break,
+            }
+        }
+        (e, p)
+    };
+    let mut ca: Option<(E, E)> = None;
+    let mut cp = p0;
+    let sides: Vec<E> = match ir.get(x) {
+        Node::Cmp(_, a, b) => vec![a, b],
+        _ => vec![x],
+    };
+    for side in sides {
+        let (e, p) = follow(side, p0);
+        if ca.is_none() {
+            ca = cmp_args(e);
+        }
+        if ca.is_some() && cp == p0 {
+            cp = p;
+        }
+    }
+    let ca = ca?;
+    fn prov(
+        fl: &FlowCtx,
+        d: &Defs,
+        follow: &dyn Fn(E, Pos) -> (E, Pos),
+        calls: &HashMap<Pos, String>,
+        acct_var: Option<&dyn Fn(u32) -> Option<String>>,
+        infos: Option<(&HashMap<Pos, String>, &HashMap<u32, String>)>,
+        cp: Pos,
+        e: E,
+        p: Pos,
+        direct: bool,
+        dd: u32,
+    ) -> Option<(String, bool)> {
+        if dd > 10 {
+            return None;
+        }
+        let ir = d.ir;
+        let (e, p) = follow(e, p);
+        if let Some(o) = d.fp_off(e) {
+            let (y0, y1) = d.reaching(fl, slot(o), p, true)?;
+            let (v, q) = follow(y0, y1);
+            if matches!(ir.get(v), Node::Call(..)) {
+                return calls.get(&y1).map(|a| (a.clone(), direct));
+            }
+            let ia = if direct {
+                None
+            } else {
+                match ir.get(v) {
+                    Node::Load { .. } => infos.and_then(|i| i.0.get(&q).cloned()),
+                    Node::Var(id) => infos.and_then(|i| i.1.get(&id).cloned()),
+                    _ => None,
+                }
+            };
+            if let Some(ia) = ia {
+                return Some((ia, direct));
+            }
+            if !direct && d.fp_off(v).is_some() {
+                return prov(fl, d, follow, calls, acct_var, infos, cp, v, cp, true, dd + 1);
+            }
+            return match ir.get(v) {
+                Node::Load { addr, .. } => prov(fl, d, follow, calls, acct_var, infos, cp, addr, q, direct, dd + 1),
+                _ => None,
+            };
+        }
+        let base = match ir.get(e) {
+            Node::Bin(BinOp::Add, a, b) if matches!(ir.get(b), Node::Const(_)) => a,
+            _ => e,
+        };
+        let (b, q) = follow(base, p);
+        if let Node::Var(id) = ir.get(b) {
+            if !direct {
+                if let Some(a) = acct_var.and_then(|f| f(id)) {
+                    return Some((a, direct));
+                }
+            }
+        }
+        match ir.get(b) {
+            Node::Load { size: 8, addr } => prov(fl, d, follow, calls, acct_var, infos, cp, addr, q, false, dd + 1),
+            _ => None,
+        }
+    }
+    let res: Vec<(String, bool)> = [ca.0, ca.1].iter().filter_map(|&a| prov(fl, d, &follow, calls, acct_var, infos, cp, a, cp, true, 0)).collect();
+    Some(res)
 }
