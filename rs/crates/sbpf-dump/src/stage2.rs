@@ -81,7 +81,10 @@ pub fn dump_stage2(bytes: &[u8], stages: &[String], res: &mut Vec<(&'static str,
     if !need("vars") {
         return;
     }
-    recover_all(&mut q);
+    if let Err(e) = recover_all(&mut q) {
+        res.push(("vars", header("vars") + &err_line(&e)));
+        return;
+    }
     if want("vars") {
         let mut o = header("vars");
         for f in q.funcs.values() {

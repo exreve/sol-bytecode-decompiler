@@ -548,7 +548,7 @@ pub struct Recovered {
 /// Convert register IR into variable IR (dataflow.ts recoverVars): each maximal web of
 /// definitions/uses of a register becomes one variable. Reads the function (register IR in `pir`);
 /// the result is stored with [`apply_recovered`].
-pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
+pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Result<Recovered, String> {
     let f = &cx.funcs[fi];
     let returns = sigs[fi].returns;
     let (live_in, _) = liveness(cx, sigs, pir, f, returns, &f.ind_clobber);
@@ -576,13 +576,14 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
     let mut call_extra: Vec<Vec<Vec<u8>>> = Vec::with_capacity(nb);
     let mut call_dst: Vec<Vec<i32>> = Vec::with_capacity(nb);
     let mut ret_e: Vec<Option<E>> = Vec::with_capacity(nb);
-    let mut exit_val: Vec<[i32; 11]> = Vec::with_capacity(nb);
+    let mut exit_val: Vec<[i32; 16]> = Vec::with_capacity(nb);
     for (bi, b) in f.blocks.iter().enumerate() {
-        let mut cur = [0i32; 11];
-        for (r, c) in cur.iter_mut().enumerate() {
+        // (registers 11..15 of invalid instructions: `undefined` (-1) until defined in the block)
+        let mut cur = [-1i32; 16];
+        for (r, c) in cur.iter_mut().enumerate().take(11) {
             *c = entry_node(bi, r);
         }
-        let note = |uses: &mut Vec<(i32, u8)>, cur: &[i32; 11], e: E| {
+        let note = |uses: &mut Vec<(i32, u8)>, cur: &[i32; 16], e: E| {
             pir.walk(e, &mut |_, n| {
                 if let Node::Reg(r) = n {
                     uses.push((cur[r as usize], r));
@@ -705,21 +706,18 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
     let mut cv = ClassVars {
         uf,
         class_var: vec![NO_VAR; next as usize],
+        undef_class: NO_VAR,
         vars: vec![],
     };
     // variables for every class that is read (in use order)
     let use_vars: Vec<u32> = uses.iter().map(|&(n, r)| cv.var_of(n, r as i32)).collect();
     // rewrite (the uses are visited in the same order as in the first pass)
     let ir = Ir::with_capacity(pir.len() / 4);
-    let mut cur = 0usize;
-    let mut leaf = |ir: &Ir, _e: E, n: Node| -> Option<E> {
-        if let Node::Reg(_) = n {
-            let v = use_vars[cur];
-            cur += 1;
-            Some(ir.var(v))
-        } else {
-            None
-        }
+    let mut rw = Rw {
+        uses: &uses,
+        use_vars: &use_vars,
+        cur: 0,
+        err: false,
     };
     let mut out_stmts = Vec::with_capacity(nb);
     let mut terms = Vec::with_capacity(nb);
@@ -728,13 +726,13 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
         for (i, s) in b.stmts.iter().enumerate() {
             match s {
                 Stmt::Set { dst, e, pc } => {
-                    let e = ir.import(pir, *e, &mut leaf);
+                    let e = rw.rw(&ir, pir, *e);
                     let dst = cv.var_of(def_node[bi][i], *dst) as i32;
                     out.push(Stmt::Set { dst, e, pc: *pc });
                 }
                 Stmt::Store { size, addr, v, pc } => {
-                    let addr = ir.import(pir, *addr, &mut leaf);
-                    let v = ir.import(pir, *v, &mut leaf);
+                    let addr = rw.rw(&ir, pir, *addr);
+                    let v = rw.rw(&ir, pir, *v);
                     out.push(Stmt::Store {
                         size: *size,
                         addr,
@@ -743,27 +741,24 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
                     });
                 }
                 Stmt::Eval { e, pc } => {
-                    let e = ir.import(pir, *e, &mut leaf);
+                    let e = rw.rw(&ir, pir, *e);
                     out.push(Stmt::Eval { e, pc: *pc });
                 }
                 Stmt::Call { t, pc, .. } => {
                     let args: Vec<E> = call_args[bi][i]
                         .iter()
                         .map(|a| match a {
-                            Arg::E(e) => ir.import(pir, *e, &mut leaf),
+                            Arg::E(e) => rw.rw(&ir, pir, *e),
                             Arg::Undef => ir.undef(),
                         })
                         .collect();
                     let t = match t {
                         CallTarget::Ind { e } => CallTarget::Ind {
-                            e: ir.import(pir, *e, &mut leaf),
+                            e: rw.rw(&ir, pir, *e),
                         },
                         t => t.clone(),
                     };
-                    let extra: Vec<E> = call_extra[bi][i]
-                        .iter()
-                        .map(|&r| leaf(&ir, E(0), Node::Reg(r)).expect("register use"))
-                        .collect();
+                    let extra: Vec<E> = call_extra[bi][i].iter().map(|_| rw.top(&ir)).collect();
                     let dst = if call_dst[bi][i] == 0 {
                         cv.var_of(def_node[bi][i], 0) as i32
                     } else {
@@ -793,17 +788,20 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
         }
         let t = match &b.term {
             Term::Br { c, t, f } => Term::Br {
-                c: ir.import(pir, *c, &mut leaf),
+                c: rw.rw(&ir, pir, *c),
                 t: *t,
                 f: *f,
             },
             Term::Ret { .. } => Term::Ret {
-                e: ret_e[bi].map(|e| ir.import(pir, e, &mut leaf)),
+                e: ret_e[bi].map(|e| rw.rw(&ir, pir, e)),
             },
             t => t.clone(),
         };
         out_stmts.push(out);
         terms.push(t);
+    }
+    if rw.err {
+        return Err("internal: unmapped register use".into());
     }
     // classify variables: parameters / implicit inputs
     for &(node, reg, kind) in &defs {
@@ -814,11 +812,44 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Recovered {
             }
         }
     }
-    Recovered {
+    Ok(Recovered {
         stmts: out_stmts,
         terms,
         vars: cv.vars,
         ir,
+    })
+}
+
+/// The rewrite's register reads, consumed in first-pass order. TS: a register read with no reaching
+/// node (`undefined`: registers 11..15) maps to one shared variable when it is the whole expression
+/// (`rwUse`), and throws when nested (`rwLeaf`).
+struct Rw<'a> {
+    uses: &'a [(i32, u8)],
+    use_vars: &'a [u32],
+    cur: usize,
+    err: bool,
+}
+
+impl Rw<'_> {
+    fn top(&mut self, ir: &Ir) -> E {
+        let v = self.use_vars[self.cur];
+        self.cur += 1;
+        ir.var(v)
+    }
+    fn rw(&mut self, ir: &Ir, pir: &Ir, e: E) -> E {
+        if let Node::Reg(_) = pir.get(e) {
+            return self.top(ir);
+        }
+        ir.import(pir, e, &mut |ir: &Ir, _e: E, n: Node| {
+            if let Node::Reg(_) = n {
+                if self.uses[self.cur].0 < 0 {
+                    self.err = true;
+                }
+                Some(self.top(ir))
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -828,16 +859,22 @@ const NO_VAR: u32 = u32::MAX;
 struct ClassVars {
     uf: Uf,
     class_var: Vec<u32>,
+    /// the class of `undefined` nodes (see Rw)
+    undef_class: u32,
     vars: Vec<VarInfo>,
 }
 
 impl ClassVars {
     fn get(&self, root: i32) -> Option<u32> {
-        let v = self.class_var[root as usize];
+        let v = if root < 0 {
+            self.undef_class
+        } else {
+            self.class_var[root as usize]
+        };
         (v != NO_VAR).then_some(v)
     }
     fn var_of(&mut self, node: i32, reg: i32) -> u32 {
-        let c = self.uf.find(node);
+        let c = if node < 0 { node } else { self.uf.find(node) };
         if let Some(v) = self.get(c) {
             return v;
         }
@@ -848,7 +885,11 @@ impl ClassVars {
             param: -1,
             undef: false,
         });
-        self.class_var[c as usize] = v;
+        if c < 0 {
+            self.undef_class = v;
+        } else {
+            self.class_var[c as usize] = v;
+        }
         v
     }
 }
@@ -862,11 +903,12 @@ pub fn apply_recovered(f: &mut Func, r: Recovered) {
     f.ir = Some(r.ir);
 }
 
-/// recoverVars of every function (in `p.funcs` order).
-pub fn recover_all(p: &mut Program) {
+/// recoverVars of every function (in `p.funcs` order); the first error stops.
+pub fn recover_all(p: &mut Program) -> Result<(), String> {
     let sigs = sigs_of(p);
     for fi in 0..p.funcs.len() {
-        let r = recover_vars(&Ctx::of(p), &sigs, &p.ir, fi);
+        let r = recover_vars(&Ctx::of(p), &sigs, &p.ir, fi)?;
         apply_recovered(&mut p.funcs[fi], r);
     }
+    Ok(())
 }

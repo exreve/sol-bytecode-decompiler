@@ -272,7 +272,7 @@ fn time(files: &[String], iters: usize) {
             sbpf_dataflow::infer_signatures(&mut q);
             let sig = ts.elapsed();
             let ts = Instant::now();
-            sbpf_dataflow::recover_all(&mut q);
+            let _ = sbpf_dataflow::recover_all(&mut q);
             let rec = ts.elapsed();
             let ts = Instant::now();
             for f in q.funcs.values_mut() {
