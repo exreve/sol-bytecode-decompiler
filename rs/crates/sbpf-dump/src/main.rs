@@ -434,6 +434,19 @@ fn real_main() {
         time(&files, iters);
         return;
     }
+    if args.first().map(|s| s.as_str()) == Some("--cli") {
+        cli(&args[1..]);
+        return;
+    }
+    if args.first().map(|s| s.as_str()) == Some("--timecli") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        timecli(files, iters);
+        return;
+    }
     let mut stages: Vec<String> = STAGES.iter().map(|s| s.to_string()).collect();
     let mut pos = vec![];
     let mut idl_file: Option<String> = None;
@@ -478,6 +491,81 @@ fn real_main() {
             text,
         )
         .expect("write");
+    }
+}
+
+/// The CLI's output (dev driver until stage 9): `--cli prog.so [--idl x.json] [--full] [-o out.ts | -o dir/]`, as
+/// `sbpf-decompile` writes it (a project for a directory, else the single file; stdout without -o).
+fn cli(args: &[String]) {
+    let (mut idl_file, mut out, mut full, mut input) = (None, None, false, None);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--idl" => {
+                idl_file = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "-o" => {
+                out = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--full" => full = true,
+            _ => input = Some(args[i].clone()),
+        }
+        i += 1;
+    }
+    let bytes = std::fs::read(input.expect("input")).expect("read input");
+    let idl = idl_file.map(|f| {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(f).expect("read idl")).expect("idl json");
+        sbpf_read::idl::parse_idl(&v)
+    });
+    let r = match sbpf_read::decompile::decompile_read(&bytes, idl.as_ref(), stage3::threads(), full) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    match out {
+        Some(o) if o.ends_with('/') || std::path::Path::new(&o).is_dir() => {
+            for (path, text) in sbpf_read::layout::render_project(&r) {
+                let f = std::path::Path::new(&o).join(&path);
+                std::fs::create_dir_all(f.parent().unwrap()).expect("mkdir");
+                std::fs::write(f, text).expect("write");
+            }
+            eprintln!("wrote project to {o}");
+        }
+        Some(o) => std::fs::write(o, sbpf_read::decompile::render_read(&r)).expect("write"),
+        None => print!("{}", sbpf_read::decompile::render_read(&r)),
+    }
+}
+
+/// Whole CLI output timings (ms, best of `iters`): decompile + analysis + the single file + the project
+/// (renderProject), on 1 thread and on worker threads.
+fn timecli(files: &[String], iters: usize) {
+    println!("file	single_1	project_1	single_par	project_par");
+    let n = stage3::threads();
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = [f64::MAX; 4];
+        for _ in 0..iters {
+            for (k, th) in [(0, 1), (2, n)] {
+                let t = Instant::now();
+                let r = sbpf_read::decompile::decompile_read(&bytes, None, th, false).unwrap();
+                let s = sbpf_read::decompile::render_read(&r);
+                let t1 = t.elapsed().as_secs_f64() * 1e3;
+                let p = sbpf_read::layout::render_project(&r);
+                let t2 = t.elapsed().as_secs_f64() * 1e3;
+                std::hint::black_box((s, p));
+                best[k] = best[k].min(t1);
+                best[k + 1] = best[k + 1].min(t2);
+            }
+        }
+        println!(
+            "{f}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+            best[0], best[1], best[2], best[3]
+        );
     }
 }
 

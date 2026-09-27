@@ -38,15 +38,18 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --time8 --iters 5 a.so     # analysis foundation (as stagetime.ts --stage8)
 /tmp/claude-1000/rs-target/release/sbpf-dump --timediff --iters 5 a.so b.so   # program diff timing (as stagetime.ts --diff)
 /tmp/claude-1000/rs-target/release/sbpf-dump --diff a.so b.so out_dir   # diff.jsonl (as dump.ts --diff)
+/tmp/claude-1000/rs-target/release/sbpf-dump --cli prog.so [--idl x.json] [--full] [-o out.ts | -o dir/]  # the CLI's output (dev driver)
+/tmp/claude-1000/rs-target/release/sbpf-dump --timecli --iters 5 a.so   # whole CLI output timing (single file, project; 1 / n threads)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
 node scripts/parity.ts samples/token.so compat/bin                       # given files / dirs
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
 node scripts/parity.ts --idl --stages types,rtext,readfile bench/bin     # binaries with an IDL, given to both
+node scripts/cliparity.ts [--idl] [--full] samples compat/bin            # TS CLI vs sbpf-dump --cli: diff -r of -o dir/ and -o out.ts
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow,analysis] out_dir`, or `--diff a.so b.so out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint,facts,flow,analysis,project] out_dir`, or `--diff a.so b.so out_dir`
 (the IDL is read from stage 5 on).
 
 ## Stage dump format (format 1)
@@ -209,7 +212,8 @@ per function in `p.funcs` order:
   `{"k":"switch","v","cases":[{"vals","body"}]}`, `{"k":"setstate","v","val"}`.
 - `text`: `{"t":"func","pc","name","text"}` — the function's printed text, verbatim.
 - `rawfile`: `{"text"}` — the single-file rendering (`renderSingle`) without the analysis summary block
-  (`// security summary …` up to the blank line after it: stage 8).
+  (`// security summary …` up to the blank line after it): the raw mode is not a CLI output and the Rust raw printer
+  collects no analysis facts.
 
 A `decompile` error is a `struct` error line (later stage 4 dumps absent).
 
@@ -223,9 +227,9 @@ classification; `--idl x.json` on both dumpers), per function in output order:
   (`FuncOut.varTypes`) in insertion order.
 - `rtext`: `{"t":"func","pc","name","text"}` — the function's printed text, verbatim (comments, typed views,
   account fields, CPI / PDA notes, outlined-tail calls).
-- `readfile`: `{"text"}` — the single file (`renderSingle`: instruction table with IDL args / accounts,
-  helpers, typed-view declarations, syscalls, outlined tails, grouped functions) without the analysis
-  summary block (stage 8), as `rawfile`.
+- `readfile`: `{"text"}` — the single file (`renderSingle`: instruction table with IDL args / accounts, the analysis
+  summary block, helpers, typed-view declarations, syscalls, outlined tails, grouped functions): the CLI's `--full`
+  output, verbatim.
 
 A `decompile` error is an error line in the first requested of these dumps.
 
@@ -240,8 +244,11 @@ The default output is `decompile(bytes, { idl })`: library functions are classif
   `{"t":"stub","text"}` and `{"t":"count","funcs":<decompiled>,"lib":<libCount>}`.
 - `fingerprint`: `{"text"}`, the project output's `security/fingerprints.json` (`layout.ts` fingerprints: per-function
   hash / regfree / data / fuzzy signatures, library flags, the instructions whose handlers reach each function).
-- `readfile` gets a third line `{"lib":true,"text"}` (or `{"lib":true,"error"}`): the default single file, without the
-  analysis summary block, as line 2 for `--full`.
+- `readfile` gets a third line `{"lib":true,"text"}` (or `{"lib":true,"error"}`): the default single file (the CLI's
+  stdout), analysis summary block included.
+- `project` (stage 8c): `{"path","text"}` per file of `-o dir/` (`layout.ts` renderProject, in its map order: modules,
+  `outlined.ts`, `lib.d.ts`, `index.ts`, `bundle/*`, `security/analysis.json`, `summary.md`, `<ix>.md`,
+  `fingerprints.json`), verbatim.
 - `diff` (`--diff a.so b.so out_dir`): `{"text"}`, the report of `sbpf-decompile a.so b.so -o report.txt` (all rows, the
   two paths as labels), or an error line.
 
@@ -276,11 +283,11 @@ after the flow header.
 
 ### `analysis.jsonl` — the report layer (stage 8b)
 
-The analysis (`report.ts` analyze0, `phase2.ts`, `phase3.ts`, `audit.ts`, `consistency.ts`, `libcpi.ts`) as it stands
-when phase 2 is about to run the incident rules (`phase2Hooks.beforeIncidents`, a dev hook unset in the CLI; Rust: the
-same state at the end of `An::analyze`): everything `renderJson` writes to `security/analysis.json` except the `where`
-file mapping (`file` / `file_line`, layout: 8c), fund movers and the incident findings (8c), plus the internal fields the
-rules read. `<Loc>` = `{"fn","line"[,"pc"]}`. Lines, all key orders fixed:
+The analysis (`report.ts` analyze0, `phase2.ts`, `phase3.ts`, `audit.ts`, `consistency.ts`, `libcpi.ts`, `incidents.ts`)
+as it stands when phase 2 is about to run the incident rules (`phase2Hooks.beforeIncidents`, a dev hook unset in the CLI;
+Rust: `Analysis::rule_findings`, the rule engine's findings saved at that point), then the final findings and fund movers:
+everything `renderJson` writes to `security/analysis.json` except the `where` file mapping (checked by `project`), plus
+the internal fields the rules read. `<Loc>` = `{"fn","line"[,"pc"]}`. Lines, all key orders fixed:
 
 - `{"t":"program","version","instructions","functions","anchor","idl"}`;
 - per instruction (sorted by score, then name by `localeCompare`): `{"t":"ix","name","handler","kind"[,"dispatch"],"score","effects","functions","indirect"}`,
@@ -300,7 +307,10 @@ rules read. `<Loc>` = `{"fn","line"[,"pc"]}`. Lines, all key orders fixed:
   `{"t":"dep","target","readBy","writtenBy"}`, `{"t":"finding","rule","ix","confidence","weight","title","accounts","path","evidence"}`
   (the rule engine's, in rule order: before the incident rules, the dispatcher grouping and the ranking),
   `{"t":"authField","field","writtenBy"}`, `{"t":"role","role","by","members":[{"ix","account","validations","uses"}...],"inconsistencies":[{"role","ix","account","validation","appliedIn":[{"ix","account"[,"at"]}...],"others","uses","weight"}...]}`,
-  `{"t":"unattr","at","kinds","text"[,"target"][,"how"][,"value"][,"cpi"][,"pda"]}` (operations no handler reaches).
+  `{"t":"unattr","at","kinds","text"[,"target"][,"how"][,"value"][,"cpi"][,"pda"]}` (operations no handler reaches);
+- then (8c) the final findings, `{"t":"ranked","rule","ix","confidence","weight","title","accounts","path","evidence"}`
+  (incident rules added, `cpi-unchecked-program` findings merged with `signer-to-untrusted-program`, one finding per
+  place of a dispatcher, ranked by `rank * 10 + weight`, then instruction), and `{"t":"fundMover","instruction","authority","kind"[,"from"],"at"}`.
 
 A default-output error is an error line (as for the other stage 8 dumps); an exception of the TS analysis (or one the
 Rust side models, e.g. a sysvar read in a branch condition) is an error line after the header.
