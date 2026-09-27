@@ -18,4 +18,5 @@ sbpf-ir.workspace = true
 sbpf-program.workspace = true
 sbpf-print.workspace = true
 sbpf-read.workspace = true
+mimalloc = { version = "0.1", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls"] }

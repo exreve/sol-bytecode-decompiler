@@ -1,5 +1,9 @@
 //! `sbpf-decompile`: the decompiler's command line (see `sbpf_cli::USAGE`).
 
+// the decompiler allocates many small strings / vectors: mimalloc is markedly faster than glibc malloc here
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
