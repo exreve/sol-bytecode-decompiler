@@ -16,7 +16,7 @@
 //! kept as computed, like the TS numbers.
 
 use std::cell::UnsafeCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 macro_rules! str_enum {
     ($name:ident { $($v:ident = $s:literal),* $(,)? }) => {
@@ -95,7 +95,7 @@ pub enum Node {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallTarget {
     Fn { pc: i64 },
-    Sys { name: Rc<str>, hash: u32 },
+    Sys { name: Arc<str>, hash: u32 },
     Ind { e: E },
 }
 
@@ -137,7 +137,7 @@ pub enum Stmt {
         rev: Option<bool>,
     },
     Trap {
-        msg: Rc<str>,
+        msg: Arc<str>,
         pc: i64,
     },
 }
@@ -147,7 +147,7 @@ pub enum Term {
     Jmp { to: i64 },
     Br { c: E, t: i64, f: i64 },
     Ret { e: Option<E> },
-    Trap { msg: Rc<str> },
+    Trap { msg: Arc<str> },
     Tail,
 }
 
@@ -157,7 +157,7 @@ pub enum Term {
 pub struct Ir {
     nodes: UnsafeCell<Vec<Node>>,
     targets: UnsafeCell<Vec<CallTarget>>,
-    names: UnsafeCell<Vec<Rc<str>>>,
+    names: UnsafeCell<Vec<Arc<str>>>,
 }
 
 impl Clone for Ir {
@@ -250,7 +250,7 @@ impl Ir {
             (v.len() - 1) as u32
         }
     }
-    pub fn name(&self, i: u32) -> Rc<str> {
+    pub fn name(&self, i: u32) -> Arc<str> {
         // SAFETY: see `len`
         unsafe { (&*self.names.get())[i as usize].clone() }
     }
@@ -259,7 +259,7 @@ impl Ir {
         // SAFETY: see `len`; `f` only gets a `&str` and cannot reach the arena mutably through it
         unsafe { f(&(&*self.names.get())[i as usize]) }
     }
-    pub fn mk_name(&self, s: Rc<str>) -> u32 {
+    pub fn mk_name(&self, s: Arc<str>) -> u32 {
         // SAFETY: see `len`
         unsafe {
             let v = &mut *self.names.get();

@@ -12,7 +12,7 @@
 use sbpf_elf::Image;
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E, L};
 use sbpf_program::{Block, Func};
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub mod cfgopt;
 pub mod compact;
@@ -294,7 +294,7 @@ pub fn term_expr(t: &Term) -> Option<E> {
 }
 
 pub fn dead_trap() -> Term {
-    thread_local!(static DEAD: Rc<str> = Rc::from("dead"));
+    thread_local!(static DEAD: Arc<str> = Arc::from("dead"));
     Term::Trap {
         msg: DEAD.with(|d| d.clone()),
     }
@@ -377,7 +377,7 @@ impl<'i> Fx<'i> {
     pub fn mk_fn(&mut self, n: Intr, args: &[E]) -> E {
         let k = INTRS.iter().position(|x| x.0 == n).unwrap();
         if self.intr_ix[k] == u32::MAX {
-            self.intr_ix[k] = self.ir.mk_name(Rc::from(n.name()));
+            self.intr_ix[k] = self.ir.mk_name(Arc::from(n.name()));
         }
         let l = self.ir.list(args.iter().copied());
         self.ir.mk(Node::Fn(self.intr_ix[k], l))
@@ -1064,6 +1064,41 @@ pub fn phase2(f: &mut Func, img: Option<&Image>, exact_memory: bool, after_opt: 
     }
     f.ir = Some(x.ir);
     settled
+}
+
+/// Runs `f` on every function, on `threads` worker threads (functions are independent in the
+/// per-function phase: each owns its arena; the image is shared read-only). Results in input order.
+pub fn par_each<T: Send>(
+    funcs: Vec<&mut Func>,
+    threads: usize,
+    f: impl Fn(&mut Func) -> T + Sync,
+) -> Vec<T> {
+    let n = funcs.len();
+    if threads <= 1 || n <= 1 {
+        return funcs.into_iter().map(f).collect();
+    }
+    let work = std::sync::Mutex::new(funcs.into_iter().enumerate());
+    let out: std::sync::Mutex<Vec<Option<T>>> =
+        std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            // (deep expression trees are walked recursively: large stacks, as the main thread's)
+            std::thread::Builder::new()
+                .stack_size(1 << 28)
+                .spawn_scoped(s, || loop {
+                    let next = work.lock().unwrap().next();
+                    let Some((i, g)) = next else { break };
+                    let r = f(g);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.unwrap())
+        .collect()
 }
 
 /// The per-function steps after rewriteStackArgs: sinkFrameLoads (unless exactMemory), compactStores.

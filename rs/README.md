@@ -12,6 +12,7 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | `sbpf-ir` | `src/ir.ts` (types) | arena IR: `Ir` (16-byte `Node`s, `E` ids, `L` lists), `Stmt`, `Term`, `CallTarget` |
 | `sbpf-program` | `src/program.ts`, `src/murmur.ts`, `src/syscalls.ts` | decode, lifter, function discovery, CFG (full and lazy) |
 | `sbpf-dataflow` | `src/dataflow.ts`, `src/stack.ts`, `src/stackargs.ts` | signatures (lazy block materialization), variable recovery, stack slot promotion, stack arguments |
+| `sbpf-opt` | `src/simplify.ts`, `src/cfgopt.ts`, `src/ifconv.ts`, `src/idioms.ts`, `src/compact.ts`, decompile's phase 2 | per-function optimizer (`Fx`: arena + per-id caches), `phase2`, `finish` |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
 Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order) and `serde_json` (string
@@ -25,6 +26,7 @@ The cargo target dir is outside `/home` (`.cargo/config.toml`: `/tmp/claude-1000
 cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump prog.so out_dir            # stage dumps (as scripts/dump.ts)
 /tmp/claude-1000/rs-target/release/sbpf-dump --time --iters 5 a.so b.so # stage timings (as scripts/stagetime.ts)
+/tmp/claude-1000/rs-target/release/sbpf-dump --time3 --iters 5 a.so     # stage 3 timings (as stagetime.ts --stage3)
 
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
@@ -32,7 +34,7 @@ node scripts/parity.ts samples/token.so compat/bin                       # given
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir`
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir`
 (the IDL is accepted for the later stages; the stages so far do not read it).
 
 ## Stage dump format (format 1)
@@ -162,6 +164,24 @@ The block statements are the lifted statements of `start..end` (cut after a nore
 then per function `{"t":"func","pc"[,"stackArgs"][,"argAreaElided"][,"vars"],"changed":<bool>}`
 (`vars` for the functions given stack parameters) followed by its block lines when its IR differs from
 the `stack` stage.
+
+### `opt.jsonl`, `optir.jsonl`, `compact.jsonl` — the per-function phase (stage 3)
+
+On a fresh lazily loaded program after inferSignatures and recoverVars of every function, decompile's
+phase 2 over every function in `p.funcs` order (as `--full` builds them: library classification is
+stage 7), with read-only memory folding on the program image (`setFoldImage`):
+
+- `opt`: per function after `optimizeFunc`: `{"t":"func","pc","settled","vars":[...]}` (`settled`:
+  isSettled, the fixpoint flag that lets the pipeline skip a later optimizeFunc) + its block lines (as
+  in `vars.jsonl`).
+- `optir`: the same after the whole per-function phase: optimizeFunc; promoteStack, then optimizeFunc
+  if it promoted; recognizeIdioms, then optimizeFunc if it changed something and (really modified the
+  IR or the function is not settled).
+- `compact`: after `rewriteStackArgs` over all functions, then `sinkFrameLoads` and `compactStores` per
+  function (the IR structuring starts from): `{"t":"nstack","pc","n"}` (Map order), then per function
+  `{"t":"func","pc"[,"stackArgs"][,"argAreaElided"],"vars"}` + its block lines.
+
+A recoverVars error is an `opt` error line (later stage 3 dumps absent).
 
 ### Later stages (planned)
 

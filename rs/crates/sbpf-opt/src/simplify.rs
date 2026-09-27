@@ -728,19 +728,38 @@ impl VarMap {
     }
 }
 
+/// A variable substitution (substVars' map).
+pub(crate) trait Look {
+    fn look(&self, v: u32) -> Option<E>;
+}
+impl Look for VarMap {
+    #[inline]
+    fn look(&self, v: u32) -> Option<E> {
+        self.get(v)
+    }
+}
+/// A single-entry map `new Map([[v, e]])`.
+pub(crate) struct One(pub u32, pub E);
+impl Look for One {
+    #[inline]
+    fn look(&self, v: u32) -> Option<E> {
+        (v == self.0).then_some(self.1)
+    }
+}
+
 impl Fx<'_> {
     /// substVars: returns `e` when no variable of `m` occurs; otherwise rebuilds every composite node.
-    pub(crate) fn subst_vars(&mut self, e: E, m: &VarMap) -> E {
+    pub(crate) fn subst_vars<M: Look>(&mut self, e: E, m: &M) -> E {
         let mut hit = false;
-        self.evars(e, |v| hit |= m.has(v));
+        self.evars(e, |v| hit |= m.look(v).is_some());
         if !hit {
             return e;
         }
         self.subst_go(e, m)
     }
-    fn subst_go(&mut self, x: E, m: &VarMap) -> E {
+    fn subst_go<M: Look>(&mut self, x: E, m: &M) -> E {
         match self.node(x) {
-            Node::Var(id) => m.get(id).unwrap_or(x),
+            Node::Var(id) => m.look(id).unwrap_or(x),
             Node::Bin(op, a, b) => {
                 let a = self.subst_go(a, m);
                 let b = self.subst_go(b, m);
@@ -1230,8 +1249,7 @@ fn inline_local(x: &mut Fx, f: &mut Func, exact: &mut Option<Vec<i32>>) -> bool 
                     continue;
                 }
             }
-            let mut m = VarMap::new(vars.len());
-            m.set(v, se);
+            let m = One(v, se);
             if found < b.stmts.len() {
                 let ns = x.map_stmt(&b.stmts[found], &mut |x, e| x.subst_vars(e, &m));
                 b.stmts[found] = ns;
@@ -1380,8 +1398,7 @@ fn inline_call(
     let ti = x.ir.mk_target(t.clone());
     let l = x.ir.list(all);
     let ce = x.ir.mk(Node::Call(ti, l));
-    let mut m = VarMap::new(vars.len());
-    m.set(v, ce);
+    let m = One(v, ce);
     if i + 1 < b.stmts.len() {
         let ns = x.map_stmt(&b.stmts[i + 1], &mut |x, e| x.subst_vars(e, &m));
         b.stmts[i + 1] = ns;

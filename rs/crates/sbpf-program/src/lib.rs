@@ -8,7 +8,7 @@ use indexmap::{IndexMap, IndexSet};
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 use syscalls::Syscall;
 
 #[derive(Clone, Copy, Debug)]
@@ -219,9 +219,9 @@ impl Step {
     }
 }
 
-fn register(cx: &mut Cx, sc: &Syscall) -> Rc<str> {
+fn register(cx: &mut Cx, sc: &Syscall) -> Arc<str> {
     cx.syscalls.insert(sc.name.clone(), sc.clone());
-    Rc::from(sc.name.as_str())
+    Arc::from(sc.name.as_str())
 }
 
 impl Lifter {
@@ -348,7 +348,7 @@ impl Lifter {
             }),
             flow: Flow::Next(pc + 1),
         };
-        let trap = |msg: Rc<str>| Lifted {
+        let trap = |msg: Arc<str>| Lifted {
             stmt: None,
             flow: Flow::Term(Term::Trap { msg }),
         };

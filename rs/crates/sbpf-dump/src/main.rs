@@ -327,6 +327,15 @@ fn main() {
 
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("--time3") {
+        let (iters, files) = if args.get(1).map(|s| s.as_str()) == Some("--iters") {
+            (args[2].parse().unwrap(), &args[3..])
+        } else {
+            (5, &args[1..])
+        };
+        time3(files, iters);
+        return;
+    }
     if args.first().map(|s| s.as_str()) == Some("--time") {
         let mut iters = 5;
         let mut files = vec![];
@@ -369,5 +378,89 @@ fn real_main() {
             text,
         )
         .expect("write");
+    }
+}
+
+/// Stage 3 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage3.
+fn time3(files: &[String], iters: usize) {
+    use sbpf_opt::{compact, idioms, optimize_func, Fx};
+    println!("file\topt1\tpromote\topt2\tidioms\topt3\tstackargs\tsink\tcompact\ttotal\tparallel");
+    for f in files {
+        let bytes = std::fs::read(f).expect("read");
+        let mut best = [f64::MAX; 10];
+        for _ in 0..iters {
+            let mut q = load_program(&bytes, true).unwrap();
+            sbpf_dataflow::infer_signatures(&mut q);
+            sbpf_dataflow::recover_all(&mut q).unwrap();
+            let img = Image::new(&q.elf);
+            let mut v = [0f64; 9];
+            let mut t;
+            let mut lap = |k: usize, t: &mut Instant| {
+                let n = Instant::now();
+                v[k] += (n - *t).as_secs_f64() * 1e3;
+                *t = n;
+            };
+            for g in q.funcs.values_mut() {
+                t = Instant::now();
+                let mut x = Fx::new(g.ir.take().unwrap(), Some(&img));
+                let mut settled = optimize_func(&mut x, g);
+                g.ir = Some(std::mem::take(&mut x.ir));
+                lap(0, &mut t);
+                let pr = sbpf_dataflow::stack::promote_stack(g);
+                x.ir = g.ir.take().unwrap();
+                lap(1, &mut t);
+                if pr {
+                    settled = optimize_func(&mut x, g);
+                }
+                lap(2, &mut t);
+                let (c, real) = idioms::recognize_idioms(&mut x, g);
+                lap(3, &mut t);
+                if c && (real || !settled) {
+                    optimize_func(&mut x, g);
+                }
+                g.ir = Some(std::mem::take(&mut x.ir));
+                lap(4, &mut t);
+            }
+            t = Instant::now();
+            let built: Vec<usize> = (0..q.funcs.len()).collect();
+            sbpf_dataflow::stackargs::rewrite_stack_args(&mut q.funcs, &built);
+            lap(5, &mut t);
+            for g in q.funcs.values_mut() {
+                t = Instant::now();
+                let mut x = Fx::new(g.ir.take().unwrap(), None);
+                compact::sink_frame_loads(&mut x, g);
+                lap(6, &mut t);
+                compact::compact_stores(&mut x, g);
+                g.ir = Some(std::mem::take(&mut x.ir));
+                lap(7, &mut t);
+            }
+            v[8] = v[..8].iter().sum();
+            // the same work with the per-function steps on worker threads (wall time)
+            let mut q = load_program(&bytes, true).unwrap();
+            sbpf_dataflow::infer_signatures(&mut q);
+            sbpf_dataflow::recover_all(&mut q).unwrap();
+            let n = stage3::threads();
+            let tp = Instant::now();
+            {
+                let img = Image::new(&q.elf);
+                sbpf_opt::par_each(q.funcs.values_mut().collect(), n, |g| {
+                    sbpf_opt::phase2(g, Some(&img), false, |_, _| {})
+                });
+            }
+            let built: Vec<usize> = (0..q.funcs.len()).collect();
+            sbpf_dataflow::stackargs::rewrite_stack_args(&mut q.funcs, &built);
+            sbpf_opt::par_each(q.funcs.values_mut().collect(), n, |g| sbpf_opt::finish(g, false));
+            let par = tp.elapsed().as_secs_f64() * 1e3;
+            let v = [v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], par];
+            for k in 0..10 {
+                best[k] = best[k].min(v[k]);
+            }
+        }
+        let name = std::path::Path::new(f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let cols: Vec<String> = best.iter().map(|x| format!("{x:.2}")).collect();
+        println!("{name}\t{}", cols.join("\t"));
     }
 }

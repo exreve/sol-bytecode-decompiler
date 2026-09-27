@@ -16,6 +16,14 @@ fn fline(f: &Func, settled: bool, o: &mut String) {
     o.push_str(&func_ir(f));
 }
 
+/// Worker threads for the per-function phase (SBPF_THREADS, default: available parallelism).
+pub fn threads() -> usize {
+    std::env::var("SBPF_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 pub fn dump_stage3(bytes: &[u8], stages: &[String], res: &mut Vec<(&'static str, String)>) {
     let want = |s: &str| stages.iter().any(|x| x == s);
     if !["opt", "optir", "compact"].iter().any(|s| want(s)) {
@@ -30,9 +38,16 @@ pub fn dump_stage3(bytes: &[u8], stages: &[String], res: &mut Vec<(&'static str,
     let (mut opt, mut optir) = (header("opt"), header("optir"));
     {
         let img = Image::new(&q.elf);
-        for f in q.funcs.values_mut() {
-            let settled = sbpf_opt::phase2(f, Some(&img), false, |f, s| fline(f, s, &mut opt));
-            fline(f, settled, &mut optir);
+        let outs = sbpf_opt::par_each(q.funcs.values_mut().collect(), threads(), |f| {
+            let mut a = String::new();
+            let settled = sbpf_opt::phase2(f, Some(&img), false, |f, s| fline(f, s, &mut a));
+            let mut b = String::new();
+            fline(f, settled, &mut b);
+            (a, b)
+        });
+        for (a, b) in outs {
+            opt.push_str(&a);
+            optir.push_str(&b);
         }
     }
     if want("opt") {
@@ -52,8 +67,9 @@ pub fn dump_stage3(bytes: &[u8], stages: &[String], res: &mut Vec<(&'static str,
         j.s("t", "nstack").n("pc", pc).n("n", n as i64);
         j.line(&mut o);
     }
-    for f in q.funcs.values_mut() {
+    let outs = sbpf_opt::par_each(q.funcs.values_mut().collect(), threads(), |f| {
         sbpf_opt::finish(f, false);
+        let mut o = String::new();
         let mut j = J::obj();
         j.s("t", "func").n("pc", f.pc);
         if let Some(n) = f.stack_args {
@@ -65,6 +81,10 @@ pub fn dump_stage3(bytes: &[u8], stages: &[String], res: &mut Vec<(&'static str,
         j.raw("vars", &vars_of(f));
         j.line(&mut o);
         o.push_str(&func_ir(f));
+        o
+    });
+    for s in outs {
+        o.push_str(&s);
     }
     res.push(("compact", o));
 }
