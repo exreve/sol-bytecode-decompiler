@@ -256,10 +256,13 @@ fn side_j(s: &Side) -> String {
 }
 
 /// scripts/dump8.ts flowLines: the flow layer's outputs
-pub fn flow_lines(an: &An) -> String {
+/// `analyzed`: the analysis ran before (its exit writes are in the facts; scripts/dump8.ts flowLines(r, check = true))
+pub fn flow_lines(an: &An, analyzed: bool) -> String {
     let mut out = String::new();
     // (analyze0's foundation calls, in its order)
-    an.add_exit_writes();
+    if !analyzed {
+        an.add_exit_writes();
+    }
     let ind = an.indirect_targets();
     let splits = an.splits();
     let ixs = an.ix_contexts(&ind, &splits);
@@ -663,7 +666,7 @@ pub fn dump_stage8(
         } else {
             String::new()
         };
-        let f = if wf { flow_lines(an) } else { String::new() };
+        let f = if wf { flow_lines(an, wa) } else { String::new() };
         format!("{a}\u{0}{f}")
     };
     let r = match decompile_read_hook(

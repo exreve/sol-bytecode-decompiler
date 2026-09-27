@@ -147,21 +147,27 @@ if (diffMode) {
 // With --stage8: the analysis foundation on the default output (the flow dump of scripts/dump8.ts, before the
 // single file's analysis: its exit writes, indirect targets, dispatch splits, instruction contexts, resolvers, paths,
 // sources).
+// The analysis column: report.ts analyze0 + phase 2 / 3 / audit / consistency up to the rule findings (the part stage 8b
+// ports: until phase2Hooks.beforeIncidents), on a fresh decompile.
 if (stage8) {
 	const { flowLines } = await import('./dump8.ts')
 	const { debugHooks } = await import('../src/decompile.ts')
-	console.log('file\tflow')
+	const { analyze } = await import('../src/analysis/report.ts')
+	const { phase2Hooks } = await import('../src/analysis/phase2.ts')
+	console.log('file\tflow\tanalysis')
 	for (const f of files) {
 		const bytes = new Uint8Array(readFileSync(f))
-		let best = Infinity
+		const best = [Infinity, Infinity]
 		for (let it = 0; it < iters + 1; it++) {
-			let ms = 0
+			let ms = 0, ma = 0
 			debugHooks.beforeRender = r => { const t0 = performance.now(); flowLines(r, false); ms = performance.now() - t0 }
 			decompile(bytes)
+			debugHooks.beforeRender = r => { const t0 = performance.now(); phase2Hooks.beforeIncidents = () => { ma = performance.now() - t0 }; analyze(r); phase2Hooks.beforeIncidents = undefined }
+			decompile(bytes)
 			debugHooks.beforeRender = undefined
-			if (it) best = Math.min(best, ms)
+			if (it) { best[0] = Math.min(best[0], ms); best[1] = Math.min(best[1], ma) }
 		}
-		console.log([basename(f), best.toFixed(1)].join('\t'))
+		console.log([basename(f), ...best.map(x => x.toFixed(1))].join('\t'))
 	}
 	process.exit(0)
 }

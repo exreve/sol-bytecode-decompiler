@@ -608,36 +608,49 @@ fn time3(files: &[String], iters: usize) {
 /// code as stubs), single file included, on one thread and on worker threads (as scripts/stagetime.ts --stage7).
 /// Stage 8 timings (ms, best of `iters`): the analysis foundation on the default output (the flow dump, as
 /// scripts/stagetime.ts --stage8).
+/// The analysis column: the report layer up to phase 2's rule findings (stage 8b), on a fresh decompile.
 fn time8(files: &[String], iters: usize) {
-    println!("file\tflow");
+    println!("file\tflow\tanalysis");
     for f in files {
         let bytes = std::fs::read(f).expect("read");
-        let mut best = f64::MAX;
+        let mut best = [f64::MAX; 2];
         for _ in 0..iters {
             let ms = std::cell::Cell::new(0.0);
             let hook = |an: &sbpf_read::analysis::An| {
                 let t = Instant::now();
-                let s = stage8::flow_lines(an);
+                let s = stage8::flow_lines(an, false);
                 ms.set(t.elapsed().as_secs_f64() * 1e3);
                 s
             };
-            std::hint::black_box(
-                sbpf_read::decompile::decompile_read_hook(
-                    &bytes,
-                    None,
-                    stage3::threads(),
-                    false,
-                    Some(&hook),
-                )
-                .unwrap(),
-            );
-            best = best.min(ms.get());
+            let ma = std::cell::Cell::new(0.0);
+            let hook_a = |an: &sbpf_read::analysis::An| {
+                let t = Instant::now();
+                an.analyze(|a, _| std::hint::black_box(a.ixs.len()));
+                ma.set(t.elapsed().as_secs_f64() * 1e3);
+                String::new()
+            };
+            for (h, cell, k) in [
+                (&hook as sbpf_read::printfn::AnalysisHook, &ms, 0),
+                (&hook_a, &ma, 1),
+            ] {
+                std::hint::black_box(
+                    sbpf_read::decompile::decompile_read_hook(
+                        &bytes,
+                        None,
+                        stage3::threads(),
+                        false,
+                        Some(h),
+                    )
+                    .unwrap(),
+                );
+                best[k] = best[k].min(cell.get());
+            }
         }
         let name = std::path::Path::new(f)
             .file_name()
             .unwrap()
             .to_string_lossy();
-        println!("{name}\t{best:.1}");
+        println!("{name}\t{:.1}\t{:.1}", best[0], best[1]);
     }
 }
 
