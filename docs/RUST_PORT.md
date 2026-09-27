@@ -14,6 +14,8 @@ Tooling (details and the dump format: [`rs/README.md`](../rs/README.md)):
   differing line per stage.
 - `scripts/stagetime.ts` / `sbpf-dump --time`: per-stage timings, same breakdown.
 - `scripts/cpuprof.ts`: per-stage breakdown of `node --cpu-prof` profiles of the whole CLI.
+- `scripts/fixtures.ts` / `sbpf-fixtures`: the frozen TS CLI outputs (outside the repository) and the Rust runner
+  comparing `sbpf-decompile` against them (see *Stage 9 results*).
 
 ## Stage order
 
@@ -30,7 +32,7 @@ stages are at 100% parity.
 | 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (done with stage 7: only used on library functions) | (covered by `rtext` / `readfile`, `library`) |
 | 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `library`, `fingerprint`, `readfile` (default output line), `diff` (done; native-arm diffs wait for stage 8) |
 | 8 | `src/analysis/*` (8a foundation: `facts`, `flow`, `paths`, `sources`; 8b report layer: `report`, `phase2`, `phase3`, `audit`, `consistency`, `libcpi`; 8c incidents, rendering, + `layout`, `budget`) | `facts`, `flow` (8a done); `analysis` (8b / 8c done); `project`, `readfile` with the summary (8c done: whole CLI output) |
-| 9 | `rpc`, `cli` (the binary) | whole CLI output (`-o dir/`) byte-compared through the binary |
+| 9 | `rpc`, `cli` (the binary) | whole CLI output (`-o dir/`) byte-compared through the binary (done: `sbpf-decompile`, frozen fixtures) |
 
 Until stage 9 the Rust code is a library plus `sbpf-dump`; the TS CLI stays the product. A stage's
 Rust output feeds the next stage's Rust code only; the TS pipeline is never fed from Rust.
@@ -946,7 +948,107 @@ regexes over printed lines of `facts.rs`) cost ~2 s and run on one thread. First
 `print_func` + `function_facts` (no `perf` on this box: use a sampling profiler or `--time5` splits), move the facts
 extraction into the per-function parallel printing, and cache the `jsre` regexes.
 
+## Stage 9 results (the `sbpf-decompile` binary, frozen fixtures)
+
+Ported (`rs/crates/sbpf-cli`, binary `sbpf-decompile`; `sbpf-dump --cli` is now a wrapper of the same `sbpf_cli::run`):
+
+- `cli.ts`: the same USAGE, `VALUED` / `KNOWN` / unknown-option rejection (`error: unknown option(s) …` + USAGE, exit 1),
+  inputs (`-` = stdin), `-h` / `--help` / 0 or > 2 inputs → USAGE (exit 0 with 1–2 inputs, else 1), JS truthiness of
+  option values (`-o ''` = stdout), `opt()` = first occurrence's next argument (`-o --full x.so` behaves as the TS).
+  `-o` ending in `/` or an existing directory → project, else the single file; stdout otherwise; EPIPE → exit 0.
+  Threads from `available_parallelism`, no environment variables, the run on a 1 GiB-stack thread.
+- `load` in the TS order: the two-input diff mimics `Promise.all(inputs.map(load))` — both loads' synchronous parts
+  first (a `fail` exits at once, in input order), then the first exception thrown there (e.g. `EISDIR`), then the fetches.
+- Uncaught TS exceptions (Node prints them with a stack) are printed as their first line, exit 1: `Error: not an ELF
+  file`, `Error: ENOENT: no such file or directory, open '<path>'`, `Error: EISDIR: illegal operation on a directory,
+  read`, the IDL file's `SyntaxError: …` (V8's `Unexpected end of JSON input` for a truncated / empty file; other JSON
+  syntax errors keep serde's wording: the only message that differs).
+- `rpc.ts` (`rpc.rs`): `isAddress`, JSON-RPC `getAccountInfo` (base64) with the 429 retries (1–4 s), `RPC <method>: HTTP
+  <status>` / `RPC <method>: <error.message>`, transport failure → `fetch failed`, unparsable URL → `Failed to parse URL
+  from <url>`; BPFLoader1/2 (the data), Upgradeable (programdata after 45 bytes), LoaderV4 (after 48), the other owners'
+  and non-ELF errors verbatim. The owner is passed as `loader` (`decompile_read_opts`: `BPFLoader1111…` → unaligned
+  input, as `decompile.ts`). `fetchIdl`: `anchorIdlAddress` (PDA bump search with the ed25519 on-curve test on a small
+  mod 2^255 − 19 field implementation, `create_with_seed(…, "anchor:idl", program)`), `[8 disc][32 authority][u32
+  len][zlib]` inflated with `miniz_oxide`. HTTP: `ureq` 3 (rustls), the only new dependency.
+- `invalidInstructions` (the stderr warning for opcodes the declared version lacks) over the decompiled program.
+- `diff.rs`: `profile(bytes, idl)` gains the IDL arms (`arms.set(ix.name, 'idl')`), the IDL-aware `Semantics` and
+  `native_arms(bytes, idl)`; `diff_report` takes the two IDLs (the CLI's on-chain IDLs of fetched programs).
+
+### Parity (the real binary)
+
+- Frozen fixtures (below) vs `sbpf-decompile`, every binary of every set (615): default single file on stdout **615 /
+  615**, `-o out.ts` **615 / 615**, `-o dir/` project **615 / 615**, `--full` on stdout **615 / 615**, `--idl` single
+  file **184 / 184**, `--idl` project **184 / 184** (stderr and exit code compared too); the 199 diff pairs on stdout
+  (terminal report) **199 / 199** and with `-o report.txt` (complete) **199 / 199**. Runner time: ~40 min (2 jobs).
+- `scripts/cliparity.ts --bin …/sbpf-decompile` (the TS CLI process vs the binary, `diff -r`): samples, regress, compat
+  **29 / 29** (confirms the in-process fixtures equal the TS CLI's files).
+- Invalid-opcode warning: `e_flags` mutants (v1 / v2 / v3) of token, memo, zig_counter, a_audit: **12 / 12** identical
+  (stdout, stderr, exit code; the v2 ones warn).
+- stdin (`-`), EPIPE (`| head`), two-program diff on stdout: identical.
+- Error cases (exit code, stdout, stderr; the TS stack trace stripped): **28 / 29** identical — missing file, non-ELF,
+  directory input, missing / bad / empty IDL file, address without `--rpc`, unknown options, no / three inputs,
+  `-h` with one or two inputs, `-o` in a missing directory, `-o` without a value, a missing file in a pair (both orders,
+  also against a directory), the RPC errors (non-program owners, `Invalid param: WrongSize`, unparsable URL, connection
+  refused), an address with no account. The one difference: the JSON syntax error text of a malformed IDL file (V8's
+  `Expected property name or '}' in JSON at position 1 (line 1 column 2)` vs serde's `key must be a string at line 1
+  column 2`).
+- `--rpc https://api.mainnet-beta.solana.com` (TS CLI and the binary on the same addresses, stdout / files and stderr):
+  squads v4 `SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf` (upgradeable, on-chain IDL) single file and project,
+  whirlpool (10 MB programdata, IDL), `4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7` (IDL), token, token-2022, memo v2,
+  memo v1 (`BPFLoader1111…`: the unaligned input), the diff token / token-2022 by address and squads (address, IDL
+  arms) / whirlpool.so: **all identical** (`fetched …: N bytes`, `using on-chain Anchor IDL of …`, `wrote project to …`).
+
+### Frozen TS fixtures
+
+Location (not committed): `/tmp/claude-1000/fixtures/` — **127 MB** (zstd `-17 --long=27`; 5.2 GB uncompressed).
+
+- `files.txt`: the 615 binaries (paths relative to the repository root: `samples/`, `samples/regress/`, `compat/bin/`,
+  `eval/bin/`, `bench/bin/`, `corpus/`).
+- `<path>.jsonl.zst` per binary: a header `{"file","idl"}` (the IDL found as `parity.ts` / `cliparity.ts` do, 184
+  binaries), then `{"out","text"}` records: `single.ts` (default single file = stdout = `-o out.ts`), `project/<path>`
+  (every file of `-o dir/`), `full.ts` (`--full`), `idl.ts` / `idl-project/<path>` (with `--idl`), and when present
+  `stderr/<mode>` (the warning) / `error/<mode>` (the exception's first line). 41 210 records; no binary errors or warns.
+- `diff.jsonl.zst`: 398 records `{"a","b","all","text"}` (the 199 pairs, terminal and complete reports; the labels are
+  the root-relative paths); `pairs.txt` the pairs.
+- `fuzz.json`: the fuzz runs of the stage dumps (seeds 1, 7, 11 on samples + compat; 3 on corpus + bench + eval;
+  1000 mutants each; `mutate()` of `scripts/parity.ts`). The mutants' outputs are not frozen.
+
+Regenerate (TS, while it exists; ~50 min, 2 Node processes of 5 files):
+`cd <repo> && ls samples/*.so samples/regress/*.so compat/bin/*.so eval/bin/*.so bench/bin/*.so corpus/*.so > F/files.txt`,
+`xargs -a F/files.txt -n 5 -P 2 node <worktree>/scripts/fixtures.ts --root <repo> --out F`, then
+`node scripts/fixtures.ts --root <repo> --out F --diff F/pairs.txt` (existing per-binary fixtures are kept).
+Check: from the repository root, `sbpf-fixtures --fixtures F [--ofile] [-j 2] [--no-diff | --only-diff] [substring…]`
+(runs `sbpf-decompile` next to it, or `--bin`; needs the `zstd` command).
+
+### Timings (whole CLI, wall time of the process, best of 2, 8 threads, ms)
+
+| program | TS single | TS project | Rust single | Rust project | speedup (project) |
+|---|---:|---:|---:|---:|---:|
+| jup | 7186 | 7742 | 3315 | 3654 | 2.1× |
+| whirlpool | 4935 | 5159 | 2594 | 2998 | 1.7× |
+| token22 | 2665 | 2929 | 1241 | 1353 | 2.2× |
+| svault_v3 | 7748 | 8430 | 5155 | 5524 | 1.5× |
+| token | 990 | 1111 | 964 | 874 | 1.3× |
+
+Modest, as expected: the readable printing's facts collection (stage 8a / 8b regression, see *Stage 8c results*) is
+not fixed here.
+
 ## Plan changes
+
+- **Stage 9 is done** (above): `sbpf-decompile` is byte-identical to the TS CLI in every mode on all 615 binaries
+  (IDL 184, diff pairs 199), `--rpc` / on-chain IDL identical on mainnet programs; the TS outputs are frozen as fixtures
+  with a Rust runner. Next, in order:
+  1. **Performance pass**, guarded by `sbpf-fixtures` (whole CLI) and the stage dumps: first the readable printing's
+     facts (`print_func` + `function_facts`, `node_lines`, site notes, `SugarSnap`, the `FlowCtx` built before printing,
+     the per-function `jsre` regexes of `facts.rs`) moved into the per-function parallel printing; then stage 5's
+     phase 4 on workers, the concrete runs of `anchorstate` / `cpiexec`, stage 4 allocations.
+  2. **Tooling port, then TS removal**: freeze the stage dumps too (`scripts/dump.ts` per binary, compressed like the
+     fixtures) or retire them in favour of the whole-output fixtures; port `mutate()` of `parity.ts` (xorshift32) to Rust
+     and freeze the fuzz mutants' TS CLI outputs from `fuzz.json`'s seeds (they are not frozen yet); port or drop the
+     dev scripts (`stagetime`, `cpuprof`, `readability`, `profile`); move the fixtures to a durable place (release asset);
+     then remove `src/` and the Node tooling.
+  - Known difference kept: the JSON syntax error text of a malformed `--idl` file (serde's wording, not V8's).
+
 
 - **Stage 8c is done** (above): incidents, ranking, `security/*`, the single-file summary block, the project layout and
   the diff's native arms; the whole CLI output is byte-identical (615 / 615, IDL 184 / 184, fuzz 4000 / 4000, TS CLI
