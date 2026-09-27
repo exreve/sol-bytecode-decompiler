@@ -164,7 +164,7 @@ impl<'a> An<'a> {
         }
     }
 
-    fn idom_of(&self, fn_: i64, ctx: Option<&IxCtx<'a>>) -> Option<Rc<Vec<i32>>> {
+    pub fn idom_of(&self, fn_: i64, ctx: Option<&IxCtx<'a>>) -> Option<Rc<Vec<i32>>> {
         let ctx = ctx?;
         let grp = ctx.grp.as_ref()?;
         if !ctx.restricted.as_ref().is_some_and(|r| r.contains(&fn_)) {

@@ -1843,7 +1843,7 @@ pub fn run(
                     names: rf.names.clone(),
                 })
                 .collect();
-            let an = Box::new(crate::analysis::An::new(
+            let mut an = Box::new(crate::analysis::An::new(
                 dx.p,
                 fl,
                 fnrefs,
@@ -1858,6 +1858,8 @@ pub fn run(
                 dx.acct_layouts.clone(),
                 expr_printer(dx, snaps),
             ));
+            an.lib_pcs = dm.libs.iter().filter(|x| x.1.lib).map(|x| *x.0).collect();
+            an.program_id = dm.state_idl_address.clone();
             Some(h(&an))
         }
         None => None,

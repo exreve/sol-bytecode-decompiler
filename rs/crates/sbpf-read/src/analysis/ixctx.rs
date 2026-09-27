@@ -30,6 +30,9 @@ pub struct IxCtx<'a> {
     pub tag: Option<(i64, u32)>,
     pub res: RefCell<HashMap<i64, Option<Rc<Resolver<'a>>>>>,
     pub ridom: RefCell<HashMap<i64, Rc<Vec<i32>>>>,
+    /// evaluatorsFor (audit.ts): the Anchor evaluation contexts of the instruction's functions
+    pub ev: RefCell<HashMap<i64, Option<Rc<super::anchor::ACtx<'a>>>>>,
+    pub ev_ready: std::cell::Cell<bool>,
 }
 
 impl IxCtx<'_> {
@@ -143,7 +146,6 @@ impl<'a> An<'a> {
         let roots = self.roots();
         let root_pcs: HashSet<i64> = roots.iter().copied().collect();
         let mut out: Vec<IxInfo<'a>> = Vec::new();
-        let mut next_id = 1u32;
         let lib_memo: RefCell<HashMap<i64, Vec<i64>>> = RefCell::new(HashMap::new());
         let lib_calls = |pc: i64| -> Vec<i64> {
             if let Some(l) = lib_memo.borrow().get(&pc) {
@@ -376,8 +378,10 @@ impl<'a> An<'a> {
                         .collect::<IndexSet<i64>>()
                 });
                 drop(facts);
+                let id = self.ctx_ids.get();
+                self.ctx_ids.set(id + 1);
                 let ctx = Rc::new(IxCtx {
-                    id: next_id,
+                    id,
                     handler: hpc,
                     parents,
                     grp: grp.cloned(),
@@ -385,8 +389,9 @@ impl<'a> An<'a> {
                     tag: grp.map(|g| g.tag),
                     res: RefCell::new(HashMap::new()),
                     ridom: RefCell::new(HashMap::new()),
+                    ev: RefCell::new(HashMap::new()),
+                    ev_ready: std::cell::Cell::new(false),
                 });
-                next_id += 1;
                 out.push(IxInfo {
                     name,
                     handler: hpc,

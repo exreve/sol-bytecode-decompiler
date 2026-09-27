@@ -2033,3 +2033,26 @@ pub fn known_families() -> Vec<KnownFamily> {
         })
         .collect()
 }
+
+/// knownIx: a well-known program's instruction by its tag (the data's first 1 / 4 bytes, little-endian): family,
+/// name, account roles.
+pub fn known_ix(
+    known: &str,
+    data: &[u8],
+) -> Option<(&'static str, &'static str, &'static [&'static str])> {
+    let f = family_of(known)?;
+    let ts = fam_tag_size(f) as usize;
+    if data.len() < ts {
+        return None;
+    }
+    let tag = if ts == 1 {
+        data[0] as i64
+    } else {
+        i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64
+    };
+    if tag < 0 {
+        return None;
+    }
+    let l = fam_ix(f, tag as u64)?;
+    Some((fam_name(Some(known), f), l.name, l.accounts))
+}

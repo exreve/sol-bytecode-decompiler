@@ -648,17 +648,30 @@ pub fn dump_stage8(
     res: &mut Vec<(&'static str, String)>,
 ) {
     let want = |s: &str| stages.iter().any(|x| x == s);
-    let wanted: Vec<&'static str> = ["facts", "flow"].into_iter().filter(|s| want(s)).collect();
+    let wanted: Vec<&'static str> = ["facts", "flow", "analysis"]
+        .into_iter()
+        .filter(|s| want(s))
+        .collect();
     if wanted.is_empty() {
         return;
     }
-    let hook = |an: &An| flow_lines(an);
+    let (wa, wf) = (want("analysis"), want("flow"));
+    // (the analysis first, as the TS single file runs it before the dump's flow walk)
+    let hook = |an: &An| {
+        let a = if wa {
+            an.analyze(|a, _| crate::stage8b::analysis_lines(an, a))
+        } else {
+            String::new()
+        };
+        let f = if wf { flow_lines(an) } else { String::new() };
+        format!("{a}\u{0}{f}")
+    };
     let r = match decompile_read_hook(
         bytes,
         idl,
         threads(),
         false,
-        if want("flow") { Some(&hook) } else { None },
+        if wa || wf { Some(&hook) } else { None },
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -673,7 +686,12 @@ pub fn dump_stage8(
         facts_lines(&r, &mut o);
         res.push(("facts", o));
     }
-    if want("flow") {
-        res.push(("flow", header("flow") + r.flow.as_deref().unwrap_or("")));
+    let fl = r.flow.as_deref().unwrap_or("\u{0}");
+    let (a, f) = fl.split_once('\u{0}').unwrap_or(("", ""));
+    if wf {
+        res.push(("flow", header("flow") + f));
+    }
+    if wa {
+        res.push(("analysis", header("analysis") + a));
     }
 }

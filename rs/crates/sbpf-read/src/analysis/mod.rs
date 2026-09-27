@@ -5,11 +5,17 @@
 
 pub mod acct;
 pub mod anchor;
+pub mod audit;
+pub mod consistency;
 pub mod dispatch;
 pub mod facts;
 pub mod flow;
 pub mod ixctx;
+pub mod libcpi;
 pub mod paths;
+pub mod phase2;
+pub mod phase3;
+pub mod report;
 pub mod sources;
 
 use regex::Regex;
@@ -195,6 +201,40 @@ pub fn big_of(s: &str) -> Option<u64> {
     }
 }
 
+/// String.prototype.localeCompare (ICU root collation) for the analysis' names: ASCII by the root order (spaces,
+/// punctuation, symbols, digits, letters case-insensitively), then lowercase before uppercase; other characters after
+/// ASCII letters by code point.
+pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    const ORD: &str = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789aAbBcCdDeEfFgGhHiIjJkKlLmMnNoOpPqQrRsStTuUvVwWxXyYzZ";
+    let prim = |c: char| -> u32 {
+        if c.is_ascii_alphabetic() {
+            return 1000 + (c.to_ascii_lowercase() as u32 - 'a' as u32);
+        }
+        match ORD.find(c) {
+            Some(i) if c.is_ascii() => i as u32,
+            _ => 2000 + c as u32,
+        }
+    };
+    let (x, y): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    for i in 0..x.len().min(y.len()) {
+        let o = prim(x[i]).cmp(&prim(y[i]));
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+    }
+    let o = x.len().cmp(&y.len());
+    if o != std::cmp::Ordering::Equal {
+        return o;
+    }
+    for i in 0..x.len() {
+        let o = x[i].is_ascii_uppercase().cmp(&y[i].is_ascii_uppercase());
+        if o != std::cmp::Ordering::Equal {
+            return o;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 /// f64 map key (JS Map semantics for numbers: -0 is 0)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FK(pub u64);
@@ -245,6 +285,16 @@ pub struct An<'a> {
     pub paths: paths::PathMemo,
     /// the printer of a function's expressions (facts' expr: names as printed)
     pub expr: Box<dyn Fn(i64, sbpf_ir::E) -> Option<String> + 'a>,
+    /// recognized library functions (Result.libPcs)
+    pub lib_pcs: std::collections::HashSet<i64>,
+    /// the program's address (Result.programId)
+    pub program_id: Option<String>,
+    /// (instruction context ids: every context object distinct, as the TS's memo keys)
+    pub ctx_ids: std::cell::Cell<u32>,
+    /// libcpi.ts memo
+    pub lib_cpi: RefCell<HashMap<i64, Option<libcpi::LibCpi>>>,
+    /// phase2.ts lamportsGetter memo
+    pub getters: RefCell<HashMap<i64, bool>>,
 }
 
 impl<'a> An<'a> {
@@ -283,6 +333,11 @@ impl<'a> An<'a> {
             memo: Default::default(),
             paths: Default::default(),
             expr,
+            lib_pcs: Default::default(),
+            program_id: None,
+            ctx_ids: std::cell::Cell::new(1),
+            lib_cpi: Default::default(),
+            getters: Default::default(),
         }
     }
     pub fn fo(&self, pc: i64) -> Option<&FnRef<'a>> {
@@ -305,4 +360,28 @@ impl<'a> An<'a> {
             .get(&pc)
             .map_or(String::new(), |f| f.name.clone())
     }
+}
+
+/// String.prototype.slice(start, end) by UTF-16 code units (a surrogate pair cut in half becomes U+FFFD)
+pub fn js_slice(s: &str, start: usize, end: Option<usize>) -> String {
+    let mut o = String::new();
+    let mut u = 0usize;
+    let end = end.unwrap_or(usize::MAX);
+    for c in s.chars() {
+        let n = c.len_utf16();
+        let (a, b) = (u, u + n);
+        u = b;
+        if b <= start {
+            continue;
+        }
+        if a >= end {
+            break;
+        }
+        if a >= start && b <= end {
+            o.push(c);
+        } else {
+            o.push('\u{FFFD}');
+        }
+    }
+    o
 }
