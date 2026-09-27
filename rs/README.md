@@ -9,8 +9,9 @@ Plan, parity rules and pitfalls: [`docs/RUST_PORT.md`](../docs/RUST_PORT.md).
 | crate | ports | contents |
 |---|---|---|
 | `sbpf-elf` | `src/elf.ts` | ELF loader, relocations, regions, `Image` |
-| `sbpf-ir` | `src/ir.ts` (types) | `Expr`, `Stmt`, `Term`, `CallTarget`, constructors |
+| `sbpf-ir` | `src/ir.ts` (types) | arena IR: `Ir` (16-byte `Node`s, `E` ids, `L` lists), `Stmt`, `Term`, `CallTarget` |
 | `sbpf-program` | `src/program.ts`, `src/murmur.ts`, `src/syscalls.ts` | decode, lifter, function discovery, CFG (full and lazy) |
+| `sbpf-dataflow` | `src/dataflow.ts`, `src/stack.ts`, `src/stackargs.ts` | signatures (lazy block materialization), variable recovery, stack slot promotion, stack arguments |
 | `sbpf-dump` | `scripts/dump.ts`, `scripts/stagetime.ts` | stage dump binary, stage timer |
 
 Dependencies are kept minimal: `indexmap` (JS `Map`/`Set` insertion order) and `serde_json` (string
@@ -31,8 +32,8 @@ node scripts/parity.ts samples/token.so compat/bin                       # given
 node scripts/parity.ts --fuzz 1000 --seed 7 samples compat/bin           # mutants (all versions, corrupt headers)
 ```
 
-Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift] out_dir` (the IDL is accepted
-for the later stages; the early stages do not read it).
+Both dumpers take `prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir`
+(the IDL is accepted for the later stages; the stages so far do not read it).
 
 ## Stage dump format (format 1)
 
@@ -124,6 +125,43 @@ Every node is an object whose first key is `"k"`; the other keys follow the TS t
 | Stmt `trap` | `k, msg, pc` |
 | Term `jmp` / `br` | `k, to` / `k, c, t, f` |
 | Term `ret` / `trap` / `tail` | `k, e` (`null` when absent) / `k, msg` / `k, e:null` |
+
+### `dataflow.jsonl` — inferSignatures (stage 2)
+
+On a fresh `loadProgram(bytes, {lazyBlocks: true})` (the decompiler's path), after `inferSignatures`
+(noreturn fixed point, `materializeBlocks`, parameters/returns fixed point):
+
+```
+{"t":"func","pc","noreturn","returns","nparams","extraIn":[...],"leaders":[blockAt keys],"blocks":<n>}
+{"t":"block","id","start","end","stmts":<count>,"term":<Term>,"succs":[...],"preds":[...]}   (after each func)
+```
+
+The block statements are the lifted statements of `start..end` (cut after a noreturn call), see
+`lift.jsonl`; their variable form is in `vars.jsonl`.
+
+### `vars.jsonl` — recoverVars (stage 2)
+
+`recoverVars` of every function in `p.funcs` order, then per function:
+
+```
+{"t":"func","pc","vars":[[reg,param,undef],...]}          (VarInfo by id)
+{"t":"block","id","start","end","stmts":[<Stmt>...],"term":<Term>,"succs":[...],"preds":[...]}
+```
+
+### `stack.jsonl` — promoteStack (stage 2)
+
+`promoteStack` of every function, run on `recoverVars`' output (the pipeline runs it after
+`optimizeFunc`; here it is a harness of the same code on unoptimized IR):
+`{"t":"func","pc","promoted":<bool>}`, and when true
+`{"t":"slots","slots":[[off,size,var],...],"vars":[...]}` plus the function's block lines (as in
+`vars.jsonl`; `off` is a JS number).
+
+### `stackargs.jsonl` — rewriteStackArgs (stage 2)
+
+`rewriteStackArgs` over all functions after the `stack` stage: `{"t":"nstack","pc","n"}` (Map order),
+then per function `{"t":"func","pc"[,"stackArgs"][,"argAreaElided"][,"vars"],"changed":<bool>}`
+(`vars` for the functions given stack parameters) followed by its block lines when its IR differs from
+the `stack` stage.
 
 ### Later stages (planned)
 

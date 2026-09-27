@@ -55,9 +55,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbpf-dataflow"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "sbpf-ir",
+ "sbpf-program",
+]
+
+[[package]]
 name = "sbpf-dump"
 version = "0.1.0"
 dependencies = [
+ "sbpf-dataflow",
  "sbpf-elf",
  "sbpf-ir",
  "sbpf-program",

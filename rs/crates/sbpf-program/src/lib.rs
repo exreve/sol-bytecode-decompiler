@@ -69,6 +69,40 @@ pub struct Func {
     pub stack_args: Option<u32>,
     /// lazyBlocks: leaders and direct call targets until the blocks are materialized
     pub pending: Option<Pending>,
+    // ---- from variable recovery on (VarFunc) ----
+    /// the function's own arena: once set, the blocks' expressions live here (not in `Program::ir`)
+    pub ir: Option<Ir>,
+    pub vars: Vec<VarInfo>,
+    /// stack slots turned into variables
+    pub promoted: Option<Vec<Promoted>>,
+    /// stores to the outgoing stack-argument area were turned into call arguments
+    pub arg_area_elided: Option<bool>,
+    /// indirect calls: argument registers holding call-clobbered garbage, by (block id, stmt index)
+    pub ind_clobber: HashMap<(u32, u32), i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VarInfo {
+    pub id: u32,
+    pub reg: i32,
+    /// 1..5 for r1..r5 params, 10 for fp, 0/6..9 implicit inputs, -1 local
+    pub param: i32,
+    /// includes a call-clobber definition (value unknowable)
+    pub undef: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Promoted {
+    pub off: f64,
+    pub size: u8,
+    pub v: u32,
+}
+
+impl Func {
+    /// The arena holding the blocks' expressions.
+    pub fn ir<'a>(&'a self, p: &'a Program) -> &'a Ir {
+        self.ir.as_ref().unwrap_or(&p.ir)
+    }
 }
 
 pub struct LazyState {
@@ -959,6 +993,11 @@ fn new_func(p: &Names, entry: i64) -> Func {
         is_entry: entry == p.elf.entry_pc,
         stack_args: None,
         pending: None,
+        ir: None,
+        vars: vec![],
+        promoted: None,
+        arg_area_elided: None,
+        ind_clobber: HashMap::new(),
     }
 }
 
@@ -1033,4 +1072,127 @@ pub fn pending_calls(f: &Func) -> &[i64] {
 
 pub fn fn_addr(p: &Program, pc: i64) -> u64 {
     p.text_vaddr.wrapping_add((pc * 8) as u64)
+}
+
+/// The lifted instruction at `pc`, if it was lifted (a walked instruction start).
+fn memo_at<'a>(lz: &'a LazyState, pc: i64) -> Option<&'a Lifted> {
+    let n = lz.starts.len() as i64;
+    if pc >= 0 && pc < n && lz.starts[pc as usize] != 0 {
+        lz.lifter.memo[pc as usize].as_ref()
+    } else {
+        None
+    }
+}
+
+/// The program was loaded with lazyBlocks and its blocks are not formed yet.
+pub fn has_pending_blocks(p: &Program) -> bool {
+    p.lazy.is_some()
+}
+
+/// reachesReturn on the full CFG (program.ts reachesReturnPending): from the entry block, is a `ret`
+/// reached through blocks without a call to a noreturn callee?
+pub fn reaches_return_pending(p: &Program, f: &Func, noret: &dyn Fn(&Stmt) -> bool) -> bool {
+    let lz = p.lazy.as_ref().expect("lazy");
+    let pd = f.pending.as_ref().expect("pending");
+    let mut seen: HashSet<i64> = HashSet::new();
+    seen.insert(f.pc);
+    let mut st = vec![f.pc];
+    while let Some(mut pc) = st.pop() {
+        let mut push = |x: i64, st: &mut Vec<i64>| {
+            if seen.insert(x) {
+                st.push(x);
+            }
+        };
+        loop {
+            let Some(l) = memo_at(lz, pc) else { break };
+            if l.stmt.as_ref().is_some_and(noret) {
+                break;
+            }
+            match &l.flow {
+                Flow::Term(t) => {
+                    match t {
+                        Term::Ret { .. } => return true,
+                        Term::Jmp { to } => push(*to, &mut st),
+                        Term::Br { t, f, .. } => {
+                            push(*t, &mut st);
+                            push(*f, &mut st);
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+                Flow::Next(nx) => {
+                    if pd.leaders.contains(nx) {
+                        push(*nx, &mut st);
+                        break;
+                    }
+                    pc = *nx;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// program.ts materializeBlocks: the full CFG's blocks that remain after cutting blocks after their
+/// first noreturn call and pruning unreachable blocks. Returns (blocks, blockAt); the caller stores
+/// them in the function and drops its pending state.
+pub fn materialize_blocks(
+    p: &Program,
+    f: &Func,
+    noret: &dyn Fn(&Stmt) -> bool,
+) -> (Vec<Block>, IndexMap<i64, usize>) {
+    let lz = p.lazy.as_ref().expect("lazy");
+    let pd = f.pending.as_ref().expect("pending");
+    let is_leader = |x: i64| pd.leaders.contains(&x);
+    let mut formed: HashMap<i64, Option<Block>> = HashMap::new();
+    let mut st = vec![f.pc];
+    formed.insert(f.pc, None);
+    while let Some(l) = st.pop() {
+        let mut b = form_block(&lz.lifter, &lz.starts, l, usize::MAX, &is_leader);
+        let i = b.stmts.iter().position(noret);
+        if let Some(i) = i {
+            if !(i == b.stmts.len() - 1 && matches!(b.term, Term::Trap { .. })) {
+                b.stmts.truncate(i + 1);
+                b.term = Term::Trap { msg: "".into() };
+                formed.insert(l, Some(b));
+                continue;
+            }
+        }
+        let next: Vec<i64> = match &b.term {
+            Term::Jmp { to } => vec![*to],
+            Term::Br { t, f, .. } => vec![*t, *f],
+            _ => vec![],
+        };
+        formed.insert(l, Some(b));
+        for x in next {
+            if let std::collections::hash_map::Entry::Vacant(e) = formed.entry(x) {
+                e.insert(None);
+                st.push(x);
+            }
+        }
+    }
+    let mut blocks: Vec<Block> = vec![];
+    let mut block_at = IndexMap::new();
+    for l in &pd.sorted {
+        if let Some(Some(b)) = formed.get_mut(l) {
+            let mut b = std::mem::replace(
+                b,
+                Block {
+                    id: 0,
+                    start: 0,
+                    end: 0,
+                    stmts: vec![],
+                    term: Term::Tail,
+                    succs: vec![],
+                    preds: vec![],
+                },
+            );
+            b.id = blocks.len();
+            block_at.insert(*l, b.id);
+            blocks.push(b);
+        }
+    }
+    link_blocks(&mut blocks, &block_at);
+    (blocks, block_at)
 }

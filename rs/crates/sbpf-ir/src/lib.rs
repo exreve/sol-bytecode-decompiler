@@ -160,6 +160,25 @@ pub struct Ir {
     names: UnsafeCell<Vec<Rc<str>>>,
 }
 
+impl Clone for Ir {
+    fn clone(&self) -> Self {
+        // SAFETY: see `Ir::len`
+        unsafe {
+            Ir {
+                nodes: UnsafeCell::new((*self.nodes.get()).clone()),
+                targets: UnsafeCell::new((*self.targets.get()).clone()),
+                names: UnsafeCell::new((*self.names.get()).clone()),
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Ir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ir({} nodes)", self.len())
+    }
+}
+
 impl Ir {
     pub fn new() -> Self {
         Self::default()

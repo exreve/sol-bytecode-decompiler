@@ -1,9 +1,10 @@
 //! Stage dumps, byte-identical to `scripts/dump.ts` (encoding: rs/README.md), and a stage timer.
 //!
-//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift] out_dir
+//!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir
 //!   sbpf-dump --time [--iters N] prog.so...
 
 mod enc;
+mod stage2;
 
 use enc::*;
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
@@ -12,7 +13,16 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 4] = ["elf", "insns", "cfg", "lift"];
+const STAGES: [&str; 8] = [
+    "elf",
+    "insns",
+    "cfg",
+    "lift",
+    "dataflow",
+    "vars",
+    "stack",
+    "stackargs",
+];
 
 fn dump_elf(elf: &Elf) -> String {
     let mut o = header("elf");
@@ -212,15 +222,17 @@ fn dump_all(bytes: &[u8], stages: &[String]) -> Vec<(&'static str, String)> {
     if want("lift") {
         res.push(("lift", dump_lift(&p)));
     }
+    drop(p);
+    stage2::dump_stage2(bytes, stages, &mut res);
     res
 }
 
 /// Stage timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts.
 fn time(files: &[String], iters: usize) {
-    println!("file\telf\tdecode\tdiscover_lazy\tload_lazy\tload_full\tlift_all");
+    println!("file\telf\tdecode\tdiscover_lazy\tload_lazy\tload_full\tlift_all\tsignatures\trecover\tpromote\tstackargs");
     for f in files {
         let bytes = std::fs::read(f).expect("read");
-        let mut best = [f64::MAX; 6];
+        let mut best = [f64::MAX; 10];
         for _ in 0..iters {
             let t0 = Instant::now();
             let elf = parse_elf(&bytes).unwrap();
@@ -230,7 +242,7 @@ fn time(files: &[String], iters: usize) {
             discover(&mut p, true);
             let t3 = Instant::now();
             let tl = Instant::now();
-            let q = load_program(&bytes, true).unwrap();
+            let mut q = load_program(&bytes, true).unwrap();
             let load_lazy = tl.elapsed();
             let tf = Instant::now();
             let full = load_program(&bytes, false).unwrap();
@@ -255,6 +267,22 @@ fn time(files: &[String], iters: usize) {
             }
             std::hint::black_box(cnt);
             let lift_all = ta.elapsed();
+            drop(cx);
+            let ts = Instant::now();
+            sbpf_dataflow::infer_signatures(&mut q);
+            let sig = ts.elapsed();
+            let ts = Instant::now();
+            sbpf_dataflow::recover_all(&mut q);
+            let rec = ts.elapsed();
+            let ts = Instant::now();
+            for f in q.funcs.values_mut() {
+                sbpf_dataflow::stack::promote_stack(f);
+            }
+            let prom = ts.elapsed();
+            let ts = Instant::now();
+            let built: Vec<usize> = (0..q.funcs.len()).collect();
+            sbpf_dataflow::stackargs::rewrite_stack_args(&mut q.funcs, &built);
+            let sa = ts.elapsed();
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
             let v = [
                 ms(t1 - t0),
@@ -263,8 +291,12 @@ fn time(files: &[String], iters: usize) {
                 ms(load_lazy),
                 ms(load_full),
                 ms(lift_all),
+                ms(sig),
+                ms(rec),
+                ms(prom),
+                ms(sa),
             ];
-            for k in 0..6 {
+            for k in 0..10 {
                 best[k] = best[k].min(v[k]);
             }
         }
@@ -310,7 +342,7 @@ fn main() {
         i += 1;
     }
     if pos.len() != 2 {
-        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift] out_dir");
+        eprintln!("usage: sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir");
         std::process::exit(2);
     }
     let bytes = std::fs::read(&pos[0]).expect("read input");
