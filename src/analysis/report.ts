@@ -67,14 +67,15 @@
 //   custom (IDL error), raw, rent_exempt, count, token_mint, token_owner, …; op kinds: see facts.ts OpKind.
 import type { FuncOut, Result } from '../decompile.ts'
 import type { FnFacts, IxHint, Op, OpKind } from './facts.ts'
-import { refOf, cpiKinds } from './facts.ts'
+import { refOf, cpiKinds, helperRoles } from './facts.ts'
 import { knownFamilies } from '../cpi.ts'
 import { dominance, phase2, type TrustRow, type Relation, type AuthorityRow, type Finding, type StoredKeys } from './phase2.ts'
-import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal, type EvCtx } from './flow.ts'
+import { addExitWrites, indirectTargets, splitDispatch, type DispatchGroups, accountResolver, seedFrom, calleeOf, cfgOf, decisionBlock, defsOf, compareAccounts, callOf, objField, type DispatchGroup, type AcctRef, type AcctResolver, type AcctVal, type EvCtx } from './flow.ts'
 import type { Expr, Stmt } from '../ir.ts'
+import { walkExpr } from '../ir.ts'
 import type { PathInfo, Chain, ArithSite, DivSite, Proof, StateField } from './phase3.ts'
 import type { AuditFacts } from './audit.ts'
-import { libCpiOps } from './libcpi.ts'
+import { libCpiOps, ctxAccounts } from './libcpi.ts'
 import { evaluatorsFor } from './audit.ts'
 type CpiAcct = NonNullable<OpOut['cpi']>['accounts'][number]
 import { irOf, stmtAt } from './paths.ts'
@@ -97,6 +98,7 @@ export interface CheckOut {
 	pdaBufs?: number[]                    // (internal, native) the PDA derivations the check compares (their calls' pointer arguments' frame offsets)
 	fnPc: number; c?: Expr; passPc?: number; main: boolean // (internal: the dominance analysis, phase2.ts)
 	keyCmp?: boolean                      // (internal, Anchor: a 32-byte comparison of account keys only, no data, no constant)
+	cross?: [string, string]              // (internal, Anchor: two accounts whose data the condition compares, e.g. a.seqno == b.seqno)
 }
 export interface OpOut {
 	at: Loc; kinds: OpKind[]; text: string; main: boolean; target?: string; how?: string; value?: string; cpi?: Op['cpi']; pda?: Op['pda']
@@ -302,7 +304,8 @@ function analyze0(r: Result): Analysis {
 			// (each account's call: the last call of the checked callee before the check naming the account)
 			const calls = new Map<number, string>()
 			for (const c of ff.checks) {
-				if (!c.named || c.before === undefined || !c.c) continue
+				// (not a PDA check's derivation: its buffer is the derived address, not the account's data)
+				if (!c.named || c.before === undefined || !c.c || c.kinds.includes('pda')) continue
 				let b = decisionBlock(g, c.c, c.pc, c.passPc)
 				for (let k = 0; b !== undefined && k < 6; k++) {
 					const ss = blocks[b].stmts
@@ -457,7 +460,7 @@ function analyze0(r: Result): Analysis {
 				// per account: the named one gets every kind; accounts read by the condition get their field's kind
 				// (applied once the statuses are final: see the dominance analysis below)
 				if (c.named && cn(c.named)) for (const k of kinds) pend.push([cn(c.named)!, k, ci, c.via && !c.kinds.includes(k) ? c.via.fn : undefined])
-				for (const x of irRefs) { const k = fk(x.field); if (k) pend.push([idxName(x.index), k, ci, undefined]) }
+				for (const x of irRefs) { const k = fk(x.field) ?? (x.field === 'data[0..1]' && kinds.includes('discriminator') ? 'discriminator' : undefined); if (k) pend.push([idxName(x.index), k, ci, undefined]) }
 				for (const x of c.refs) {
 					const ca = cn(x.acct)
 					if (!ca || ca === cn(c.named)) continue
@@ -498,6 +501,48 @@ function analyze0(r: Result): Analysis {
 		const ctx: IxCtx = { handler: h.pc, parents, allowed: grp?.allowed, restricted: grp && new Set(fns.filter(f => grp.dispatchers.includes(f.name)).map(f => f.pc)), tag: grp?.tag }
 		// (CPIs of Anchor helpers the library database does not name: libcpi.ts)
 		ops.push(...libCpiOps(r, ctx, fns, keep, fn => !!main.get(fn)))
+		// (Anchor: a condition comparing the data of two accounts (their deserialized objects / data), e.g.
+		// multisig.owner_set_seqno == transaction.owner_set_seqno: the two are meant to belong together)
+		if (r.anchor) for (const c of checks) {
+			if (!c.c || c.cross) continue
+			const fo = byPc.get(c.fnPc), g = fo && cfgOf(fo), b = g && decisionBlock(g, c.c, c.at.pc, c.passPc)
+			if (b === undefined || !fo) continue
+			const E = evaluatorsFor(r, ctx)(c.fnPc), p = b << 16 | fo.f.blocks[b].stmts.length
+			if (!E) continue
+			const D = defsOf(fo.f, calleeOf(r))
+			const side = (e: Expr): string | undefined => {
+				for (let k = 0; k < 4 && e.k === 'var' && D.defs.has(e.id); k++) e = D.defs.get(e.id)!
+				while (e.k === 'ext') e = e.a
+				if (e.k !== 'load') return undefined
+				const v = E.ev(e.addr, p)
+				return v && (v.k === 'obj' || v.k === 'data') && !v.guess && !v.vo ? v.acct : undefined
+			}
+			let pair: [string, string] | undefined
+			walkExpr(c.c, x => { if (!pair && x.k === 'cmp') { const a = side(x.a), bb = side(x.b); if (a && bb && a !== bb) pair = [a, bb] } })
+			if (pair) c.cross = pair
+		}
+		// (Anchor: a key compared with the elements of a Vec field of a boxed account (a loop over e.g. multisig.owners): a
+		// membership check, the key's account a member of the stored list)
+		if (r.anchor) for (const c of checks) {
+			if (c.sides || !c.c || !c.kinds.includes('key') || c.kinds.includes('member')) continue
+			const fo = byPc.get(c.fnPc), g = fo && cfgOf(fo), b = g && decisionBlock(g, c.c, c.at.pc, c.passPc)
+			if (b === undefined || !fo) continue
+			let x = c.c
+			while (x.k === 'lnot' || (x.k === 'cmp' && x.b.k === 'const' && x.a.k !== 'const')) x = x.k === 'lnot' ? x.a : x.a
+			while (x.k === 'ext') x = x.a
+			const D = defsOf(fo.f, calleeOf(r))
+			if (x.k === 'var' && D.defs.get(x.id)?.k === 'call') x = D.defs.get(x.id)!
+			if (x.k !== 'call' || x.args.length < 3 || x.args[2].k !== 'const' || x.args[2].v !== 0x20n) continue
+			const E = evaluatorsFor(r, ctx)(c.fnPc), p = b << 16 | fo.f.blocks[b].stmts.length
+			const vs = E ? [E.ev(x.args[0], p), E.ev(x.args[1], p)] : []
+			const el = vs.find(v => v?.k === 'objp' && v.vo), key = vs.find(v => v?.k === 'keyp' && v.off === 0 && !v.guess)
+			if (!el || !key || el.k !== 'objp' || key.k !== 'keyp' || el.acct === key.acct) continue
+			const fl = objField(r, el.ty, el.fo ?? -1) ?? `data@${el.fo}`
+			c.kinds = [...c.kinds, 'member']
+			c.sides = [`${el.acct}.${fl}[]`, `${key.acct}.key`]
+			if (!c.account || c.account.endsWith('?')) c.account = el.acct
+			pend.push([key.acct, 'member', checks.indexOf(c), undefined])
+		}
 		// (Anchor: a CPI a function the handler calls makes (e.g. a library helper given a CpiContext): an account the printed
 		// code does not name, by where its key comes from up the call path (the expression at the call, else the variable the
 		// text names, e.g. a key pointer given to an instruction builder))
@@ -505,6 +550,21 @@ function analyze0(r: Result): Analysis {
 			let E: ((fn: number) => EvCtx | undefined) | undefined
 			for (const o of ops) {
 				const src = o.cpi?.src, fo = o.fnPc !== undefined ? byPc.get(o.fnPc) : undefined
+				// (a library helper's CpiContext (anchor_spl token / token_interface / token_2022, system_program): its accounts
+				// by their key words, the helper possibly called by a function of the program given the accounts)
+				const roles = !src && fo && o.at.pc !== undefined && o.cpi?.family && o.cpi.ix && /\[lib: /.test(o.text) ? helperRoles(o.cpi.family, o.cpi.ix) : undefined
+				if (roles && o.cpi!.accounts.length <= roles.length && roles.some((_, i) => !known.has(o.cpi!.accounts[i]?.text ?? ''))) {
+					const cx = ctxAccounts(r, ctx, fo!.pc, o.at.pc!, roles), acc = cx?.accounts
+					if (acc?.some(x => x !== undefined && known.has(x))) {
+						const prev = o.cpi!.accounts
+						const accounts = roles.map((role, i) => ({ ...(prev[i] ?? { s: /^(authority|from|current_authority)$/.test(role) ? 1 : undefined }), role, text: known.has(prev[i]?.text ?? '') ? prev[i].text : acc[i] !== undefined && known.has(acc[i]!) ? acc[i]! : prev[i]?.text ?? '?' }))
+						// (the signer seeds, when the printed context did not show them: a helper's parameters, or a constant count)
+						const seeds = o.cpi!.seeds ?? cx!.seeds ?? undefined
+						o.cpi = { ...o.cpi!, accounts, ...(seeds ? { seeds } : {}) }
+						if (seeds && !o.kinds.includes('PDA_SIGNATURE') && !/^p\d+\[/.test(seeds)) o.kinds = [...o.kinds, 'PDA_SIGNATURE']
+						o.text = o.text.replace(/^(CPI \S+)(?: \{[^}]*\})?/, (_, a) => `${a} { ${accounts.map(x => `${x.role}: ${x.text}`).join(', ')} }`)
+					}
+				}
 				if (!src || !fo || o.at.pc === undefined) continue
 				// (the facts' CPI is shared by the instructions reaching the function: renamed in a copy)
 				let accs: CpiAcct[] | undefined
@@ -521,6 +581,13 @@ function analyze0(r: Result): Analysis {
 				})
 				if (accs) o.cpi = { ...o.cpi!, accounts: accs }
 			}
+		}
+		// (a write at one statement the text names by a temporary (`b.lamports`) and the IR by the account it reaches (a helper
+		// given the account): the named one)
+		for (let i = ops.length - 1; i >= 0; i--) {
+			const o = ops[i], t = o.target?.split('.')
+			if (!t || known.has(t[0]) || o.at.pc === undefined) continue
+			if (ops.some(x => x !== o && x.at.pc === o.at.pc && x.at.fn === o.at.fn && x.target && known.has(x.target.split('.')[0]) && x.target.split('.').slice(1).join('.') === t.slice(1).join('.'))) ops.splice(i, 1)
 		}
 		dominance(r, checks, ops, ctx)
 		for (const [acct, k, ci, via] of pend) note(acct, k, { status: checks[ci].status, at: checks[ci].at, via })

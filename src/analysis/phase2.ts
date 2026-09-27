@@ -28,7 +28,7 @@ import { cpiKinds } from './facts.ts'
 import { b58, KNOWN_KEYS } from '../semantics.ts'
 
 export interface TrustRow { value: string; trust: 'caller-controlled' | 'validated' | 'partially-validated' | 'runtime'; evidence: string[] }
-export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
+export interface Relation { a: string; b: string; kind: 'key_eq' | 'field_eq' | 'has_one' | 'address' | 'compare' | 'token' | 'member'; status: 'found' | 'partial'; at: Loc; negated?: boolean } // token: a token account's mint / owner (token::mint / token::authority)
 /** an account whose data is used: which of its stored keys are compared with which provided accounts (see storedKeys) */
 export interface StoredKeys { account: string; type?: string; compared: string[]; referencedBy: string[]; never: string[]; gaps: string[] }
 export interface Enabler { kind: 'signer' | 'stored' | 'pda' | 'none'; what: string; status?: string; writtenBy?: string[] }
@@ -356,6 +356,8 @@ export function phase2(a: Analysis, r: Result) {
 				for (const t of cands) rel.push({ a: fields ? `${c.account}.${t.name}` : hasOneField(c.account, t.name, c.cond, a), b: `${t.name}.key`, kind: 'has_one', status: c.status, at: c.at })
 			}
 			if (c.kinds.includes('address') && c.account) rel.push({ a: `${c.account}.key`, b: '(constant address)', kind: 'address', status: c.status, at: c.at })
+			// (a key among the elements of a stored list: b ∈ a)
+			if (c.kinds.includes('member') && c.sides) { rel.push({ a: c.sides[0], b: c.sides[1], kind: 'member', status: c.status, at: c.at }); continue }
 			const sides = c.sides ?? eqSides(c.cond)
 			if (!sides) continue
 			const norm = (t: string) => {
@@ -417,6 +419,17 @@ export function phase2(a: Analysis, r: Result) {
 	a.authorityFields = [...authFields].map(([field, writtenBy]) => ({ field, writtenBy }))
 	for (const ix of a.ixs) {
 		findings.push(...rules(ix, a))
+	}
+	// (native: one finding at a place inside the dispatcher itself found by several of its arms (instructions whose parts
+	// of the dispatcher are not told apart there): the first instruction's only)
+	const armOf = new Map(a.ixs.map(ix => [ix.name, /matched in (\w+)/.exec(ix.dispatch ?? '')?.[1]]))
+	const seen = new Set<string>()
+	for (let i = 0; i < findings.length; i++) {
+		const f = findings[i], d = armOf.get(f.ix)
+		if (!d || !f.path.length || !f.path.every(p => p.startsWith(`${d}:`))) continue
+		const k = `${f.rule}|${f.path.join(',')}|${d}`
+		if (seen.has(k)) findings.splice(i--, 1)
+		else seen.add(k)
 	}
 	findings.push(...incidentFindings(a, r, findings))
 	a.fundMovers = fundMovers(a, r)
@@ -551,8 +564,9 @@ const wOf = (o: OpOut) => Math.max(0, ...o.kinds.map(k => W[k] ?? 0))
 const L = (at: Loc) => `${at.fn}:${at.line}`
 
 /** value movements / authority changes a signer enables with no stored authority related to it (and no PDA signature);
- * none when a has_one check is not attributed to an account (it may bind the signer) */
-const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => ix.checks.some(c => c.kinds.includes('has_one') && !c.account && !c.sides && c.status !== 'not_found') ? [] : (ix.authority ?? []).flatMap(row => {
+ * none when a has_one check is not attributed to an account (it may bind the signer), nor (Anchor) a seeds check (the
+ * seeds may include the signer's key), nor a key comparison raising an error of the program's */
+const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] => ix.checks.some(c => (c.kinds.includes('has_one') || (ix.kind === 'anchor' && c.kinds.includes('pda')) || (c.kinds.includes('key') && c.kinds.includes('custom'))) && !c.account && !c.sides && c.status !== 'not_found') ? [] : (ix.authority ?? []).flatMap(row => {
 	const o = ix.ops[row.op]
 	const hasSigner = row.enabledBy.some(e => e.kind === 'signer'), stored = row.enabledBy.some(e => e.kind === 'stored' || e.kind === 'pda')
 	// (a signer checked against a constant address: a known admin, related to no stored field by design)
@@ -560,6 +574,9 @@ const signerUnrelated = (ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] =>
 	// (a signer whose key a check compares on every path (e.g. with a stored creator copied out of the account's data, the
 	// relation's other side not resolved): bound to something)
 	if (row.enabledBy.some(e => e.kind === 'signer' && ix.accounts.find(x => x.name === e.what)?.constraints.key?.status === 'found')) return []
+	// (or a check of the program's own on it (a constraint raising a custom error, e.g. `constraint = cfg.admin == admin.key()
+	// @ Unauthorized` with its sides not resolved))
+	if (row.enabledBy.some(e => e.kind === 'signer' && ix.checks.some(c => c.account === e.what && c.kinds.includes('custom') && c.status === 'found'))) return []
 	// (Anchor's close constraint on an account bound by has_one: the rent goes to the target its stored data names, e.g. a
 	// permissionless trade closing the maker's escrow to the maker)
 	const closed = o.anchorClose && o.target ? o.target.split('.')[0] + '.' : undefined
@@ -637,7 +654,7 @@ const RULES: Rule[] = [
 			if (signers) return []
 			// (the program signing for the move authorizes nobody in particular: low)
 			// (Anchor's close constraint sends the lamports to its target: a cleanup anyone may run, unless the target is the caller's)
-			return ix.ops.filter(o => isValueOrAuth(o) && !runtimeAuthorized(o) && !initMechanics(ix, o) && !o.anchorClose).slice(0, 3).map(o => {
+			return ix.ops.filter(o => isValueOrAuth(o) && !runtimeAuthorized(o) && !initMechanics(ix, o) && !o.anchorClose && !boundCrank(ix, o)).slice(0, 3).map(o => {
 				const pda = !!o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')
 				return { accounts: [...opAccounts(o)], path: [L(o.at)], evidence: [o.text.slice(0, 140), ...(pda ? ['the program signs it (PDA); no caller signature is required'] : [])], confidence: pda ? 'low' as const : 'medium' as const, weight: wOf(o) }
 			})
@@ -646,8 +663,8 @@ const RULES: Rule[] = [
 	{
 		id: 'signer-not-related-to-authority', title: 'Value movement or authority change with a signer but no relation between the signer key and a stored authority field',
 		run: (ix, a) => {
-			const out = signerUnrelated(ix)
-			if (out.length) return out
+			const out = [...signerUnrelated(ix), ...memberUnsigned(ix), ...crossUnrelated(ix)]
+			if (out.length) return out.slice(0, 3)
 			// (Anchor's has_one convention: an authority field another instruction stores, named like a signer of this one, with
 			// no relation between the two here; e.g. a PDA-signed outflow from a per-user account whose owner is not checked)
 			const signers = new Set(ix.accounts.filter(x => x.constraints.signer && x.constraints.signer.status !== 'not_found').map(x => x.name))
@@ -686,7 +703,7 @@ const RULES: Rule[] = [
 	},
 	{
 		id: 'token-mint-unrelated', title: 'Token transfer (unchecked Transfer) whose destination mint is not related to the source / state mint',
-		run: ix => ix.ops.filter(o => o.kinds.includes('TOKEN_TRANSFER') && o.cpi?.ix === 'Transfer').flatMap(o => {
+		run: ix => [...ix.ops.filter(o => o.kinds.includes('TOKEN_TRANSFER') && o.cpi?.ix === 'Transfer').flatMap(o => {
 			const dest = o.cpi!.accounts.find(x => x.role === 'destination')
 			const d = dest && /^\*?([A-Za-z_]\w*)/.exec(dest.text)?.[1]
 			if (!d || !ix.accounts.some(x => x.name === d)) return []
@@ -695,7 +712,7 @@ const RULES: Rule[] = [
 			const pda = !!row?.constraints.pda && row.constraints.pda.status !== 'not_found'
 			const related = row && (row.constraints.token_mint || row.constraints.associated || pda) || (ix.relations ?? []).some(x => (x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`)) && /mint/.test(x.a + x.b))
 			return related ? [] : [{ accounts: [d], path: [L(o.at)], evidence: [o.text.slice(0, 140), `no token::mint constraint / mint relation found for ${d}`], confidence: 'low' as const, weight: wOf(o) }]
-		}),
+		}), ...mintUnanchored(ix)],
 	},
 	{
 		id: 'caller-controlled-sensitive-param', title: 'Caller-controlled value reaches a CPI program id, PDA seeds or an authority assignment',
@@ -785,8 +802,21 @@ const RULES: Rule[] = [
 		// (Anchor: data the logic reads itself from an account try_accounts did not deserialize as Account<T> (no discriminator check))
 		// (the owner verified, the type not: the program's other accounts of the same layout pass; an owner not verified
 		// at all is unverified-account-data's)
-		run: ix => {
+		run: (ix, a) => {
 			if (!ix.ops.some(o => isValueOrAuth(o) && !runtimeAuthorized(o))) return []
+			// (native: a program that tells its account types by a tag byte (a first-data-byte comparison in some instruction):
+			// an account of its own whose data this instruction uses (checks / writes) with no such comparison)
+			if (ix.kind !== 'anchor') {
+				// (the same account (by position) tag-checked by another instruction; here its data authorizes: a stored key compared
+				// with another account's key on every path)
+				const tagged = (x: string) => a.ixs.some(i => i !== ix && i.kind !== 'anchor' && i.checks.some(c => c.account === x && c.kinds.includes('discriminator') && c.status === 'found'))
+				const used = (x: string) => tagged(x) && ix.checks.some(c => c.account === x && c.status === 'found' && c.kinds.includes('key') && !c.kinds.includes('owner') && !c.kinds.includes('address') && !c.kinds.includes('pda'))
+				// (not an account the instruction creates: its owner compared with the system program, or a creation made here)
+				const created = (x: string) => ix.checks.some(c => c.account === x && c.kinds.includes('owner') && /"1{32}"|SYSTEM_PROGRAM/.test(c.cond)) || ix.ops.some(o => (o.kinds.includes('ACCOUNT_CREATE') && o.target?.startsWith(`${x}.`)) || (o.cpi?.family === 'system' && /^(CreateAccount|Allocate|Assign)/.test(o.cpi.ix ?? '') && o.cpi.accounts.some(y => y.text.replace(/^\*/, '') === x)))
+				return ix.accounts.filter(x => found(ix, x.name, 'owner') && !found(ix, x.name, 'discriminator') && used(x.name) && !created(x.name)).slice(0, 1).map(x => ({
+					accounts: [x.name], path: [] as string[], evidence: [`${x.name}: its owner is checked and its data used, no type tag (first data byte) comparison on it found`, 'the program tells its account types by a tag byte elsewhere: another account type of the program with a matching layout passes'], confidence: 'medium' as const, weight: 3,
+				}))
+			}
 			const own = (a: string) => found(ix, a, 'owner') || !!ix.audit?.ownerCmp?.includes(a)
 			const out = (ix.audit?.dataReads ?? []).filter(a => !SYSVAR_NAME.test(a) && !addressChecked(ix, a) && !found(ix, a, 'discriminator') && own(a)).slice(0, 2).map(a => ({
 				accounts: [a], path: [] as string[], evidence: [`the logic reads ${a}'s data itself; its owner is checked, no discriminator check on it found`, 'another account type of the same program with a matching layout passes the checks made on this data'], confidence: 'medium' as const, weight: 3,
@@ -839,7 +869,12 @@ const RULES: Rule[] = [
 			const tagged = new Set([...ix.ops.filter(o => /\.data\[0\.\.[18]\]$|\.discriminator$/.test(o.target ?? '') && /^(0x[0-9a-f]+|\d+)$/.test(o.value ?? '')).map(o => o.target!.split('.')[0]), ...ix.audit?.initGated ?? []])
 			// (a raw constraint gates a write only when it can bind who calls: a key comparison (32 bytes) or a flag it reads;
 			// e.g. not two counters compared)
-			const gates = (c: CheckOut) => c.kinds.some(k => gate.includes(k) && (k !== 'raw' || !!c.sides || /memcmp|memeq|keyeq|is_signer|, 0x20\)/.test(c.cond)))
+			// (Anchor: a PDA's address checked gates nothing when that account neither signs nor is written: e.g. a program PDA meant
+			// to sign (seeds = [multisig.key()]) passed unsigned)
+			const written = new Set(ix.ops.map(o => o.target?.split('.')[0]).filter(Boolean))
+			// (Anchor: a check of the program's own (custom error) on no account and reading no account's field (e.g. an argument's
+			// length validated) binds nobody either)
+			const gates = (c: CheckOut) => c.kinds.some(k => gate.includes(k) && (k !== 'raw' || !!c.sides || /memcmp|memeq|keyeq|is_signer|, 0x20\)/.test(c.cond)) && (k !== 'pda' || ix.kind !== 'anchor' || !c.account || written.has(c.account) || c.kinds.some(x => x !== 'pda' && x !== 'key' && gate.includes(x))) && (k !== 'custom' || ix.kind !== 'anchor' || c.kinds.length > 1 || !!c.account || !!c.sides || /\b[a-z_]\w*\.[a-z_]\w*/.test(c.cond)))
 			const ws = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || o.kinds.includes('AUTHORITY_WRITE')) && o.target && !initWrite(ix, o) && !tagged.has(o.target.split('.')[0]) && !(o.guards ?? []).some(i => gates(ix.checks[i])))
 			if (!ws.length) return []
 			const tg = [...new Set(ws.map(o => o.target!))]
@@ -913,9 +948,13 @@ const RULES: Rule[] = [
 			// destination: the token program requires it to hold the mint minted)
 			if (!row && !(d && !a.program.anchor && /^account\[\d+\]$/.test(d) && !k.includes('MINT'))) return []
 			// (native: an explicit owner check, e.g. the token program's; Anchor's Account<T> always checks one)
-			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(c => row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime')
+			const found = (c: string) => !!row?.constraints[c] && row.constraints[c].status !== 'not_found' && row.constraints[c].status !== 'runtime'
+			const bind = ['token_owner', 'token_mint', 'associated', 'has_one', 'key', 'address', 'pda', 'signer', ...(a.program.anchor ? [] : ['owner'])].filter(found)
 			const rel = (ix.relations ?? []).some(x => x.a.startsWith(`${d}.`) || x.b.startsWith(`${d}.`))
-			if (bind.length || rel) return []
+			// (Anchor: an account created here (init / init_if_needed: its rent exemption checked), at an address Anchor binds
+			// (a PDA, an associated token account, or a new account that signs))
+			const created = a.program.anchor && found('rent_exempt')
+			if (created) return []
 			// (a finding when anyone may call it (no signer check) or the destination is named after another party of the
 			// instruction that does not sign it (maker_ata_b while the taker signs); a destination the signer picks for
 			// itself is informational: the token program keeps the mints consistent)
@@ -924,16 +963,126 @@ const RULES: Rule[] = [
 			const signers = ix.accounts.filter(x => x.expected.signer || x.constraints.signer && x.constraints.signer.status !== 'not_found')
 			// (the party: an account of the instruction named so, bound to the program's state (a stored key compared with it),
 			// e.g. an offer's maker; not the destination itself, nor one of its own accounts)
-			const who = /^account\[/.test(d!) ? undefined : seg(d!)
+			const who = !d || /^account\[/.test(d) ? undefined : seg(d)
 			const party = who ? ix.accounts.find(x => x.name !== d && snakeName(x.name) === who) : undefined
 			const bound = !!party && (ix.relations ?? []).some(x => x.kind !== 'address' && (x.a === `${party.name}.key` || x.b === `${party.name}.key`))
 			const third = bound && !signers.some(x => seg(x.name) === who)
+			// (another party's destination: only its owner binds it to that party (token::authority, associated, a key / PDA /
+			// stored-key check, a relation of its owner / key); its mint alone lets the caller pass an account of its own)
+			// (on every path: a key check on some paths is e.g. Anchor's duplicate-account check when writing back)
+			const ownerBound = ['token_owner', 'associated', 'has_one', 'key', 'address', 'pda'].some(c => row?.constraints[c]?.status === 'found') || (ix.relations ?? []).some(x => x.kind !== 'compare' && [x.a, x.b].some(y => y === `${d}.owner` || y === `${d}.key`))
+			if (third ? ownerBound : bind.length || rel) return []
 			const conf = !signers.length || third ? (o.cpi?.seeds ? 'medium' as const : 'low' as const) : 'info' as const
+			// (informational only, and a binding check (token::mint / token::authority / has_one / associated) the analysis could not
+			// attribute to an account: it may be the destination's)
+			if (conf === 'info' && ix.checks.some(c => !c.account && c.kinds.some(x => /^(token_mint|token_owner|has_one|associated)$/.test(x)))) return []
 			// (outflows the program signs for are the ones where an unbound destination matters most)
 			return [{ accounts: [d!], path: [L(o.at)], evidence: [o.text.slice(0, 140), `${d}: no owner / mint / key / PDA / relation check found${o.cpi?.seeds ? '; the program signs this outflow (PDA)' : ''}${!signers.length ? '; no signer check in the instruction' : third ? `; named after ${who}, who does not sign` : ''}`], confidence: conf, weight: wOf(o) }]
 		}),
 	},
 ]
+
+/**
+ * A key looked up in a stored list (a membership check: multisig.owners contains proposer.key) whose account does not
+ * sign: the list authorizes whoever names one of its keys.
+ */
+function memberUnsigned(ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] {
+	const writes = ix.ops.filter(o => (o.kinds.includes('ACCOUNT_DATA_WRITE') || isValueOrAuth(o)) && !initMechanics(ix, o))
+	if (!writes.length) return []
+	const rel = ix.relations ?? []
+	const related = (t: string, m: string) => rel.some(r => r.kind !== 'member' && ((r.a.startsWith(`${t}.`) && r.b === `${m}.key`) || (r.a.startsWith(`${m}.`) && r.b === `${t}.key`) || (r.a === `${t}.key` && r.b === `${m}.key`)))
+	const created = (t: string) => { const row = ix.accounts.find(y => y.name === t); return !!row && ['zero', 'rent_exempt', 'pda', 'address'].some(k => row.constraints[k] && row.constraints[k].status !== 'not_found') }
+	return rel.filter(r => r.kind === 'member' && r.status === 'found').flatMap(r => {
+		const x = r.b.replace(/\.key$/, ''), m = r.a.split('.')[0], row = ix.accounts.find(y => y.name === x)
+		if (!row) return []
+		if (!row.expected.signer && !(row.constraints.signer && row.constraints.signer.status !== 'not_found'))
+			return [{ accounts: [x, m], path: [L(r.at), L(writes[0].at)], evidence: [`${x}.key is looked up in ${r.a} (a membership check), but ${x} does not sign`, writes[0].text.slice(0, 120)], confidence: 'medium' as const, weight: 4 }]
+		// (the member signs: the state it changes must belong to the account holding the list (e.g. transaction.multisig ==
+		// multisig.key), else a member of one list changes another's)
+		const w = writes.find(o => { const t = o.target?.split('.')[0]; return !!t && t !== m && t !== x && ix.accounts.some(y => y.name === t) && !created(t) && !initWrite(ix, o) && !related(t, m) })
+		return w ? [{ accounts: [w.target!.split('.')[0], m], path: [L(r.at), L(w.at)], evidence: [`${x} is a member of ${r.a}, but ${w.target!.split('.')[0]} (written) is not related to ${m} by any stored key`, w.text.slice(0, 120)], confidence: 'low' as const, weight: 3 }] : []
+	}).slice(0, 1)
+}
+
+/**
+ * Two accounts of the program whose data a check compares (e.g. multisig.owner_set_seqno == transaction.owner_set_seqno),
+ * neither bound otherwise (no stored key relates them or either to anything, no PDA / address), gating a write / a
+ * value or authority operation: nothing ties the one to the other (e.g. a transaction of another multisig).
+ */
+function crossUnrelated(ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] {
+	if (ix.kind !== 'anchor') return []
+	const rel = ix.relations ?? []
+	const keyRel = (x: string) => rel.some(r => r.kind !== 'member' && r.kind !== 'address' && (r.a === `${x}.key` || r.b === `${x}.key`))
+	const fixed = (x: string) => ['pda', 'address', 'zero'].some(k => { const c = ix.accounts.find(y => y.name === x)?.constraints[k]; return !!c && c.status !== 'not_found' })
+	return ix.checks.flatMap((c, ci) => {
+		if (!c.cross || c.status !== 'found') return []
+		const [A, B] = c.cross
+		if (keyRel(A) || keyRel(B) || fixed(A) || fixed(B)) return []
+		const o = ix.ops.find(o => (o.guards ?? []).includes(ci) && (o.kinds.includes('ACCOUNT_DATA_WRITE') || isValueOrAuth(o) || (o.kinds.includes('CPI') && !o.cpi?.known)))
+		if (!o) return []
+		return [{ accounts: [A, B], path: [L(c.at), L(o.at)], evidence: [`a check compares ${A}'s and ${B}'s data (${c.cond.slice(0, 60)}), but no stored key relates ${A} and ${B}`, o.text.slice(0, 120)], confidence: 'low' as const, weight: wOf(o) }]
+	}).slice(0, 1)
+}
+
+/**
+ * A permissionless crank: a move the program signs (PDA) whose recipients (destination / to roles) are all bound to the
+ * program's state (a stored key compared with them, a constant, a PDA, or a token account such an account / a stored key
+ * owns), behind a check of the program's own (a custom error, e.g. require!(listing.remaining == 0, NotSoldOut)): anyone
+ * may run it, the funds only go where the state says, when the state allows it; or the close of an account of the
+ * program's behind such a check (e.g. require!(bid.expiry < now, BidNotYetExpired)).
+ */
+function boundCrank(ix: IxOut, o: OpOut): boolean {
+	const custom = (o.guards ?? []).some(i => ix.checks[i]?.kinds.includes('custom') && ix.checks[i].status === 'found')
+	// (a PDA-signed move behind a binding the analysis does not attribute (a has_one / token::authority / a key compared
+	// with the program's error on no named account): it may bind the recipient)
+	const pdaSigned = !!o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')
+	if (pdaSigned && (o.guards ?? []).some(i => { const c = ix.checks[i]; return !!c && !c.account && !c.sides && c.status === 'found' && (c.kinds.includes('has_one') || c.kinds.includes('token_owner') || (c.kinds.includes('key') && c.kinds.includes('custom'))) })) return true
+	// (the program's own account closed (its lamports drained, no CPI) behind a check of the program's (e.g. an expiry))
+	if (!o.cpi && o.kinds.includes('ACCOUNT_CLOSE')) return custom
+	if (!o.cpi?.seeds && !o.kinds.includes('PDA_SIGNATURE')) return false
+	const recips = (o.cpi?.accounts ?? []).filter(x => x.role && /^(destination|to)$/.test(x.role)).map(x => /^\*?([A-Za-z_]\w*)$/.exec(x.text)?.[1])
+	if (!recips.length || recips.some(d => !d || !ix.accounts.some(y => y.name === d))) return false
+	const rel = ix.relations ?? []
+	/** an account the program's state binds: a stored key / has_one, a constant address, a PDA */
+	const fixed = (x: string) => rel.some(r => (r.kind === 'field_eq' || r.kind === 'has_one') && (r.a === `${x}.key` || r.b === `${x}.key`)) || ['address', 'pda'].some(k => { const c = ix.accounts.find(y => y.name === x)?.constraints[k]; return !!c && c.status !== 'not_found' })
+	// (a recipient bound so, or a token account owned by such an account or by a stored key (token::authority = config.fund_owner))
+	const bound = (d: string) => fixed(d) || rel.some(r => r.kind === 'token' && r.a === `${d}.owner` && (r.b.endsWith('.key') ? fixed(r.b.slice(0, -4)) : true))
+	// (and when the state allows it: a check of the program's own on the way; else anyone may force it at any time, e.g.
+	// refund another's offer)
+	return custom && recips.every(d => bound(d!))
+}
+
+/**
+ * An exchange: the program pays out (a transfer it signs for, PDA) in an instruction where the caller pays another party
+ * with a checked transfer (TransferChecked: the token program ties both token accounts to the mint passed) whose mint and
+ * destination are both unrelated to the program's state (no stored key / has_one / constant / PDA binds either): the
+ * caller pays with a mint of its choosing (e.g. a worthless one) and still receives the payout.
+ */
+function mintUnanchored(ix: IxOut): Omit<Finding, 'rule' | 'title' | 'ix'>[] {
+	const pays = ix.ops.some(o => (o.kinds.includes('TOKEN_TRANSFER') || o.kinds.includes('LAMPORT_TRANSFER')) && (!!o.cpi?.seeds || o.kinds.includes('PDA_SIGNATURE')))
+	if (!pays) return []
+	const name = (t?: string) => t && /^\*?([A-Za-z_]\w*)$/.exec(t)?.[1]
+	/** an account the program's state (a stored key, has_one), a constant or a PDA derivation binds */
+	const anchored = (x: string) => {
+		const row = ix.accounts.find(y => y.name === x)
+		if (!row) return true
+		if (['address', 'pda', 'has_one'].some(c => row.constraints[c] && row.constraints[c].status !== 'not_found')) return true
+		return (ix.relations ?? []).some(r => (r.a === `${x}.key` || r.b === `${x}.key`) && r.kind !== 'token' && r.kind !== 'compare' && r.kind !== 'member')
+	}
+	// (the payment goes to another party of the exchange: the destination is named after an account of the instruction bound
+	// to the program's state (a stored key compared with it, e.g. an offer's maker) that does not sign)
+	const seg = (n: string) => snakeName(n).split('_')[0]
+	const signs = (x: IxOut['accounts'][number]) => x.expected.signer || !!x.constraints.signer && x.constraints.signer.status !== 'not_found'
+	const party = (d: string) => {
+		const p = ix.accounts.find(x => x.name !== d && snakeName(x.name) === seg(d))
+		return !!p && !signs(p) && (ix.relations ?? []).some(r => r.kind !== 'address' && r.kind !== 'member' && (r.a === `${p.name}.key` || r.b === `${p.name}.key`))
+	}
+	return ix.ops.filter(o => o.kinds.includes('TOKEN_TRANSFER') && o.cpi?.ix === 'TransferChecked' && !o.cpi.seeds && !o.kinds.includes('PDA_SIGNATURE')).flatMap(o => {
+		const m = name(o.cpi!.accounts.find(x => x.role === 'mint')?.text), d = name(o.cpi!.accounts.find(x => x.role === 'to')?.text)
+		if (!m || !d || anchored(m) || anchored(d) || !party(d)) return []
+		return [{ accounts: [m, d], path: [L(o.at)], evidence: [o.text.slice(0, 140), `the caller pays in with mint ${m} and destination ${d}, neither bound to the program's state, while the program pays out (PDA-signed) in the same instruction`], confidence: 'low' as const, weight: wOf(o) }]
+	})
+}
 
 function rules(ix: IxOut, a: Analysis): Finding[] {
 	const out: Finding[] = []

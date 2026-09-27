@@ -8,7 +8,7 @@ import { walkExpr } from '../ir.ts'
 import { stmtExprs } from '../simplify.ts'
 import type { IxCtx, IxOut, Loc } from './report.ts'
 import { irOf, stmtAt, defsIn, pathTo, blockAt, valueKey } from './paths.ts'
-import { dataReads, callOf, cfgOf, anchorEval, tryInfo, ctxResolver, calleeOf, type HVal, type EvCtx } from './flow.ts'
+import { dataReads, argParam, callOf, cfgOf, anchorEval, tryInfo, ctxResolver, calleeOf, type HVal, type EvCtx } from './flow.ts'
 import { sourceCtx } from './sources.ts'
 import type { FnFacts } from './facts.ts'
 
@@ -415,7 +415,7 @@ export function evaluatorsFor(r: Result, ctx: IxCtx): (fn: number) => EvCtx | un
 			const c = st && callOf(st[0])
 			if (P && c) {
 				const roots = new Map<number, HVal>()
-				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = fo.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) roots.set(pv, v) })
+				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = argParam(fo.f, j); if (v && pv !== undefined) roots.set(pv, v) })
 				// (try_accounts before &AccountInfo fields: the variables holding an account's &AccountInfo (byValueTry))
 				if (fn === T?.tryPc) for (const [id, acct] of T.ptrs ?? []) roots.set(id, { k: 'info', acct, off: 0, seq: T.seqs?.get(id) })
 				x = A.ctxOf(fo, roots, 2)

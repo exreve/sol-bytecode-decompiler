@@ -16,7 +16,7 @@ import type { Result, FuncOut } from '../decompile.ts'
 import type { Expr } from '../ir.ts'
 import type { IxOut } from './report.ts'
 import { irOf, valueKey, stmtAt, defsIn } from './paths.ts'
-import { accountResolver, anchorEval, callOf, type HVal, type EvCtx } from './flow.ts'
+import { accountResolver, argParam, anchorEval, callOf, type HVal, type EvCtx } from './flow.ts'
 
 export type SrcKind = 'ix' | 'key' | 'data' | 'lamports' | 'owner' | 'remaining' | 'sysvar' | 'return-data'
 export interface Source { source: string; kind: SrcKind; acct?: string }
@@ -80,7 +80,7 @@ function sourceCtx0(r: Result, ix: IxOut): SourceCtx {
 			const c = st && callOf(st[0])
 			if (P && c) {
 				const roots = new Map<number, HVal>()
-				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = fo.f.vars.find(q => q.param === j + 1)?.id; if (v && pv !== undefined) roots.set(pv, v) })
+				c.args.forEach((a, j) => { const v = P.ev(a, st![1]); const pv = argParam(fo.f, j); if (v && pv !== undefined) roots.set(pv, v) })
 				x = A.ctxOf(fo, roots, 2)
 			}
 		}

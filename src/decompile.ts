@@ -184,6 +184,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
   const heurNames = new Map<number, string>(); // pc -> provenance note of a heuristic function name
   let nameFn: number | undefined;
   const errorFrom = new Set<number>(); // the program's error constructors (argument 2: an #[error_code] variant)
+  const errorOr = new Set<number>(); // (analysis only, not renamed) constructors storing 6000 | their second argument (a variant < 16)
   if (opts.sugar !== false && sem.anchor) {
     nameFn = findNameFn([...built.values()].map(b => b.f), (ptr, len) => sem.strAt(ptr, len));
     const rename = (pc: number, nm: string, why: string) => {
@@ -221,7 +222,14 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       let hit = false;
       const is = (e: Expr) => walkExpr(e, x => { if (x.k === 'bin' && x.op === 'add' && x.a.k === 'var' && x.a.id === b && x.b.k === 'const' && x.b.v === 6000n) hit = true; });
       for (const x of f.blocks) for (const st of x.stmts) if (st.k === 'store' || st.k === 'stores') (st.k === 'store' ? [st.v] : st.vals).forEach(is);
-      if (!hit) continue;
+      if (!hit) {
+        // (6000 | variant: the compiler's form for variants below 16 (6000 = 0x1770); the analysis counts the branches raising
+        // it as custom-error checks, the printed code is left as it is)
+        const or = (e: Expr) => walkExpr(e, x => { if (x.k === 'bin' && x.op === 'or' && ((x.a.k === 'var' && x.a.id === b && x.b.k === 'const') || (x.b.k === 'var' && x.b.id === b && x.a.k === 'const')) && (x.a.k === 'const' ? x.a.v : (x.b as { v: bigint }).v) === 6000n) hit = true; });
+        for (const x of f.blocks) for (const st of x.stmts) if (st.k === 'store' || st.k === 'stores') (st.k === 'store' ? [st.v] : st.vals).forEach(or);
+        if (hit) errorOr.add(pc);
+        continue;
+      }
       let nm = 'program_error_from', k = 2;
       while ([...p.funcs.values()].some(x => x.name === nm)) nm = `program_error_from_${k++}`;
       rename(pc, nm, 'stores 6000 + its second argument: <anchor_lang::error::Error as From<ErrorCode>>::from for the program\'s #[error_code] enum (the argument: the variant, error code 6000 + it)');
@@ -1545,6 +1553,7 @@ export function decompile(bytes: Uint8Array, opts: Options = {}): Result {
       irStore: sem.anchor ? undefined : s => accountResolver({ f, names }, callee).store(s),
       calleePath: t => (libs.get(t)?.lib ? libs.get(t)?.hint : undefined),
       strAt: (a, n) => sem.strAt(a, n),
+      customError: t => errorFrom.has(t) || errorOr.has(t),
     }));
     if (userInvoke.has(pc)) facts.get(pc)!.wrapper = true;
     if (facts.has(pc)) facts.get(pc)!.expr = e => pr.u(e, 0);

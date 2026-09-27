@@ -38,6 +38,7 @@ export interface FnInput {
 	irStore?: (s: Stmt) => { index: number; field?: string; how?: '=' | '+=' | '-=' } | undefined // native: the account field a store writes (flow.ts accountResolver)
 	calleePath?: (pc: number) => string | undefined          // a recognized library function's path (library database)
 	strAt?: (ptr: bigint, len: bigint) => string | undefined // a string in program memory
+	customError?: (pc: number) => boolean                    // the program's #[error_code] constructor (6000 + / | its second argument)
 }
 
 /** An account (or an object held by one) as the code names it: `game_state`, `accounts.user`, `acc0`, a temporary `ga`. */
@@ -137,6 +138,8 @@ const HELPER_ROLES: Record<string, string[]> = {
 	FreezeAccount: ['account', 'mint', 'authority'], ThawAccount: ['account', 'mint', 'authority'],
 }
 const SYSTEM_ROLES: Record<string, string[]> = { Transfer: ['from', 'to'], CreateAccount: ['from', 'to'], Assign: ['account_to_assign'], Allocate: ['account_to_allocate'] }
+/** the accounts struct of a CPI helper's context (see HELPER_ROLES) */
+export const helperRoles = (family: string, ix: string): string[] | undefined => (family === 'system' ? SYSTEM_ROLES[ix] : HELPER_ROLES[ix])
 const pascal = (s: string) => s.replace(/(^|_)([a-z0-9])/g, (_, _u, c: string) => c.toUpperCase())
 /** a library path's program: [program, family] */
 const helperProgram = (p: string): [string, string] => /system/.test(p) ? ['SYSTEM_PROGRAM', 'system'] : /token_2022/.test(p) ? ['TOKEN_2022_PROGRAM', 'token2022'] : /token_interface/.test(p) ? ['TOKEN_PROGRAM|TOKEN_2022_PROGRAM', 'token'] : ['TOKEN_PROGRAM', 'token']
@@ -478,6 +481,22 @@ export function functionFacts(inp: FnInput): FnFacts {
 		facts.ops.push({ line: l + 1, pc: s.pc, kinds, text: t, main, errPath: err, target: { acct: r.acct, field: r.field?.replace(/^lamports\..*/, 'lamports') }, how, value: rhs })
 	}
 
+	/** the custom error code a failing side raises through the program's error constructor (see customError), within its first statements */
+	const customErrCall = (ns: Node[]): number | undefined => {
+		if (!inp.customError) return undefined
+		let r: number | undefined
+		const visit = (xs: Node[], d: number) => {
+			for (const x of xs.slice(0, 12)) {
+				if (r !== undefined) return
+				if (x.k === 'stmt') {
+					const c = x.s.k === 'call' ? x.s : x.s.k === 'set' && x.s.e.k === 'call' ? x.s.e : undefined
+					if (c?.t.k === 'fn' && inp.customError!(c.t.pc) && c.args[1]?.k === 'const' && c.args[1].v < 0x400n) r = 6000 + Number(c.args[1].v)
+				} else if (d < 2 && (x.k === 'block' || x.k === 'if')) visit(x.k === 'if' ? [...x.then, ...x.else] : x.body, d + 1)
+			}
+		}
+		visit(ns, 0)
+		return r
+	}
 	const check = (n: Extract<Node, { k: 'if' }>, failNodes: Node[], failsIf: boolean, main: boolean, before: number | undefined, passNodes: Node[]) => {
 		const l = lineOf(n)
 		const hl = lines[l] ?? ''
@@ -496,7 +515,10 @@ export function functionFacts(inp: FnInput): FnFacts {
 			if (FIELD_KIND[f0]) add(FIELD_KIND[f0])
 			else if (r.field && !ACC_FIELDS.has(f0)) add('state')
 		}
-		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k) }
+		// (native: an account's first data byte compared with a constant: its type tag, a discriminator)
+		const tagCmp = ((e: Expr) => { while (e.k === 'lnot') e = e.a; return e.k === 'cmp' && (e.op === 'eq' || e.op === 'ne') && [e.a, e.b].some(y => y.k === 'const' && y.v < 0x100n) })(n.c)
+		let tagRef = false
+		for (const x of inp.irRefs?.(n.c, firstPc(failNodes), firstPc(passNodes)) ?? []) { const k = FIELD_KIND[x.field ?? '']; if (k) add(k); else if (tagCmp && x.field === 'data[0..1]') tagRef = true }
 		if (/\bkeyeq\(|(?:memeq|memcmp)\((?:[^()]|\([^()]*\))*, 0x20\)/.test(clean) && !kinds.includes('owner')) add('key')
 		// (vipers assert_keys_eq!(a, b) logs "self.a != self.b" on its failing side; the comparison itself is split into
 		// word / 16-byte pieces the condition alone does not show as a key comparison)
@@ -508,12 +530,17 @@ export function functionFacts(inp: FnInput): FnFacts {
 		const cm2 = /\berror::(\w+)/.exec(ft)
 		const ams = [...ft.matchAll(/anchor::(\w+)/g)].map(x => x[1])
 		const ak = ams.find(x => ANCHOR_KIND[x])
+		// (a call of the program's error constructor with a constant variant: its custom error 6000 + variant)
+		const ce = cm2 ? undefined : customErrCall(failNodes)
 		if (cm2) { error = cm2[0]; add('custom') }
+		else if (ce !== undefined) { error = `error ${ce}`; add('custom') }
 		// (Anchor `zero`: the account's discriminator must be zero, a discriminator check)
 		else if (ak) { error = `anchor::${ak}`; add(ANCHOR_KIND[ak]); if (ANCHOR_KIND[ak] === 'zero') add('discriminator') }
 		else if (ams.length) error = `anchor::${ams[0]}`
 		else { const em = /\b(Err\([^)]*\)?\))/.exec(ft) ?? /ProgramError::(\w+)/.exec(ft); if (em) error = em[0] }
 		if (!error) error = /\btrap\(|\babort\(|panic/.test(ft) || failNodes[failNodes.length - 1]?.k === 'trap' ? 'abort' : 'return'
+		// (the tag byte tested, the failing side raising an account-data error (not a match on it): a type check)
+		if (tagRef && /InvalidAccountData|UninitializedAccount|AccountAlreadyInitialized|InvalidAccountOwner|IncorrectProgramId|^error/.test(error)) add('discriminator')
 		// (native: a flag the caller passes (e.g. a helper taking `is_signer` by value) tested, the failing side returning
 		// MissingRequiredSignature: a signer check)
 		if (!kinds.length && /MissingRequiredSignature/.test(error)) add('signer')
