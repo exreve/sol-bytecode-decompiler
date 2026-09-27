@@ -148,11 +148,6 @@ struct Site {
 }
 
 impl<'a> An<'a> {
-    /// the rule engine over one instruction (8b: in progress)
-    pub fn rules(&self, _a: &Analysis, _xi: usize, _info: &IxInfo<'a>) -> Vec<Finding> {
-        vec![]
-    }
-
     /// phase2(a, r) up to the rule findings (before the incident rules)
     pub fn phase2<'x>(
         &'x self,

@@ -83,7 +83,7 @@ use super::paths::{key_in, IrCond};
 use super::report::{Analysis, IxOut, OpOut};
 use super::sources::SourceCtx;
 use super::{js_slice, js_trim, An};
-use sbpf_ir::{BinOp, CallTarget, Node, Stmt, Term, E};
+use sbpf_ir::{BinOp, CallTarget, Node, Term, E};
 use std::collections::{HashMap, HashSet};
 
 const VALUE_OPS: &[&str] = &[
@@ -1721,6 +1721,3 @@ fn proofs(an: &An, ix: &IxOut) -> Vec<Proof> {
     out
 }
 
-use super::report::Loc as _L;
-#[allow(dead_code)]
-fn _unused(_: _L, _: Stmt) {}

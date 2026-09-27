@@ -16,6 +16,7 @@ pub mod paths;
 pub mod phase2;
 pub mod phase3;
 pub mod report;
+pub mod rules;
 pub mod sources;
 
 use regex::Regex;
