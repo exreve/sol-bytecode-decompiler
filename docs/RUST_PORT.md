@@ -29,7 +29,7 @@ stages are at 100% parity.
 | 5 | `views`, `accounts`, `structs`, `frameregions`, `fieldnames`, `anchor`, `anchorstate`, `idl`, `state`, `outline`, `taint` (+ decompile's phases 3–4, readable renderSingle) | `types`, `rtext`, `readfile` (done: readable output, with and without IDL) |
 | 6 | `exec`, `cpiexec`, `cpi` (done with stage 5: the readable text needs them), `builtins` (done with stage 7: only used on library functions) | (covered by `rtext` / `readfile`, `library`) |
 | 7 | `fingerprint`, `library`, `diff`, `selector`, `semantics` | `library`, `fingerprint`, `readfile` (default output line), `diff` (done; native-arm diffs wait for stage 8) |
-| 8 | `src/analysis/*` | `analysis` (analysis JSON, canonical key order) |
+| 8 | `src/analysis/*` (8a foundation: `facts`, `flow`, `paths`, `sources`; 8b report layer; 8c incidents, libcpi, rendering) | `facts`, `flow` (8a done); `analysis` (analysis JSON, canonical key order: 8b / 8c) |
 | 9 | `layout`, `budget`, `rpc`, `cli` | whole CLI output (`-o dir/`) byte-compared |
 
 Until stage 9 the Rust code is a library plus `sbpf-dump`; the TS CLI stays the product. A stage's
@@ -682,7 +682,103 @@ Program diff (`--timediff` / `stagetime.ts --diff`: both profiles + the report, 
 The diff is a straight port (signature token strings per instruction, a `Set` per candidate pair in step 5, and
 `SemR::new` per profile, as in the TS) and has not been profiled yet: a target for the performance pass.
 
+## Stage 8a results (analysis foundation)
+
+Stage 8 is split in three passes: **8a** the foundation (this section), **8b** the report layer, **8c** the rest of
+the analysis and its rendering (next steps below).
+
+Ported (`rs/crates/sbpf-read/src/analysis/`):
+
+- `facts.rs` ← `src/analysis/facts.ts`: per-function checks / ops / calls / instruction hints with their lines,
+  `pcLine`, `condLine`, types and aliases of the printed names; `calleeChecks` (Anchor try-call checks). The
+  printed text is parsed with the same regexes (`jsre` translates a JS source: `\w \d \b \s \S` are ASCII / JS
+  whitespace; the few lookaheads are hand-written: `anchor::(?!Instruction…)`, `signer seeds (?![])`).
+- `flow.rs` ← CFGs (`cfgOf`: pc blocks, condition / return blocks by identity, pc copies), `dominates`,
+  `condKey`, `decisionBlock`, `bypass`, `reaches`, `singleDefs`, `storeValue`, reaching definitions (`Defs`:
+  single / multi definitions, the per-key fixpoint over the blocks a position depends on, loose frame-slot
+  effects of stores / copies / memcpy / calls writing through pointers, iterator cursors advanced by callees),
+  `callWrites` / `writesInfo` / `iterAdvance` (depth-keyed memos), `memcpyOf`, `arithHow`, `compareAccounts`,
+  `sameLoads`.
+- `acct.rs` ← the native account model: `AV` values, `avEvaluator` (memo only for evaluations no depth limit cut:
+  `evCuts`, shared by every evaluator; per-callee budgets), `classifyRoots` / `sliceParams` / `writesThrough`,
+  `cursorArrays` (zig / C SDK entrypoints), `accountResolver` (`refs`, `store`, `sides`, `pdaBufs`, `valueAt`,
+  `cmp32`, `pdaEq`, `byName`), `seedFrom` with `ext` loaders (pointers into a caller's frame, evaluated by the
+  caller's evaluator as at the call).
+- `anchor.rs` ← exit functions and exit writes (`exitFns`, `addExitWrites`, `calleeWrites` with `rootKeep` /
+  `derivedFrom` / `visitPos`), the handler evaluator (`anchorEval`: `HVal`, frame pointers of each context,
+  AccountInfo words, RcBoxes, boxed account objects, `infoAcct`, `frameAcct`, `zcField`), `tryInfo` (+ `sliceEvents`,
+  `byValueTry`), `isBorrowData`, `dataReads`.
+- `dispatch.rs` ← `indirectTargets`, `tagStates` / `splitDispatch` (tag bitsets, nested dispatchers, known
+  program layouts, `before` part, `via` hand-overs).
+- `ixctx.rs` ← the start of report.ts `analyze0` (roots, splits, the reach walk: main path, parents, function
+  pointers, initial account rows) and `ctxResolver`.
+- `paths.rs` ← `condsIn` (dominators restricted to a dispatch part), `pathTo`, `valueKey` (memo keyed by expression,
+  function, position and context; the stored key truncated at 600 UTF-16 units as in the TS), `cmpsOf`, `follow`,
+  `keyIn`, `stmtAt` / `storedAt` / `posAt` / `blockAt`.
+- `sources.rs` ← `sourceCtx`: `of` (the backward walk with its 400-step budget), `frameAccount`, `bytesAt`.
+- `src/taint.ts` was already ported with stage 5 (`sbpf-read/src/taint.rs`).
+
+Plumbing:
+
+- **Print hooks.** `Sugar::node_lines` (print.ts `nodeLines`: a node's printed lines, chained `else if`s and outlined
+  tails included) and the CPI / PDA site notes (`SiteNote` with the CPI's `CpiParts`: program, account metas by role,
+  fields, seeds and the source expressions, now filled by `format_ix`) feed `function_facts` at the end of
+  `print_func`, as decompile.ts does. Nodes are keyed by address (the printed body); statements by their index in the
+  tree, mapped to their block position by `Tree::origin` (recorded when structuring copies a block's statements: the
+  TS object identity `D.pos.get(s)` relies on).
+- **One flow context for printing and analysis.** `FlowCtx` (callee, `Defs` per function and callee kind, write /
+  advance memos, `evCuts`, resolver / classify / slice / pda memos, ext loaders) is created before printing (facts'
+  IR hooks: `irRefs`, `irCmp`, `irPda`, `irStore`) and moved into the analysis (`An`), as the TS shares its WeakMaps
+  between the two phases (resolver memos are hit by later queries).
+- **The functions' printers after printing.** The analysis prints expressions of a function (`facts.expr`: sources'
+  `via`, 8b/8c texts). `print_func` returns a `SugarSnap` of its hooks' state (typed views, frame objects as left by the
+  printing, strings, …); `expr_printer` rebuilds the printers over the final `Dx` (views added for later functions
+  included, as the TS closures see them).
+- **`decompile_read_hook`** runs a hook on the analysis context (`An`) after printing (the dumps; 8b will run the
+  report there). decompile.ts exports `debugHooks.beforeRender` (unset in the CLI) so the dump can read the facts
+  before the single file's analysis adds to them.
+
+Dumps (format in [`rs/README.md`](../rs/README.md)): `facts` (per-function facts before the analysis) and `flow`
+(exit functions and exit / callee writes, indirect targets, dispatch splits with their allowed blocks, try_accounts
+layouts, data reads, every instruction context of analyze0 (its loop mirrored in `scripts/dump8.ts` and checked against
+the analysis' own contexts), the native resolvers of each instruction's functions, path conditions and value keys of
+the points the report reads, sources of the ops' values).
+
+### Parity
+
+- `facts`: **615 / 615 identical** (samples 8 + regress 2 + compat 20 + bench 164 + eval 19 + corpus 402).
+- `flow`: FLOWCOUNT
+- With IDL (`--idl`, `facts,flow`): IDLCOUNT
+- Fuzz (`facts,flow`, 1000 mutants each): FUZZCOUNT
+
+Residual differences: RESIDUAL
+
+### Speed
+
+SPEED
+
 ## Plan changes
+
+- **Stage 8a is done** (above): the analysis foundation, byte-identical `facts` / `flow` dumps. Next, in order:
+  - **8b — the report layer** (`report.ts` analyze0 after the contexts, `phase2.ts`, `phase3.ts`, `consistency.ts`, and
+    `audit.ts`, which the report calls through `evaluatorsFor` / `auditIx`): per instruction the check rows (canon
+    names, `anchorCompares` = `compareAccounts` with the calls / acctVar / infos maps, sysvar checks, `resolverFor` — its
+    own per-instruction resolver memo, not ctxResolver's), `builderAccounts` / `hintBefore`, the ops rows (`keep` /
+    `keepCall`, wrappers, `libCpiOps` from 8c's libcpi.ts: port it here or stub it behind the dump), `dominance`,
+    phase 2 (trust rows, relations, stored keys, authority rows, findings; uses sources' `bytesAt` / `frameAccount`,
+    `knownIx`), phase 3 (paths, chains, arithmetic / division sites, proofs, state fields; uses `facts.expr` through
+    `An::expr`), consistency, the score / effects / sort, unattributed ops, PDAs, state writes, deps. Run it in the
+    `decompile_read_hook` place (after printing, same `FlowCtx`), keep the order of the TS calls (evaluator memos are
+    shared). Dump: an `analysis` stage = `renderJson(a, where)` (`security/analysis.json`, canonical as the TS prints it)
+    with `where` from layout (8c) — or first a structural dump of `Analysis` (ixs rows) if `where` is not ported yet.
+    Keep `flow` as the regression net for the foundation (its instruction contexts must stay equal to the report's).
+  - **8c — the rest**: `incidents.ts` (fund movers, incident rules), `libcpi.ts` (if not taken in 8b), `budget.ts`
+    rendering of `security/` (summary.md / per-ix md / analysis.json budgets and orders), the summary block of the
+    single file (`renderSummaryComment`: brings back the `// security summary` block in `rawfile` / `readfile`, the
+    dumps' `withoutAnalysis` goes away), and the diff's native-arm profiles (`analyze(r).ixs` in diff.ts `profile`:
+    removes the `unsupported: native instruction arms` error, re-run the 199 diff pairs).
+  - Untested by the 8a dumps (ported, exercised first by 8b): `compareAccounts`, `sources.bytesAt` / `frameAccount`,
+    `objField`, `bypass` / `reaches`, `storedAt` / `posAt` / `follow` / `keyIn`, `Resolver::value_ref`.
 
 - **Stage 7 is done** (above): the CLI default output (library stubs), `security/fingerprints.json`, the program
   diff (except native programs without named instructions, whose arms come from the analysis) and the selector
