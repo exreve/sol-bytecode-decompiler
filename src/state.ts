@@ -20,7 +20,8 @@ export function accountViews(idl: IdlInfo, views: Views): Map<bigint, string> {
 		const def = idl.types.get(a.name)
 		if (def?.kind !== 'struct' || !Array.isArray(def.fields)) continue
 		const fields = [{ name: 'discriminator', type: 'u64' }, ...def.fields.filter((f: any) => typeof f === 'object' && f.name).map((f: any) => ({ name: f.name, type: f.type }))]
-		const name = `${a.name[0].toUpperCase()}${a.name.slice(1)}Account`
+		const base = `${a.name[0].toUpperCase()}${a.name.slice(1)}Account`
+		const name = idl.types.has(base) ? `${base}Data` : base // never replace the view of an IDL type of that name
 		if (views.map.has(name)) continue
 		const v = views.borshView(name, `data of an account of type ${a.name} (Anchor IDL: 8-byte discriminator, then the fields in serialized order)`, fields, idl.types)
 		if (v && v.fields.length > 1) out.set(a.disc, name)
