@@ -15,6 +15,8 @@ sbpf-ir = { path = "crates/sbpf-ir" }
 sbpf-program = { path = "crates/sbpf-program" }
 sbpf-dataflow = { path = "crates/sbpf-dataflow" }
 sbpf-opt = { path = "crates/sbpf-opt" }
+sbpf-struct = { path = "crates/sbpf-struct" }
+sbpf-print = { path = "crates/sbpf-print" }
 
 [profile.release]
 codegen-units = 1

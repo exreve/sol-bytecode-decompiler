@@ -2,7 +2,7 @@
 // stage, byte-compared against `rs/` (sbpf-dump) by scripts/parity.ts. The encoding is specified in
 // rs/README.md; any change here must be mirrored in rs/crates/sbpf-dump.
 //
-//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir
+//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseElf, Image, type Elf } from '../src/elf.ts'
@@ -15,9 +15,11 @@ import { rewriteStackArgs } from '../src/stackargs.ts'
 import { optimizeFunc, setFoldImage, isSettled } from '../src/simplify.ts'
 import { recognizeIdioms } from '../src/idioms.ts'
 import { compactStores, sinkFrameLoads } from '../src/compact.ts'
+import { decompile } from '../src/decompile.ts'
+import type { Node } from '../src/structure.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -275,6 +277,59 @@ export function dumpStage3(bytes: Uint8Array, stages: readonly string[], res: Ma
 	} finally { setFoldImage(null) }
 }
 
+/** A structured statement tree node (src/structure.ts `Node`), keys in declaration order (`loop`: `c` only for while / do). */
+export function snode(n: Node): unknown {
+	switch (n.k) {
+		case 'stmt': return { k: n.k, s: stmt(n.s) }
+		case 'if': return { k: n.k, c: expr(n.c), then: n.then.map(snode), else: n.else.map(snode) }
+		case 'block': return { k: n.k, label: n.label, body: n.body.map(snode) }
+		case 'loop': {
+			const o: Record<string, unknown> = { k: n.k, label: n.label, body: n.body.map(snode), form: n.form }
+			if (n.c) o.c = expr(n.c)
+			return o
+		}
+		case 'break': case 'continue': return { k: n.k, label: n.label }
+		case 'return': return { k: n.k, e: n.e ? expr(n.e) : null }
+		case 'trap': return { k: n.k, msg: n.msg }
+		case 'switch': return { k: n.k, v: n.v, cases: n.cases.map(c => ({ vals: c.vals, body: c.body.map(snode) })) }
+		case 'setstate': return { k: n.k, v: n.v, val: n.val }
+	}
+}
+
+/** The single-file text without the analysis summary block (`// security summary …` up to the blank line: stage 8). */
+export function withoutAnalysis(text: string): string {
+	const ls = text.split('\n')
+	const i = ls.findIndex(l => l.startsWith('// security summary ('))
+	if (i < 0) return text
+	let j = i
+	while (j < ls.length && ls[j] !== '') j++
+	return [...ls.slice(0, i), ...ls.slice(j)].join('\n')
+}
+
+/**
+ * Stage 4: the raw decompiler output (`decompile(bytes, { sugar: false, full: true })`, the form
+ * `test/equiv.ts --raw` checks). `struct` = each function's structured body (structure + cleanup +
+ * statementIdioms), `text` = each function's printed text, `rawfile` = the single-file text minus the
+ * analysis summary.
+ */
+export function dumpStage4(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>) {
+	const want = ['struct', 'text', 'rawfile'].filter(s => stages.includes(s))
+	if (!want.length) return
+	let r: ReturnType<typeof decompile>
+	try { r = decompile(bytes, { sugar: false, full: true }) } catch (e) { res.set('struct', header('struct') + errLine(e)); return }
+	if (stages.includes('struct')) {
+		const out = [header('struct')]
+		for (const f of r.funcs) out.push(line({ t: 'func', pc: f.pc, irreducible: f.irreducible, nvars: f.f.vars.length, body: f.body.map(snode) }))
+		res.set('struct', out.join(''))
+	}
+	if (stages.includes('text')) {
+		const out = [header('text')]
+		for (const f of r.funcs) out.push(line({ t: 'func', pc: f.pc, name: f.name, text: f.text }))
+		res.set('text', out.join(''))
+	}
+	if (stages.includes('rawfile')) res.set('rawfile', header('rawfile') + line({ text: withoutAnalysis(r.text) }))
+}
+
 export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): Map<string, string> {
 	const res = new Map<string, string>()
 	let elf: Elf
@@ -287,6 +342,7 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): 
 	if (stages.includes('lift')) res.set('lift', dumpLift(p))
 	dumpStage2(bytes, stages, res)
 	dumpStage3(bytes, stages, res)
+	dumpStage4(bytes, stages, res)
 	return res
 }
 
@@ -299,7 +355,7 @@ if (import.meta.main) {
 		else if (args[i] === '--stages') stages = args[++i].split(',')
 		else pos.push(args[i])
 	}
-	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact] out_dir'); process.exit(2) }
+	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile] out_dir'); process.exit(2) }
 	const [file, dir] = pos
 	mkdirSync(dir, { recursive: true })
 	for (const [stage, text] of dumpAll(new Uint8Array(readFileSync(file)), stages)) writeFileSync(join(dir, `${stage}.jsonl`), text)

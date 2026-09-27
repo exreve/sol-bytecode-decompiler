@@ -1,10 +1,11 @@
 [package]
-name = "sbpf-dump"
+name = "sbpf-print"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+indexmap.workspace = true
 serde_json.workspace = true
 sbpf-elf.workspace = true
 sbpf-ir.workspace = true
@@ -12,4 +13,3 @@ sbpf-program.workspace = true
 sbpf-dataflow.workspace = true
 sbpf-opt.workspace = true
 sbpf-struct.workspace = true
-sbpf-print.workspace = true

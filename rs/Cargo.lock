@@ -71,7 +71,9 @@ dependencies = [
  "sbpf-elf",
  "sbpf-ir",
  "sbpf-opt",
+ "sbpf-print",
  "sbpf-program",
+ "sbpf-struct",
  "serde_json",
 ]
 
@@ -97,12 +99,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbpf-print"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "sbpf-dataflow",
+ "sbpf-elf",
+ "sbpf-ir",
+ "sbpf-opt",
+ "sbpf-program",
+ "sbpf-struct",
+ "serde_json",
+]
+
+[[package]]
 name = "sbpf-program"
 version = "0.1.0"
 dependencies = [
  "indexmap",
  "sbpf-elf",
  "sbpf-ir",
+]
+
+[[package]]
+name = "sbpf-struct"
+version = "0.1.0"
+dependencies = [
+ "sbpf-ir",
+ "sbpf-opt",
+ "sbpf-program",
 ]
 
 [[package]]
