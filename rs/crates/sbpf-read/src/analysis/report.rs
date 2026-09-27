@@ -12,7 +12,7 @@ use super::consistency::RoleView;
 use super::dispatch::DispatchGroups;
 use super::facts::{cpi_kinds, helper_roles, ref_of, FnFacts, IxHint, OpCpi, Pda};
 use super::flow::*;
-use super::ixctx::{Expected, IxInfo};
+use super::ixctx::{Expected, IxCtx, IxInfo};
 use super::phase2::{AuthorityRow, Finding, Relation, StoredKeys, TrustRow};
 use super::phase3::{ArithSite, Chain, DivSite, PathInfo, Proof, StateField};
 use super::An;
@@ -200,6 +200,19 @@ pub struct ProgramOut {
     pub functions: usize,
     pub anchor: bool,
     pub idl: bool,
+}
+
+/// A dispatch part of an instruction handled inline by a processor: the dispatchers restricted to its blocks,
+/// and the line marks of the functions its bundle slices (by pc).
+pub struct IxPart {
+    pub restricted: IndexSet<i64>,
+    pub marks: HashMap<i64, Option<Vec<u8>>>,
+}
+
+/// The analysis as the outputs read it (per a.ixs: the dispatch part, when the instruction has one).
+pub struct AnalysisOut {
+    pub a: Analysis,
+    pub parts: Vec<Option<IxPart>>,
 }
 
 pub struct Analysis {
@@ -683,6 +696,67 @@ impl<'a> An<'a> {
     /// analyze(r) up to phase 2's rule findings (the incident rules, fund movers and the findings' ranking are 8c);
     /// `f` reads the result with the instruction contexts.
     pub fn analyze<R>(&self, f: impl FnOnce(&Analysis, &[IxInfo<'a>]) -> R) -> R {
+        self.analyze_owned(f).1
+    }
+
+    /// The analysis for the outputs: owned, with what the project layout reads of the instruction contexts
+    /// (the dispatch parts' line marks of the functions a bundle slices).
+    pub fn analysis_out(&self) -> Result<AnalysisOut, String> {
+        let (a, parts) = self.analyze_owned(|a, infos| {
+            a.ixs
+                .iter()
+                .map(|ix| {
+                    let ctx = &infos[ix.info].ctx;
+                    ctx.grp.as_ref()?;
+                    let restricted = ctx.restricted.clone().unwrap_or_default();
+                    let mut marks: HashMap<i64, Option<Vec<u8>>> = HashMap::new();
+                    for pc in std::iter::once(ctx.handler).chain(restricted.iter().copied()) {
+                        marks.entry(pc).or_insert_with(|| self.slice_marks(ctx, pc));
+                    }
+                    Some(IxPart { restricted, marks })
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(e) = self.err.borrow().as_ref() {
+            return Err(e.clone());
+        }
+        Ok(AnalysisOut { a, parts })
+    }
+
+    /// layout.ts slice's line marks of a function: 1 = code of this instruction, 2 = only code of others, 0 = no
+    /// code; None when the function has no facts or no line of other instructions
+    fn slice_marks(&self, ctx: &IxCtx<'a>, pc: i64) -> Option<Vec<u8>> {
+        let fo = self.fo(pc)?;
+        let facts = self.facts.borrow();
+        let ff = facts.get(&pc)?;
+        let g = self.cfg(pc);
+        let n = fo.text.split('\n').count();
+        let mut st = vec![0u8; n];
+        let mut mark = |line: i64, b: Option<usize>| {
+            let Some(b) = b else { return };
+            if line < 1 || line as usize > n {
+                return;
+            }
+            let i = line as usize - 1;
+            if ctx.allowed(pc, b) != Some(false) {
+                st[i] = 1;
+            } else if st[i] != 1 {
+                st[i] = 2;
+            }
+        };
+        for (p, &line) in &ff.pc_line {
+            mark(line, g.pc_block.get(p).copied());
+        }
+        for (c, &line) in &ff.cond_line {
+            mark(line, g.cond_block.get(c).copied());
+        }
+        if !st.contains(&2) {
+            return None;
+        }
+        Some(st)
+    }
+
+    pub fn analyze_owned<R>(&self, f: impl FnOnce(&Analysis, &[IxInfo<'a>]) -> R) -> (Analysis, R) {
         self.add_exit_writes();
         let ind = self.indirect_targets();
         let splits = self.splits();
@@ -692,7 +766,8 @@ impl<'a> An<'a> {
         let srcs: Vec<OnceCell<super::sources::SourceCtx<'a, '_>>> =
             infos.iter().map(|_| OnceCell::new()).collect();
         self.phase2(&mut a, &infos, &srcs);
-        f(&a, &infos)
+        let r = f(&a, &infos);
+        (a, r)
     }
 
     fn analyze0(

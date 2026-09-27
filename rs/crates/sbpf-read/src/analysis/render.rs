@@ -2,10 +2,10 @@
 //! renderSummaryComment, `src/budget.ts`): security/analysis.json, security/summary.md, security/<ix>.md and the
 //! single file's summary comment.
 
+use super::js_slice;
 use super::json::{utf16_len, Jv};
 use super::phase2::Finding;
 use super::report::{AcctOut, Analysis, CheckOut, Evidence, IxOut, Loc, OpOut};
-use super::js_slice;
 use crate::util::js_num;
 use indexmap::{IndexMap, IndexSet};
 
@@ -107,11 +107,8 @@ pub fn render_json(a: &Analysis, w: Where) -> String {
             .with_opt("note", e.note.map(Jv::s))
     };
     let guard = |ix: &str, g: &Option<(Loc, String)>| {
-        g.as_ref().map(|(at, cond)| {
-            Jv::obj()
-                .with("at", lj(ix, at))
-                .with("cond", Jv::s(cond))
-        })
+        g.as_ref()
+            .map(|(at, cond)| Jv::obj().with("at", lj(ix, at)).with("cond", Jv::s(cond)))
     };
     let p = &a.program;
     let mut doc = Jv::obj()
@@ -367,7 +364,10 @@ pub fn render_json(a: &Analysis, w: Where) -> String {
                                                     .with("cond", Jv::s(&c.cond))
                                                     .with("holds", Jv::Bool(c.holds))
                                                     .with("how", Jv::s(c.how))
-                                                    .with_opt("check", c.check.map(|x| Jv::n(x as f64)))
+                                                    .with_opt(
+                                                        "check",
+                                                        c.check.map(|x| Jv::n(x as f64)),
+                                                    )
                                             })
                                             .collect(),
                                     ),
@@ -381,7 +381,9 @@ pub fn render_json(a: &Analysis, w: Where) -> String {
                                                 Jv::obj().with("check", Jv::n(*c as f64)).with_opt(
                                                     "path",
                                                     path.as_ref().map(|p| {
-                                                        Jv::Arr(p.iter().map(|y| lj(n, y)).collect())
+                                                        Jv::Arr(
+                                                            p.iter().map(|y| lj(n, y)).collect(),
+                                                        )
                                                     }),
                                                 )
                                             })
@@ -683,7 +685,8 @@ pub fn render_json(a: &Analysis, w: Where) -> String {
                                                                     .with("account", Jv::s(acc))
                                                                     .with_opt(
                                                                         "at",
-                                                                        at.as_ref().map(|at| lj(ix, at)),
+                                                                        at.as_ref()
+                                                                            .map(|at| lj(ix, at)),
                                                                     )
                                                             })
                                                             .collect(),
@@ -882,9 +885,21 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
             }),
             _ => {
                 cap(&mut doc, "findings", 300, "findings", om);
-                cap(&mut doc, "unattributed_operations", 100, "unattributed_operations", om);
+                cap(
+                    &mut doc,
+                    "unattributed_operations",
+                    100,
+                    "unattributed_operations",
+                    om,
+                );
                 cap(&mut doc, "state_writes", 200, "state_writes", om);
-                cap(&mut doc, "validation_consistency", 30, "validation_consistency", om);
+                cap(
+                    &mut doc,
+                    "validation_consistency",
+                    30,
+                    "validation_consistency",
+                    om,
+                );
                 each(&mut doc, &mut |ix| {
                     cap(ix, "checks", 60, "checks", om);
                     cap(ix, "operations", 60, "operations", om);
@@ -916,7 +931,10 @@ fn flags(ix: &IxOut) -> Vec<String> {
     let mut out: IndexSet<String> = IndexSet::new();
     for x in &ix.accounts {
         for k in ["signer", "pda", "address", "writable"] {
-            if x.constraints.get(k).is_some_and(|e| e.status == "not_found") {
+            if x.constraints
+                .get(k)
+                .is_some_and(|e| e.status == "not_found")
+            {
                 out.insert(format!("{}: {k} expected, no check found", x.name));
             }
         }
@@ -930,7 +948,11 @@ fn flags(ix: &IxOut) -> Vec<String> {
             let c = c.borrow();
             if !c.known.as_deref().is_some_and(|k| !k.is_empty())
                 && c.program != "?"
-                && !c.checked.as_deref().unwrap_or("").contains("(id compared with")
+                && !c
+                    .checked
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("(id compared with")
                 && !prog_checked
             {
                 out.insert(format!(
@@ -982,9 +1004,14 @@ fn info_line(fs: &[&Finding]) -> Option<String> {
 }
 
 fn render_findings(a: &Analysis) -> Vec<String> {
-    let fs: Vec<&Finding> = a.findings.iter().filter(|f| f.confidence != "info").collect();
+    let fs: Vec<&Finding> = a
+        .findings
+        .iter()
+        .filter(|f| f.confidence != "info")
+        .collect();
     let mut out = vec![
-        "## Findings (ranked; rule engine over the facts: leads to review, not verdicts)".to_string(),
+        "## Findings (ranked; rule engine over the facts: leads to review, not verdicts)"
+            .to_string(),
         String::new(),
     ];
     if fs.is_empty() {
@@ -1010,7 +1037,10 @@ fn render_findings(a: &Analysis) -> Vec<String> {
         ));
     }
     if fs.len() > 15 {
-        out.push(format!("- … {} more in analysis.json (findings)", fs.len() - 15));
+        out.push(format!(
+            "- … {} more in analysis.json (findings)",
+            fs.len() - 15
+        ));
     }
     let mut by_rule: IndexMap<&str, usize> = IndexMap::new();
     for f in &fs {
@@ -1049,7 +1079,13 @@ fn inc_line(x: &super::consistency::Inconsistency, w: Where, head: bool) -> Stri
     format!(
         "{}{}; {}/{} other instructions of the role apply it: {}{}{}",
         if head {
-            format!("{} · {} [{}] ({}): ", x.ix, x.account, x.role, x.uses.join(", "))
+            format!(
+                "{} · {} [{}] ({}): ",
+                x.ix,
+                x.account,
+                x.role,
+                x.uses.join(", ")
+            )
         } else {
             String::new()
         },
@@ -1061,7 +1097,8 @@ fn inc_line(x: &super::consistency::Inconsistency, w: Where, head: bool) -> Stri
             .take(lim)
             .map(|(ix, _, at)| format!(
                 "{ix}{}",
-                at.as_ref().map_or(String::new(), |at| format!(" {}", at2s(w, Some(ix), at)))
+                at.as_ref()
+                    .map_or(String::new(), |at| format!(" {}", at2s(w, Some(ix), at)))
             ))
             .collect::<Vec<_>>()
             .join(", "),
@@ -1118,7 +1155,12 @@ fn moves(ix: &IxOut) -> bool {
         o.kinds.iter().any(|k| {
             matches!(
                 *k,
-                "TOKEN_TRANSFER" | "LAMPORT_TRANSFER" | "MINT" | "BURN" | "ACCOUNT_CLOSE" | "AUTHORITY_WRITE"
+                "TOKEN_TRANSFER"
+                    | "LAMPORT_TRANSFER"
+                    | "MINT"
+                    | "BURN"
+                    | "ACCOUNT_CLOSE"
+                    | "AUTHORITY_WRITE"
             )
         }) || (o.has("LAMPORT_WRITE") && o.how == Some("-="))
     })
@@ -1167,7 +1209,8 @@ fn render_stored_gaps(a: &Analysis) -> Vec<String> {
     }
     let more = gaps.len() + only.len() - out.len();
     let mut r = vec![
-        "## Stored keys not compared (accounts whose data is used; see <ix>.md Stored keys)".to_string(),
+        "## Stored keys not compared (accounts whose data is used; see <ix>.md Stored keys)"
+            .to_string(),
         String::new(),
     ];
     r.extend(out);
@@ -1194,14 +1237,19 @@ fn render_fund_movers(a: &Analysis) -> Vec<String> {
                 x.instruction,
                 x.authority,
                 x.kind,
-                x.from.as_ref().map_or(String::new(), |f| format!(" from {f}")),
+                x.from
+                    .as_ref()
+                    .map_or(String::new(), |f| format!(" from {f}")),
                 x.at
             ),
             240,
         ));
     }
     if xs.len() > 8 {
-        out.push(format!("- … {} more in analysis.json (fund_movers)", xs.len() - 8));
+        out.push(format!(
+            "- … {} more in analysis.json (fund_movers)",
+            xs.len() - 8
+        ));
     }
     out.push(String::new());
     out
@@ -1242,7 +1290,9 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
             .iter()
             .filter(|c| {
                 c.kinds.contains(&"signer")
-                    && c.account.as_ref().is_none_or(|a| a.is_empty() || a.ends_with('?'))
+                    && c.account
+                        .as_ref()
+                        .is_none_or(|a| a.is_empty() || a.ends_with('?'))
             })
             .count();
         if anon > 0 {
@@ -1291,7 +1341,12 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
             .iter()
             .map(|s| s.to_string()),
         );
-        let wo = |o: &OpOut| o.kinds.iter().map(|k| weight(k)).fold(f64::NEG_INFINITY, f64::max);
+        let wo = |o: &OpOut| {
+            o.kinds
+                .iter()
+                .map(|k| weight(k))
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
         let mut us: Vec<&OpOut> = a.unattributed.iter().collect();
         us.sort_by(|x, y| {
             let d = wo(y) - wo(x);
@@ -1310,7 +1365,10 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
             ));
         }
         if a.unattributed.len() > 25 {
-            out.push(format!("- … {} more in analysis.json", a.unattributed.len() - 25));
+            out.push(format!(
+                "- … {} more in analysis.json",
+                a.unattributed.len() - 25
+            ));
         }
     }
     if !a.pdas.is_empty() {
@@ -1358,7 +1416,10 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
             ));
         }
         if a.state_writes.len() > 60 {
-            out.push(format!("- … {} more in analysis.json", a.state_writes.len() - 60));
+            out.push(format!(
+                "- … {} more in analysis.json",
+                a.state_writes.len() - 60
+            ));
         }
     }
     if let Some(af) = a.authority_fields.as_ref().filter(|x| !x.is_empty()) {
@@ -1399,7 +1460,11 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
             out.push(format!(
                 "- {}: set by {}; checked by {}",
                 x.field,
-                if set.is_empty() { "none found".into() } else { set },
+                if set.is_empty() {
+                    "none found".into()
+                } else {
+                    set
+                },
                 if chk.is_empty() {
                     "none found".into()
                 } else {
@@ -1458,7 +1523,9 @@ pub fn fail_text(c: &CheckOut) -> String {
     if c.fails_if {
         return c.cond.clone();
     }
-    if let Some(m) = crate::jre!(r"^([^&|!=<>()]+?) (==|!=|>=|<=|>|<) ([^&|!=<>()]+)$").captures(&c.cond) {
+    if let Some(m) =
+        crate::jre!(r"^([^&|!=<>()]+?) (==|!=|>=|<=|>|<) ([^&|!=<>()]+)$").captures(&c.cond)
+    {
         let op = match &m[2] {
             "==" => "!=",
             "!=" => "==",
@@ -1526,7 +1593,11 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
         out.push(String::new());
     }
     let all: Vec<&Finding> = a.findings.iter().filter(|f| f.ix == ix.name).collect();
-    let fs: Vec<&Finding> = all.iter().copied().filter(|f| f.confidence != "info").collect();
+    let fs: Vec<&Finding> = all
+        .iter()
+        .copied()
+        .filter(|f| f.confidence != "info")
+        .collect();
     let info = info_line(&all);
     if info.is_some() && fs.is_empty() {
         out.extend(
@@ -1586,7 +1657,10 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
             cell(x, "owner"),
             x.constraints
                 .get("discriminator")
-                .map_or(String::new(), |e| format!(" (+discriminator {})", st(e.status))),
+                .map_or(String::new(), |e| format!(
+                    " (+discriminator {})",
+                    st(e.status)
+                )),
             cell(x, "executable"),
             x.expected
                 .address
@@ -1664,8 +1738,16 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                                     .filter(|r| !r.is_empty())
                                     .map_or(String::new(), |r| format!("{r}: ")),
                                 x.text,
-                                if x.w.is_some_and(|v| v != 0.0 && !v.is_nan()) { " w" } else { "" },
-                                if x.s.is_some_and(|v| v != 0.0 && !v.is_nan()) { " s" } else { "" }
+                                if x.w.is_some_and(|v| v != 0.0 && !v.is_nan()) {
+                                    " w"
+                                } else {
+                                    ""
+                                },
+                                if x.s.is_some_and(|v| v != 0.0 && !v.is_nan()) {
+                                    " s"
+                                } else {
+                                    ""
+                                }
                             ))
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -1752,9 +1834,9 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
             o.guards.is_some()
                 && o.kinds.iter().any(|k| {
                     (*k != "PDA_DERIVE" && *k != "CPI")
-                        || o.cpi
-                            .as_ref()
-                            .is_some_and(|c| !c.borrow().known.as_deref().is_some_and(|k| !k.is_empty()))
+                        || o.cpi.as_ref().is_some_and(|c| {
+                            !c.borrow().known.as_deref().is_some_and(|k| !k.is_empty())
+                        })
                 })
         })
         .collect();
@@ -1782,7 +1864,10 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                 for k in &c.kinds {
                     ks.insert(format!(
                         "{k}{}",
-                        c.account.as_ref().filter(|a| !a.is_empty()).map_or(String::new(), |a| format!(" {a}"))
+                        c.account
+                            .as_ref()
+                            .filter(|a| !a.is_empty())
+                            .map_or(String::new(), |a| format!(" {a}"))
                     ));
                 }
             }
@@ -1791,7 +1876,11 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
             out.push(format!(
                 "- {} {}: {} dominating checks{}",
                 wl(&o.at),
-                if kk.is_empty() { "CPI".to_string() } else { kk.join(", ") },
+                if kk.is_empty() {
+                    "CPI".to_string()
+                } else {
+                    kk.join(", ")
+                },
                 g.len(),
                 if ks.is_empty() {
                     String::new()
@@ -1809,7 +1898,10 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                     "  - ⚠ check {} ({}{}) does not dominate it: {}",
                     wl(&c.at),
                     c.kinds.join(", "),
-                    c.account.as_ref().filter(|a| !a.is_empty()).map_or(String::new(), |a| format!(" on {a}")),
+                    c.account
+                        .as_ref()
+                        .filter(|a| !a.is_empty())
+                        .map_or(String::new(), |a| format!(" on {a}")),
                     b.path.iter().map(|x| wl(x)).collect::<Vec<_>>().join(" → ")
                 ));
             }
@@ -1865,12 +1957,18 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
         format!(
             "{} {}{}",
             wl(&o.at),
-            if kk.is_empty() { "CPI".to_string() } else { kk.join(", ") },
+            if kk.is_empty() {
+                "CPI".to_string()
+            } else {
+                kk.join(", ")
+            },
             if let Some(t) = o.target.as_ref().filter(|t| !t.is_empty()) {
                 format!(" {t}")
             } else if let Some((p, i)) = o.cpi.as_ref().and_then(|c| {
                 let c = c.borrow();
-                c.ix.clone().filter(|i| !i.is_empty()).map(|i| (c.program.clone(), i))
+                c.ix.clone()
+                    .filter(|i| !i.is_empty())
+                    .map(|i| (c.program.clone(), i))
             }) {
                 format!(" {p}.{i}")
             } else {
@@ -1898,7 +1996,12 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
         for p in ps {
             out.push(format!("- {} [{}]", op_name(p.op), p.kind));
             for x in &p.props {
-                out.push(format!("  - [{}] {} — {}", pst(x.status), x.prop, md(&x.evidence)));
+                out.push(format!(
+                    "  - [{}] {} — {}",
+                    pst(x.status),
+                    x.prop,
+                    md(&x.evidence)
+                ));
             }
         }
     }
@@ -1973,7 +2076,11 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                 } else {
                     String::new()
                 },
-                if p.truncated == Some(true) { " (budget reached)" } else { "" }
+                if p.truncated == Some(true) {
+                    " (budget reached)"
+                } else {
+                    ""
+                }
             ));
             if !p.not_required.is_empty() {
                 out.push(format!(
@@ -1985,7 +2092,10 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                             format!(
                                 "#{k} ({}{}){}",
                                 c.kinds.join(", "),
-                                c.account.as_ref().filter(|a| !a.is_empty()).map_or(String::new(), |a| format!(" {a}")),
+                                c.account
+                                    .as_ref()
+                                    .filter(|a| !a.is_empty())
+                                    .map_or(String::new(), |a| format!(" {a}")),
                                 path.as_ref().map_or(String::new(), |p| format!(
                                     " via {}",
                                     p.iter().map(|x| wl(x)).collect::<Vec<_>>().join(" → ")
@@ -2022,7 +2132,11 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                     md(cond),
                     wl(at)
                 )),
-                if x.caller == Some(true) { " — instruction data" } else { "" }
+                if x.caller == Some(true) {
+                    " — instruction data"
+                } else {
+                    ""
+                }
             ));
         }
         for x in divs {
@@ -2069,11 +2183,17 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
         );
         for k in sk {
             let mut parts: Vec<String> = k.compared.clone();
-            parts.extend(k.referenced_by.iter().map(|b| format!("key referenced by {b}")));
+            parts.extend(
+                k.referenced_by
+                    .iter()
+                    .map(|b| format!("key referenced by {b}")),
+            );
             out.push(format!(
                 "- {}{}: {}",
                 k.account,
-                k.ty.as_ref().filter(|t| !t.is_empty()).map_or(String::new(), |t| format!(" ({t})")),
+                k.ty.as_ref()
+                    .filter(|t| !t.is_empty())
+                    .map_or(String::new(), |t| format!(" ({t})")),
                 if parts.is_empty() {
                     "no key relation found".to_string()
                 } else {
@@ -2091,7 +2211,10 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                 ));
             }
             if !k.never.is_empty() {
-                out.push(format!("  - stored keys never compared: {}", k.never.join(", ")));
+                out.push(format!(
+                    "  - stored keys never compared: {}",
+                    k.never.join(", ")
+                ));
             }
             for g in &k.gaps {
                 out.push(format!("  - GAP: {g}"));
@@ -2146,7 +2269,11 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                         } else {
                             m.validations.join(", ")
                         },
-                        if os.is_empty() { "none".to_string() } else { os.join(", ") }
+                        if os.is_empty() {
+                            "none".to_string()
+                        } else {
+                            os.join(", ")
+                        }
                     ),
                     300,
                 ));
@@ -2279,7 +2406,9 @@ fn is_rule(l: &str) -> bool {
     b.len() >= 3
         && b[0] == b'|'
         && b[b.len() - 1] == b'|'
-        && b[1..b.len() - 1].iter().all(|&c| c == b'-' || c == b'|' || c == b' ')
+        && b[1..b.len() - 1]
+            .iter()
+            .all(|&c| c == b'-' || c == b'|' || c == b' ')
 }
 
 /// Section order for security/<ix>.md (dropped first → last).

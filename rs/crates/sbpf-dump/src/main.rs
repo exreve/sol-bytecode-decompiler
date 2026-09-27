@@ -19,7 +19,7 @@ use sbpf_program::{
 };
 use std::time::Instant;
 
-const STAGES: [&str; 22] = [
+const STAGES: [&str; 23] = [
     "elf",
     "insns",
     "cfg",
@@ -42,6 +42,7 @@ const STAGES: [&str; 22] = [
     "facts",
     "flow",
     "analysis",
+    "project",
 ];
 
 fn dump_elf(elf: &Elf) -> String {

@@ -268,6 +268,8 @@ pub struct ReadOut {
     pub facts: IndexMap<i64, crate::analysis::facts::FnFacts>,
     /// the analysis hook's output (dumps)
     pub flow: Option<String>,
+    /// the analysis (without a hook)
+    pub analysis: Option<crate::analysis::report::AnalysisOut>,
     /// the built functions' final structured bodies (funcs order)
     pub trees: Vec<Tree>,
     /// the pre-repr(C) AccountInfo layout
@@ -2235,6 +2237,9 @@ pub fn render_read(r: &ReadOut) -> String {
         out.extend(r.views.render(&names));
         out
     };
+    let summary: Vec<String> = r.analysis.as_ref().map_or_else(Vec::new, |a| {
+        crate::analysis::render::render_summary_comment(&a.a)
+    });
     render_single_of(&SingleIn {
         version: r.version,
         n_insns: r.n_insns,
@@ -2247,5 +2252,6 @@ pub fn render_read(r: &ReadOut) -> String {
         outlined: r.outlined.iter().map(|x| x.1.as_str()).collect(),
         lib_count: r.lib_count,
         stubs: &r.stubs,
+        summary: &summary,
     })
 }

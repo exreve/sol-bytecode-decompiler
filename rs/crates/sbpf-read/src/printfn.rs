@@ -1828,9 +1828,9 @@ pub fn run(
         .filter(|(pc, _)| d.idx.contains_key(pc))
         .map(|(pc, names)| (d.fn_name(*pc), names.clone()))
         .collect();
-    // the analysis (stage 8: the dumps' hook only for now)
-    let flow = match hook {
-        Some(h) => {
+    // the analysis: the dumps' hook, else the outputs' analysis (security/, the single file's summary)
+    let (flow, analysis) = {
+        {
             let dx = shorten_dx(&dm);
             let fnrefs: Vec<crate::analysis::FnRef> = funcs
                 .iter()
@@ -1860,9 +1860,11 @@ pub fn run(
             ));
             an.lib_pcs = dm.libs.iter().filter(|x| x.1.lib).map(|x| *x.0).collect();
             an.program_id = dm.state_idl_address.clone();
-            Some(h(&an))
+            match hook {
+                Some(h) => (Some(h(&an)), None),
+                None => (None, Some(an.analysis_out()?)),
+            }
         }
-        None => None,
     };
     let d = &dm;
     Ok(ReadOut {
@@ -1883,6 +1885,7 @@ pub fn run(
         program: None,
         facts,
         flow,
+        analysis,
         trees: finals,
         legacy: d.legacy,
         try_of: d.try_of.clone(),

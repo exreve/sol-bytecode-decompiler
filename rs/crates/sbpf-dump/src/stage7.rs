@@ -13,7 +13,7 @@ pub fn dump_stage7(
     res: &mut Vec<(&'static str, String)>,
 ) {
     let want = |s: &str| stages.iter().any(|x| x == s);
-    let wanted: Vec<&'static str> = ["library", "fingerprint", "readfile"]
+    let wanted: Vec<&'static str> = ["library", "fingerprint", "readfile", "project"]
         .into_iter()
         .filter(|s| want(s))
         .collect();
@@ -100,6 +100,15 @@ pub fn dump_stage7(
         j.s("text", &sbpf_read::decompile::render_fingerprints(&r));
         j.line(&mut o);
         res.push(("fingerprint", o));
+    }
+    if want("project") {
+        let mut o = header("project");
+        for (path, text) in sbpf_read::layout::render_project(&r) {
+            let mut j = J::obj();
+            j.s("path", &path).s("text", &text);
+            j.line(&mut o);
+        }
+        res.push(("project", o));
     }
     if want("readfile") {
         let mut o = take(res, "readfile");

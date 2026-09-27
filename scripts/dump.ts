@@ -18,14 +18,14 @@ import { recognizeIdioms } from '../src/idioms.ts'
 import { compactStores, sinkFrameLoads } from '../src/compact.ts'
 import { decompile } from '../src/decompile.ts'
 import { classify } from '../src/library.ts'
-import { fingerprints } from '../src/layout.ts'
+import { fingerprints, renderProject } from '../src/layout.ts'
 import { profile, diff } from '../src/diff.ts'
 import { parseIdl, type IdlInfo } from '../src/idl.ts'
 import type { Node } from '../src/structure.ts'
 import { dumpStage8 } from './dump8.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile', 'library', 'fingerprint', 'facts', 'flow', 'analysis'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs', 'opt', 'optir', 'compact', 'struct', 'text', 'rawfile', 'types', 'rtext', 'readfile', 'library', 'fingerprint', 'facts', 'flow', 'analysis', 'project'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -362,7 +362,7 @@ export function dumpStage5(bytes: Uint8Array, stages: readonly string[], res: Ma
 		for (const f of r.funcs) out.push(line({ t: 'func', pc: f.pc, name: f.name, text: f.text }))
 		res.set('rtext', out.join(''))
 	}
-	if (stages.includes('readfile')) res.set('readfile', header('readfile') + line({ text: withoutAnalysis(r.text) }))
+	if (stages.includes('readfile')) res.set('readfile', header('readfile') + line({ text: r.text }))
 }
 
 /**
@@ -370,10 +370,11 @@ export function dumpStage5(bytes: Uint8Array, stages: readonly string[], res: Ma
  * one-line stubs). `library` = classify() of a fresh program after inferSignatures (per function: lib,
  * families, name, hint), then from the default output the library functions' final names, the stubs and
  * the counts; `fingerprint` = security/fingerprints.json; `readfile` gets a second line, the default
- * single file (as the first, without the analysis summary).
+ * single file (the CLI's stdout, analysis summary included); `project` = the files of `-o dir/` (renderProject,
+ * in its map order).
  */
 export function dumpStage7(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>, idl?: IdlInfo) {
-	const want = ['library', 'fingerprint', 'readfile'].filter(s => stages.includes(s))
+	const want = ['library', 'fingerprint', 'readfile', 'project'].filter(s => stages.includes(s))
 	if (!want.length) return
 	if (stages.includes('library')) {
 		const out = [header('library')]
@@ -397,7 +398,12 @@ export function dumpStage7(bytes: Uint8Array, stages: readonly string[], res: Ma
 		res.set('library', out.join(''))
 	}
 	if (stages.includes('fingerprint')) res.set('fingerprint', header('fingerprint') + line({ text: fingerprints(r) }))
-	if (stages.includes('readfile')) res.set('readfile', (res.get('readfile') ?? header('readfile')) + line({ lib: true, text: withoutAnalysis(r.text) }))
+	if (stages.includes('readfile')) res.set('readfile', (res.get('readfile') ?? header('readfile')) + line({ lib: true, text: r.text }))
+	if (stages.includes('project')) {
+		let out: string
+		try { out = [...renderProject(r)].map(([path, text]) => line({ path, text })).join('') } catch (e) { out = errLine(e) }
+		res.set('project', header('project') + out)
+	}
 }
 
 /** The program diff report (`sbpf-decompile a.so b.so -o report.txt`: all rows, the paths as labels). */

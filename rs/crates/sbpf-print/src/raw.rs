@@ -421,6 +421,8 @@ pub struct SingleIn<'a> {
     /// recognized library functions (libCount) and the stubs of those user code references
     pub lib_count: usize,
     pub stubs: &'a [String],
+    /// the analysis summary comment block (renderSummaryComment)
+    pub summary: &'a [String],
 }
 
 /// renderSingle without the analysis summary (`// security summary …` block).
@@ -474,6 +476,7 @@ pub fn render_single(r: &Raw) -> String {
         outlined: vec![],
         lib_count: 0,
         stubs: &[],
+        summary: &[],
     })
 }
 
@@ -627,6 +630,7 @@ pub fn render_single_of(r: &SingleIn) -> String {
             names.join(", ")
         ));
     }
+    out.extend(r.summary.iter().cloned());
     out.push(String::new());
     let mut calls: IndexSet<String> = IndexSet::new();
     for f in &r.funcs {

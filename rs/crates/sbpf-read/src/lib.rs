@@ -13,6 +13,7 @@ pub mod diff;
 pub mod fieldnames;
 pub mod frameregions;
 pub mod idl;
+pub mod layout;
 pub mod outline;
 pub mod printfn;
 pub mod sem;
