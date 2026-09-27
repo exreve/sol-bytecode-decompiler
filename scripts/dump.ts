@@ -2,15 +2,19 @@
 // stage, byte-compared against `rs/` (sbpf-dump) by scripts/parity.ts. The encoding is specified in
 // rs/README.md; any change here must be mirrored in rs/crates/sbpf-dump.
 //
-//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift] out_dir
+//   node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseElf, Image, type Elf } from '../src/elf.ts'
 import { loadProgram, pendingCalls, Lifter, type Program } from '../src/program.ts'
 import type { Expr, Stmt, Term, CallTarget } from '../src/ir.ts'
+import type { Block } from '../src/program.ts'
+import { inferSignatures, recoverVars, type VarFunc } from '../src/dataflow.ts'
+import { promoteStack } from '../src/stack.ts'
+import { rewriteStackArgs } from '../src/stackargs.ts'
 
 export const FORMAT = 1
-export const STAGES = ['elf', 'insns', 'cfg', 'lift'] as const
+export const STAGES = ['elf', 'insns', 'cfg', 'lift', 'dataflow', 'vars', 'stack', 'stackargs'] as const
 
 // ---------- canonical values ----------
 // JSON.stringify of plain objects built with keys in the documented order; bigint -> "0x" lowercase hex.
@@ -143,6 +147,80 @@ export function dumpLift(p: Program): string {
 	return out.join('')
 }
 
+/** A block with its IR. */
+const blockLine = (b: Block) => line({ t: 'block', id: b.id, start: b.start, end: b.end, stmts: b.stmts.map(stmt), term: term(b.term), succs: b.succs, preds: b.preds })
+const varsOf = (f: VarFunc) => f.vars.map(v => [v.reg, v.param, v.undef])
+
+/**
+ * Stage 2 on a fresh lazily loaded program (the decompiler's path): `dataflow` = inferSignatures
+ * (signatures and the materialized blocks), `vars` = recoverVars of every function, `stack` =
+ * promoteStack of every function on that IR, `stackargs` = rewriteStackArgs over all functions.
+ * (The pipeline runs promoteStack and rewriteStackArgs on optimized IR and skips library functions;
+ * here they run on recoverVars' output, as unit harnesses of the same code.)
+ */
+export function dumpStage2(bytes: Uint8Array, stages: readonly string[], res: Map<string, string>) {
+	const want = ['dataflow', 'vars', 'stack', 'stackargs'].filter(s => stages.includes(s))
+	if (!want.length) return
+	const need = (s: string) => ['dataflow', 'vars', 'stack', 'stackargs'].indexOf(s) <= ['dataflow', 'vars', 'stack', 'stackargs'].indexOf(want[want.length - 1])
+	const fail = (st: string, e: unknown) => { res.set(st, header(st) + errLine(e)) }
+	const q = loadProgram(bytes, { lazyBlocks: true })
+	const funcs = () => [...q.funcs.values()] as VarFunc[]
+	try { inferSignatures(q) } catch (e) { fail('dataflow', e); return }
+	if (stages.includes('dataflow')) {
+		const out: string[] = [header('dataflow')]
+		for (const f of q.funcs.values()) {
+			out.push(line({ t: 'func', pc: f.pc, noreturn: f.noreturn, returns: f.returns, nparams: f.nparams, extraIn: f.extraIn, leaders: [...f.blockAt.keys()], blocks: f.blocks.length }))
+			for (const b of f.blocks) out.push(line({ t: 'block', id: b.id, start: b.start, end: b.end, stmts: b.stmts.length, term: term(b.term), succs: b.succs, preds: b.preds }))
+		}
+		res.set('dataflow', out.join(''))
+	}
+	if (!need('vars')) return
+	try { for (const f of q.funcs.values()) recoverVars(q, f) } catch (e) { fail('vars', e); return }
+	if (stages.includes('vars')) {
+		const out: string[] = [header('vars')]
+		for (const f of funcs()) {
+			out.push(line({ t: 'func', pc: f.pc, vars: varsOf(f) }))
+			for (const b of f.blocks) out.push(blockLine(b))
+		}
+		res.set('vars', out.join(''))
+	}
+	if (!need('stack')) return
+	const before = new Map<number, string>() // (IR per function after promoteStack, for the stackargs dump)
+	{
+		const out: string[] = [header('stack')]
+		try {
+			for (const f of funcs()) {
+				const r = promoteStack(f)
+				const ir = f.blocks.map(blockLine).join('')
+				before.set(f.pc, ir)
+				out.push(line({ t: 'func', pc: f.pc, promoted: r }))
+				if (r) out.push(line({ t: 'slots', slots: f.promoted!.map(x => [x.off, x.size, x.v]), vars: varsOf(f) }), ir)
+			}
+		} catch (e) { fail('stack', e); return }
+		if (stages.includes('stack')) res.set('stack', out.join(''))
+	}
+	if (!need('stackargs')) return
+	{
+		const out: string[] = [header('stackargs')]
+		try {
+			const built = new Map(funcs().map(f => [f.pc, { f }]))
+			const nstack = rewriteStackArgs(q, built)
+			for (const [pc, n] of nstack) out.push(line({ t: 'nstack', pc, n }))
+			for (const f of funcs()) {
+				const ir = f.blocks.map(blockLine).join('')
+				const o: Record<string, unknown> = { t: 'func', pc: f.pc }
+				if (f.stackArgs !== undefined) o.stackArgs = f.stackArgs
+				if (f.argAreaElided !== undefined) o.argAreaElided = f.argAreaElided
+				if (nstack.has(f.pc)) o.vars = varsOf(f)
+				o.changed = ir !== before.get(f.pc)
+				out.push(line(o))
+				if (o.changed) out.push(ir)
+			}
+		} catch (e) { fail('stackargs', e); return }
+		res.set('stackargs', out.join(''))
+	}
+}
+
 export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): Map<string, string> {
 	const res = new Map<string, string>()
 	let elf: Elf
@@ -153,6 +231,7 @@ export function dumpAll(bytes: Uint8Array, stages: readonly string[] = STAGES): 
 	if (stages.includes('insns')) res.set('insns', dumpInsns(p))
 	if (stages.includes('cfg')) res.set('cfg', dumpCfg(p, lazy))
 	if (stages.includes('lift')) res.set('lift', dumpLift(p))
+	dumpStage2(bytes, stages, res)
 	return res
 }
 
@@ -165,7 +244,7 @@ if (import.meta.main) {
 		else if (args[i] === '--stages') stages = args[++i].split(',')
 		else pos.push(args[i])
 	}
-	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift] out_dir'); process.exit(2) }
+	if (pos.length !== 2) { console.error('usage: node scripts/dump.ts prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs] out_dir'); process.exit(2) }
 	const [file, dir] = pos
 	mkdirSync(dir, { recursive: true })
 	for (const [stage, text] of dumpAll(new Uint8Array(readFileSync(file)), stages)) writeFileSync(join(dir, `${stage}.jsonl`), text)
