@@ -918,7 +918,6 @@ pub fn decompile_read_opts(
                 unaligned: false,
             };
             let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
-    d.threads = threads;
             d.threads = threads;
             phase3(&mut d);
             anchor_names(&mut d).1
@@ -938,6 +937,7 @@ pub fn decompile_read_opts(
     }
     let ctx = ProgCtx::new(&pr.p);
     let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+    d.threads = threads;
     let p = &pr.p;
     phase3(&mut d);
     let name_fn = anchor_names(&mut d).0;
@@ -965,7 +965,7 @@ pub fn decompile_read_opts(
         legacy_account_info(&m, p.elf.entry_pc)
     };
     user_invoke(&mut d);
-    d.account_infos = find_accounts(&d.fs, d.unaligned, d.legacy);
+    d.account_infos = find_accounts(&d.fs, d.unaligned, d.legacy, d.threads);
     if d.unaligned {
         for v in unaligned_views() {
             d.views.add(v);

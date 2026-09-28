@@ -49,14 +49,15 @@ thread_local! {
     static NO_FIELDS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// (the parallel printing: field identities are made on the main thread only)
-pub fn forbid_new_fields(on: bool) {
-    NO_FIELDS.with(|c| c.set(on));
+/// (speculative computations: field identities are made on the calling thread only, in order; returns
+/// the previous setting)
+pub fn forbid_new_fields(on: bool) -> bool {
+    NO_FIELDS.with(|c| c.replace(on))
 }
 
 /// A new field identity.
 pub fn fid() -> u32 {
-    assert!(!NO_FIELDS.with(|c| c.get()), "a field made during the parallel printing");
+    assert!(!NO_FIELDS.with(|c| c.get()), "a field identity made while speculating");
     FIELD_ID.with(|c| {
         let v = c.get();
         c.set(v + 1);

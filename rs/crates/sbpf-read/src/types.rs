@@ -222,7 +222,7 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
         if let Some(nf) = name_fn {
             // (each function on its own: anchor_fn only reads the function and the program; results in order)
             let sh = crate::util::Shared(&*d);
-            let found = crate::util::par_map_big(d.fs.len(), d.threads, |i| {
+            let found = crate::util::par_map_exact(d.fs.len(), d.threads, |i| {
                 let d = sh.get();
                 let f = d.fs[i];
                 let ai = &d.account_infos[i];

@@ -857,3 +857,45 @@ fn sync_check() {
     // (not checked: the outlines' node keys are addresses, the facts' Rc<RefCell<OpCpi>>s in ReadOut are
     // not touched by the rendering's workers)
 }
+
+thread_local! {
+    /// (a speculative computation runs: a panic is caught, its message not printed)
+    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f()` run speculatively on this thread: None when it panics (the panic hook prints nothing then; the
+/// caller redoes the computation for real in its sequential turn, where it panics with its message). A
+/// field identity made meanwhile panics (the counter is per thread: identities are made on the calling
+/// thread only, in order).
+pub fn speculate<R>(f: impl FnOnce() -> R) -> Option<R> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(|q| q.get()) {
+                prev(info)
+            }
+        }));
+    });
+    let was = QUIET.with(|q| q.replace(true));
+    let nf = crate::views::forbid_new_fields(true);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    crate::views::forbid_new_fields(nf);
+    QUIET.with(|q| q.set(was));
+    r.ok()
+}
+
+/// `(0..n).map(f).collect()` with the calls on up to `threads` threads, for an `f` whose result and
+/// visible effects do not depend on the order of the calls (reads, caches of pure functions, nodes
+/// appended to one function's own arena). A call that panics is made again on this thread in its turn
+/// (after the results before it: the same panic as one at a time).
+pub fn par_map_exact<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let rs = par_map_big(n, threads, |i| speculate(|| f(i)));
+    rs.into_iter()
+        .enumerate()
+        .map(|(i, r)| match r {
+            Some(r) => r,
+            None => f(i),
+        })
+        .collect()
+}

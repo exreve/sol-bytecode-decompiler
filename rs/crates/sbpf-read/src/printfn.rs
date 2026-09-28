@@ -1765,11 +1765,6 @@ unsafe impl Sync for ParPrint<'_, '_> {}
 struct SendPrinted(Option<Printed>, Vec<BudgetEv>);
 unsafe impl Send for SendPrinted {}
 
-thread_local! {
-    /// (speculative printing: a panic is caught, its message not printed)
-    static QUIET: Cell<bool> = const { Cell::new(false) };
-}
-
 impl ParPrint<'_, '_> {
     /// The function printed with the given budgets on this thread (a panic unwinds).
     fn print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
@@ -1779,28 +1774,10 @@ impl ParPrint<'_, '_> {
     }
     /// The function printed speculatively (a panic gives None: it is printed again for real).
     fn try_print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
-        quiet_panics();
-        QUIET.with(|q| q.set(true));
-        crate::views::forbid_new_fields(true);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.print(fi, view, left)));
-        crate::views::forbid_new_fields(false);
-        QUIET.with(|q| q.set(false));
-        r.unwrap_or(SendPrinted(None, Vec::new()))
+        speculate(|| self.print(fi, view, left)).unwrap_or(SendPrinted(None, Vec::new()))
     }
 }
 
-/// (once: the panic hook prints nothing for a speculative computation's panic)
-fn quiet_panics() {
-    static HOOK: std::sync::Once = std::sync::Once::new();
-    HOOK.call_once(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if !QUIET.with(|q| q.get()) {
-                prev(info)
-            }
-        }));
-    });
-}
 
 
 /// Every function's text and facts, as printed one after the other in function order (each function's
@@ -1972,13 +1949,7 @@ impl ParFacts<'_, '_> {
         func_facts(self.d, &self.finals[p.fi], p, None)
     }
     fn try_facts(&self, x: usize) -> SendFacts {
-        quiet_panics();
-        QUIET.with(|q| q.set(true));
-        crate::views::forbid_new_fields(true);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.facts(x)));
-        crate::views::forbid_new_fields(false);
-        QUIET.with(|q| q.set(false));
-        SendFacts(r.ok())
+        SendFacts(speculate(|| self.facts(x)))
     }
 }
 

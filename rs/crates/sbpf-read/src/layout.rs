@@ -288,7 +288,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     };
     // (each function's text on its own)
     let texts = crate::util::Shared(fs.as_slice());
-    let scans: Vec<Scan> = crate::util::par_map_big(nf, r.threads, |i| {
+    let scans: Vec<Scan> = crate::util::par_map_exact(nf, r.threads, |i| {
         let t = &texts.get()[i].text;
         let mut c = IndexSet::default();
         called(t, &mut c);
@@ -784,7 +784,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         let an_sh = crate::util::Shared(&an);
         let fs_sh = crate::util::Shared(fs.as_slice());
         let home_sh = crate::util::Shared(&home);
-        crate::util::par_map_big(jobs.len(), r.threads, |k| {
+        crate::util::par_map_exact(jobs.len(), r.threads, |k| {
             let bundle = sh.get();
             let fs = fs_sh.get();
             let (ix, job) = &jobs_sh.get()[k];

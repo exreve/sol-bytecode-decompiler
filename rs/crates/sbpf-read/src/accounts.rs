@@ -167,7 +167,7 @@ struct FnInfo<'a> {
 }
 
 /// findAccounts: per function (in `funcs` order), expressions that point to an account.
-pub fn find_accounts(funcs: &[&Func], unaligned: bool, legacy: bool) -> Vec<Typed> {
+pub fn find_accounts(funcs: &[&Func], unaligned: bool, legacy: bool, threads: usize) -> Vec<Typed> {
     let kinds = [Kind::Info, if unaligned { Kind::Raw1 } else { Kind::Raw }];
     let mut info: Vec<FnInfo> = funcs
         .iter()
@@ -187,12 +187,37 @@ pub fn find_accounts(funcs: &[&Func], unaligned: bool, legacy: bool) -> Vec<Type
     let idx: HashMap<i64, usize> = funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
     let mut param_typed: IndexMap<i64, IndexMap<i32, Kind>> = IndexMap::default();
     let mut blocked: IndexMap<i64, Vec<i32>> = IndexMap::default();
-    for _round in 0..6 {
+    for round in 0..6 {
         let mut changed = false;
-        for fi in info.iter_mut() {
-            let tp = param_typed.get(&fi.f.pc).cloned();
-            if local(fi, tp.as_ref(), &kinds, legacy) {
-                changed = true;
+        if round == 0 {
+            // (the first round reads each function alone, no parameter typed yet: in parallel; it appends
+            // nodes to the function's own arena only)
+            let sh = crate::util::Shared(&info);
+            let firsts = crate::util::par_map_exact(info.len(), threads, |i| {
+                let f = sh.get()[i].f;
+                let mut fi = FnInfo {
+                    f,
+                    typed: IndexMap::default(),
+                    params: sh.get()[i].params.clone(),
+                    addrs: None,
+                    st: None,
+                };
+                let ch = local(&mut fi, None, &kinds, legacy);
+                crate::util::SendBox((fi.typed, fi.addrs, fi.st, ch))
+            });
+            for (fi, r) in info.iter_mut().zip(firsts) {
+                let (typed, addrs, st, ch) = r.0;
+                fi.typed = typed;
+                fi.addrs = addrs;
+                fi.st = st;
+                changed |= ch;
+            }
+        } else {
+            for fi in info.iter_mut() {
+                let tp = param_typed.get(&fi.f.pc).cloned();
+                if local(fi, tp.as_ref(), &kinds, legacy) {
+                    changed = true;
+                }
             }
         }
         for fi in &info {
