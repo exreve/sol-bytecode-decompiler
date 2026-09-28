@@ -286,19 +286,19 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         }
         m
     };
-    let scans: Vec<Scan> = fs
-        .iter()
-        .map(|f| {
-            let mut c = IndexSet::default();
-            called(&f.text, &mut c);
-            let mut v = IndexSet::default();
-            scan_views(&f.text, &mut v);
-            Scan {
-                called: c,
-                views: v,
-            }
-        })
-        .collect();
+    // (each function's text on its own)
+    let texts = crate::util::Shared(fs.as_slice());
+    let scans: Vec<Scan> = crate::util::par_map_big(nf, r.threads, |i| {
+        let t = &texts.get()[i].text;
+        let mut c = IndexSet::default();
+        called(t, &mut c);
+        let mut v = IndexSet::default();
+        scan_views(t, &mut v);
+        Scan {
+            called: c,
+            views: v,
+        }
+    });
     let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0.as_str()).collect();
     let is_root =
         |i: usize| fs[i].name.starts_with("ix_") || proc_names.contains(fs[i].name.as_str());
@@ -523,11 +523,11 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     let outl_names: Vec<IndexSet<String>> = r.outlined.iter().map(|o| names_in(&o.1)).collect();
     let mut bundle_loc: HashMap<String, HashMap<String, (i64, Option<Vec<usize>>)>> =
         HashMap::default();
-    let mut bundle = |ix: &str,
-                      h: usize,
-                      what: &str,
-                      view: &dyn Fn(usize) -> Option<Sliced>,
-                      files: &mut IndexMap<String, String>| {
+    let bundle = |ix: &str,
+                  h: usize,
+                  what: &str,
+                  view: &dyn Fn(usize) -> Option<Sliced>|
+     -> (String, HashMap<String, (i64, Option<Vec<usize>>)>) {
         enum Code {
             F(usize),
             O(usize),
@@ -738,7 +738,6 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         }
         pre.push(String::new());
         let pre = pre.join("\n");
-        files.insert(format!("bundle/{ix}.ts"), format!("{pre}\n{text}\n"));
         let mut m: HashMap<String, (i64, Option<Vec<usize>>)> = HashMap::default();
         let mut at = pre.split('\n').count() as i64 + 1;
         for &f in &order {
@@ -746,52 +745,88 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
             m.insert(fs[f].name.clone(), (at, v.map(|v| v.map.clone())));
             at += v.map_or(line_count(&fs[f].text), |v| v.lines) as i64 + 1;
         }
-        bundle_loc.insert(ix.to_string(), m);
+        (format!("{pre}\n{text}\n"), m)
     };
+    // the bundles: which ones in order (a name bundled once), then each on its own (in parallel), added in order
+    enum Job {
+        Handler(usize),
+        /// (index in the analysis' instructions, handler)
+        Inline(usize, usize),
+    }
+    let mut jobs: Vec<(String, Job)> = Vec::new();
+    let mut bundled: HashSet<String> = HashSet::default();
     for (i, f) in fs.iter().enumerate() {
         if let Some(x) = f.name.strip_prefix("ix_") {
-            bundle(x, i, "handler", &|_| None, &mut files);
+            bundled.insert(x.to_string());
+            jobs.push((x.to_string(), Job::Handler(i)));
         }
     }
     let mut inline: Vec<String> = Vec::new();
     if let Some(an) = an {
         for (xi, ix) in an.a.ixs.iter().enumerate() {
-            let Some(part) = an.parts[xi].as_ref() else {
+            if an.parts[xi].is_none() {
                 continue;
-            };
+            }
             let Some(&h) = by_name.get(ix.handler.as_str()) else {
                 continue;
             };
-            if ix.handler.starts_with("ix_")
-                || files.contains_key(&format!("bundle/{}.ts", ix.name))
-            {
+            if ix.handler.starts_with("ix_") || bundled.contains(&ix.name) {
                 continue;
             }
-            let hpc = fs[h].pc;
-            let view = |f: usize| -> Option<Sliced> {
-                let pc = fs[f].pc;
-                if f != h && !part.restricted.contains(&pc) {
-                    return None;
+            bundled.insert(ix.name.clone());
+            jobs.push((ix.name.clone(), Job::Inline(xi, h)));
+        }
+    }
+    let made = {
+        // (the bundles only read the functions' texts, the scans and the analysis' instruction parts)
+        let sh = crate::util::Shared(&bundle);
+        let jobs_sh = crate::util::Shared(jobs.as_slice());
+        let an_sh = crate::util::Shared(&an);
+        let fs_sh = crate::util::Shared(fs.as_slice());
+        let home_sh = crate::util::Shared(&home);
+        crate::util::par_map_big(jobs.len(), r.threads, |k| {
+            let bundle = sh.get();
+            let fs = fs_sh.get();
+            let (ix, job) = &jobs_sh.get()[k];
+            crate::util::SendBox(match *job {
+                Job::Handler(i) => bundle(ix, i, "handler", &|_| None),
+                Job::Inline(xi, h) => {
+                    let an = an_sh.get().as_ref().unwrap();
+                    let part = an.parts[xi].as_ref().unwrap();
+                    let x = &an.a.ixs[xi];
+                    let view = |f: usize| -> Option<Sliced> {
+                        let pc = fs[f].pc;
+                        if f != h && !part.restricted.contains(&pc) {
+                            return None;
+                        }
+                        let st = part.marks.get(&pc)?.as_ref()?;
+                        let full = format!(
+                            "{}.ts",
+                            home_sh.get().get(&fs[f].name).map_or("entrypoint", |s| s.as_str())
+                        );
+                        Some(slice(&fs[f].text, st, &full))
+                    };
+                    bundle(
+                        ix,
+                        h,
+                        &format!(
+                            "{} restricted to this instruction's paths ({})",
+                            x.handler,
+                            x.dispatch.as_deref().unwrap_or("instruction tag")
+                        ),
+                        &view,
+                    )
                 }
-                let st = part.marks.get(&pc)?.as_ref()?;
-                let full = format!(
-                    "{}.ts",
-                    home.get(&fs[f].name).map_or("entrypoint", |s| s.as_str())
-                );
-                Some(slice(&fs[f].text, st, &full))
-            };
-            let _ = hpc;
-            bundle(
-                &ix.name,
-                h,
-                &format!(
-                    "{} restricted to this instruction's paths ({})",
-                    ix.handler,
-                    ix.dispatch.as_deref().unwrap_or("instruction tag")
-                ),
-                &view,
-                &mut files,
-            );
+            })
+        })
+    };
+    for ((ix, job), m) in jobs.iter().zip(made) {
+        let (text, loc) = m.0;
+        files.insert(format!("bundle/{ix}.ts"), text);
+        bundle_loc.insert(ix.to_string(), loc);
+        let Job::Inline(xi, _) = *job else { continue };
+        let ix = &an.unwrap().a.ixs[xi];
+        {
             let d = ix.dispatch.as_deref().map_or(String::new(), |d| {
                 match d.find(" (instruction data)") {
                     Some(i) => d[..i].to_string(),

@@ -796,3 +796,64 @@ pub fn jmax(a: N, b: N) -> N {
         a.max(b)
     }
 }
+
+/// `(0..n).map(f)` on up to `threads` threads with the main thread's stack size (deep recursion).
+pub fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    if threads <= 1 || n <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            std::thread::Builder::new()
+                .stack_size(1 << 30)
+                .spawn_scoped(s, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = f(i);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
+}
+
+/// A reference handed to worker threads by a computation that only reads what it reaches. The
+/// decompilation state is `Sync` but for the IR arenas' interior mutability (nodes appended through a
+/// shared reference) and the `Rc`s of results: sound when the computation appends to no arena another
+/// thread reads and clones no `Rc` of the shared state (each use says why).
+pub struct Shared<'a, T: ?Sized>(pub &'a T);
+unsafe impl<T: ?Sized> Sync for Shared<'_, T> {}
+unsafe impl<T: ?Sized> Send for Shared<'_, T> {}
+impl<T: ?Sized> Clone for Shared<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: ?Sized> Copy for Shared<'_, T> {}
+impl<'a, T: ?Sized> Shared<'a, T> {
+    /// (a method: a closure calling it captures the wrapper, not the reference inside)
+    pub fn get(self) -> &'a T {
+        self.0
+    }
+}
+
+/// A value handed back from a worker thread that is not `Send` only because of what it may hold of the
+/// shared state (node keys: addresses in shared trees, used as keys only).
+pub struct SendBox<T>(pub T);
+unsafe impl<T> Send for SendBox<T> {}
+
+/// (`--features sync-check`) what the parallel parts share through `Shared` is `Sync` but for the arenas
+#[cfg(feature = "sync-check")]
+#[allow(dead_code)]
+fn sync_check() {
+    fn sync<T: Sync + ?Sized>() {}
+    sync::<crate::decompile::Dx<'static>>();
+    sync::<[sbpf_struct::Tree]>();
+    // (not checked: the outlines' node keys are addresses, the facts' Rc<RefCell<OpCpi>>s in ReadOut are
+    // not touched by the rendering's workers)
+}

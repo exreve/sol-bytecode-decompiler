@@ -276,6 +276,8 @@ pub struct ReadOut {
     pub try_of: IndexMap<i64, i64>,
     pub acct_layouts: IndexMap<i64, Vec<Field>>,
     pub program_id: Option<String>,
+    /// worker threads of the rendering
+    pub threads: usize,
 }
 
 pub const GENERIC_RESULT: &str =
@@ -344,6 +346,8 @@ pub struct Dx<'p> {
     frame_offs: Vec<OnceLock<(IndexSet<K>, IndexSet<K>)>>,
     /// function entry address -> pc (callsOf's table), built once
     pub pc_by_addr: std::sync::OnceLock<HashMap<u64, i64>>,
+    /// worker threads of the parallel parts
+    pub threads: usize,
 }
 
 pub const RESERVED_TS: &[&str] = &[
@@ -861,6 +865,7 @@ fn new_dx<'p>(
         spill: (0..n).map(|_| OnceLock::new()).collect(),
         frame_offs: (0..n).map(|_| OnceLock::new()).collect(),
         pc_by_addr: std::sync::OnceLock::new(),
+        threads: 1,
     }
 }
 
@@ -913,6 +918,8 @@ pub fn decompile_read_opts(
                 unaligned: false,
             };
             let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+    d.threads = threads;
+            d.threads = threads;
             phase3(&mut d);
             anchor_names(&mut d).1
         };

@@ -1802,30 +1802,6 @@ fn quiet_panics() {
     });
 }
 
-/// `(0..n).map(f)` on up to `threads` threads with the main thread's stack size (deep recursion).
-fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    if threads <= 1 || n <= 1 {
-        return (0..n).map(f).collect();
-    }
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n) {
-            std::thread::Builder::new()
-                .stack_size(1 << 30)
-                .spawn_scoped(s, || loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let r = f(i);
-                    out.lock().unwrap()[i] = Some(r);
-                })
-                .expect("spawn");
-        }
-    });
-    out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
-}
 
 /// Every function's text and facts, as printed one after the other in function order (each function's
 /// facts right after its text), on `threads` threads. Order matters through three things:
@@ -2220,6 +2196,7 @@ pub fn run(
         try_of: d.try_of.clone(),
         acct_layouts: d.acct_layouts.clone(),
         program_id: d.state_idl_address.clone(),
+        threads,
     })
 }
 
