@@ -452,3 +452,34 @@ impl Iterator for Items<'_> {
 }
 
 impl ExactSizeIterator for Items<'_> {}
+
+/// `(0..n).map(f).collect()` on up to `threads` worker threads (large stacks, as the main thread's: deep
+/// expression trees are walked recursively); results in index order, the same for any thread count.
+pub fn par_map_n<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    if threads <= 1 || n <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> =
+        std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            std::thread::Builder::new()
+                .stack_size(1 << 28)
+                .spawn_scoped(s, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = f(i);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.unwrap())
+        .collect()
+}

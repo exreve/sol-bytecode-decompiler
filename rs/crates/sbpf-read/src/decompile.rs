@@ -173,7 +173,7 @@ pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead
         .collect();
     let sym_notes = name_functions_lib(&mut p, &sem, &|pc| libs.get(&pc).is_some_and(|i| i.lib));
     let names = prog_names(&p);
-    sbpf_dataflow::recover_some(&mut p, &|fi| !lib_at[fi])?;
+    sbpf_dataflow::recover_some_par(&mut p, &|fi| !lib_at[fi], threads)?;
     {
         let img = sbpf_elf::Image::new(&p.elf);
         let fs: Vec<&mut Func> = p

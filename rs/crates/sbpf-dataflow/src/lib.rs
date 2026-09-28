@@ -938,13 +938,36 @@ pub fn recover_all(p: &mut Program) -> Result<(), String> {
 
 /// recoverVars of the functions `pick` selects (by index, in `p.funcs` order); the first error stops.
 pub fn recover_some(p: &mut Program, pick: &dyn Fn(usize) -> bool) -> Result<(), String> {
+    recover_some_par(p, pick, 1)
+}
+
+/// `recover_some` with the per-function recoveries on `threads` worker threads, applied in order.
+pub fn recover_some_par(
+    p: &mut Program,
+    pick: &dyn Fn(usize) -> bool,
+    threads: usize,
+) -> Result<(), String> {
     let sigs = sigs_of(p);
-    for fi in 0..p.funcs.len() {
-        if !pick(fi) {
-            continue;
+    let picked: Vec<usize> = (0..p.funcs.len()).filter(|&fi| pick(fi)).collect();
+    let rs = {
+        let cx = Ctx::of(p);
+        /// The program read by the recoveries: `recover_vars` only reads the program arena and the
+        /// functions (it builds each function's IR in a new arena of its own), and nothing else holds the
+        /// program while they run (`p` is borrowed mutably here): the arenas' interior mutability is not
+        /// used, so sharing them read-only between the threads is sound.
+        struct Shared<'a>(&'a Ctx<'a>, &'a [Sig], &'a Ir);
+        unsafe impl Sync for Shared<'_> {}
+        impl Shared<'_> {
+            fn recover(&self, fi: usize) -> Result<Recovered, String> {
+                recover_vars(self.0, self.1, self.2, fi)
+            }
         }
-        let r = recover_vars(&Ctx::of(p), &sigs, &p.ir, fi)?;
-        apply_recovered(&mut p.funcs[fi], r);
+        let sh = Shared(&cx, &sigs, &p.ir);
+        sbpf_ir::par_map_n(picked.len(), threads, |k| sh.recover(picked[k]))
+    };
+    // (the first error in function order stops, as one at a time)
+    for (fi, r) in picked.into_iter().zip(rs) {
+        apply_recovered(&mut p.funcs[fi], r?);
     }
     Ok(())
 }
