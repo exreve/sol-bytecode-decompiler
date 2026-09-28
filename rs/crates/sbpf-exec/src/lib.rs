@@ -13,6 +13,7 @@ use sbpf_program::Program;
 use std::cell::RefCell;
 use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Minimal insertion-ordered set (the crate avoids other dependencies).
 mod indexmap_lite {
@@ -162,11 +163,12 @@ pub struct ProgCtx<'p> {
     /// image regions in address order: (vaddr, bytes)
     regions: Vec<(u64, &'p [u8])>,
     image_pages: HashSet<u64>,
-    calls: RefCell<HashMap<i64, Option<Target>>>,
-    extents: RefCell<Option<HashMap<i64, i64>>>,
-    cfgs: RefCell<HashMap<i64, Rc<Cfg>>>,
-    reach: RefCell<HashMap<(i64, i64), Option<Rc<PcSet>>>>,
-    ret: RefCell<HashMap<i64, Rc<PcSet>>>,
+    // (caches of pure functions of their keys: shared by the worker threads of the readable printing)
+    calls: Mutex<HashMap<i64, Option<Target>>>,
+    extents: OnceLock<HashMap<i64, i64>>,
+    cfgs: Mutex<HashMap<i64, Arc<Cfg>>>,
+    reach: Mutex<HashMap<(i64, i64), Option<Arc<PcSet>>>>,
+    ret: Mutex<HashMap<i64, Arc<PcSet>>>,
 }
 
 impl<'p> ProgCtx<'p> {
@@ -191,16 +193,16 @@ impl<'p> ProgCtx<'p> {
             p,
             regions,
             image_pages,
-            calls: RefCell::new(HashMap::default()),
-            extents: RefCell::new(None),
-            cfgs: RefCell::new(HashMap::default()),
-            reach: RefCell::new(HashMap::default()),
-            ret: RefCell::new(HashMap::default()),
+            calls: Mutex::new(HashMap::default()),
+            extents: OnceLock::new(),
+            cfgs: Mutex::new(HashMap::default()),
+            reach: Mutex::new(HashMap::default()),
+            ret: Mutex::new(HashMap::default()),
         }
     }
 
     fn call_target(&self, pc: i64) -> Option<Target> {
-        if let Some(t) = self.calls.borrow().get(&pc) {
+        if let Some(t) = self.calls.lock().unwrap().get(&pc) {
             return t.clone();
         }
         let p = self.p;
@@ -218,14 +220,13 @@ impl<'p> ProgCtx<'p> {
                 CallName::Hash(h) => Target::Sys(format!("hash:{h}")),
             })
         };
-        self.calls.borrow_mut().insert(pc, t.clone());
+        self.calls.lock().unwrap().insert(pc, t.clone());
         t
     }
 
     /// extentOf: the first pc after the function at fpc (the next function's entry).
     pub fn extent_of(&self, fpc: i64) -> i64 {
-        let mut e = self.extents.borrow_mut();
-        let m = e.get_or_insert_with(|| {
+        let m = self.extents.get_or_init(|| {
             let mut starts: Vec<i64> = self.p.funcs.keys().copied().collect();
             starts.sort();
             let mut m = HashMap::default();
@@ -243,8 +244,8 @@ impl<'p> ProgCtx<'p> {
         m.get(&fpc).copied().unwrap_or(self.p.insns.len() as i64)
     }
 
-    fn cfg_of(&self, fpc: i64) -> R<Rc<Cfg>> {
-        if let Some(c) = self.cfgs.borrow().get(&fpc) {
+    fn cfg_of(&self, fpc: i64) -> R<Arc<Cfg>> {
+        if let Some(c) = self.cfgs.lock().unwrap().get(&fpc) {
             return Ok(c.clone());
         }
         let p = self.p;
@@ -309,13 +310,13 @@ impl<'p> ProgCtx<'p> {
             edge(pc, pc + 1);
             pc += 1;
         }
-        let c = Rc::new(Cfg {
+        let c = Arc::new(Cfg {
             preds,
             exits,
             lo: fpc,
             end,
         });
-        self.cfgs.borrow_mut().insert(fpc, c.clone());
+        self.cfgs.lock().unwrap().insert(fpc, c.clone());
         Ok(c)
     }
 
@@ -342,28 +343,28 @@ impl<'p> ProgCtx<'p> {
     }
 
     /// reaching: instructions of the function at fpc from which `target` can be reached.
-    pub fn reaching(&self, fpc: i64, target: i64) -> R<Option<Rc<PcSet>>> {
-        if let Some(r) = self.reach.borrow().get(&(fpc, target)) {
+    pub fn reaching(&self, fpc: i64, target: i64) -> R<Option<Arc<PcSet>>> {
+        if let Some(r) = self.reach.lock().unwrap().get(&(fpc, target)) {
             return Ok(r.clone());
         }
         let g = self.cfg_of(fpc)?;
         let r = if target < fpc || target >= g.end {
             None
         } else {
-            Some(Rc::new(Self::backward(&g, &[target])))
+            Some(Arc::new(Self::backward(&g, &[target])))
         };
-        self.reach.borrow_mut().insert((fpc, target), r.clone());
+        self.reach.lock().unwrap().insert((fpc, target), r.clone());
         Ok(r)
     }
 
     /// returning: instructions of the function at fpc from which it can return.
-    pub fn returning(&self, fpc: i64) -> R<Rc<PcSet>> {
-        if let Some(r) = self.ret.borrow().get(&fpc) {
+    pub fn returning(&self, fpc: i64) -> R<Arc<PcSet>> {
+        if let Some(r) = self.ret.lock().unwrap().get(&fpc) {
             return Ok(r.clone());
         }
         let g = self.cfg_of(fpc)?;
-        let r = Rc::new(Self::backward(&g, &g.exits));
-        self.ret.borrow_mut().insert(fpc, r.clone());
+        let r = Arc::new(Self::backward(&g, &g.exits));
+        self.ret.lock().unwrap().insert(fpc, r.clone());
         Ok(r)
     }
 }
@@ -726,7 +727,7 @@ pub struct Exec<'c> {
     capped: HashSet<BranchKey>,
     pub variant: u32,
     pda_calls: u32,
-    force: Option<Rc<PcSet>>,
+    force: Option<Arc<PcSet>>,
     ret: u64,
     ret_t: u8,
     mem_v0: [u8; 256],
@@ -915,7 +916,7 @@ impl<'c> Exec<'c> {
             return Err(Exc::Limit);
         }
         let p = self.ctx.p;
-        let reach: Option<Rc<PcSet>> = if depth == 0 && self.force.is_some() {
+        let reach: Option<Arc<PcSet>> = if depth == 0 && self.force.is_some() {
             self.force.clone()
         } else if self.no_panic {
             Some(self.ctx.returning(fpc)?)

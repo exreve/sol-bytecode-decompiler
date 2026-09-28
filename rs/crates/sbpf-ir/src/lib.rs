@@ -162,6 +162,10 @@ pub struct Ir {
     names: UnsafeCell<Vec<Arc<str>>>,
 }
 
+// (check only: see the `sync-check` feature)
+#[cfg(feature = "sync-check")]
+unsafe impl Sync for Ir {}
+
 impl Clone for Ir {
     fn clone(&self) -> Self {
         // SAFETY: see `Ir::len`

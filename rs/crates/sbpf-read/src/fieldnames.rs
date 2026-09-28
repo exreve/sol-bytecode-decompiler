@@ -180,6 +180,7 @@ struct Loc {
     key: bool,
 }
 
+#[derive(Default)]
 struct Votes {
     votes: IndexMap<u32, (String, Vec<Vote>)>,
     added: IndexMap<String, IndexMap<crate::util::K, Vec<Vote>>>,
@@ -188,6 +189,22 @@ struct Votes {
 }
 
 impl Votes {
+    /// the votes of `o` (made after those of `self`) added: the same as made in one after the other
+    fn merge(&mut self, o: Votes) {
+        for (id, (view, vs)) in o.votes {
+            self.votes.entry(id).or_insert_with(|| (view, Vec::new())).1.extend(vs);
+        }
+        for (view, m) in o.added {
+            let e = self.added.entry(view).or_default();
+            for (k, vs) in m {
+                e.entry(k).or_default().extend(vs);
+            }
+        }
+        self.edges.extend(o.edges);
+        for (k, v) in o.shared_memo {
+            self.shared_memo.entry(k).or_insert(v);
+        }
+    }
     fn shared(&mut self, views: &Views, l: &Loc) -> bool {
         if let Some(&r) = self.shared_memo.get(&l.view) {
             return r;
@@ -271,7 +288,7 @@ fn pick(vs: &[Vote]) -> Vote {
 }
 
 /// nameFields: rename the generated fields of the views after how the functions use them.
-pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
+pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views, threads: usize) -> usize {
     let mut vt = Votes {
         votes: IndexMap::default(),
         added: IndexMap::default(),
@@ -298,6 +315,7 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
         gen.insert(t.to_string(), r);
         r
     }
+    let mut todo: Vec<(i64, &Func, IndexMap<u32, String>)> = Vec::new();
     for (&pc, f) in &cfg.funcs {
         let ir = f.ir.as_ref().unwrap();
         let tys = (cfg.types)(pc);
@@ -323,8 +341,21 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
             }
         }
         if any {
-            scan(cfg, views, pc, f, &tys, &mut vt);
+            todo.push((pc, *f, tys));
         }
+    }
+    // (each function scanned on its own, its votes added in order: a scan reads the views and appends
+    // nodes to its function's own arena only)
+    let sh = crate::util::Shared(&(cfg, &*views, &todo));
+    let got = crate::util::par_map_exact(todo.len(), threads, |k| {
+        let (cfg, views, todo) = *sh.get();
+        let (pc, f, tys) = &todo[k];
+        let mut v = Votes::default();
+        scan(cfg, views, *pc, f, tys, &mut v);
+        crate::util::SendBox(v)
+    });
+    for v in got {
+        vt.merge(v.0);
     }
     let mut n = 0;
     let mut by_view: IndexMap<String, Vec<(u32, Vote)>> = IndexMap::default();

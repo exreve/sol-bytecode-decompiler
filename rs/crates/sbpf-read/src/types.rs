@@ -220,14 +220,20 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
     }
     if d.sem.anchor {
         if let Some(nf) = name_fn {
-            let fs = d.fs.clone();
-            for (i, f) in fs.iter().enumerate() {
+            // (each function on its own: anchor_fn only reads the function and the program; results in order)
+            let sh = crate::util::Shared(&*d);
+            let found = crate::util::par_map_exact(d.fs.len(), d.threads, |i| {
+                let d = sh.get();
+                let f = d.fs[i];
                 let ai = &d.account_infos[i];
                 let sa = |p: u64, n: u64| d.str_at(p, n, false);
                 let en = |v: u64| d.sem.anchor_error(v);
                 let isacc = |v: u32| ai.get(&format!("v{v}")) == Some(&Kind::Info);
-                if let Some(a) = anchor_fn(f, &d.trees[i], nf, &sa, &en, &isacc) {
-                    d.anchor_info.insert(f.pc, a);
+                crate::util::SendBox(anchor_fn(f, &d.trees[i], nf, &sa, &en, &isacc).map(|a| (f.pc, a)))
+            });
+            for x in found {
+                if let Some((pc, a)) = x.0 {
+                    d.anchor_info.insert(pc, a);
                 }
             }
             let mut taken: HashSet<String> = d.pn.by_pc.values().cloned().collect();
@@ -1662,6 +1668,7 @@ fn view_types(d: &mut Dx) {
         let fname = move |pc: i64| pn.fn_name(pc);
         let sem = &d.sem;
         let sa = |p: u64, n: u64| sem.str_at(p, n, true);
+        let threads = d.threads;
         let cfg = FieldNameCfg {
             funcs,
             types: &types,
@@ -1669,7 +1676,7 @@ fn view_types(d: &mut Dx) {
             str_at: &sa,
         };
         let mut views = std::mem::take(&mut d.views);
-        name_fields(&cfg, &mut views);
+        name_fields(&cfg, &mut views, threads);
         drop(cfg);
         d.views = views;
     }

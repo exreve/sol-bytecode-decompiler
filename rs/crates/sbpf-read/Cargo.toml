@@ -23,3 +23,8 @@ sbpf-lib.workspace = true
 [build-dependencies]
 miniz_oxide.workspace = true
 serde_json.workspace = true
+
+[features]
+# `cargo check -p sbpf-read --features sync-check`: the state shared by the parallel parts is `Sync` but
+# for the IR arenas (see util::Shared)
+sync-check = ["sbpf-ir/sync-check"]

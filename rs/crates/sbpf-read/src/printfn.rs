@@ -7,7 +7,7 @@ use crate::analysis::acct::account_resolver;
 use crate::analysis::facts::{function_facts, FnFacts, FnInput, NodeKey, SiteNote, StoreRef};
 use crate::analysis::flow::{cfg_of, decision_block, pos_of, Callee, Cfg, FlowCtx};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, site_objects, CpiEnv, CpiSite, SiteKind};
-use crate::cpiexec::{describe_model, ExecSiteKind};
+use crate::cpiexec::{describe_model, ExecBudget, ExecSiteKind};
 use crate::decompile::{
     call_insns, invoke_abi, pascal_ix, pda_abi, Dx, FrameClaim, IxRow, ReadFunc, ReadOut,
     GENERIC_RESULT, RESERVED_TS,
@@ -1677,10 +1677,287 @@ impl RegionCfg for RC<'_> {
 /// The analysis hook: given the result as the analysis reads it (after printing), its text output.
 pub type AnalysisHook<'h> = &'h dyn for<'a> Fn(&crate::analysis::An<'a>) -> String;
 
+/// The concrete-run budgets (interpreter steps) all functions' printing shares in function order: `Exec`,
+/// the CPI sites' descriptions (250k), `Wrap`, the runs through user functions wrapping invoke (150k).
+/// A run is made only while its budget is positive; a run's result does not depend on the budget. Each
+/// test of a budget and each spending is logged: the log replayed against other starting budgets tells
+/// whether the printing would have been the same (every test with the same outcome).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BK {
+    Exec = 0,
+    Wrap = 1,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BudgetEv {
+    Test(BK, bool),
+    Spend(BK, i64),
+}
+
+struct Budgets {
+    left: Cell<[i64; 2]>,
+    log: RefCell<Vec<BudgetEv>>,
+}
+
+impl Budgets {
+    fn new(left: [i64; 2]) -> Self {
+        Budgets {
+            left: Cell::new(left),
+            log: RefCell::new(Vec::new()),
+        }
+    }
+    fn left(&self, k: BK) -> i64 {
+        self.left.get()[k as usize]
+    }
+    fn test(&self, k: BK) -> bool {
+        let ok = self.left(k) > 0;
+        self.log.borrow_mut().push(BudgetEv::Test(k, ok));
+        ok
+    }
+    fn spend(&self, k: BK, n: i64) {
+        let mut l = self.left.get();
+        l[k as usize] -= n;
+        self.left.set(l);
+        self.log.borrow_mut().push(BudgetEv::Spend(k, n));
+    }
+}
+
+impl Budgets {
+    /// The budgets left after a printing whose log this is, from `left`, when the printing would have been
+    /// the same with those (every test with the same outcome); else None.
+    fn replay(log: &[BudgetEv], mut left: [i64; 2]) -> Option<[i64; 2]> {
+        for ev in log {
+            match *ev {
+                BudgetEv::Test(k, ok) => {
+                    if (left[k as usize] > 0) != ok {
+                        return None;
+                    }
+                }
+                BudgetEv::Spend(k, n) => left[k as usize] -= n,
+            }
+        }
+        Some(left)
+    }
+    /// Whether the printing tested budget `k`.
+    fn tests(log: &[BudgetEv], k: BK) -> bool {
+        log.iter().any(|ev| matches!(*ev, BudgetEv::Test(x, _) if x == k))
+    }
+}
+
+/// A budget no printing exhausts (a speculative printing's budget while the real one is positive).
+const UNBOUNDED: i64 = i64::MAX / 4;
+
+/// The shared state of the parallel printing. The printing of a function reads the decompilation state
+/// (`Dx`: every cache in it is thread-safe) and the outlines, and appends nodes to that function's IR
+/// arena only (it reads no other function's arena): each arena is used by one thread at a time, so
+/// sharing the (not `Sync`) arenas is sound. Nothing else writes the state while the threads run (`Dx`
+/// is only changed between the runs, by the argument views of the instructions).
+struct ParPrint<'a, 'p> {
+    d: &'a Dx<'p>,
+    finals: &'a [Tree],
+    outl: &'a Outlines,
+    helper_names: &'a HashSet<String>,
+}
+unsafe impl Sync for ParPrint<'_, '_> {}
+
+/// A printed function and its budget log, handed from a worker thread (the node keys it holds are
+/// addresses in the shared trees, only used as keys). None: the printing threw.
+struct SendPrinted(Option<Printed>, Vec<BudgetEv>);
+unsafe impl Send for SendPrinted {}
+
+impl ParPrint<'_, '_> {
+    /// The function printed with the given budgets on this thread (a panic unwinds).
+    fn print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
+        let bud = Budgets::new(left);
+        let p = print_body(self.d, fi, &self.finals[fi], self.outl, self.helper_names, view, &bud);
+        SendPrinted(Some(p), bud.log.into_inner())
+    }
+    /// The function printed speculatively (a panic gives None: it is printed again for real).
+    fn try_print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
+        speculate(|| self.print(fi, view, left)).unwrap_or(SendPrinted(None, Vec::new()))
+    }
+}
+
+
+
+/// Every function's text and facts, as printed one after the other in function order (each function's
+/// facts right after its text), on `threads` threads. Order matters through three things:
+/// - the argument views of the instructions, added to the shared view table before each function is
+///   printed: the functions between two additions (a segment) are printed together;
+/// - the concrete-run budgets, spent in function order: the functions are printed speculatively with
+///   unbounded budgets (those still positive) and checked in order against the real budgets by their
+///   logs; the first one whose printing would have been different is printed again with the real
+///   budgets, and the later ones that tested a budget it exhausted are printed again speculatively (at
+///   most twice: two budgets);
+/// - the flow layer's memos (native programs' facts): the facts are made in order on this thread (Anchor
+///   programs' facts do not use it: on the worker threads).
+/// A panic while speculating is caught; the computation is redone for real in its sequential turn (the
+/// same panic, its message printed then from this thread). The result is the one of the sequential
+/// printing, for any thread count.
+fn print_all<'p: 'f, 'f>(
+    dm: &mut Dx<'p>,
+    finals: &[Tree],
+    outl: &Outlines,
+    helper_names: &HashSet<String>,
+    fl: &FlowCtx<'f>,
+    threads: usize,
+) -> Vec<(Printed, FnFacts)> {
+    let n = dm.fs.len();
+    let mut out: Vec<(Printed, FnFacts)> = Vec::with_capacity(n);
+    let mut left: [i64; 2] = [250_000, 150_000];
+    let mut i = 0;
+    while i < n {
+        // the segment: its first function may add views; the next ones up to one that would add
+        let mut views = vec![add_args_view(dm, i)];
+        let mut j = i + 1;
+        while j < n {
+            match args_view_of(dm, j) {
+                ArgsView::New => break,
+                ArgsView::None => views.push(None),
+                ArgsView::Existing(v) => views.push(Some(v)),
+            }
+            j += 1;
+        }
+        let pp = ParPrint {
+            d: dm,
+            finals,
+            outl,
+            helper_names,
+        };
+        let spec = |left: [i64; 2]| left.map(|b| if b > 0 { UNBOUNDED } else { b });
+        let mut regime = spec(left);
+        let mut got: Vec<Option<SendPrinted>> = (i..j).map(|_| None).collect();
+        let mut todo: Vec<usize> = (0..j - i).collect();
+        // (the first function whose printing panics for real: the later ones are not printed)
+        let mut stop = j - i;
+        let mut k = 0;
+        while k < stop {
+            let rs = par_map_big(todo.len(), threads, |t| {
+                let x = todo[t];
+                pp.try_print(i + x, views[x].clone(), regime)
+            });
+            for (x, r) in todo.iter().zip(rs) {
+                got[*x] = Some(r);
+            }
+            todo.clear();
+            // in order: keep the printings the real budgets give the same result
+            while k < stop {
+                let r = got[k].as_ref().unwrap();
+                if r.0.is_some() {
+                    if let Some(l) = Budgets::replay(&r.1, left) {
+                        left = l;
+                        k += 1;
+                        continue;
+                    }
+                }
+                // printed again with the real budgets, then the later ones that tested a budget it exhausted
+                let r = pp.try_print(i + k, views[k].clone(), left);
+                if r.0.is_none() {
+                    stop = k;
+                    break;
+                }
+                left = Budgets::replay(&r.1, left).expect("the real budgets");
+                got[k] = Some(r);
+                k += 1;
+                let now = spec(left);
+                for b in [BK::Exec, BK::Wrap] {
+                    if now[b as usize] != regime[b as usize] {
+                        for x in k..j - i {
+                            if !todo.contains(&x) && Budgets::tests(&got[x].as_ref().unwrap().1, b) {
+                                todo.push(x);
+                            }
+                        }
+                    }
+                }
+                todo.sort();
+                regime = now;
+                if !todo.is_empty() {
+                    break;
+                }
+            }
+        }
+        let printed: Vec<Printed> = got
+            .into_iter()
+            .take(stop)
+            .map(|r| r.unwrap().0.unwrap())
+            .collect();
+        // the facts
+        let facts: Vec<FnFacts> = if dm.sem.anchor {
+            let pf = ParFacts {
+                d: dm,
+                finals,
+                printed: &printed,
+            };
+            let rs = par_map_big(printed.len(), threads, |x| pf.try_facts(x));
+            rs.into_iter()
+                .enumerate()
+                .map(|(x, r)| match r.0 {
+                    Some(ff) => ff,
+                    None => pf.facts(x),
+                })
+                .collect()
+        } else {
+            printed
+                .iter()
+                .map(|p| func_facts(&*dm, &finals[p.fi], p, Some(fl)))
+                .collect()
+        };
+        out.extend(printed.into_iter().zip(facts));
+        if stop < j - i {
+            // (the printing that panics, in its turn)
+            let _ = pp_real(dm, finals, outl, helper_names, i + stop, views[stop].clone(), left);
+            unreachable!("the printing panicked while speculating");
+        }
+        i = j;
+    }
+    // (the printer's statement table is left, as after printing the functions one by one on this thread)
+    if let Some(t) = finals.last() {
+        TREE_STMTS.with(|x| *x.borrow_mut() = t.stmts.clone());
+    }
+    out
+}
+
+/// A function printed for real on this thread.
+fn pp_real(
+    d: &Dx,
+    finals: &[Tree],
+    outl: &Outlines,
+    helper_names: &HashSet<String>,
+    fi: usize,
+    view: Option<String>,
+    left: [i64; 2],
+) -> Printed {
+    let bud = Budgets::new(left);
+    print_body(d, fi, &finals[fi], outl, helper_names, view, &bud)
+}
+
+/// The facts of an Anchor program's printed functions (they do not use the flow layer), shared by the
+/// worker threads: the state is read only (see `ParPrint`; the facts append to no IR arena).
+struct ParFacts<'a, 'p> {
+    d: &'a Dx<'p>,
+    finals: &'a [Tree],
+    printed: &'a [Printed],
+}
+unsafe impl Sync for ParFacts<'_, '_> {}
+
+struct SendFacts(Option<FnFacts>);
+unsafe impl Send for SendFacts {}
+
+impl ParFacts<'_, '_> {
+    fn facts(&self, x: usize) -> FnFacts {
+        let p = &self.printed[x];
+        func_facts(self.d, &self.finals[p.fi], p, None)
+    }
+    fn try_facts(&self, x: usize) -> SendFacts {
+        SendFacts(speculate(|| self.facts(x)))
+    }
+}
+
 pub fn run(
     mut dm: Dx,
     _name_fn: Option<i64>,
     hook: Option<AnalysisHook>,
+    threads: usize,
 ) -> Result<ReadOut, String> {
     let d = &dm;
     let n = d.fs.len();
@@ -1747,9 +2024,8 @@ pub fn run(
     };
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
-    for i in 0..n {
-        let v = add_args_view(&mut dm, i);
-        let (rf, sn) = print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl);
+    for (pd, ff) in print_all(&mut dm, &finals, &outl, &helper_names, &fl, threads) {
+        let (rf, sn) = read_func(&dm, pd, ff);
         funcs.push(rf);
         snaps.push(sn);
     }
@@ -1891,6 +2167,7 @@ pub fn run(
         try_of: d.try_of.clone(),
         acct_layouts: d.acct_layouts.clone(),
         program_id: d.state_idl_address.clone(),
+        threads,
     })
 }
 
@@ -1902,15 +2179,15 @@ fn is_short_temp(n: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_func<'p>(
+fn print_body<'p>(
     d: &Dx<'p>,
     fi: usize,
     tree: &Tree,
     outl: &Outlines,
     helper_names: &HashSet<String>,
     args_view: Option<String>,
-    fl: &FlowCtx<'p>,
-) -> (ReadFunc, SugarSnap) {
+    bud: &Budgets,
+) -> Printed {
     let f = d.fs[fi];
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
@@ -2446,7 +2723,7 @@ fn print_func<'p>(
                 .as_ref()
                 .is_some_and(|x| x.family.is_some() && !x.guessed);
             if let Some(kind) = kind {
-                if !decoded && d.exec_budget.borrow().steps > 0 {
+                if !decoded && bud.test(BK::Exec) {
                     let at = match n {
                         SNode::Stmt(si) if matches!(tree_ref.stmt(*si), Stmt::Call { .. }) => {
                             Some(stmt_pc(tree_ref.stmt(*si)))
@@ -2470,17 +2747,16 @@ fn print_func<'p>(
                         let hit = exec_memo.borrow().get(&k).cloned();
                         let r = match hit {
                             Some(r) => {
-                                d.exec_budget.borrow_mut().steps -= r.1;
+                                bud.spend(BK::Exec, r.1);
                                 r
                             }
                             None => {
-                                let b0 = d.exec_budget.borrow().steps;
-                                let m = {
-                                    let mut bud = d.exec_budget.borrow_mut();
-                                    describe_model(d.ctx, f, at, kind, &mut env, &mut bud)
-                                };
+                                let mut b = ExecBudget { steps: bud.left(BK::Exec) };
+                                let m = describe_model(d.ctx, f, at, kind, &mut env, &mut b);
+                                let spent = bud.left(BK::Exec) - b.steps;
+                                bud.spend(BK::Exec, spent);
                                 let x = m.and_then(|m| m.format(&mut env));
-                                let r = (x, b0 - d.exec_budget.borrow().steps);
+                                let r = (x, spent);
                                 exec_memo.borrow_mut().insert(k, r.clone());
                                 r
                             }
@@ -2507,8 +2783,8 @@ fn print_func<'p>(
     let mut pr = Printer::new(ir, &d.pn, &names_final).with_sugar(&sugar);
     // (analysis only: CPIs made through small user functions wrapping invoke; runs with their own budget)
     if let Some(fpv) = fp_v {
-        if !d.user_invoke.is_empty() && d.wrap_budget.borrow().steps > 0 {
-            wrapper_runs(d, f, tree, body, fpv, &mut pr, &site_notes);
+        if !d.user_invoke.is_empty() && bud.test(BK::Wrap) {
+            wrapper_runs(d, f, tree, body, fpv, &mut pr, &site_notes, bud);
         }
     }
     // stack objects
@@ -2892,101 +3168,8 @@ fn print_func<'p>(
     lines.extend(body_lines);
     lines.push("}".into());
     drop(pr);
-    let facts = {
-        let spans = sugar.spans.borrow();
-        let notes = site_notes.borrow();
-        let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
-        let callee_name = |t: i64| d.fn_name(t);
-        let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
-        let callee_path = |t: i64| {
-            d.libs
-                .get(&t)
-                .filter(|i| i.lib)
-                .and_then(|i| i.hint.clone())
-        };
-        let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
-        let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
-        // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
-        let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
-        let cfg = || -> Rc<Cfg> {
-            ir_cfg
-                .borrow_mut()
-                .get_or_insert_with(|| Rc::new(cfg_of(f)))
-                .clone()
-        };
-        let res = || account_resolver(fl, f, &names_final, true, None);
-        let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
-            let r = res();
-            let x = r.refs(fl, e, None);
-            let x = if !x.is_empty() || fail.is_none() {
-                x
-            } else {
-                match decision_block(&cfg(), Some(e), fail, pass) {
-                    Some(b) => r.refs(fl, e, Some(b)),
-                    None => x,
-                }
-            };
-            x.into_iter().map(|y| y.field).collect()
-        };
-        let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
-            let r = res();
-            let b = if fail.is_none() {
-                None
-            } else {
-                decision_block(&cfg(), Some(e), fail, pass)
-            };
-            r.cmp32(fl, e, b)
-        };
-        let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
-            let r = res();
-            let b = if fail.is_none() {
-                None
-            } else {
-                decision_block(&cfg(), Some(e), fail, pass)
-            };
-            r.pda_eq(fl, e, b)
-        };
-        let ir_store = |si: u32| -> Option<StoreRef> {
-            let r = res();
-            let p = tree
-                .origin
-                .get(&si)
-                .map(|&(b, i)| pos_of(b as usize, i as usize));
-            r.store(fl, p).map(|(a, how)| StoreRef {
-                index: a.index,
-                field: a.field,
-                how,
-            })
-        };
-        let anchor = d.sem.anchor;
-        let inp = FnInput {
-            pc,
-            name: &name,
-            ir,
-            tree,
-            body,
-            lines: &lines,
-            at: body_at,
-            spans: &spans,
-            sites: &notes,
-            noreturn: &noreturn,
-            callee_name: &callee_name,
-            anchor: d.sem.anchor,
-            seeds_at: &seeds_at,
-            ir_refs: if anchor { None } else { Some(&ir_refs) },
-            ir_cmp: if anchor { None } else { Some(&ir_cmp) },
-            ir_pda: if anchor { None } else { Some(&ir_pda) },
-            ir_store: if anchor { None } else { Some(&ir_store) },
-            callee_path: &callee_path,
-            str_at: &str_at,
-            custom_error: &custom_error,
-        };
-        let mut ff = function_facts(&inp);
-        if d.user_invoke.contains(&pc) {
-            ff.wrapper = true;
-        }
-        ff
-    };
+    let spans = sugar.spans.take();
+    let notes = std::mem::take(&mut *site_notes.borrow_mut());
     let snap = SugarSnap {
         fi,
         var_types: sugar.var_types.clone(),
@@ -2998,17 +3181,156 @@ fn print_func<'p>(
         arg_notes: sugar.arg_notes,
         names: names_final.clone(),
     };
-    let rf = ReadFunc {
-        pc,
-        name,
+    Printed {
+        fi,
         text: lines.join("\n"),
-        calls: calls_of(d, f),
-        is_entry: f.is_entry,
-        var_types: var_types.into_iter().collect(),
+        name,
+        lines,
+        body_at,
+        spans,
+        notes,
+        names_final,
         names,
+        var_types,
+        calls: calls_of(d, f),
+        snap,
+    }
+}
+
+/// A function as printed (before its analysis facts, which read the shared flow layer: made in order).
+struct Printed {
+    fi: usize,
+    name: String,
+    text: String,
+    lines: Vec<String>,
+    /// index in `lines` of the body's first line
+    body_at: usize,
+    spans: HashMap<NodeKey, (usize, usize)>,
+    notes: HashMap<NodeKey, SiteNote>,
+    names_final: Vec<Option<String>>,
+    names: Vec<Option<String>>,
+    var_types: IndexMap<u32, String>,
+    calls: Vec<i64>,
+    snap: SugarSnap,
+}
+
+/// The analysis facts of a printed function (native programs: the account resolver of the flow layer).
+fn func_facts<'x, 'p>(d: &'x Dx<'p>, tree: &Tree, p: &Printed, flo: Option<&FlowCtx<'p>>) -> FnFacts {
+    // (native programs only: the account resolver)
+    let fl = || flo.expect("the flow layer");
+    let f = d.fs[p.fi];
+    let pc = f.pc;
+    let ir = f.ir.as_ref().unwrap();
+    let body = &tree.body;
+    let spans = &p.spans;
+    let notes = &p.notes;
+    let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
+    let callee_name = |t: i64| d.fn_name(t);
+    let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
+    let callee_path = |t: i64| {
+        d.libs
+            .get(&t)
+            .filter(|i| i.lib)
+            .and_then(|i| i.hint.clone())
+    };
+    let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
+    let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
+    // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
+    let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
+    let cfg = || -> Rc<Cfg> {
+        ir_cfg
+            .borrow_mut()
+            .get_or_insert_with(|| Rc::new(cfg_of(f)))
+            .clone()
+    };
+    let res = || account_resolver(fl(), f, &p.names_final, true, None);
+    let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
+        let r = res();
+        let x = r.refs(fl(), e, None);
+        let x = if !x.is_empty() || fail.is_none() {
+            x
+        } else {
+            match decision_block(&cfg(), Some(e), fail, pass) {
+                Some(b) => r.refs(fl(), e, Some(b)),
+                None => x,
+            }
+        };
+        x.into_iter().map(|y| y.field).collect()
+    };
+    let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
+        let r = res();
+        let b = if fail.is_none() {
+            None
+        } else {
+            decision_block(&cfg(), Some(e), fail, pass)
+        };
+        r.cmp32(fl(), e, b)
+    };
+    let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
+        let r = res();
+        let b = if fail.is_none() {
+            None
+        } else {
+            decision_block(&cfg(), Some(e), fail, pass)
+        };
+        r.pda_eq(fl(), e, b)
+    };
+    let ir_store = |si: u32| -> Option<StoreRef> {
+        let r = res();
+        let p = tree
+            .origin
+            .get(&si)
+            .map(|&(b, i)| pos_of(b as usize, i as usize));
+        r.store(fl(), p).map(|(a, how)| StoreRef {
+            index: a.index,
+            field: a.field,
+            how,
+        })
+    };
+    let anchor = d.sem.anchor;
+    let inp = FnInput {
+        pc,
+        name: &p.name,
+        ir,
+        tree,
+        body,
+        lines: &p.lines,
+        at: p.body_at,
+        spans,
+        sites: notes,
+        noreturn: &noreturn,
+        callee_name: &callee_name,
+        anchor: d.sem.anchor,
+        seeds_at: &seeds_at,
+        ir_refs: if anchor { None } else { Some(&ir_refs) },
+        ir_cmp: if anchor { None } else { Some(&ir_cmp) },
+        ir_pda: if anchor { None } else { Some(&ir_pda) },
+        ir_store: if anchor { None } else { Some(&ir_store) },
+        callee_path: &callee_path,
+        str_at: &str_at,
+        custom_error: &custom_error,
+    };
+    let mut ff = function_facts(&inp);
+    if d.user_invoke.contains(&pc) {
+        ff.wrapper = true;
+    }
+    ff
+}
+
+/// A printed function with its facts.
+fn read_func(d: &Dx, p: Printed, facts: FnFacts) -> (ReadFunc, SugarSnap) {
+    let f = d.fs[p.fi];
+    let rf = ReadFunc {
+        pc: f.pc,
+        name: p.name,
+        text: p.text,
+        calls: p.calls,
+        is_entry: f.is_entry,
+        var_types: p.var_types.into_iter().collect(),
+        names: p.names,
         facts: Some(facts),
     };
-    (rf, snap)
+    (rf, p.snap)
 }
 
 /// seedsAt: a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
@@ -3262,6 +3584,7 @@ fn wrapper_runs(
     fpv: u32,
     pr: &mut Printer,
     notes: &RefCell<HashMap<NodeKey, SiteNote>>,
+    bud: &Budgets,
 ) {
     let ir = f.ir.as_ref().unwrap();
     let pc = f.pc;
@@ -3275,11 +3598,12 @@ fn wrapper_runs(
         pr: &mut Printer,
         taint: Option<&crate::taint::FnTaint>,
         notes: &RefCell<HashMap<NodeKey, SiteNote>>,
+        bud: &Budgets,
     ) {
         let ir = f.ir.as_ref().unwrap();
         for n in ns {
             if let SNode::Stmt(si) = n {
-                if d.wrap_budget.borrow().steps > 0 {
+                if bud.test(BK::Wrap) {
                     let s = tree.stmt(*si);
                     if let Some((CallTarget::Fn { pc: t }, _)) = call_of(ir, s) {
                         if d.user_invoke.contains(&t) && t != f.pc {
@@ -3304,15 +3628,17 @@ fn wrapper_runs(
                                 tainted: Some(&tainted),
                             };
                             let m = {
-                                let mut b = d.wrap_budget.borrow_mut();
-                                describe_model(
+                                let mut b = ExecBudget { steps: bud.left(BK::Wrap) };
+                                let m = describe_model(
                                     d.ctx,
                                     f,
                                     stmt_pc(s),
                                     ExecSiteKind::Wrapper,
                                     &mut env,
                                     &mut b,
-                                )
+                                );
+                                bud.spend(BK::Wrap, bud.left(BK::Wrap) - b.steps);
+                                m
                             };
                             if let Some(x) = m.and_then(|m| m.format(&mut env)) {
                                 notes.borrow_mut().insert(
@@ -3329,12 +3655,12 @@ fn wrapper_runs(
                 }
             }
             for c in child_lists(n) {
-                visit(d, f, tree, c, fpv, pr, taint, notes);
+                visit(d, f, tree, c, fpv, pr, taint, notes, bud);
             }
         }
     }
     let _ = ir;
-    visit(d, f, tree, body, fpv, pr, taint, notes);
+    visit(d, f, tree, body, fpv, pr, taint, notes, bud);
 }
 
 #[allow(dead_code)]
@@ -3345,29 +3671,69 @@ fn unused() {
 /// The IDL argument view of the function's instruction (`views.map.get(vname) ?? views.borshView(...)`):
 /// added to the shared table while the function is named, as in the TS.
 fn add_args_view(d: &mut Dx, fi: usize) -> Option<String> {
-    let pc = d.fs[fi].pc;
-    let ix_name = d.sem.ix_names.get(&pc).cloned()?;
-    let idl = d.idl?;
-    let ix_def = idl.instructions.iter().find(|x| x.name == ix_name)?;
-    if ix_def.arg_defs.is_empty() {
-        return None;
+    match args_view_of(d, fi) {
+        ArgsView::None => None,
+        ArgsView::Existing(v) => Some(v),
+        ArgsView::New => {
+            let pc = d.fs[fi].pc;
+            let ix_name = d.sem.ix_names.get(&pc).cloned()?;
+            let idl = d.idl?;
+            let ix_def = idl.instructions.iter().find(|x| x.name == ix_name)?;
+            let vname = args_view_name(&ix_name, idl);
+            d.views.borsh_view(
+                &vname,
+                &format!("arguments of instruction {ix_name} (Anchor IDL, Borsh layout; after the 8-byte discriminator)"),
+                &ix_def.arg_defs,
+                &idl.types,
+                0.0,
+            )
+        }
     }
-    let vbase = format!("{}Args", pascal_ix(&ix_name));
-    let vname = if idl.types.contains_key(&vbase) {
+}
+
+enum ArgsView {
+    /// no argument view
+    None,
+    /// the view is in the table already
+    Existing(String),
+    /// the view is added to the table
+    New,
+}
+
+fn args_view_name(ix_name: &str, idl: &crate::idl::IdlInfo) -> String {
+    let vbase = format!("{}Args", pascal_ix(ix_name));
+    if idl.types.contains_key(&vbase) {
         format!("{}IxArgs", vbase.strip_suffix("Args").unwrap())
     } else {
         vbase
-    };
-    if d.views.map.contains_key(&vname) {
-        return Some(vname);
     }
-    d.views.borsh_view(
-        &vname,
-        &format!("arguments of instruction {ix_name} (Anchor IDL, Borsh layout; after the 8-byte discriminator)"),
-        &ix_def.arg_defs,
-        &idl.types,
-        0.0,
-    )
+}
+
+/// What `add_args_view` does for the function (without doing it).
+fn args_view_of(d: &Dx, fi: usize) -> ArgsView {
+    let pc = d.fs[fi].pc;
+    let Some(ix_name) = d.sem.ix_names.get(&pc) else {
+        return ArgsView::None;
+    };
+    let Some(idl) = d.idl else {
+        return ArgsView::None;
+    };
+    let Some(ix_def) = idl.instructions.iter().find(|x| &x.name == ix_name) else {
+        return ArgsView::None;
+    };
+    if ix_def.arg_defs.is_empty() {
+        return ArgsView::None;
+    }
+    if ix_name.split('_').any(|w| w.is_empty()) {
+        // (pascal_ix throws: when its turn comes)
+        return ArgsView::New;
+    }
+    let vname = args_view_name(ix_name, idl);
+    if d.views.map.contains_key(&vname) {
+        ArgsView::Existing(vname)
+    } else {
+        ArgsView::New
+    }
 }
 
 /// A Dx reference with its lifetime shortened (Dx is covariant).

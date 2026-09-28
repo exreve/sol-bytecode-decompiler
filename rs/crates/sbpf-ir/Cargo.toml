@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 indexmap.workspace = true
+
+[features]
+# (check only, never built: `Ir` claimed `Sync`, so that `cargo check -p sbpf-read --features sync-check`
+# shows every other part of the state the parallel parts share is `Sync`)
+sync-check = []

@@ -796,3 +796,106 @@ pub fn jmax(a: N, b: N) -> N {
         a.max(b)
     }
 }
+
+/// `(0..n).map(f)` on up to `threads` threads with the main thread's stack size (deep recursion).
+pub fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    if threads <= 1 || n <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            std::thread::Builder::new()
+                .stack_size(1 << 30)
+                .spawn_scoped(s, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = f(i);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
+}
+
+/// A reference handed to worker threads by a computation that only reads what it reaches. The
+/// decompilation state is `Sync` but for the IR arenas' interior mutability (nodes appended through a
+/// shared reference) and the `Rc`s of results: sound when the computation appends to no arena another
+/// thread reads and clones no `Rc` of the shared state (each use says why).
+pub struct Shared<'a, T: ?Sized>(pub &'a T);
+unsafe impl<T: ?Sized> Sync for Shared<'_, T> {}
+unsafe impl<T: ?Sized> Send for Shared<'_, T> {}
+impl<T: ?Sized> Clone for Shared<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: ?Sized> Copy for Shared<'_, T> {}
+impl<'a, T: ?Sized> Shared<'a, T> {
+    /// (a method: a closure calling it captures the wrapper, not the reference inside)
+    pub fn get(self) -> &'a T {
+        self.0
+    }
+}
+
+/// A value handed back from a worker thread that is not `Send` only because of what it may hold of the
+/// shared state (node keys: addresses in shared trees, used as keys only).
+pub struct SendBox<T>(pub T);
+unsafe impl<T> Send for SendBox<T> {}
+
+/// (`--features sync-check`) what the parallel parts share through `Shared` is `Sync` but for the arenas
+#[cfg(feature = "sync-check")]
+#[allow(dead_code)]
+fn sync_check() {
+    fn sync<T: Sync + ?Sized>() {}
+    sync::<crate::decompile::Dx<'static>>();
+    sync::<[sbpf_struct::Tree]>();
+    // (not checked: the outlines' node keys are addresses, the facts' Rc<RefCell<OpCpi>>s in ReadOut are
+    // not touched by the rendering's workers)
+}
+
+thread_local! {
+    /// (a speculative computation runs: a panic is caught, its message not printed)
+    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `f()` run speculatively on this thread: None when it panics (the panic hook prints nothing then; the
+/// caller redoes the computation for real in its sequential turn, where it panics with its message). A
+/// field identity made meanwhile panics (the counter is per thread: identities are made on the calling
+/// thread only, in order).
+pub fn speculate<R>(f: impl FnOnce() -> R) -> Option<R> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(|q| q.get()) {
+                prev(info)
+            }
+        }));
+    });
+    let was = QUIET.with(|q| q.replace(true));
+    let nf = crate::views::forbid_new_fields(true);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    crate::views::forbid_new_fields(nf);
+    QUIET.with(|q| q.set(was));
+    r.ok()
+}
+
+/// `(0..n).map(f).collect()` with the calls on up to `threads` threads, for an `f` whose result and
+/// visible effects do not depend on the order of the calls (reads, caches of pure functions, nodes
+/// appended to one function's own arena). A call that panics is made again on this thread in its turn
+/// (after the results before it: the same panic as one at a time).
+pub fn par_map_exact<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let rs = par_map_big(n, threads, |i| speculate(|| f(i)));
+    rs.into_iter()
+        .enumerate()
+        .map(|(i, r)| match r {
+            Some(r) => r,
+            None => f(i),
+        })
+        .collect()
+}

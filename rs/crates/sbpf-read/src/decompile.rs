@@ -7,7 +7,6 @@ use crate::accounts::{find_accounts, legacy_account_info, Kind, Typed};
 use crate::anchor::{accounts_layout, anchor_fn, find_name_fn, AnchorFn};
 use crate::anchorstate::{account_objects, copy_leaves, AccountObjs, StateCtx};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, CpiEnv, SiteKind};
-use crate::cpiexec::{describe_model, ExecBudget, ExecSiteKind};
 use crate::fieldnames::{name_fields, role_names, FieldNameCfg};
 use crate::idl::IdlInfo;
 use crate::sem::{known_key, SemR, NICHE, OK_TAGS};
@@ -26,7 +25,7 @@ use sbpf_print::print::ProgNames;
 use sbpf_print::raw::{prog_names, Prepared};
 use sbpf_program::{fn_addr, load_program, Func, Program};
 use sbpf_struct::{SNode, Tree};
-use std::cell::RefCell;
+use std::sync::OnceLock;
 use sbpf_ir::fx::{HashMap, HashSet};
 
 /// What the register-level blocks tell (read before variable recovery replaces them).
@@ -128,12 +127,12 @@ pub struct PrepRead {
 
 pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead, String> {
     let mut p = load_program(bytes, true)?;
-    sbpf_dataflow::infer_signatures(&mut p);
+    sbpf_dataflow::infer_signatures_par(&mut p, threads);
     let sem = semantics(&p);
     let mut libs = if full {
         IndexMap::default()
     } else {
-        sbpf_lib::library::classify(&p)?
+        sbpf_lib::library::classify_par(&p, threads)?
     };
     let shapes: Vec<SigShape> = p.funcs.values().map(sig_shape).collect();
     // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior)
@@ -277,6 +276,8 @@ pub struct ReadOut {
     pub try_of: IndexMap<i64, i64>,
     pub acct_layouts: IndexMap<i64, Vec<Field>>,
     pub program_id: Option<String>,
+    /// worker threads of the rendering
+    pub threads: usize,
 }
 
 pub const GENERIC_RESULT: &str =
@@ -331,8 +332,6 @@ pub struct Dx<'p> {
     pub out_params: IndexSet<i64>,
     pub out_tags: IndexMap<i64, u32>,
     pub result_out: IndexSet<i64>,
-    pub exec_budget: RefCell<ExecBudget>,
-    pub wrap_budget: RefCell<ExecBudget>,
     pub def_counts: Vec<Vec<u32>>,
     pub state_ctx: StateCtx<'p>,
     pub acct_field_view: IndexMap<(String, K), (String, bool)>,
@@ -340,12 +339,15 @@ pub struct Dx<'p> {
     /// library classification (empty: --full)
     pub libs: &'p IndexMap<i64, LibInfo>,
     pub stubs: Vec<String>,
-    global_idents: RefCell<Option<HashSet<String>>>,
-    var_acc: RefCell<HashMap<usize, HashMap<u32, Vec<(N, u8)>>>>,
-    spill: RefCell<HashMap<usize, HashMap<K, E>>>,
-    frame_offs: RefCell<HashMap<usize, (IndexSet<K>, IndexSet<K>)>>,
+    // (per-function caches, pure functions of the function: shared by the printing's worker threads)
+    global_idents: OnceLock<HashSet<String>>,
+    var_acc: Vec<OnceLock<HashMap<u32, Vec<(N, u8)>>>>,
+    spill: Vec<OnceLock<HashMap<K, E>>>,
+    frame_offs: Vec<OnceLock<(IndexSet<K>, IndexSet<K>)>>,
     /// function entry address -> pc (callsOf's table), built once
     pub pc_by_addr: std::sync::OnceLock<HashMap<u64, i64>>,
+    /// worker threads of the parallel parts
+    pub threads: usize,
 }
 
 pub const RESERVED_TS: &[&str] = &[
@@ -444,8 +446,8 @@ impl<'p> Dx<'p> {
             .copied()
             .unwrap_or(0)
     }
-    pub fn global_idents(&self) -> std::cell::Ref<'_, Option<HashSet<String>>> {
-        if self.global_idents.borrow().is_none() {
+    pub fn global_idents(&self) -> &HashSet<String> {
+        self.global_idents.get_or_init(|| {
             let mut ids: HashSet<String> = sbpf_print::names::HELPERS
                 .iter()
                 .map(|s| s.to_string())
@@ -483,12 +485,11 @@ impl<'p> Dx<'p> {
             ] {
                 ids.insert(n.into());
             }
-            *self.global_idents.borrow_mut() = Some(ids);
-        }
-        self.global_idents.borrow()
+            ids
+        })
     }
     pub fn is_global(&self, nm: &str) -> bool {
-        self.global_idents().as_ref().unwrap().contains(nm)
+        self.global_idents().contains(nm)
     }
     /// sem.strAt(ptr, len, isPtr)
     pub fn str_at(&self, ptr: u64, len: u64, is_ptr: bool) -> Option<String> {
@@ -501,8 +502,8 @@ impl<'p> Dx<'p> {
     pub fn var_accesses(
         &self,
         fi: usize,
-    ) -> std::cell::Ref<'_, HashMap<usize, HashMap<u32, Vec<(N, u8)>>>> {
-        if !self.var_acc.borrow().contains_key(&fi) {
+    ) -> &HashMap<u32, Vec<(N, u8)>> {
+        self.var_acc[fi].get_or_init(|| {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
             let mut r: HashMap<u32, Vec<(N, u8)>> = HashMap::default();
@@ -545,13 +546,12 @@ impl<'p> Dx<'p> {
                     }
                 }
             }
-            self.var_acc.borrow_mut().insert(fi, r);
-        }
-        self.var_acc.borrow()
+            r
+        })
     }
     /// spillSlots: frame slots stored exactly once (8-byte store, no other write overlapping)
     pub fn spill_slot(&self, fi: usize, o: N) -> Option<E> {
-        if !self.spill.borrow().contains_key(&fi) {
+        self.spill[fi].get_or_init(|| {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
             let fpv = fp_var(f);
@@ -613,13 +613,14 @@ impl<'p> Dx<'p> {
                     }
                 }
             }
-            self.spill.borrow_mut().insert(fi, r);
-        }
-        self.spill.borrow()[&fi].get(&K::of(o)).copied()
+            r
+        })
+        .get(&K::of(o))
+        .copied()
     }
     /// frameOffsets: (bases, all)
     pub fn frame_offsets(&self, fi: usize, fp: u32) -> IndexSet<K> {
-        if !self.frame_offs.borrow().contains_key(&fi) {
+        self.frame_offs[fi].get_or_init(|| {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
             let mut bases = IndexSet::default();
@@ -715,16 +716,17 @@ impl<'p> Dx<'p> {
                     _ => {}
                 }
             }
-            self.frame_offs.borrow_mut().insert(fi, (bases, all));
-        }
-        self.frame_offs.borrow()[&fi].0.clone()
+            (bases, all)
+        })
+        .0
+        .clone()
     }
     /// fitsView: all loads and stores through `v + c` hit fields of view `ty` exactly (and min fields).
     pub fn fits_view(&self, pc: i64, v: u32, ty: &str, min: usize) -> bool {
         let fi = self.idx[&pc];
         let acc = self.var_accesses(fi);
         let mut hit: HashSet<String> = HashSet::default();
-        for &(o, size) in acc[&fi].get(&v).map_or(&[][..], |x| x.as_slice()) {
+        for &(o, size) in acc.get(&v).map_or(&[][..], |x| x.as_slice()) {
             let r = if o < 0.0 {
                 None
             } else {
@@ -814,6 +816,7 @@ fn new_dx<'p>(
         .collect();
     let idx: HashMap<i64, usize> = fs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
     let def_counts: Vec<Vec<u32>> = fs.iter().map(|f| def_counts(f)).collect();
+    let n = fs.len();
     Dx {
         p,
         fs,
@@ -851,19 +854,18 @@ fn new_dx<'p>(
         out_params: IndexSet::default(),
         out_tags: IndexMap::default(),
         result_out: IndexSet::default(),
-        exec_budget: RefCell::new(ExecBudget { steps: 250_000 }),
-        wrap_budget: RefCell::new(ExecBudget { steps: 150_000 }),
         def_counts,
         state_ctx: StateCtx::new(ctx),
         acct_field_view: IndexMap::default(),
         state_idl_address: None,
         libs,
         stubs: Vec::new(),
-        global_idents: RefCell::new(None),
-        var_acc: RefCell::new(HashMap::default()),
-        spill: RefCell::new(HashMap::default()),
-        frame_offs: RefCell::new(HashMap::default()),
+        global_idents: OnceLock::new(),
+        var_acc: (0..n).map(|_| OnceLock::new()).collect(),
+        spill: (0..n).map(|_| OnceLock::new()).collect(),
+        frame_offs: (0..n).map(|_| OnceLock::new()).collect(),
         pc_by_addr: std::sync::OnceLock::new(),
+        threads: 1,
     }
 }
 
@@ -916,6 +918,7 @@ pub fn decompile_read_opts(
                 unaligned: false,
             };
             let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+            d.threads = threads;
             phase3(&mut d);
             anchor_names(&mut d).1
         };
@@ -934,6 +937,7 @@ pub fn decompile_read_opts(
     }
     let ctx = ProgCtx::new(&pr.p);
     let mut d = new_dx(&pr, &trees, &ctx, idl, &libs, &facts);
+    d.threads = threads;
     let p = &pr.p;
     phase3(&mut d);
     let name_fn = anchor_names(&mut d).0;
@@ -961,7 +965,7 @@ pub fn decompile_read_opts(
         legacy_account_info(&m, p.elf.entry_pc)
     };
     user_invoke(&mut d);
-    d.account_infos = find_accounts(&d.fs, d.unaligned, d.legacy);
+    d.account_infos = find_accounts(&d.fs, d.unaligned, d.legacy, d.threads);
     if d.unaligned {
         for v in unaligned_views() {
             d.views.add(v);
@@ -975,7 +979,7 @@ pub fn decompile_read_opts(
         d.data_vars = account_data_vars(&d.fs, &discs, &mut d.views);
     }
     crate::types::anchor_accounts(&mut d, name_fn);
-    let mut r = crate::printfn::run(d, name_fn, hook)?;
+    let mut r = crate::printfn::run(d, name_fn, hook, threads)?;
     drop(ctx);
     r.shapes = shapes;
     r.program = Some(pr.p);
