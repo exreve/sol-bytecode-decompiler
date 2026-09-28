@@ -1098,35 +1098,88 @@ compat, bench, eval and 3 of the largest corpus binaries: 216 binaries, IDL 110,
 
 (The box is a VM with noisy neighbours: single runs vary by ±10 %.)
 
-### Not done: parallel phase-4 printing
+### Parallel pass (after the performance pass)
 
-`print_func` is still sequential, and it is now the largest part (jup: 50 % of the main thread, svault_v3: 33 %). It
-cannot run on worker threads without changing the design, because printing function i depends on state the earlier
-functions left, and results depend on it:
+Goal: the order-dependent parts (phase-4 printing first) on worker threads, **deterministic**: the output is
+the sequential one for any thread count. No environment variable, no new flag (threads from
+`available_parallelism`, as before).
 
-- the concrete-execution budgets (`exec_budget` 250k / `wrap_budget` 150k steps) are shared by all functions in order
-  (a function's CPI-site notes depend on what the earlier functions consumed);
-- the `FlowCtx` memos (account resolvers of callees, `Defs`, the evaluator memos) are shared with the later functions
-  and with the analysis, and a memoized value is used where a fresh evaluation would hit the depth cut (`ev_cuts`), so
-  memo contents (i.e. the order) can change results;
-- printing appends nodes to the per-function IR arenas (`Ir::mk` through `&Ir`) while other functions' IR is read
-  (callee analysis): the arenas are not `Sync`; `Rc` / `RefCell` caches throughout `Dx`, `SemR`, `ProgCtx`;
-- view registration (`add_args_view`) and name-collision checks against the view table depend on function order.
+- **Thread-safe shared state.** The `ProgCtx` caches (pure functions of their keys) behind mutexes with `Arc`
+  values; `Dx`'s per-function caches as `OnceLock`s; the string-address and anchor-state memos behind mutexes.
+  `cargo check -p sbpf-read --features sync-check` (claims `Ir: Sync` for the check only) shows `Dx` is `Sync`
+  but for the IR arenas. `util::Shared` hands a reference to workers that only read and append to no arena
+  another thread reads; `util::speculate` / `par_map_exact` catch a worker's panic quietly (the panic hook is
+  wrapped) and redo that call for real on the calling thread in its turn: a panic is the sequential one, message
+  and thread included. The per-thread field-identity counter (`views::fid`) panics while speculating (so such a
+  computation falls back to the calling thread, in order).
+- **Printing split** (`printfn.rs`): `print_body` (text, site notes, spans, snapshot: reads only the function's
+  own IR arena, measured on the fixture subset) and `func_facts` (the analysis facts). `print_all` runs per
+  *segment* (functions between two additions of an IDL argument view to the view table; one segment without an
+  IDL): every function printed speculatively in parallel with unbounded budgets, then checked in order against
+  the real concrete-run budgets by its log (`Budgets`: each test of a budget with its outcome, each spending);
+  the first printing the real budgets would change is redone with them, and the later ones that tested a budget
+  it exhausted are redone speculatively (at most twice: two budgets). Then the segment's facts: **Anchor
+  programs'** do not use the flow layer: in parallel; **native programs'** use `FlowCtx` (order-dependent memos):
+  in order on the calling thread. The main thread's printer statement table (`TREE_STMTS`, read by the
+  analysis' expression printer) is left as after the last function.
+- **Other parallel parts**: `anchor_fn` per function; `find_accounts`' first round (no parameter typed yet);
+  `name_fields`' scans (votes collected per function, merged in order: same maps, keys, vote lists);
+  `infer_signatures_par` (block forming); `classify_par` (fingerprints); `render_project`'s text scans and the
+  instruction bundles (which bundles and their order decided first, files inserted in order).
+- **Assumption** (as before, now load-bearing): IR node ids are handles only (`E` is not `Ord`, unordered-map
+  order never reaches an output): speculative and redone printings leave unused nodes in their function's arena,
+  and the facts' flow layer appends to callee arenas after all texts instead of between them.
 
-A parallel design would need budget speculation with validation (a function's run is valid when the budget left at its
-turn covers what it consumed), per-function memo scopes merged in order, and thread-safe arenas; a stage of its own,
-with the fixtures as the oracle.
+Parity: full `sbpf-fixtures --ofile` run identical in every mode (615 / 615 ×4, IDL 184 / 184 ×2, diff 199 / 199
+×2; runner 5 min); the 233-binary subset (samples, regress, compat, bench, eval, 20 largest corpus) pinned to one
+CPU (`taskset -c 0`: 1 thread) identical in every mode too. The budget redo path runs on 9 subset binaries.
 
-### Remaining hotspots (main thread, after the pass)
+Timings (whole process wall time, ms, best of 3 interleaved, after the performance pass → now; 8 threads; the
+1-thread times are unchanged within noise: jup 1499 → 1519 / 1646 → 1637, svault_v3 1640 → 1595):
 
-jup: `print_func` 50 % (`function_facts` ≈ half of it: the native account resolvers — `classify_roots` /
-`slice_params` / the AV evaluator — and the printed-line regexes; `print_nodes` with the CPI-site concrete runs),
-`analysis_out` 16 %, `prepare_read` 11 % (`infer_signatures` 5 %), `anchor_accounts` 7 % (`view_types`),
-`render_project` 5 %. svault_v3: `print_func` 33 %, `analysis_out` 20 % (`add_exit_writes` / `callee_writes`,
-incident rules), `anchor_accounts` 15 %, `prepare_read` 11 %, `render_project` 7 %. Leaf costs are now spread thin
-(allocation ~10 %, hash tables ~5 %). Not tried: PGO (needs `llvm-profdata` and a multi-step build).
+| program | single | project |
+|---|---:|---:|
+| jup | 1195 → 942 | 1279 → 1015 |
+| whirlpool | 704 → 489 | 817 → 598 |
+| token22 | 331 → 272 | 339 → 300 |
+| svault_v3 | 1311 → 947 | 1463 → 1026 |
+| token | 119 → 128 | 149 → 143 |
+
+Whole fixture set (615 binaries one after the other, all threads): default **158 s → 128 s**, project
+**176 s → 141 s**.
+
+### Not done (next steps)
+
+- **Native programs' facts in parallel** (jup / token22: ~35 % of the main thread now). `func_facts` of a
+  native program queries `FlowCtx` (account resolvers, `slice_params`, `classify_roots`, the `AV` evaluator):
+  memos shared by all functions, where a memoized value is used where a fresh evaluation would hit a depth cut
+  (`ev_cuts`), plus in-progress sentinels (`same_loads`, `Defs::open`), `mres` insert / remove, the `ext_ids`
+  counter; and the evaluation appends nodes to *callee* arenas. Measured footprints (memo keys each function's
+  facts touch, jup): 1038 functions query the flow layer, 48 touch no key an earlier function touched (`endm`,
+  `slice`, `advm`, `defs`, `cmemo` shared by nearly all). A key-level conflict check therefore validates nothing;
+  an exact speculation needs a per-lookup check (a miss with a cut below where the sequential state would hit,
+  and hits on entries the sequential state would lack), per-function memo states merged in order, and arenas
+  safe for concurrent appends (e.g. a chunked append-only arena with per-task id ranges). A stage of its own.
+- **The analysis** (`analysis_out`: jup 20 %, svault_v3 36 % of the main thread): `add_exit_writes` /
+  `callee_writes`, the incident rules (`introspection` / `side_src`), `phase3_ix` — all through the same flow
+  layer and `An`'s memos.
+- Smaller sequential pieces: `anchor_accounts`' `infer_structs`, `propagate`, `native_deserializers`,
+  `account_objects` (shared memos with sentinels, the view table mutated), `load_program`'s discovery (the
+  shared lifter memo writes the program arena), `infer_signatures`' liveness fixed point, the security/
+  renderers in project mode (`render_json`, `render_ix`, fingerprints: independent of each other).
+
+### Remaining hotspots (main thread, all threads, after the parallel pass)
+
+jup: `func_facts` 35 % (native flow layer), `analysis_out` 23 %, `prepare_read` 15 % (`infer_signatures` 6 %,
+`load_program` 4 %), `anchor_accounts` 11 %. svault_v3: `analysis_out` 36 %, `anchor_accounts` 23 %
+(`view_types`: `infer_structs`, `propagate`), `prepare_read` 18 %; its printing is now off the main thread.
 
 ## Plan changes
+
+- **Parallel pass is done** (above): phase-4 texts on worker threads with budget replay (deterministic), Anchor
+  programs' facts and several independent parts in parallel; 20–30 % faster on the large samples with 8 threads,
+  byte-identical in every mode and for 1 thread. Left: native programs' facts and the analysis (the flow layer's
+  order-dependent memos, see *Not done*).
 
 - **Performance pass is done** (above): 2.6–7× faster on the samples, 4.2–4.7× on the whole fixture set, byte-identical
   in every mode. Left for later: parallel phase-4 printing (needs a design, see *Not done*), the analysis' account
