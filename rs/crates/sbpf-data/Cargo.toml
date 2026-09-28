@@ -1,0 +1,12 @@
+[package]
+name = "sbpf-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# maintenance tools: build the data/ files the decompiler embeds, fetch programs from a cluster
+[dependencies]
+indexmap.workspace = true
+serde_json.workspace = true
+sbpf-program.workspace = true
+sbpf-lib.workspace = true

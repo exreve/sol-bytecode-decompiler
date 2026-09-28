@@ -555,6 +555,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbpf-data"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "sbpf-lib",
+ "sbpf-program",
+ "serde_json",
+]
+
+[[package]]
 name = "sbpf-dataflow"
 version = "0.1.0"
 dependencies = [
