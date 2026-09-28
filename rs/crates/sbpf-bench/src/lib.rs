@@ -76,21 +76,87 @@ pub fn parallelism() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
-/// `Number.prototype.toFixed(1)` for non-negative numbers (a tie rounds up, where Rust rounds to even).
-pub fn fixed1(x: f64) -> String {
-    let t = x * 10.0;
-    if t.fract() == 0.5 {
-        return format!("{:.1}", (t + 0.5) / 10.0);
+/// `Number.prototype.toFixed(d)` for finite numbers below 1e21: the exact decimal value rounded half away from
+/// zero (Rust's formatting rounds a tie to even).
+pub fn to_fixed(x: f64, d: usize) -> String {
+    let neg = x < 0.0;
+    // the exact expansion (an f64 has at most 1074 fractional digits)
+    let s = format!("{:.1100}", x.abs());
+    let (int, frac) = s.split_once('.').unwrap();
+    let mut digits: Vec<u8> = int
+        .bytes()
+        .chain(frac.bytes().take(d))
+        .map(|c| c - b'0')
+        .collect();
+    if frac.as_bytes()[d] >= b'5' {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            i -= 1;
+            if digits[i] == 9 {
+                digits[i] = 0;
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
     }
-    format!("{x:.1}")
+    let n = digits.len() - d;
+    let body: String = digits.iter().map(|c| (c + b'0') as char).collect();
+    let out = if d > 0 {
+        format!("{}.{}", &body[..n], &body[n..])
+    } else {
+        body
+    };
+    let zero = digits.iter().all(|&c| c == 0);
+    if neg && !zero {
+        format!("-{out}")
+    } else {
+        out
+    }
 }
 
-/// `Number.prototype.toFixed(0)` for non-negative numbers.
+/// `x.toFixed(1)`
+pub fn fixed1(x: f64) -> String {
+    to_fixed(x, 1)
+}
+
+/// `x.toFixed(0)`
 pub fn fixed0(x: f64) -> String {
-    if x.fract() == 0.5 {
-        return format!("{:.0}", x + 0.5);
+    to_fixed(x, 0)
+}
+
+/// `JSON.stringify(x, null, unit)` (objects keep their key order)
+pub fn pretty_indent(x: &Value, ind: &str, unit: &str, out: &mut String) {
+    let inner = format!("{ind}{unit}");
+    match x {
+        Value::Array(a) if !a.is_empty() => {
+            out.push_str("[\n");
+            for (i, v) in a.iter().enumerate() {
+                out.push_str(&inner);
+                pretty_indent(v, &inner, unit, out);
+                out.push_str(if i + 1 < a.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(ind);
+            out.push(']');
+        }
+        Value::Object(o) if !o.is_empty() => {
+            out.push_str("{\n");
+            for (i, (k, v)) in o.iter().enumerate() {
+                out.push_str(&inner);
+                out.push_str(&serde_json::to_string(k).unwrap());
+                out.push_str(": ");
+                pretty_indent(v, &inner, unit, out);
+                out.push_str(if i + 1 < o.len() { ",\n" } else { "\n" });
+            }
+            out.push_str(ind);
+            out.push('}');
+        }
+        v => out.push_str(&serde_json::to_string(v).unwrap()),
     }
-    format!("{x:.0}")
 }
 
 pub fn pad_end(s: &str, n: usize) -> String {
@@ -145,5 +211,27 @@ pub fn js_string(v: &Value) -> String {
             .join(","),
         Value::Object(_) => "[object Object]".into(),
         Value::Bool(b) => b.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_fixed;
+
+    #[test]
+    fn js_to_fixed() {
+        for (x, d, want) in [
+            (0.25, 1, "0.3"),
+            (0.35, 1, "0.3"),
+            (1.005, 2, "1.00"),
+            (0.0625, 3, "0.063"),
+            (99.95, 1, "100.0"),
+            (2.5, 0, "3"),
+            (0.0, 1, "0.0"),
+            (123.456, 2, "123.46"),
+            (-1.5, 0, "-2"),
+        ] {
+            assert_eq!(to_fixed(x, d), want, "{x} {d}");
+        }
     }
 }

@@ -494,32 +494,7 @@ fn expected(p: &Program) -> Value {
 
 /// `JSON.stringify(x, null, '\t')`
 pub fn pretty(x: &Value, ind: &str, out: &mut String) {
-    let inner = format!("{ind}\t");
-    match x {
-        Value::Array(a) if !a.is_empty() => {
-            out.push_str("[\n");
-            for (i, v) in a.iter().enumerate() {
-                out.push_str(&inner);
-                pretty(v, &inner, out);
-                out.push_str(if i + 1 < a.len() { ",\n" } else { "\n" });
-            }
-            out.push_str(ind);
-            out.push(']');
-        }
-        Value::Object(o) if !o.is_empty() => {
-            out.push_str("{\n");
-            for (i, (k, v)) in o.iter().enumerate() {
-                out.push_str(&inner);
-                out.push_str(&serde_json::to_string(k).unwrap());
-                out.push_str(": ");
-                pretty(v, &inner, out);
-                out.push_str(if i + 1 < o.len() { ",\n" } else { "\n" });
-            }
-            out.push_str(ind);
-            out.push('}');
-        }
-        v => out.push_str(&serde_json::to_string(v).unwrap()),
-    }
+    crate::pretty_indent(x, ind, "\t", out)
 }
 
 /// `JSON.stringify(x, null, '\t')` with arrays of primitives on one line
