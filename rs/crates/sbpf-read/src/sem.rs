@@ -443,10 +443,9 @@ fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
                     let lo = (t * chunk).min(n);
                     let hi = ((t + 1) * chunk).min(n);
                     let mut v = Vec::new();
-                    let mut buf = String::new();
                     let per = 2 * (db.nouns.len() + 1);
-                    for i in lo..hi {
-                        // "global:" + name_at(db, i), without the allocation
+                    // "global:" + name_at(db, i), without the allocation
+                    let name = |i: usize, buf: &mut String| {
                         buf.clear();
                         buf.push_str("global:");
                         buf.push_str(&db.verbs[i / per]);
@@ -458,11 +457,35 @@ fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
                         if r & 1 != 0 {
                             buf.push_str("_v2");
                         }
-                        let h = sha8(buf.as_bytes());
+                    };
+                    let mut check = |h: u64, i: usize| {
                         let k = (h >> 48) as usize;
                         if filter[k >> 6] & (1 << (k & 63)) != 0 && w.binary_search(&h).is_ok() {
                             v.push((h, i as u32));
                         }
+                    };
+                    let mut bufs: [String; 4] = Default::default();
+                    let mut i = lo;
+                    // (four names hashed at once)
+                    while i + 4 <= hi {
+                        for (j, b) in bufs.iter_mut().enumerate() {
+                            name(i + j, b);
+                        }
+                        let hs = sbpf_exec::hash::sha8_x4([
+                            bufs[0].as_bytes(),
+                            bufs[1].as_bytes(),
+                            bufs[2].as_bytes(),
+                            bufs[3].as_bytes(),
+                        ]);
+                        for (j, h) in hs.into_iter().enumerate() {
+                            check(h, i + j);
+                        }
+                        i += 4;
+                    }
+                    while i < hi {
+                        name(i, &mut bufs[0]);
+                        check(sha8(bufs[0].as_bytes()), i);
+                        i += 1;
                     }
                     v
                 })

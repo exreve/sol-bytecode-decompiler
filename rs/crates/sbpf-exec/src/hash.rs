@@ -114,6 +114,105 @@ unsafe fn compress_ni(state: &mut [u32; 8], block: &[u8; 64]) {
     _mm_storeu_si128(op.add(1), hgef);
 }
 
+/// `compress` from H0 of N independent single blocks at once (the lanes' rounds interleave: SHA-NI
+/// instructions have a long latency and one message leaves the unit mostly idle). Returns the states.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+unsafe fn compress_ni_h0<const N: usize>(blocks: &[[u8; 64]; N]) -> [[u32; 8]; N] {
+    use std::arch::x86_64::*;
+    let mask = _mm_set_epi64x(
+        0x0C0D_0E0F_0809_0A0Bu64 as i64,
+        0x0405_0607_0001_0203u64 as i64,
+    );
+    let sp = H0.as_ptr() as *const __m128i;
+    let dcba = _mm_loadu_si128(sp);
+    let efgh = _mm_loadu_si128(sp.add(1));
+    let cdab = _mm_shuffle_epi32(dcba, 0xB1);
+    let efgh = _mm_shuffle_epi32(efgh, 0x1B);
+    let abef0 = _mm_alignr_epi8(cdab, efgh, 8);
+    let cdgh0 = _mm_blend_epi16(efgh, cdab, 0xF0);
+    let mut abef = [abef0; N];
+    let mut cdgh = [cdgh0; N];
+    let mut w = [[_mm_setzero_si128(); 4]; N];
+    for l in 0..N {
+        let dp = blocks[l].as_ptr() as *const __m128i;
+        for j in 0..4 {
+            w[l][j] = _mm_shuffle_epi8(_mm_loadu_si128(dp.add(j)), mask);
+        }
+    }
+    for r in 0..16 {
+        let k = _mm_loadu_si128(K.as_ptr().add(4 * r) as *const __m128i);
+        for l in 0..N {
+            let x = if r < 4 {
+                w[l][r]
+            } else {
+                // w[r] = schedule(w[r-4], w[r-3], w[r-2], w[r-1]), in a ring of 4
+                let (a, b, c, d) = (
+                    w[l][r % 4],
+                    w[l][(r + 1) % 4],
+                    w[l][(r + 2) % 4],
+                    w[l][(r + 3) % 4],
+                );
+                let t1 = _mm_sha256msg1_epu32(a, b);
+                let t2 = _mm_alignr_epi8(d, c, 4);
+                let t3 = _mm_add_epi32(t1, t2);
+                let v = _mm_sha256msg2_epu32(t3, d);
+                w[l][r % 4] = v;
+                v
+            };
+            let t1 = _mm_add_epi32(x, k);
+            cdgh[l] = _mm_sha256rnds2_epu32(cdgh[l], abef[l], t1);
+            let t2 = _mm_shuffle_epi32(t1, 0x0E);
+            abef[l] = _mm_sha256rnds2_epu32(abef[l], cdgh[l], t2);
+        }
+    }
+    let mut out = [[0u32; 8]; N];
+    for l in 0..N {
+        let a = _mm_add_epi32(abef[l], abef0);
+        let c = _mm_add_epi32(cdgh[l], cdgh0);
+        let feba = _mm_shuffle_epi32(a, 0x1B);
+        let dchg = _mm_shuffle_epi32(c, 0xB1);
+        let dcba = _mm_blend_epi16(feba, dchg, 0xF0);
+        let hgef = _mm_alignr_epi8(dchg, feba, 8);
+        let op = out[l].as_mut_ptr() as *mut __m128i;
+        _mm_storeu_si128(op, dcba);
+        _mm_storeu_si128(op.add(1), hgef);
+    }
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_ni() -> bool {
+    use std::sync::OnceLock;
+    static NI: OnceLock<bool> = OnceLock::new();
+    *NI.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("ssse3")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn pad1(s: &[u8]) -> [u8; 64] {
+    let mut b = [0u8; 64];
+    b[..s.len()].copy_from_slice(s);
+    b[s.len()] = 0x80;
+    b[56..].copy_from_slice(&((s.len() as u64) * 8).to_be_bytes());
+    b
+}
+
+/// `sha8` of 4 messages at once (the same values as 4 `sha8` calls).
+pub fn sha8_x4(m: [&[u8]; 4]) -> [u64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    if has_ni() && m.iter().all(|x| x.len() <= 55) {
+        let b = [pad1(m[0]), pad1(m[1]), pad1(m[2]), pad1(m[3])];
+        // SAFETY: the CPU features were detected
+        let h = unsafe { compress_ni_h0::<4>(&b) };
+        return h.map(|h| ((h[1].swap_bytes() as u64) << 32) | h[0].swap_bytes() as u64);
+    }
+    m.map(sha8)
+}
+
 fn compress_soft(h: &mut [u32; 8], chunk: &[u8]) {
     let mut w = [0u32; 64];
     for i in 0..16 {
@@ -220,6 +319,25 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod ni_tests {
     #[test]
+    fn sha8_x4_matches() {
+        let ms: Vec<Vec<u8>> = (0..60u8).map(|n| (0..n).map(|i| i ^ n).collect()).collect();
+        for c in ms.windows(4) {
+            let r = super::sha8_x4([&c[0], &c[1], &c[2], &c[3]]);
+            for i in 0..4 {
+                assert_eq!(r[i], super::sha8(&c[i]));
+            }
+        }
+    }
+    #[test]
+    fn sha8_is_digest_prefix() {
+        let mut m = Vec::new();
+        for n in 0..80u8 {
+            let d = super::sha256(&m);
+            assert_eq!(super::sha8(&m), u64::from_le_bytes(d[..8].try_into().unwrap()));
+            m.push(n.wrapping_mul(37));
+        }
+    }
+    #[test]
     fn ni_matches_soft() {
         let mut x: u32 = 1;
         for n in 0..2000 {
@@ -253,8 +371,8 @@ pub fn sha8(s: &[u8]) -> u64 {
         b[56..].copy_from_slice(&((s.len() as u64) * 8).to_be_bytes());
         let mut h = H0;
         compress(&mut h, &b);
-        let x = [h[0].to_be_bytes(), h[1].to_be_bytes()].concat();
-        return u64::from_le_bytes(x.try_into().unwrap());
+        // (the digest's first 8 bytes, big-endian words, read as a little-endian u64)
+        return ((h[1].swap_bytes() as u64) << 32) | h[0].swap_bytes() as u64;
     }
     u64::from_le_bytes(sha256(s)[..8].try_into().unwrap())
 }
