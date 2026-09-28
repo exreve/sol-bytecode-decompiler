@@ -11,7 +11,7 @@
 //! - Two corners are rejected with an explicit "unsupported" error instead: a call relocation whose
 //!   target is not a whole pc, and a VM address that rounds to 2^64 or more.
 
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 pub const MM_RODATA_START: u64 = 0x1_0000_0000;
 pub const MM_STACK_START: u64 = 0x2_0000_0000;
 pub const MM_HEAP_START: u64 = 0x3_0000_0000;
@@ -383,8 +383,8 @@ pub fn parse_elf(input: &[u8]) -> R<Elf> {
     let in_text = |off: Num| off >= t_off && off < t_off + t_size;
 
     // ---- relocations (exactly as agave `Executable::relocate`) ----
-    let mut call_relocs: IndexMap<u64, CallReloc> = IndexMap::new();
-    let mut data_pointers: IndexMap<u64, u64> = IndexMap::new();
+    let mut call_relocs: IndexMap<u64, CallReloc> = IndexMap::default();
+    let mut data_pointers: IndexMap<u64, u64> = IndexMap::default();
     let strict = version >= 3;
     if !strict {
         for r in &relocs {

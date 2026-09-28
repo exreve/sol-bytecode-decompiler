@@ -3,7 +3,7 @@
 //!
 //! Offsets are JS numbers in TS (`Number(BigInt.asIntN(64, c))`, rounded past 2^53): `f64` here.
 
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E, L};
 use sbpf_program::{Block, Func, Promoted, VarInfo};
 
@@ -247,7 +247,7 @@ pub fn promote_stack(f: &mut Func) -> bool {
     let mut sc = Scan {
         ir,
         fp,
-        accesses: IndexMap::new(),
+        accesses: IndexMap::default(),
         low_escape: 0.0,
         whole_frame: false,
         arg_area: false,

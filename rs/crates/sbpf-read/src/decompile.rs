@@ -16,7 +16,7 @@ use crate::structs::{infer_structs, StructCfg};
 use crate::taint::{instruction_taint, FnTaint};
 use crate::util::*;
 use crate::views::{expr_type, fid, legacy_info_view, unaligned_views, Field, View, Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_exec::{call_target_name, ProgCtx};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
 use sbpf_lib::fingerprint::{sig_shape, SigShape};
@@ -27,7 +27,7 @@ use sbpf_print::raw::{prog_names, Prepared};
 use sbpf_program::{fn_addr, load_program, Func, Program};
 use sbpf_struct::{SNode, Tree};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// What the register-level blocks tell (read before variable recovery replaces them).
 pub struct RegFacts {
@@ -70,7 +70,7 @@ pub fn pda_abi(name: &str) -> Option<SiteKind> {
 }
 
 fn reg_facts(p: &Program) -> RegFacts {
-    let mut invoke_thunks = IndexMap::new();
+    let mut invoke_thunks = IndexMap::default();
     let mut pda_info = Vec::new();
     for f in p.funcs.values() {
         let calls: Vec<&Stmt> = f
@@ -131,7 +131,7 @@ pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead
     sbpf_dataflow::infer_signatures(&mut p);
     let sem = semantics(&p);
     let mut libs = if full {
-        IndexMap::new()
+        IndexMap::default()
     } else {
         sbpf_lib::library::classify(&p)?
     };
@@ -505,7 +505,7 @@ impl<'p> Dx<'p> {
         if !self.var_acc.borrow().contains_key(&fi) {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
-            let mut r: HashMap<u32, Vec<(N, u8)>> = HashMap::new();
+            let mut r: HashMap<u32, Vec<(N, u8)>> = HashMap::default();
             let mut acc = |addr: E, size: u8, extra: N, r: &mut HashMap<u32, Vec<(N, u8)>>| {
                 let (b, o) = match ir.get(addr) {
                     Node::Var(v) => (Some(v), 0.0),
@@ -556,7 +556,7 @@ impl<'p> Dx<'p> {
             let ir = f.ir.as_ref().unwrap();
             let fpv = fp_var(f);
             let fo = |e: E| fo_any(ir, e, fpv);
-            let mut vals: IndexMap<K, Option<E>> = IndexMap::new();
+            let mut vals: IndexMap<K, Option<E>> = IndexMap::default();
             let mut spans: Vec<(N, N)> = Vec::new();
             for b in &f.blocks {
                 for s in &b.stmts {
@@ -599,7 +599,7 @@ impl<'p> Dx<'p> {
                     }
                 }
             }
-            let mut r = HashMap::new();
+            let mut r = HashMap::default();
             for (k, v) in vals {
                 let o = k.get();
                 if let Some(v) = v {
@@ -622,8 +622,8 @@ impl<'p> Dx<'p> {
         if !self.frame_offs.borrow().contains_key(&fi) {
             let f = self.fs[fi];
             let ir = f.ir.as_ref().unwrap();
-            let mut bases = IndexSet::new();
-            let mut all = IndexSet::new();
+            let mut bases = IndexSet::default();
+            let mut all = IndexSet::default();
             fn visit(
                 ir: &Ir,
                 fp: u32,
@@ -723,7 +723,7 @@ impl<'p> Dx<'p> {
     pub fn fits_view(&self, pc: i64, v: u32, ty: &str, min: usize) -> bool {
         let fi = self.idx[&pc];
         let acc = self.var_accesses(fi);
-        let mut hit: HashSet<String> = HashSet::new();
+        let mut hit: HashSet<String> = HashSet::default();
         for &(o, size) in acc[&fi].get(&v).map_or(&[][..], |x| x.as_slice()) {
             let r = if o < 0.0 {
                 None
@@ -825,44 +825,44 @@ fn new_dx<'p>(
         ctx,
         views: Views::new(),
         sym_notes: pr.sym_notes.clone(),
-        heur_names: IndexMap::new(),
-        fn_notes: IndexMap::new(),
-        error_from: IndexSet::new(),
-        error_or: IndexSet::new(),
-        abi_names: IndexMap::new(),
-        taint: IndexMap::new(),
+        heur_names: IndexMap::default(),
+        fn_notes: IndexMap::default(),
+        error_from: IndexSet::default(),
+        error_or: IndexSet::default(),
+        abi_names: IndexMap::default(),
+        taint: IndexMap::default(),
         invoke_thunks: facts.invoke_thunks.clone(),
-        pda_wrappers: IndexMap::new(),
-        invoke_wrappers: IndexSet::new(),
-        user_invoke: IndexSet::new(),
+        pda_wrappers: IndexMap::default(),
+        invoke_wrappers: IndexSet::default(),
+        user_invoke: IndexSet::default(),
         legacy: false,
         unaligned: facts.unaligned,
         account_infos: Vec::new(),
-        data_vars: IndexMap::new(),
-        anchor_info: IndexMap::new(),
-        str_accounts: IndexMap::new(),
-        try_of: IndexMap::new(),
-        acct_layouts: IndexMap::new(),
-        acct_shift: IndexMap::new(),
-        param_types: IndexMap::new(),
-        obj_vars: IndexMap::new(),
-        base_types: IndexMap::new(),
-        lib_out: IndexMap::new(),
-        out_params: IndexSet::new(),
-        out_tags: IndexMap::new(),
-        result_out: IndexSet::new(),
+        data_vars: IndexMap::default(),
+        anchor_info: IndexMap::default(),
+        str_accounts: IndexMap::default(),
+        try_of: IndexMap::default(),
+        acct_layouts: IndexMap::default(),
+        acct_shift: IndexMap::default(),
+        param_types: IndexMap::default(),
+        obj_vars: IndexMap::default(),
+        base_types: IndexMap::default(),
+        lib_out: IndexMap::default(),
+        out_params: IndexSet::default(),
+        out_tags: IndexMap::default(),
+        result_out: IndexSet::default(),
         exec_budget: RefCell::new(ExecBudget { steps: 250_000 }),
         wrap_budget: RefCell::new(ExecBudget { steps: 150_000 }),
         def_counts,
         state_ctx: StateCtx::new(ctx),
-        acct_field_view: IndexMap::new(),
+        acct_field_view: IndexMap::default(),
         state_idl_address: None,
         libs,
         stubs: Vec::new(),
         global_idents: RefCell::new(None),
-        var_acc: RefCell::new(HashMap::new()),
-        spill: RefCell::new(HashMap::new()),
-        frame_offs: RefCell::new(HashMap::new()),
+        var_acc: RefCell::new(HashMap::default()),
+        spill: RefCell::new(HashMap::default()),
+        frame_offs: RefCell::new(HashMap::default()),
         pc_by_addr: std::sync::OnceLock::new(),
     }
 }
@@ -911,7 +911,7 @@ pub fn decompile_read_opts(
         let cands = {
             let ctx = ProgCtx::new(&pr.p);
             let facts = RegFacts {
-                invoke_thunks: IndexMap::new(),
+                invoke_thunks: IndexMap::default(),
                 pda_info: Vec::new(),
                 unaligned: false,
             };
@@ -941,7 +941,7 @@ pub fn decompile_read_opts(
     anchor_dispatch(&mut d);
     // instruction-data taint from the handlers' ix_args
     {
-        let mut seeds: IndexMap<i64, Vec<u32>> = IndexMap::new();
+        let mut seeds: IndexMap<i64, Vec<u32>> = IndexMap::default();
         for (pc, m) in &d.abi_names {
             for (v, nm) in m {
                 if nm == "ix_args" {
@@ -989,7 +989,7 @@ fn stubs(d: &mut Dx) {
     }
     let pc_by_addr: HashMap<u64, i64> =
         d.p.funcs.keys().map(|&pc| (fn_addr(d.p, pc), pc)).collect();
-    let mut called: IndexSet<i64> = IndexSet::new();
+    let mut called: IndexSet<i64> = IndexSet::default();
     for f in &d.fs {
         for t in crate::printfn::calls_of_with(f, &pc_by_addr) {
             if d.is_lib(t) {
@@ -1010,7 +1010,7 @@ fn stubs(d: &mut Dx) {
         let mut hint = info.hint.clone();
         if hint.is_none() {
             // unnamed library code: say what it uses (named callees, syscalls)
-            let mut uses: IndexSet<String> = IndexSet::new();
+            let mut uses: IndexSet<String> = IndexSet::default();
             for b in &f.blocks {
                 for st in &b.stmts {
                     if let Stmt::Call { t, .. } = st {
@@ -1087,9 +1087,9 @@ pub fn render_fingerprints(r: &ReadOut) -> String {
     let by_pc: HashMap<i64, &ReadFunc> = r.funcs.iter().map(|f| (f.pc, f)).collect();
     let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0.as_str()).collect();
     let is_root = |f: &ReadFunc| f.name.starts_with("ix_") || proc_names.contains(f.name.as_str());
-    let mut owners: HashMap<i64, IndexSet<i64>> = HashMap::new();
+    let mut owners: HashMap<i64, IndexSet<i64>> = HashMap::default();
     for h in r.funcs.iter().filter(|f| is_root(f)) {
-        let mut seen: HashSet<i64> = HashSet::from([h.pc]);
+        let mut seen: HashSet<i64> = HashSet::from_iter([h.pc]);
         let mut q = vec![h.pc];
         while let Some(x) = q.pop() {
             owners.entry(x).or_default().insert(h.pc);
@@ -1104,7 +1104,7 @@ pub fn render_fingerprints(r: &ReadOut) -> String {
     let inline: HashMap<&str, &Vec<String>> =
         r.processors.iter().map(|x| (x.0.as_str(), &x.1)).collect();
     let ixs = |pc: i64| -> Vec<String> {
-        let mut out: IndexSet<String> = IndexSet::new();
+        let mut out: IndexSet<String> = IndexSet::default();
         for h in owners.get(&pc).into_iter().flatten() {
             let n = &by_pc[h].name;
             if let Some(x) = n.strip_prefix("ix_") {
@@ -1129,10 +1129,10 @@ pub fn render_fingerprints(r: &ReadOut) -> String {
 // ---------------- phase 3: constants, Result layouts, out parameters ----------------
 
 fn phase3(d: &mut Dx) {
-    let mut consts: IndexSet<u64> = IndexSet::new();
-    let mut niche: IndexMap<u64, u32> = IndexMap::new();
-    let mut tags: IndexMap<u64, u32> = IndexMap::new();
-    let mut tag_stores: IndexMap<u64, u32> = IndexMap::new();
+    let mut consts: IndexSet<u64> = IndexSet::default();
+    let mut niche: IndexMap<u64, u32> = IndexMap::default();
+    let mut tags: IndexMap<u64, u32> = IndexMap::default();
+    let mut tag_stores: IndexMap<u64, u32> = IndexMap::default();
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         let mut note = |e: E| {
@@ -1231,7 +1231,7 @@ fn direct_calls(f: &Func) -> Vec<(i64, Vec<E>)> {
 }
 
 fn result_out_params(d: &Dx, ok: u64) -> IndexSet<i64> {
-    let mut out: IndexSet<i64> = IndexSet::new();
+    let mut out: IndexSet<i64> = IndexSet::default();
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         let a = param1_unassigned(f);
@@ -1297,7 +1297,7 @@ fn result_out_params(d: &Dx, ok: u64) -> IndexSet<i64> {
 }
 
 fn pure_out_params(d: &Dx) -> IndexSet<i64> {
-    let mut out = IndexSet::new();
+    let mut out = IndexSet::default();
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         let Some(a) = param_var(f, 1) else { continue };
@@ -1405,8 +1405,8 @@ fn pure_out_params(d: &Dx) -> IndexSet<i64> {
 
 fn out_param_tags(d: &Dx) -> IndexMap<i64, u32> {
     // tag: None = unclear (null), Some(None) = undefined, Some(Some(n))
-    let mut tag: IndexMap<i64, Option<Option<u32>>> = IndexMap::new();
-    let mut fwd: IndexMap<i64, Vec<i64>> = IndexMap::new();
+    let mut tag: IndexMap<i64, Option<Option<u32>>> = IndexMap::default();
+    let mut fwd: IndexMap<i64, Vec<i64>> = IndexMap::default();
     for &pc in &d.out_params {
         let f = d.f(pc).unwrap();
         let ir = f.ir.as_ref().unwrap();
@@ -1494,7 +1494,7 @@ fn out_param_tags(d: &Dx) -> IndexMap<i64, u32> {
             }
         }
     }
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::default();
     for (pc, t) in tag {
         if let Some(Some(n)) = t {
             out.insert(pc, n);
@@ -1534,7 +1534,7 @@ fn anchor_names(d: &mut Dx) -> (Option<i64>, Vec<i64>) {
             "the callee most often given an account-name string as its last argument pair",
         );
     }
-    let mut count: IndexMap<i64, u32> = IndexMap::new();
+    let mut count: IndexMap<i64, u32> = IndexMap::default();
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         for b in &f.blocks {
@@ -1673,7 +1673,7 @@ fn anchor_names(d: &mut Dx) -> (Option<i64>, Vec<i64>) {
 // ---------------- selector dispatcher without instruction logs ----------------
 
 fn selector_dispatch(d: &mut Dx) {
-    let mut disc_high: IndexMap<u64, String> = IndexMap::new();
+    let mut disc_high: IndexMap<u64, String> = IndexMap::default();
     for (v, dd) in &d.sem.disc {
         if dd.starts_with("ix:") {
             let k = v & !0xff;
@@ -1692,7 +1692,7 @@ fn selector_dispatch(d: &mut Dx) {
     for dpc in pcs {
         let f = d.f(dpc).unwrap();
         let ir = f.ir.as_ref().unwrap();
-        let mut br: IndexMap<usize, (String, usize)> = IndexMap::new();
+        let mut br: IndexMap<usize, (String, usize)> = IndexMap::default();
         for b in &f.blocks {
             let Term::Br { c, t, f: fl } = &b.term else {
                 continue;
@@ -1732,11 +1732,11 @@ fn selector_dispatch(d: &mut Dx) {
         if distinct.len() < 3 {
             continue;
         }
-        let mut order: IndexMap<String, Vec<i64>> = IndexMap::new();
-        let mut seen: HashMap<i64, IndexSet<String>> = HashMap::new();
+        let mut order: IndexMap<String, Vec<i64>> = IndexMap::default();
+        let mut seen: HashMap<i64, IndexSet<String>> = HashMap::default();
         for (ix, start) in br.values() {
             let mut out = Vec::new();
-            let mut vis: IndexSet<usize> = IndexSet::new();
+            let mut vis: IndexSet<usize> = IndexSet::default();
             vis.insert(*start);
             let mut q = std::collections::VecDeque::new();
             q.push_back(*start);
@@ -2054,7 +2054,7 @@ fn wrappers(d: &mut Dx, facts: &RegFacts) {
             let mut spills: Option<IndexMap<(u32, i128), Vec<E>>> = None;
             let mut spilled = |key: (u32, i128)| -> Option<Vec<E>> {
                 if spills.is_none() {
-                    let mut m: IndexMap<(u32, i128), Vec<E>> = IndexMap::new();
+                    let mut m: IndexMap<(u32, i128), Vec<E>> = IndexMap::default();
                     for b in &f.blocks {
                         for st in &b.stmts {
                             match st {

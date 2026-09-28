@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 sbpf-elf.workspace = true
+sbpf-ir.workspace = true
 sbpf-program.workspace = true

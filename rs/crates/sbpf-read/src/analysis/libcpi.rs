@@ -12,7 +12,7 @@ use crate::cpi::PartAcc;
 use sbpf_elf::CallReloc;
 use sbpf_ir::{BinOp, Node, Stmt, E};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use sbpf_ir::fx::HashSet;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -145,17 +145,17 @@ impl<'a> An<'a> {
                 _ => None,
             }
         };
-        if !invokes(&calls, pc, 3, &mut HashSet::new()) {
+        if !invokes(&calls, pc, 3, &mut HashSet::default()) {
             return None;
         }
-        let mut found: indexmap::IndexMap<&'static str, LibCpi> = indexmap::IndexMap::new();
+        let mut found: sbpf_ir::fx::IndexMap<&'static str, LibCpi> = sbpf_ir::fx::IndexMap::default();
         fn walk(
             built: &dyn Fn(i64) -> Option<LibCpi>,
             calls: &dyn Fn(i64) -> (Vec<i64>, Vec<String>),
             s: i64,
             d: i32,
             seen: &mut HashSet<i64>,
-            found: &mut indexmap::IndexMap<&'static str, LibCpi>,
+            found: &mut sbpf_ir::fx::IndexMap<&'static str, LibCpi>,
         ) {
             if !seen.insert(s) {
                 return;
@@ -169,7 +169,7 @@ impl<'a> An<'a> {
                 }
             }
         }
-        walk(&built, &calls, pc, 2, &mut HashSet::new(), &mut found);
+        walk(&built, &calls, pc, 2, &mut HashSet::default(), &mut found);
         if found.len() == 1 {
             found.into_values().next()
         } else {

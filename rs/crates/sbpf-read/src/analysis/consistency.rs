@@ -33,8 +33,8 @@ pub struct RoleView {
 
 use super::report::{snake, AcctOut, Analysis, IxOut};
 use crate::views::FT;
-use indexmap::{IndexMap, IndexSet};
-use std::collections::HashMap;
+use sbpf_ir::fx::{IndexMap, IndexSet};
+use sbpf_ir::fx::HashMap;
 
 const OWNED: &str = "(owner-checked account)";
 const VALUE: &[&str] = &[
@@ -125,7 +125,7 @@ impl<'a> super::An<'a> {
     /// consistency(a, r): validation consistency across the instructions of a role
     pub fn consistency(&self, a: &Analysis) -> Vec<RoleView> {
         let types = self.idl.map(|i| &i.types);
-        let idl_accts: IndexSet<String> = self.idl.map_or(IndexSet::new(), |i| {
+        let idl_accts: IndexSet<String> = self.idl.map_or(IndexSet::default(), |i| {
             i.accounts.iter().map(|x| x.0.clone()).collect()
         });
         let type_of = |ix: &IxOut, name: &str| -> Option<String> {
@@ -185,7 +185,7 @@ impl<'a> super::An<'a> {
             .ixs
             .iter()
             .map(|ix| {
-                let mut m = HashMap::new();
+                let mut m = HashMap::default();
                 for x in &ix.accounts {
                     if let Some(ro) = role_of(ix, &x.name) {
                         m.insert(x.name.clone(), ro);
@@ -213,7 +213,7 @@ impl<'a> super::An<'a> {
         };
         let validations = |ii: usize, x: &AcctOut, by: &str| -> Vals {
             let ix = &a.ixs[ii];
-            let mut out: Vals = IndexMap::new();
+            let mut out: Vals = IndexMap::default();
             let c = |k: &str| x.constraints.get(k);
             if has(x, "owner") && c("owner").unwrap().status != "runtime" {
                 out.insert("owner".into(), c("owner").unwrap().at.clone());
@@ -279,7 +279,7 @@ impl<'a> super::An<'a> {
             out
         };
         let uses = |ix: &IxOut, name: &str, by: &str| -> Vec<String> {
-            let mut out: IndexSet<String> = IndexSet::new();
+            let mut out: IndexSet<String> = IndexSet::default();
             if by == "data_len" {
                 out.insert("data unpacked".into());
             }
@@ -347,7 +347,7 @@ impl<'a> super::An<'a> {
                             .unwrap_or(false)
                 })
         };
-        let mut by_role: IndexMap<String, (&'static str, Vec<Member>)> = IndexMap::new();
+        let mut by_role: IndexMap<String, (&'static str, Vec<Member>)> = IndexMap::default();
         for (ii, ix) in a.ixs.iter().enumerate() {
             for (xi, x) in ix.accounts.iter().enumerate() {
                 let Some(ro) = roles[ii].get(&x.name) else {
@@ -367,7 +367,7 @@ impl<'a> super::An<'a> {
         }
         let mut out: Vec<RoleView> = Vec::new();
         for (role, (by, members)) in &by_role {
-            let mut ixs: IndexSet<usize> = IndexSet::new();
+            let mut ixs: IndexSet<usize> = IndexSet::default();
             for m in members {
                 ixs.insert(m.ix);
             }
@@ -375,7 +375,7 @@ impl<'a> super::An<'a> {
                 continue;
             }
             let mut inc: Vec<Inconsistency> = Vec::new();
-            let mut all: IndexSet<String> = IndexSet::new();
+            let mut all: IndexSet<String> = IndexSet::default();
             for m in members {
                 for k in m.v.keys() {
                     all.insert(k.clone());
@@ -436,7 +436,7 @@ impl<'a> super::An<'a> {
                         continue;
                     }
                     let mut applied_in: Vec<(String, String, Option<Loc>)> = Vec::new();
-                    let mut seen_ix: IndexSet<usize> = IndexSet::new();
+                    let mut seen_ix: IndexSet<usize> = IndexSet::default();
                     for o in &applied {
                         if !seen_ix.insert(o.ix) {
                             continue;

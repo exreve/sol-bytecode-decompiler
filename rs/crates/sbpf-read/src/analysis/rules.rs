@@ -6,7 +6,7 @@ use super::phase2::{is_value_or_auth, Finding};
 use super::phase3::close_zeroing;
 use super::report::{snake, AcctOut, Analysis, CheckOut, IxOut, Loc, OpOut};
 use super::{js_slice, An};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 
 /// a finding before its rule / title / instruction
 struct F {
@@ -720,7 +720,7 @@ impl<'a> An<'a> {
         };
         // cpi-unchecked-program
         {
-            let mut by: IndexMap<String, (usize, usize, bool)> = IndexMap::new();
+            let mut by: IndexMap<String, (usize, usize, bool)> = IndexMap::default();
             for (oi, o) in ix.ops.iter().enumerate() {
                 let Some(c) = &o.cpi else { continue };
                 let (known, prog, sd) = {
@@ -1140,7 +1140,7 @@ impl<'a> An<'a> {
                 .collect();
             let mut fs = Vec::new();
             for o in &ix.ops {
-                let mut rs: IndexSet<String> = IndexSet::new();
+                let mut rs: IndexSet<String> = IndexSet::default();
                 if let Some(t) = &o.target {
                     if crate::jre!(r"^remaining_accounts\[\d+\]\.").is_match(t)
                         && (o.how == Some("+=") || o.kinds.iter().any(|k| *k != "LAMPORT_WRITE"))
@@ -1862,7 +1862,7 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
         return vec![];
     }
     let gate = ["signer", "address", "pda", "custom", "state", "raw"];
-    let mut tagged: IndexSet<String> = IndexSet::new();
+    let mut tagged: IndexSet<String> = IndexSet::default();
     for o in &ix.ops {
         if crate::jre!(r"\.data\[0\.\.[18]\]$|\.discriminator$")
             .is_match(o.target.as_deref().unwrap_or(""))
@@ -1904,7 +1904,7 @@ fn rule_state_write_ungated(ix: &IxOut) -> Vec<F> {
     if ws.is_empty() {
         return vec![];
     }
-    let mut tg: IndexSet<String> = IndexSet::new();
+    let mut tg: IndexSet<String> = IndexSet::default();
     for o in &ws {
         tg.insert(o.target.clone().unwrap());
     }

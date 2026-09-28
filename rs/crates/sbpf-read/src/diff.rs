@@ -4,12 +4,12 @@
 
 use crate::idl::IdlInfo;
 use crate::sem::SemR;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_lib::fingerprint::{code_hash, fuzzy_sim, signatures, FnSig};
 use sbpf_lib::js_str_cmp;
 use sbpf_lib::library::classify;
 use sbpf_program::{load_program, Program};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 pub struct Profile {
     pub p: Program,
@@ -39,7 +39,7 @@ fn native_arms(
     let Some(an) = r.analysis.as_ref() else {
         return;
     };
-    let mut by_name: HashMap<&str, i64> = HashMap::new();
+    let mut by_name: HashMap<&str, i64> = HashMap::default();
     for f in &r.funcs {
         by_name.insert(&f.name, f.pc);
     }
@@ -70,7 +70,7 @@ pub fn profile(bytes: &[u8], idl: Option<&IdlInfo>) -> Result<Profile, String> {
     let img = p.image();
     let sigs = signatures(&p, &img);
     let lib: IndexSet<i64> = libs.iter().filter(|x| x.1.lib).map(|x| *x.0).collect();
-    let mut names: IndexMap<i64, String> = IndexMap::new();
+    let mut names: IndexMap<i64, String> = IndexMap::default();
     for f in p.funcs.values() {
         names.insert(
             f.pc,
@@ -79,7 +79,7 @@ pub fn profile(bytes: &[u8], idl: Option<&IdlInfo>) -> Result<Profile, String> {
                 .unwrap_or_else(|| f.name.clone()),
         );
     }
-    let mut roots: IndexMap<i64, Vec<String>> = IndexMap::new();
+    let mut roots: IndexMap<i64, Vec<String>> = IndexMap::default();
     for (pc, ix) in &sem.ix_names {
         if !lib.contains(pc) {
             names.insert(*pc, format!("ix_{ix}"));
@@ -99,7 +99,7 @@ pub fn profile(bytes: &[u8], idl: Option<&IdlInfo>) -> Result<Profile, String> {
         }
     }
     let mut owners = handler_reach(&sigs, &lib, &roots);
-    let mut arms: IndexMap<String, &'static str> = IndexMap::new();
+    let mut arms: IndexMap<String, &'static str> = IndexMap::default();
     for ix in sem.ix_names.values() {
         arms.insert(ix.clone(), "log");
     }
@@ -136,9 +136,9 @@ pub fn profile(bytes: &[u8], idl: Option<&IdlInfo>) -> Result<Profile, String> {
         // (security analysis), which needs the full decompilation
         native_arms(bytes, idl, &mut arms, &mut owners);
     }
-    let mut callers: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut callers: HashMap<i64, Vec<i64>> = HashMap::default();
     for s in sigs.values() {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for &t in &s.calls {
             if seen.insert(t) {
                 callers.entry(t).or_default().push(s.pc);
@@ -165,9 +165,9 @@ fn handler_reach(
     lib: &IndexSet<i64>,
     roots: &IndexMap<i64, Vec<String>>,
 ) -> HashMap<i64, Vec<String>> {
-    let mut own: IndexMap<i64, IndexSet<String>> = IndexMap::new();
+    let mut own: IndexMap<i64, IndexSet<String>> = IndexMap::default();
     for (&r, ixs) in roots {
-        let mut seen: HashSet<i64> = HashSet::from([r]);
+        let mut seen: HashSet<i64> = HashSet::from_iter([r]);
         let mut q = vec![r];
         while let Some(x) = q.pop() {
             let o = own.entry(x).or_default();
@@ -219,8 +219,8 @@ fn is_fn_hex(n: &str) -> bool {
 }
 
 fn match_fns(a: &Profile, b: &Profile) -> IndexMap<i64, Match> {
-    let mut m: IndexMap<i64, Match> = IndexMap::new();
-    let mut used: HashSet<i64> = HashSet::new();
+    let mut m: IndexMap<i64, Match> = IndexMap::default();
+    let mut used: HashSet<i64> = HashSet::default();
     fn pair(
         m: &mut IndexMap<i64, Match>,
         used: &mut HashSet<i64>,
@@ -237,7 +237,7 @@ fn match_fns(a: &Profile, b: &Profile) -> IndexMap<i64, Match> {
                   used: &mut HashSet<i64>,
                   kind: Kind,
                   key: &dyn Fn(&FnSig) -> String| {
-        let mut idx: HashMap<String, std::collections::VecDeque<i64>> = HashMap::new();
+        let mut idx: HashMap<String, std::collections::VecDeque<i64>> = HashMap::default();
         for s in b.sigs.values() {
             if !used.contains(&s.pc) {
                 idx.entry(key(s)).or_default().push_back(s.pc);
@@ -258,7 +258,7 @@ fn match_fns(a: &Profile, b: &Profile) -> IndexMap<i64, Match> {
     by_key(&mut m, &mut used, Kind::Data, &|s| s.hash.clone());
     by_key(&mut m, &mut used, Kind::Regs, &|s| s.regfree.clone());
     // 4: same instruction handler / symbol name (user code)
-    let mut b_by_name: HashMap<&str, i64> = HashMap::new();
+    let mut b_by_name: HashMap<&str, i64> = HashMap::default();
     for (pc, n) in &b.names {
         if !used.contains(pc) && !b.lib.contains(pc) && !is_fn_hex(n) {
             b_by_name.insert(n.as_str(), *pc);
@@ -372,7 +372,7 @@ fn changed_insns(a: &[String], b: &[String]) -> usize {
         d = d.min(q);
     }
     if d > 8 {
-        let mut c: HashMap<&str, usize> = HashMap::new();
+        let mut c: HashMap<&str, usize> = HashMap::default();
         for x in &a[pre..a.len() - suf] {
             *c.entry(x.as_str()).or_default() += 1;
         }
@@ -459,7 +459,7 @@ fn diff_lines(a: &Profile, b: &Profile, all: bool, labels: [&str; 2]) -> Vec<Str
     l.push(desc(a, la));
     l.push(desc(b, lb));
     let lib_hashes = |pp: &Profile| -> IndexMap<String, usize> {
-        let mut c: IndexMap<String, usize> = IndexMap::new();
+        let mut c: IndexMap<String, usize> = IndexMap::default();
         for pc in &pp.lib {
             *c.entry(pp.sigs[pc].hash.clone()).or_default() += 1;
         }

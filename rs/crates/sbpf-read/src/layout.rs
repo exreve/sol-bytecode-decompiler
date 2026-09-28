@@ -8,10 +8,10 @@ use crate::analysis::render::{
 };
 use crate::analysis::report::{AnalysisOut, Loc};
 use crate::decompile::ReadOut;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_print::consts::{OUTLINED, PRELUDE, PROVENANCE, TYPES};
 use sbpf_print::raw::{called, scan_views};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 fn line_count(t: &str) -> usize {
     t.bytes().filter(|&b| b == b'\n').count() + 1
@@ -29,7 +29,7 @@ fn export_fn(t: &str) -> String {
 }
 
 fn names_in(t: &str) -> IndexSet<String> {
-    let mut s = IndexSet::new();
+    let mut s = IndexSet::default();
     called(t, &mut s);
     s
 }
@@ -102,7 +102,7 @@ struct Scan {
 
 /// usedViews: the view declarations of the typed views these functions use
 fn used_views(r: &ReadOut, scans: &[Scan], fis: &[usize]) -> Vec<String> {
-    let mut names: IndexSet<String> = IndexSet::new();
+    let mut names: IndexSet<String> = IndexSet::default();
     for &i in fis {
         for n in &scans[i].views {
             if r.views.has(n) {
@@ -273,14 +273,14 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     let nf = fs.len();
     let by_pc: HashMap<i64, usize> = fs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
     let by_name: HashMap<&str, usize> = {
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         for (i, f) in fs.iter().enumerate() {
             m.insert(f.name.as_str(), i);
         }
         m
     };
     let outl_by_name: HashMap<&str, usize> = {
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         for (i, o) in r.outlined.iter().enumerate() {
             m.insert(o.0.as_str(), i);
         }
@@ -289,9 +289,9 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     let scans: Vec<Scan> = fs
         .iter()
         .map(|f| {
-            let mut c = IndexSet::new();
+            let mut c = IndexSet::default();
             called(&f.text, &mut c);
-            let mut v = IndexSet::new();
+            let mut v = IndexSet::default();
             scan_views(&f.text, &mut v);
             Scan {
                 called: c,
@@ -304,9 +304,9 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         |i: usize| fs[i].name.starts_with("ix_") || proc_names.contains(fs[i].name.as_str());
     // handlerOwners
     let handlers: Vec<usize> = (0..nf).filter(|&i| is_root(i)).collect();
-    let mut owners: HashMap<usize, IndexSet<usize>> = HashMap::new();
+    let mut owners: HashMap<usize, IndexSet<usize>> = HashMap::default();
     for &h in &handlers {
-        let mut seen: HashSet<usize> = HashSet::from([h]);
+        let mut seen: HashSet<usize> = HashSet::from_iter([h]);
         let mut q = vec![h];
         while let Some(x) = q.pop() {
             owners.entry(x).or_default().insert(h);
@@ -389,8 +389,8 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     }
     entry.funcs.sort_by_key(|&i| (!fs[i].is_entry, fs[i].pc));
 
-    let mut files: IndexMap<String, String> = IndexMap::new();
-    let mut home: HashMap<String, String> = HashMap::new();
+    let mut files: IndexMap<String, String> = IndexMap::default();
+    let mut home: HashMap<String, String> = HashMap::default();
     for g in std::iter::once(&entry)
         .chain(std::iter::once(&shared))
         .chain(ixg.iter())
@@ -402,12 +402,12 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     for (n, _) in &r.outlined {
         home.insert(n.clone(), "outlined".into());
     }
-    let mut mod_loc: HashMap<String, (String, i64)> = HashMap::new();
+    let mut mod_loc: HashMap<String, (String, i64)> = HashMap::default();
     let mut module = |g: &Group, files: &mut IndexMap<String, String>| {
         if g.funcs.is_empty() {
             return;
         }
-        let mut imports: IndexMap<String, IndexSet<String>> = IndexMap::new();
+        let mut imports: IndexMap<String, IndexSet<String>> = IndexMap::default();
         for &f in &g.funcs {
             for n in &scans[f].called {
                 if let Some(h) = home.get(n) {
@@ -481,7 +481,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         );
     }
     let all: Vec<usize> = (0..nf).collect();
-    let mut all_called: IndexSet<String> = IndexSet::new();
+    let mut all_called: IndexSet<String> = IndexSet::default();
     for s in &scans {
         for n in &s.called {
             if is_sys(n) {
@@ -520,7 +520,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
             })
     };
     let mut bundle_loc: HashMap<String, HashMap<String, (i64, Option<Vec<usize>>)>> =
-        HashMap::new();
+        HashMap::default();
     let mut bundle = |ix: &str,
                       h: usize,
                       what: &str,
@@ -532,8 +532,8 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         }
         let mut order: Vec<usize> = vec![h];
         let mut outl: Vec<usize> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::from([fs[h].name.clone()]);
-        let mut sliced: HashMap<usize, Sliced> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::from_iter([fs[h].name.clone()]);
+        let mut sliced: HashMap<usize, Sliced> = HashMap::default();
         let mut other: Vec<usize> = Vec::new();
         let mut left: Vec<usize> = Vec::new();
         let mut size = match view(h) {
@@ -551,7 +551,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
                         Some(s) => names_in(&s.text),
                         None => scans[*f].called.clone(),
                     };
-                    let mut err: HashMap<i64, bool> = HashMap::new();
+                    let mut err: HashMap<i64, bool> = HashMap::default();
                     for (c, e) in facts_calls(*f) {
                         let v = *err.get(&c).unwrap_or(&true) && e;
                         err.insert(c, v);
@@ -577,7 +577,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         };
         let mut level: Vec<usize> = vec![h];
         while !level.is_empty() {
-            let mut next: IndexMap<String, bool> = IndexMap::new();
+            let mut next: IndexMap<String, bool> = IndexMap::default();
             let add = |x: &Code,
                        next: &mut IndexMap<String, bool>,
                        seen: &HashSet<String>,
@@ -736,7 +736,7 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
         pre.push(String::new());
         let pre = pre.join("\n");
         files.insert(format!("bundle/{ix}.ts"), format!("{pre}\n{text}\n"));
-        let mut m: HashMap<String, (i64, Option<Vec<usize>>)> = HashMap::new();
+        let mut m: HashMap<String, (i64, Option<Vec<usize>>)> = HashMap::default();
         let mut at = pre.split('\n').count() as i64 + 1;
         for &f in &order {
             let v = sliced.get(&f);

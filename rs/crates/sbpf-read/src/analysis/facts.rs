@@ -10,12 +10,11 @@ use crate::anchorstate::inline_string;
 use crate::cpi::{CpiDesc, CpiParts, CpiSrc, PartAcc};
 use crate::jre;
 use crate::util::{call_of, js_num, json_str, stmt_exprs, stmt_pc, u16len};
-use indexmap::IndexMap;
-use regex::Regex;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E};
 use sbpf_struct::{Label, SNode, Tree};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// A CPI / PDA site of the function (the comment printed before it).
 #[derive(Clone, Debug)]
@@ -735,7 +734,7 @@ impl Fx<'_, '_> {
     /// The seeds of one PDA signer built in the frame before line l.
     fn signer_seeds(&self, v: Option<&str>, l: i64) -> Option<String> {
         let at = self.inp.at as i64;
-        let mut words: HashMap<super::FK, String> = HashMap::new();
+        let mut words: HashMap<super::FK, String> = HashMap::default();
         st64_words(self.inp.lines, at.max(l - 120), l, &mut words, None);
         let s = v.and_then(slot_off);
         let get = |o: f64| words.get(&super::FK::of(o));
@@ -840,7 +839,7 @@ impl Fx<'_, '_> {
     ) -> Option<(Vec<PartAcc>, Option<String>)> {
         let y = slot_off(ctx)?;
         let at = self.inp.at as i64;
-        let mut words: HashMap<super::FK, String> = HashMap::new();
+        let mut words: HashMap<super::FK, String> = HashMap::default();
         st64_words(
             self.inp.lines,
             at.max(l - 120),
@@ -2126,8 +2125,8 @@ impl Fx<'_, '_> {
 
 pub fn function_facts(inp: &FnInput) -> FnFacts {
     let lines = inp.lines;
-    let mut types: IndexMap<String, String> = IndexMap::new();
-    let mut alias: HashMap<String, Option<String>> = HashMap::new();
+    let mut types: IndexMap<String, String> = IndexMap::default();
+    let mut alias: HashMap<String, Option<String>> = HashMap::default();
     let sig = lines
         .iter()
         .find(|l| l.starts_with("function ") || l.starts_with("export function "));
@@ -2181,7 +2180,7 @@ pub fn function_facts(inp: &FnInput) -> FnFacts {
             ..Default::default()
         }),
         alias,
-        label_cont: RefCell::new(HashMap::new()),
+        label_cont: RefCell::new(HashMap::default()),
         ok_out,
     };
     fx.walk(inp.body, true, false, true, false);
@@ -2219,7 +2218,7 @@ pub fn callee_checks(
     }
     memo.insert(pc, Vec::new());
     let p = ctx.p;
-    let mut own: indexmap::IndexSet<&'static str> = indexmap::IndexSet::new();
+    let mut own: sbpf_ir::fx::IndexSet<&'static str> = sbpf_ir::fx::IndexSet::default();
     let mut sub: Vec<i64> = Vec::new();
     let end = ctx.extent_of(pc);
     let mut i = pc;

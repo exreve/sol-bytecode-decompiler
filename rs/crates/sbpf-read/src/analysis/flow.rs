@@ -7,12 +7,12 @@
 //! expression) are new ids created at the same events.
 
 use super::FK;
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E, L};
 use sbpf_program::Func;
 use sbpf_struct::structure::{compute_rpo, dominators};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// position: block << 16 | statement index (the branch condition: index = the block's statement count)
@@ -111,10 +111,10 @@ pub struct Cfg<'a> {
 pub fn cfg_of(f: &Func) -> Cfg<'_> {
     let (order, rpo) = compute_rpo(f);
     let idom = dominators(f, &order, &rpo);
-    let mut pc_block: HashMap<i64, usize> = HashMap::new();
-    let mut cond_block: IndexMap<E, usize> = IndexMap::new();
-    let mut ret_block: HashMap<E, usize> = HashMap::new();
-    let mut pc_copies: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut pc_block: HashMap<i64, usize> = HashMap::default();
+    let mut cond_block: IndexMap<E, usize> = IndexMap::default();
+    let mut ret_block: HashMap<E, usize> = HashMap::default();
+    let mut pc_copies: HashMap<i64, Vec<usize>> = HashMap::default();
     for (i, b) in f.blocks.iter().enumerate() {
         if rpo[i] < 0 {
             continue;
@@ -315,7 +315,7 @@ pub fn decision_block(
             {
                 let mut ck = g.cond_key.borrow_mut();
                 if ck.is_none() {
-                    let mut m: HashMap<String, Vec<usize>> = HashMap::new();
+                    let mut m: HashMap<String, Vec<usize>> = HashMap::default();
                     for (e, &b) in &g.cond_block {
                         m.entry(cond_key(ir, *e, 0)).or_default().push(b);
                     }
@@ -451,8 +451,8 @@ pub fn block_pc(g: &Cfg, b: usize) -> i64 {
 
 /// variables with a single definition (`set`): their expression
 pub fn single_defs(f: &Func) -> IndexMap<u32, E> {
-    let mut out: IndexMap<u32, E> = IndexMap::new();
-    let mut multi: HashSet<u32> = HashSet::new();
+    let mut out: IndexMap<u32, E> = IndexMap::default();
+    let mut multi: HashSet<u32> = HashSet::default();
     for b in &f.blocks {
         for s in &b.stmts {
             let (d, set_e) = match s {
@@ -538,8 +538,8 @@ impl<'a> Callee<'a> {
             f,
             name,
             legacy,
-            memo: RefCell::new(HashMap::new()),
-            adv: RefCell::new(HashMap::new()),
+            memo: RefCell::new(HashMap::default()),
+            adv: RefCell::new(HashMap::default()),
         }
     }
 }
@@ -592,7 +592,7 @@ struct WritesInfo {
 
 fn writes_info(f: &Func) -> WritesInfo {
     let ir = fir(f);
-    let mut defs: HashMap<u32, Option<Vec<E>>> = HashMap::new();
+    let mut defs: HashMap<u32, Option<Vec<E>>> = HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
@@ -643,7 +643,7 @@ fn writes_info(f: &Func) -> WritesInfo {
     }
     let mut ys: Vec<f64> = Vec::new();
     {
-        let mut seen: HashSet<FK> = HashSet::new();
+        let mut seen: HashSet<FK> = HashSet::default();
         for x in &fst {
             if seen.insert(FK::of(x.0)) {
                 ys.push(x.0);
@@ -651,7 +651,7 @@ fn writes_info(f: &Func) -> WritesInfo {
         }
     }
     ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mut hit: indexmap::IndexSet<FK> = indexmap::IndexSet::new();
+    let mut hit: sbpf_ir::fx::IndexSet<FK> = sbpf_ir::fx::IndexSet::default();
     let mut hitv: Vec<f64> = Vec::new();
     for b in &f.blocks {
         for s in &b.stmts {
@@ -742,7 +742,7 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
             fst,
             narrow,
         } = &*w;
-        let spill: RefCell<HashMap<FK, bool>> = RefCell::new(HashMap::new());
+        let spill: RefCell<HashMap<FK, bool>> = RefCell::new(HashMap::default());
         fn off(
             ir: &Ir,
             e: E,
@@ -1015,10 +1015,10 @@ impl<'a> Defs<'a> {
     pub fn new(f: &'a Func, with_callee: bool) -> Defs<'a> {
         let ir = fir(f);
         let fp = fp_of(f);
-        let mut defs: IndexMap<u32, E> = IndexMap::new();
-        let mut def_pos: HashMap<u32, Pos> = HashMap::new();
-        let mut multi: HashSet<u32> = HashSet::new();
-        let mut pos_e: HashMap<E, Pos> = HashMap::new();
+        let mut defs: IndexMap<u32, E> = IndexMap::default();
+        let mut def_pos: HashMap<u32, Pos> = HashMap::default();
+        let mut multi: HashSet<u32> = HashSet::default();
+        let mut pos_e: HashMap<E, Pos> = HashMap::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (i, s) in b.stmts.iter().enumerate() {
                 let (d, e) = match s {
@@ -1059,9 +1059,9 @@ impl<'a> Defs<'a> {
             with_callee,
             slot_at: RefCell::new(vec![None; n]),
             var_at: RefCell::new(vec![None; n]),
-            end_memo: RefCell::new(HashMap::new()),
+            end_memo: RefCell::new(HashMap::default()),
             open: RefCell::new(vec![false; n]),
-            adv_memo: RefCell::new(HashMap::new()),
+            adv_memo: RefCell::new(HashMap::default()),
         }
     }
 
@@ -1302,7 +1302,7 @@ impl<'a> Defs<'a> {
         if let Some(r) = &self.var_at.borrow()[b] {
             return r.clone();
         }
-        let mut r: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut r: HashMap<u32, Vec<usize>> = HashMap::default();
         for (i, s) in self.f.blocks[b].stmts.iter().enumerate() {
             match s {
                 Stmt::Set { dst, .. } | Stmt::Call { dst, .. } if *dst >= 0 => {
@@ -1416,7 +1416,7 @@ impl<'a> Defs<'a> {
                     known(q)
                 }
             };
-            let mut succs: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut succs: HashMap<usize, Vec<usize>> = HashMap::default();
             for &q in &todo {
                 for &r in &self.f.blocks[q].preds {
                     if self.open.borrow()[r] {
@@ -1506,9 +1506,9 @@ impl<'a> FlowCtx<'a> {
     pub fn new(callee: Callee<'a>) -> Self {
         FlowCtx {
             callee,
-            defs: RefCell::new(HashMap::new()),
-            winfo: RefCell::new(HashMap::new()),
-            same: RefCell::new(HashMap::new()),
+            defs: RefCell::new(HashMap::default()),
+            winfo: RefCell::new(HashMap::default()),
+            same: RefCell::new(HashMap::default()),
             ev_cuts: Cell::new(0),
             cache: Default::default(),
         }

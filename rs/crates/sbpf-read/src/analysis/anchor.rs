@@ -8,11 +8,11 @@ use super::flow::*;
 use super::{An, FK};
 use crate::util::{js_num, to_int32};
 use crate::views::{Field, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E};
 use sbpf_program::Func;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 // ---- exit functions ----
@@ -122,10 +122,10 @@ impl<'a> An<'a> {
     }
 
     fn exit_fns0(&self) -> IndexMap<i64, ExitFn> {
-        let mut out: IndexMap<i64, ExitFn> = IndexMap::new();
+        let mut out: IndexMap<i64, ExitFn> = IndexMap::default();
         let img = self.p.image();
         let idl = self.idl;
-        let disc_type: HashMap<u64, String> = idl.map_or(HashMap::new(), |i| {
+        let disc_type: HashMap<u64, String> = idl.map_or(HashMap::default(), |i| {
             i.accounts.iter().map(|(n, d)| (*d, n.clone())).collect()
         });
         for fo in &self.funcs {
@@ -144,13 +144,13 @@ impl<'a> An<'a> {
                 continue;
             }
             let fp = fp_of(f);
-            let mut slot: HashMap<FK, E> = HashMap::new();
+            let mut slot: HashMap<FK, E> = HashMap::default();
             let mut sdefs: Option<IndexMap<u32, E>> = None;
             struct Rec {
                 disc: Option<u64>,
                 writes: Vec<(i32, f64, f64)>,
             }
-            let mut by_w: IndexMap<i64, Rec> = IndexMap::new();
+            let mut by_w: IndexMap<i64, Rec> = IndexMap::default();
             for (b, i) in stmts_in_order(f) {
                 let s = &f.blocks[b].stmts[i];
                 if let Stmt::Store { addr, v, .. } = s {
@@ -483,7 +483,7 @@ impl<'a> An<'a> {
                         });
                     let s0pc = stmt_pc(s0);
                     let exit_block = g.pc_block.get(&s0pc).copied();
-                    let mut seen: HashSet<String> = HashSet::new();
+                    let mut seen: HashSet<String> = HashSet::default();
                     let size = ex
                         .fields
                         .iter()
@@ -532,7 +532,7 @@ impl<'a> An<'a> {
                             vec![]
                         }
                     };
-                    let mut per_delta: HashMap<FK, i64> = HashMap::new();
+                    let mut per_delta: HashMap<FK, i64> = HashMap::default();
                     for &(b, i) in &order {
                         if let Stmt::Store { addr, .. } | Stmt::Stores { addr, .. } =
                             &f.blocks[b].stmts[i]
@@ -1081,7 +1081,7 @@ impl<'a> AnchorEval<'a> {
             d,
             roots,
             depth,
-            memo: RefCell::new(HashMap::new()),
+            memo: RefCell::new(HashMap::default()),
             key: RefCell::new(None),
         })
     }
@@ -1266,7 +1266,7 @@ impl<'a> ACtx<'a> {
         if vs.is_empty() || vs.len() > 8 {
             return None;
         }
-        let mut rs: IndexMap<u32, HVal<'a>> = IndexMap::new();
+        let mut rs: IndexMap<u32, HVal<'a>> = IndexMap::default();
         for (k, &a) in args.iter().enumerate() {
             let x = self.ev(a, p, d + 1);
             let q = arg_param(g.f, k);
@@ -1341,7 +1341,7 @@ impl<'a> ACtx<'a> {
             let mut m = self.memo.borrow_mut();
             if had {
                 if let Some(y) = m.get_mut(&e) {
-                    y.more.get_or_insert_with(HashMap::new).insert(p, x.clone());
+                    y.more.get_or_insert_with(HashMap::default).insert(p, x.clone());
                 }
             } else {
                 m.insert(
@@ -1813,7 +1813,7 @@ impl<'a> An<'a> {
         };
         let g = self.cfg(tpc);
         // (decision blocks of the named checks, by index in tf.checks)
-        let db_memo: RefCell<HashMap<usize, Option<usize>>> = RefCell::new(HashMap::new());
+        let db_memo: RefCell<HashMap<usize, Option<usize>>> = RefCell::new(HashMap::default());
         let ck_idx =
             |k: &super::facts::Check| tf.checks.iter().position(|x| std::ptr::eq(x, k)).unwrap();
         let db_of = |k: &super::facts::Check| -> Option<usize> {
@@ -1901,7 +1901,7 @@ impl<'a> An<'a> {
         };
         let box_of = |v: E, p: Pos| -> Option<(String, Option<String>)> {
             let chain = |e: E, q: Pos| -> IndexSet<String> {
-                let mut out: IndexSet<String> = IndexSet::new();
+                let mut out: IndexSet<String> = IndexSet::default();
                 fn go(
                     ir: &Ir,
                     d: &Defs,
@@ -1970,17 +1970,17 @@ impl<'a> An<'a> {
             }
             None
         };
-        let mut info_slots: HashSet<String> = HashSet::new();
+        let mut info_slots: HashSet<String> = HashSet::default();
         let dv = |a: E| -> E {
             match ir.get(a) {
                 Node::Var(id) => d.defs.get(&id).copied().unwrap_or(a),
                 _ => a,
             }
         };
-        let mut box_reads: IndexMap<Pos, IndexSet<FK>> = IndexMap::new();
-        let mut box_reads_v: HashMap<Pos, Vec<f64>> = HashMap::new();
-        let mut box_name: HashMap<Pos, String> = HashMap::new();
-        let mut box_info: IndexMap<String, f64> = IndexMap::new();
+        let mut box_reads: IndexMap<Pos, IndexSet<FK>> = IndexMap::default();
+        let mut box_reads_v: HashMap<Pos, Vec<f64>> = HashMap::default();
+        let mut box_name: HashMap<Pos, String> = HashMap::default();
+        let mut box_info: IndexMap<String, f64> = IndexMap::default();
         {
             let mut info_at = |a: E, p: Pos| {
                 let hw = dv(a);
@@ -2085,9 +2085,9 @@ impl<'a> An<'a> {
         let mut most = 0usize;
         for (bi, b) in tfn.blocks.iter().enumerate() {
             let mut bl: Vec<Field> = Vec::new();
-            let mut word_of: HashMap<FK, Option<f64>> = HashMap::new();
-            let mut slot_of: HashMap<FK, Option<String>> = HashMap::new();
-            let mut cpc_of: HashMap<FK, i64> = HashMap::new();
+            let mut word_of: HashMap<FK, Option<f64>> = HashMap::default();
+            let mut slot_of: HashMap<FK, Option<String>> = HashMap::default();
+            let mut cpc_of: HashMap<FK, i64> = HashMap::default();
             let mut nst = 0usize;
             for (i, s) in b.stmts.iter().enumerate() {
                 let Stmt::Store {
@@ -2347,7 +2347,7 @@ impl<'a> An<'a> {
                     .flatten()
                     .is_some_and(|z| info_slots.contains(&z))
             };
-            let mut by_callee: IndexMap<i64, Option<f64>> = IndexMap::new();
+            let mut by_callee: IndexMap<i64, Option<f64>> = IndexMap::default();
             for (xi, x) in bl.iter().enumerate() {
                 let same: Vec<usize> = (0..bl.len()).filter(|&j| bl[j].name == x.name).collect();
                 let fi: Vec<usize> = same
@@ -2523,7 +2523,7 @@ impl<'a> An<'a> {
             }
         }
         let iss = |e: E| is_s(ir, &td, fl, sv, e, 0);
-        let err_pc: HashSet<i64> = self.facts.borrow().get(&tpc).map_or(HashSet::new(), |f| {
+        let err_pc: HashSet<i64> = self.facts.borrow().get(&tpc).map_or(HashSet::default(), |f| {
             f.calls
                 .iter()
                 .filter(|c| c.err_path && c.pc.is_some())
@@ -2605,7 +2605,7 @@ impl<'a> An<'a> {
             }
         }
         let mut n = 0.0;
-        let mut at: HashMap<u32, f64> = HashMap::new();
+        let mut at: HashMap<u32, f64> = HashMap::default();
         for x in all.iter_mut() {
             if let Some((v, k)) = x.adv {
                 let base = at.get(&v)?;
@@ -2627,8 +2627,8 @@ impl<'a> An<'a> {
         if n != nl || evs.iter().any(|x| x.idx >= nl) {
             return None;
         }
-        let mut ptrs: IndexMap<u32, String> = IndexMap::new();
-        let mut seqs: IndexMap<u32, Vec<String>> = IndexMap::new();
+        let mut ptrs: IndexMap<u32, String> = IndexMap::default();
+        let mut seqs: IndexMap<u32, Vec<String>> = IndexMap::default();
         for x in &evs {
             if let Some(v) = x.v {
                 if !td.multi.contains(&v) {
@@ -2775,7 +2775,7 @@ impl<'a> An<'a> {
         let mut most = 0.0;
         for (bi, b) in tf.blocks.iter().enumerate() {
             let mut nw = 0.0;
-            let mut m: IndexMap<FK, (f64, f64, f64)> = IndexMap::new();
+            let mut m: IndexMap<FK, (f64, f64, f64)> = IndexMap::default();
             for (i, s) in b.stmts.iter().enumerate() {
                 let p = pos_of(bi, i);
                 if let Stmt::Store {
@@ -2830,7 +2830,7 @@ impl<'a> An<'a> {
                 infos.push(*k);
             }
         }
-        let mut words: IndexMap<FK, (f64, String, f64)> = IndexMap::new();
+        let mut words: IndexMap<FK, (f64, String, f64)> = IndexMap::default();
         for (o, k, w) in best.values() {
             if infos.contains(k) {
                 words.insert(FK::of(*o), (*o, se.names[*k as usize].clone(), *w));
@@ -2870,7 +2870,7 @@ impl<'a> An<'a> {
         let d = self.fl.defs_of(hf, true);
         let ti = self.try_info(h);
         let try_pc = ti.as_ref().map(|t| t.try_pc);
-        let disc_type: HashMap<u64, String> = self.idl.map_or(HashMap::new(), |i| {
+        let disc_type: HashMap<u64, String> = self.idl.map_or(HashMap::default(), |i| {
             i.accounts.iter().map(|(n, dd)| (*dd, n.clone())).collect()
         });
         Rc::new_cyclic(|me| AnchorEval {
@@ -2937,9 +2937,9 @@ impl<'a> An<'a> {
         let ir = fir(f);
         let fp = d.fp;
         let seed = |v: u32| roots.contains_key(&v) && v as i64 != fp;
-        let mut dep_var: HashSet<u32> = HashSet::new();
+        let mut dep_var: HashSet<u32> = HashSet::default();
         let mut ranges: Vec<(f64, f64)> = Vec::new();
-        let mut set_defs: HashMap<u32, Vec<E>> = HashMap::new();
+        let mut set_defs: HashMap<u32, Vec<E>> = HashMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Set { dst, e, .. } = s {
@@ -3169,8 +3169,8 @@ impl<'a> An<'a> {
         self.memo.anchor.borrow_mut().insert(h, ae.clone());
         let try_pc = self.try_info(h).map(|t| t.try_pc);
         let hname = self.fo(h).unwrap().name.clone();
-        let mut done: HashSet<String> = HashSet::new();
-        let mut seen: HashMap<String, i32> = HashMap::new();
+        let mut done: HashSet<String> = HashSet::default();
+        let mut seen: HashMap<String, i32> = HashMap::default();
         let mut uniq = 0u64;
         #[allow(clippy::too_many_arguments)]
         fn visit<'a>(
@@ -3283,7 +3283,7 @@ impl<'a> An<'a> {
                         if let Some(g) = an.fo(*pc) {
                             let gf = g.f;
                             let gpc = g.pc;
-                            let mut rs: IndexMap<u32, HVal<'a>> = IndexMap::new();
+                            let mut rs: IndexMap<u32, HVal<'a>> = IndexMap::default();
                             for (j, xa) in ir.items(*args).enumerate() {
                                 let v = x.ev(xa, p, 0);
                                 let pv = arg_param(gf, j);
@@ -3459,7 +3459,7 @@ impl<'a> An<'a> {
             &mut seen,
             &mut uniq,
             h,
-            IndexMap::new(),
+            IndexMap::default(),
             3,
         );
     }

@@ -13,9 +13,9 @@ use super::report::{IxOut, Loc, OpOut};
 use super::sources::SourceCtx;
 use super::An;
 use super::{js_slice, FK};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Node, Stmt, Term, E};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -165,8 +165,8 @@ impl<'a> An<'a> {
                 .unwrap_or(false)
         });
         if self.anchor && (!out.data_reads.is_empty() || rem) {
-            let mut seen: indexmap::IndexSet<String> = indexmap::IndexSet::new();
-            let mut owners: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+            let mut seen: sbpf_ir::fx::IndexSet<String> = sbpf_ir::fx::IndexSet::default();
+            let mut owners: sbpf_ir::fx::IndexSet<String> = sbpf_ir::fx::IndexSet::default();
             for ck in &ix.checks {
                 let ev = self.ev_for(ctx, ck.fn_pc);
                 let st = ck.at.pc.and_then(|pc| self.stmt_at(ck.fn_pc, pc));
@@ -192,8 +192,8 @@ impl<'a> An<'a> {
                     e: E,
                     q: Pos,
                     dd: u32,
-                    seen: &mut indexmap::IndexSet<String>,
-                    owners: &mut indexmap::IndexSet<String>,
+                    seen: &mut sbpf_ir::fx::IndexSet<String>,
+                    owners: &mut sbpf_ir::fx::IndexSet<String>,
                 ) {
                     let mut nodes: Vec<Node> = Vec::new();
                     ir.walk(e, &mut |_, n| nodes.push(n));
@@ -238,7 +238,7 @@ impl<'a> An<'a> {
             let t = self.try_info(ctx.handler).map(|t| t.try_pc);
             let facts = self.facts.borrow();
             if let Some(tf) = t.and_then(|t| facts.get(&t)) {
-                let mut n: IndexMap<i64, usize> = IndexMap::new();
+                let mut n: IndexMap<i64, usize> = IndexMap::default();
                 for c in &tf.calls {
                     if !c.err_path {
                         *n.entry(c.callee).or_insert(0) += 1;
@@ -317,7 +317,7 @@ impl<'a> An<'a> {
         }
         // (native: an account set to 1 behind a condition reading its data)
         if !self.anchor {
-            let mut gated: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+            let mut gated: sbpf_ir::fx::IndexSet<String> = sbpf_ir::fx::IndexSet::default();
             let rent_test = |k: &IrCond| {
                 let ir = fir(self.fo(k.fn_).unwrap().f);
                 let mut hit = false;
@@ -418,7 +418,7 @@ impl<'a> An<'a> {
                     continue;
                 }
                 let pre = format!("{acct}.");
-                let mut wk: HashSet<String> = HashSet::new();
+                let mut wk: HashSet<String> = HashSet::default();
                 for x in &ix.ops {
                     let (Some(xt), Some(fx), Some(xpc)) = (&x.target, x.fn_pc, x.at.pc) else {
                         continue;
@@ -543,7 +543,7 @@ impl<'a> An<'a> {
         let fns: Vec<i64> = std::iter::once(ctx.handler)
             .chain(ctx.parents.keys().copied())
             .collect();
-        let mut discs: IndexMap<u64, String> = IndexMap::new();
+        let mut discs: IndexMap<u64, String> = IndexMap::default();
         if let Some(idl) = self.idl {
             for (n, d) in &idl.accounts {
                 discs.insert(*d, n.clone());
@@ -592,7 +592,7 @@ impl<'a> An<'a> {
         }
         self.ev_init(ctx);
         let mut out: Vec<InitWrite> = Vec::new();
-        let mut compared: HashSet<String> = HashSet::new();
+        let mut compared: HashSet<String> = HashSet::default();
         for fn_ in &fns {
             if let Some(fo) = self.fo(*fn_) {
                 let ir = fir(fo.f);
@@ -625,8 +625,8 @@ impl<'a> An<'a> {
                     _ => (e, false),
                 }
             };
-            let mut buf_v: HashMap<u32, String> = HashMap::new();
-            let mut buf_f: HashMap<FK, String> = HashMap::new();
+            let mut buf_v: HashMap<u32, String> = HashMap::default();
+            let mut buf_f: HashMap<FK, String> = HashMap::default();
             let mut any = false;
             for b in &fo.f.blocks {
                 for st in &b.stmts {
@@ -842,7 +842,7 @@ impl<'a> An<'a> {
         let h = ctx.handler;
         let f = self.fo(fn_).unwrap().f;
         let ir = fir(f);
-        let mut stored: HashSet<u32> = HashSet::new();
+        let mut stored: HashSet<u32> = HashSet::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (i, s) in b.stmts.iter().enumerate() {
                 let (addr, size, vals): (E, u8, Vec<E>) = match s {
@@ -961,7 +961,7 @@ impl<'a> An<'a> {
             if out.len() >= 4 {
                 continue;
             }
-            let mut bases0: HashSet<String> = HashSet::new();
+            let mut bases0: HashSet<String> = HashSet::default();
             let mut cands: Vec<(E, Pos, &'static str)> = Vec::new();
             for bi in 0..fo.f.blocks.len() {
                 if ctx.restricted.as_ref().is_some_and(|r| r.contains(&fpc))
@@ -1176,7 +1176,7 @@ impl<'a> An<'a> {
         let mut x: Option<Rc<ACtx<'a>>> = None;
         if let Some(fo) = self.fo(fn_) {
             if fn_ == ctx.handler {
-                x = Some(ae.ctx_of(fn_, IndexMap::new(), 2));
+                x = Some(ae.ctx_of(fn_, IndexMap::default(), 2));
             } else {
                 let par = ctx.parents.get(&fn_).copied();
                 let pp = par.and_then(|p| self.ev_in(ctx, p.fn_, d + 1));
@@ -1189,7 +1189,7 @@ impl<'a> An<'a> {
                     _ => None,
                 };
                 if let (Some(pp), Some(((_, args), sp, pir))) = (pp, c) {
-                    let mut roots: IndexMap<u32, HVal<'a>> = IndexMap::new();
+                    let mut roots: IndexMap<u32, HVal<'a>> = IndexMap::default();
                     for (j, a) in pir.items(args).enumerate() {
                         let v = pp.ev(a, sp, 0);
                         let pv = arg_param(fo.f, j);
@@ -1380,7 +1380,7 @@ fn read_after(f: &sbpf_program::Func, p: Pos, d: &Defs, o: f64, n: f64) -> bool 
     if term_hit(b0) {
         return true;
     }
-    let mut seen: HashSet<usize> = HashSet::from([b0]);
+    let mut seen: HashSet<usize> = HashSet::from_iter([b0]);
     let mut work: Vec<usize> = blocks[b0].succs.clone();
     while let Some(b) = work.pop() {
         if !seen.insert(b) {

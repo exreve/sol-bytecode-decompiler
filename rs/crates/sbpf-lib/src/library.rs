@@ -2,11 +2,11 @@
 //! `data/libsigs.json` / `data/libnames.json`, the crate-aware policy and behavioral names.
 
 use crate::fingerprint::{fingerprint, FnPrint};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use regex::Regex;
 use sbpf_ir::{CallTarget, Node, Stmt};
 use sbpf_program::{Func, Program};
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::sync::OnceLock;
 
 pub const MIN_LIB_INSNS: usize = 6;
@@ -24,7 +24,7 @@ fn lib_db() -> &'static HashMap<String, f64> {
     static DB: OnceLock<HashMap<String, f64>> = OnceLock::new();
     DB.get_or_init(|| {
         let v: serde_json::Value = serde_json::from_str(LIBSIGS).expect("libsigs.json");
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         if let Some(o) = v.get("sigs").and_then(|x| x.as_object()) {
             for (k, x) in o {
                 m.insert(k.clone(), x.get(0).and_then(|y| y.as_f64()).unwrap_or(0.0));
@@ -38,7 +38,7 @@ fn lib_names() -> &'static HashMap<String, String> {
     static DB: OnceLock<HashMap<String, String>> = OnceLock::new();
     DB.get_or_init(|| {
         let v: serde_json::Value = serde_json::from_str(LIBNAMES).expect("libnames.json");
-        let mut m = HashMap::new();
+        let mut m = HashMap::default();
         if let Some(o) = v.as_object() {
             for (k, x) in o {
                 if let Some(s) = x.as_str() {
@@ -108,7 +108,7 @@ pub fn behavior_name(p: &Program, f: &Func, strings: &[String]) -> Option<String
         }
     }
     let ir = f.ir.as_ref().unwrap_or(&p.ir);
-    let mut sys: IndexSet<String> = IndexSet::new();
+    let mut sys: IndexSet<String> = IndexSet::default();
     let mut calls = 0;
     let mut heap = false;
     let mut es = Vec::new();
@@ -255,14 +255,14 @@ pub fn classify(p: &Program) -> Result<IndexMap<i64, LibInfo>, String> {
     let d = lib_db();
     let nm = lib_names();
     let img = p.image();
-    let mut out: IndexMap<i64, LibInfo> = IndexMap::new();
-    let mut used: HashMap<String, u32> = HashMap::new();
+    let mut out: IndexMap<i64, LibInfo> = IndexMap::default();
+    let mut used: HashMap<String, u32> = HashMap::default();
     let prints: Vec<FnPrint> = p.funcs.values().map(|f| fingerprint(p, &img, f)).collect();
     let name_of = |fp: &FnPrint| -> Option<&'static String> {
         nm.get(&fp.hash)
             .or_else(|| fp.alt.as_ref().and_then(|a| nm.get(a)))
     };
-    let mut owned: IndexSet<String> = IndexSet::new();
+    let mut owned: IndexSet<String> = IndexSet::default();
     for fp in &prints {
         if let Some(n) = name_of(fp) {
             if owned_re().is_match(n) && !generic_re().is_match(&crate_of(n)) {

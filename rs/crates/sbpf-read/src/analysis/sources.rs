@@ -6,10 +6,10 @@ use super::anchor::{ACtx, AnchorEval, HVal, HK};
 use super::flow::*;
 use super::ixctx::IxInfo;
 use super::An;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Node, Stmt, E, L};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,7 +60,7 @@ impl<'a> An<'a> {
             .iter()
             .map(|s| super::js_trim(s.split(':').next().unwrap_or("")).to_string())
             .collect();
-        let mut bases: IndexSet<String> = IndexSet::new();
+        let mut bases: IndexSet<String> = IndexSet::default();
         if let Some((tfn, tv)) = ctx.tag {
             if let (Some(_), Some(fo)) = (self.defs_in(tfn), self.fo(tfn)) {
                 let ir = fir(fo.f);
@@ -116,8 +116,8 @@ impl<'a> An<'a> {
             args,
             bases,
             ae,
-            ev_memo: RefCell::new(HashMap::new()),
-            of_memo: RefCell::new(HashMap::new()),
+            ev_memo: RefCell::new(HashMap::default()),
+            of_memo: RefCell::new(HashMap::default()),
         }
     }
 }
@@ -173,7 +173,7 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
         let mut x: Option<Rc<ACtx<'a>>> = None;
         if let Some(fo) = an.fo(fn_) {
             if fn_ == ctx.handler {
-                x = Some(ae.ctx_of(fn_, IndexMap::new(), 2));
+                x = Some(ae.ctx_of(fn_, IndexMap::default(), 2));
             } else {
                 let par = ctx.parents.get(&fn_).copied();
                 let pp = par.and_then(|p| self.ev_in(p.fn_, d + 1));
@@ -186,7 +186,7 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
                     _ => None,
                 };
                 if let (Some(pp), Some(((_, args), sp, pir))) = (pp, c) {
-                    let mut roots: IndexMap<u32, HVal<'a>> = IndexMap::new();
+                    let mut roots: IndexMap<u32, HVal<'a>> = IndexMap::default();
                     for (j, a) in pir.items(args).enumerate() {
                         let v = pp.ev(a, sp, 0);
                         let pv = arg_param(fo.f, j);
@@ -319,9 +319,9 @@ impl<'a, 'x> SourceCtx<'a, 'x> {
     fn of0(&self, fn0: i64, e0: E, p0: Pos) -> Vec<Source> {
         let mut w = Walk {
             s: self,
-            out: IndexMap::new(),
+            out: IndexMap::default(),
             budget: 400,
-            seen: HashSet::new(),
+            seen: HashSet::default(),
         };
         w.walk(fn0, e0, p0, 0, String::new(), false);
         w.out.into_values().collect()

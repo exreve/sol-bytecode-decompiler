@@ -5,11 +5,11 @@
 use super::flow::*;
 use super::FK;
 use crate::util::js_num;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E};
 use sbpf_program::Func;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 /// Abstract values of the account model.
@@ -298,10 +298,10 @@ pub fn av_evaluator<'a>(
         pass1,
         infos,
         bud,
-        memo: RefCell::new(HashMap::new()),
+        memo: RefCell::new(HashMap::default()),
         mdefs: RefCell::new(None),
         own: RefCell::new(None),
-        mres: RefCell::new(HashMap::new()),
+        mres: RefCell::new(HashMap::default()),
     })
 }
 
@@ -392,7 +392,7 @@ impl<'a> AvEval<'a> {
         if vs.is_empty() || vs.len() > 8 {
             return None;
         }
-        let mut rs: IndexMap<u32, AV> = IndexMap::new();
+        let mut rs: IndexMap<u32, AV> = IndexMap::default();
         for (k, &a) in args.iter().enumerate() {
             let x = if k == j {
                 None
@@ -446,7 +446,7 @@ impl<'a> AvEval<'a> {
             None => {}
         }
         if self.mdefs.borrow().is_none() {
-            let mut m: HashMap<u32, Vec<(Option<E>, Pos)>> = HashMap::new();
+            let mut m: HashMap<u32, Vec<(Option<E>, Pos)>> = HashMap::default();
             for (bi, b) in self.f.blocks.iter().enumerate() {
                 for (i, st) in b.stmts.iter().enumerate() {
                     let (dst, e) = match st {
@@ -540,7 +540,7 @@ impl<'a> AvEval<'a> {
             let mut m = self.memo.borrow_mut();
             if had {
                 if let Some(x) = m.get_mut(&e) {
-                    x.more.get_or_insert_with(HashMap::new).insert(p, r.clone());
+                    x.more.get_or_insert_with(HashMap::default).insert(p, r.clone());
                 }
             } else {
                 m.insert(
@@ -857,7 +857,7 @@ impl<'a> AvEval<'a> {
 /// Account arrays an entrypoint fills in its frame through a cursor: (ptrs, infos) frame offsets
 fn cursor_arrays(f: &Func, input: u32, d: &Defs) -> (Option<f64>, Option<f64>) {
     let ir = fir(f);
-    let mut all: HashMap<u32, Vec<E>> = HashMap::new();
+    let mut all: HashMap<u32, Vec<E>> = HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             if let Stmt::Set { dst, e, .. } = s {
@@ -892,9 +892,9 @@ fn cursor_arrays(f: &Func, input: u32, d: &Defs) -> (Option<f64>, Option<f64>) {
     };
     let mut ptrs: Option<f64> = None;
     let mut infos: Option<f64> = None;
-    let mut flags: IndexMap<u32, IndexSet<FK>> = IndexMap::new();
-    let mut flagv: HashMap<u32, Vec<f64>> = HashMap::new();
-    let mut keys: HashMap<u32, HashSet<FK>> = HashMap::new();
+    let mut flags: IndexMap<u32, IndexSet<FK>> = IndexMap::default();
+    let mut flagv: HashMap<u32, Vec<f64>> = HashMap::default();
+    let mut keys: HashMap<u32, HashSet<FK>> = HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             let (addr, size, vals) = match s {
@@ -1044,7 +1044,7 @@ fn slice_params<'a>(fl: &FlowCtx<'a>, g: &'a Func, depth: i32) -> Rc<Vec<i32>> {
     if g.blocks.len() > 4000 {
         return Rc::new(Vec::new());
     }
-    let mut roots: IndexMap<u32, AV> = IndexMap::new();
+    let mut roots: IndexMap<u32, AV> = IndexMap::default();
     classify_roots(
         fl,
         g,
@@ -1098,13 +1098,13 @@ fn classify_roots<'a>(
         None,
     );
     let legacy = with_callee && fl.callee.legacy;
-    let mut hits: IndexMap<u32, IndexSet<FK>> = IndexMap::new();
-    let mut elems: IndexMap<u32, IndexSet<FK>> = IndexMap::new();
-    let mut rec_uses: HashMap<u32, i64> = HashMap::new();
-    let mut info_ev: HashSet<u32> = HashSet::new();
-    let mut misfit: HashSet<u32> = HashSet::new();
-    let mut key_words: HashMap<(u32, FK), HashSet<FK>> = HashMap::new();
-    let mut several: IndexSet<u32> = IndexSet::new();
+    let mut hits: IndexMap<u32, IndexSet<FK>> = IndexMap::default();
+    let mut elems: IndexMap<u32, IndexSet<FK>> = IndexMap::default();
+    let mut rec_uses: HashMap<u32, i64> = HashMap::default();
+    let mut info_ev: HashSet<u32> = HashSet::default();
+    let mut misfit: HashSet<u32> = HashSet::default();
+    let mut key_words: HashMap<(u32, FK), HashSet<FK>> = HashMap::default();
+    let mut several: IndexSet<u32> = IndexSet::default();
     let elem_field = |a: &Option<AV>| match a {
         Some(AV::Elem { e, .. }) => info_field(legacy, jmod(e * 8.0, 48.0)),
         _ => None,
@@ -1381,7 +1381,7 @@ pub fn account_resolver<'a>(
     } else {
         "-"
     };
-    let empty = IndexMap::new();
+    let empty = IndexMap::default();
     let seed = seed.unwrap_or(&empty);
     let sk = (f.pc, seed_key(ck, seed));
     if let Some(r) = fl.cache.seed.borrow().get(&sk) {
@@ -1494,7 +1494,7 @@ pub fn account_resolver<'a>(
         infos,
         None,
     );
-    let mut by_name: IndexMap<String, AcctRef> = IndexMap::new();
+    let mut by_name: IndexMap<String, AcctRef> = IndexMap::default();
     if has_roots || arr.is_some() || infos.is_some() {
         for (v, e) in &d.defs {
             let Some(Some(nm)) = names.get(*v as usize) else {
@@ -1563,7 +1563,7 @@ pub fn account_resolver<'a>(
         d,
         ev,
         by_name,
-        ext_memo: RefCell::new(HashMap::new()),
+        ext_memo: RefCell::new(HashMap::default()),
         with_callee,
         pm,
     });
@@ -2080,13 +2080,13 @@ impl<'a> Resolver<'a> {
             match x {
                 Some(x) => x,
                 None => {
-                    let mut seen: IndexMap<FK, (f64, HashSet<FK>)> = IndexMap::new();
+                    let mut seen: IndexMap<FK, (f64, HashSet<FK>)> = IndexMap::default();
                     for (bi, b) in self.f.blocks.iter().enumerate() {
                         if let Term::Br { c, .. } = &b.term {
                             for (o, w, _) in self.pda_eqs(fl, *c, pos_of(bi, b.stmts.len())).iter()
                             {
                                 seen.entry(FK::of(*o))
-                                    .or_insert_with(|| (*o, HashSet::new()))
+                                    .or_insert_with(|| (*o, HashSet::default()))
                                     .1
                                     .insert(FK::of(*w));
                             }
@@ -2210,7 +2210,7 @@ impl<'a> Resolver<'a> {
             return vec![];
         };
         let ir = self.ir();
-        let mut out: IndexSet<FK> = IndexSet::new();
+        let mut out: IndexSet<FK> = IndexSet::default();
         let mut outv: Vec<f64> = Vec::new();
         let mut add = |o: f64, out: &mut IndexSet<FK>| {
             if out.insert(FK::of(o)) {
@@ -2220,7 +2220,7 @@ impl<'a> Resolver<'a> {
         for (o, _, _) in self.pda_eqs(fl, c, p0).iter() {
             add(*o, &mut out);
         }
-        let mut seen: HashSet<E> = HashSet::new();
+        let mut seen: HashSet<E> = HashSet::default();
         let mut todo: Vec<(E, Pos, u32)> = vec![(c, p0, 0)];
         // (a walk per expression, in the TS order: depth-first, a variable's definition scanned where it is met)
         fn scan<'a>(
@@ -2288,7 +2288,7 @@ pub fn seed_from<'a>(
     fo: &'a Func,
     fn_: i64,
 ) -> IndexMap<u32, AV> {
-    let mut seed: IndexMap<u32, AV> = IndexMap::new();
+    let mut seed: IndexMap<u32, AV> = IndexMap::default();
     let (Some(pr), Some(pf), Some((ct, args))) = (pr, pf, c) else {
         return seed;
     };

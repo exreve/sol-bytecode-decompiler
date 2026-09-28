@@ -106,7 +106,7 @@ pub struct Tree {
     pub irreducible: bool,
     /// statements copied from a block of the function (the same TS object as `f.blocks[b].stmts[i]`):
     /// index -> (block, index in the block); copies made by later passes are not in it
-    pub origin: std::collections::HashMap<u32, (u32, u32)>,
+    pub origin: sbpf_ir::fx::HashMap<u32, (u32, u32)>,
 }
 
 impl Tree {

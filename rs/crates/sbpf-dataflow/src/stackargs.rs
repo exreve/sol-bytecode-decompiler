@@ -2,7 +2,7 @@
 //! arguments 5.. through `r5 - 0x1000 + 8k`; the caller stores them in its own frame's argument area.
 
 use crate::stack::{fp_offset, js_as_u64, rebuild};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E, L};
 use sbpf_program::{Func, VarInfo};
 
@@ -219,7 +219,7 @@ fn map_exprs(ir: &Ir, s: Stmt, f: &mut dyn FnMut(E) -> E) -> Stmt {
 /// (function pc -> number of stack arguments), in discovery order.
 pub fn rewrite_stack_args(funcs: &mut IndexMap<i64, Func>, built: &[usize]) -> IndexMap<i64, u32> {
     // 1) callee signatures
-    let mut nstack: IndexMap<i64, u32> = IndexMap::new();
+    let mut nstack: IndexMap<i64, u32> = IndexMap::default();
     for &fi in built {
         let n = callee_stack_args(&funcs[fi]);
         if n != 0 {

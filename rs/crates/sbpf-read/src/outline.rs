@@ -2,11 +2,11 @@
 //! return that recur in several places are printed once as helpers (`ret_tail_N` / `tail_N`).
 
 use crate::util::{js_hex, json_str, n_s, N};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_program::{Func, VarInfo};
 use sbpf_struct::{SNode, Tree};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 pub struct OutlineFn<'a> {
     pub f: &'a Func,
@@ -275,7 +275,7 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
             return CandR::Undef;
         }
     }
-    let mut in_run = HashMap::new();
+    let mut in_run = HashMap::default();
     occurrences(ir, tree, run, &mut in_run);
     let only = |id: u32| in_run.get(&id) == total.get(&id) && !crate::util::is_param(fn_.f, id);
     struct S<'a> {
@@ -435,8 +435,8 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
         ir,
         fp,
         bases: &fn_.bases,
-        vars: IndexMap::new(),
-        frames: IndexMap::new(),
+        vars: IndexMap::default(),
+        frames: IndexMap::default(),
         params: Vec::new(),
     };
     if let Some((d, _)) = lead {
@@ -461,7 +461,7 @@ fn candidate(fn_: &OutlineFn, ns: &[SNode], i: usize, total: &HashMap<u32, u32>)
 /// findOutlines
 pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outlines {
     let min_lines = 3;
-    let mut groups: IndexMap<String, Vec<Cand>> = IndexMap::new();
+    let mut groups: IndexMap<String, Vec<Cand>> = IndexMap::default();
     for (fi, fn_) in fns.iter().enumerate() {
         let mut total0: Option<HashMap<u32, u32>> = None;
         fn visit(
@@ -496,7 +496,7 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
             while i >= 0 && ns.len() - i as usize <= MAX_NODES {
                 let iu = i as usize;
                 let total = total0.get_or_insert_with(|| {
-                    let mut m = HashMap::new();
+                    let mut m = HashMap::default();
                     occurrences(fn_.f.ir.as_ref().unwrap(), fn_.tree, &fn_.tree.body, &mut m);
                     m
                 });
@@ -526,7 +526,7 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
         }
         visit(fn_, fi, &fn_.tree.body, &mut total0, &mut groups, min_lines);
     }
-    let mut covered: HashSet<*const SNode> = HashSet::new();
+    let mut covered: HashSet<*const SNode> = HashSet::default();
     fn cover(ns: &[SNode], c: &mut HashSet<*const SNode>) {
         for n in ns {
             c.insert(n as *const SNode);
@@ -621,13 +621,13 @@ pub fn find_outlines(fns: &[OutlineFn], taken: &dyn Fn(&str) -> bool) -> Outline
 fn helper_of(fn_: &OutlineFn, c: &Cand, name: &str, ret_first: bool) -> Helper {
     let fir = fn_.f.ir.as_ref().unwrap();
     let hir = Ir::new();
-    let mut ids: HashMap<u32, u32> = HashMap::new();
+    let mut ids: HashMap<u32, u32> = HashMap::default();
     let mut vars: Vec<VarInfo> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut params: Vec<String> = Vec::new();
     let letters: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
     let mut li = 0usize;
-    let mut frame_param: HashMap<crate::util::K, u32> = HashMap::new();
+    let mut frame_param: HashMap<crate::util::K, u32> = HashMap::default();
     for (k, &p) in c.params.iter().enumerate() {
         let id = vars.len() as u32;
         vars.push(VarInfo {

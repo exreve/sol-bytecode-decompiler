@@ -28,8 +28,8 @@ use regex::Regex;
 pub fn jsre(p: &str) -> Regex {
     // compiled once per thread and pattern (the callers build patterns from names: the same ones recur)
     thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<String, Regex>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
+        static CACHE: std::cell::RefCell<sbpf_ir::fx::HashMap<String, Regex>> =
+            std::cell::RefCell::new(sbpf_ir::fx::HashMap::default());
     }
     if let Some(r) = CACHE.with(|c| c.borrow().get(p).cloned()) {
         return r;
@@ -267,10 +267,10 @@ use crate::idl::IdlInfo;
 use crate::views::{Field, Views};
 use facts::FnFacts;
 use flow::{Cfg, FlowCtx};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_program::{Func, Program};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::rc::Rc;
 
 /// A built function as the analysis reads it (decompile.ts FuncOut).
@@ -304,7 +304,7 @@ pub struct An<'a> {
     /// the printer of a function's expressions (facts' expr: names as printed)
     pub expr: Box<dyn Fn(i64, sbpf_ir::E) -> Option<String> + 'a>,
     /// recognized library functions (Result.libPcs)
-    pub lib_pcs: std::collections::HashSet<i64>,
+    pub lib_pcs: sbpf_ir::fx::HashSet<i64>,
     /// the program's address (Result.programId)
     pub program_id: Option<String>,
     /// (instruction context ids: every context object distinct, as the TS's memo keys)
@@ -356,7 +356,7 @@ impl<'a> An<'a> {
             legacy,
             try_of,
             acct_layouts,
-            cfgs: RefCell::new(HashMap::new()),
+            cfgs: RefCell::new(HashMap::default()),
             memo: Default::default(),
             paths: Default::default(),
             expr,

@@ -5,7 +5,7 @@ use crate::sem::known_key;
 use crate::util::{b58, expr_eq, fo_any, has_call, js_num, json_str, N};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_struct::{SNode, Tree};
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SiteKind {
@@ -44,7 +44,7 @@ pub struct CpiSite {
 }
 
 /// Sites keyed by the node containing the call (in discovery order).
-pub type Sites<'t> = indexmap::IndexMap<*const SNode, (&'t SNode, CpiSite)>;
+pub type Sites<'t> = sbpf_ir::fx::IndexMap<*const SNode, (&'t SNode, CpiSite)>;
 
 /// addOff (cpi.ts)
 pub fn add_off(ir: &Ir, e: E, i: N) -> E {
@@ -330,8 +330,8 @@ pub fn find_cpi_sites<'t>(
         tree,
         fp,
         abi_of,
-        sites: indexmap::IndexMap::new(),
-        info: HashMap::new(),
+        sites: sbpf_ir::fx::IndexMap::default(),
+        info: HashMap::default(),
     };
     w.run(body, Vec::new());
     w.sites

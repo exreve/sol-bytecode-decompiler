@@ -84,7 +84,7 @@ use super::report::{Analysis, IxOut, OpOut};
 use super::sources::SourceCtx;
 use super::{js_slice, js_trim, An};
 use sbpf_ir::{BinOp, CallTarget, Node, Term, E};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 const VALUE_OPS: &[&str] = &[
     "TOKEN_TRANSFER",
@@ -147,7 +147,7 @@ impl<'a, 'x> P3<'a, 'x> {
             None => {
                 let facts = self.an.facts.borrow();
                 let ff = facts.get(&pc)?;
-                let mut m: HashMap<i64, i64> = HashMap::new();
+                let mut m: HashMap<i64, i64> = HashMap::default();
                 for (&pc, &l) in &ff.pc_line {
                     let e = m.entry(l).or_insert(pc);
                     if *e > pc {
@@ -194,7 +194,7 @@ impl<'a, 'x> P3<'a, 'x> {
         let m = match hit {
             Some(m) => m,
             None => {
-                let mut m: HashMap<String, i64> = HashMap::new();
+                let mut m: HashMap<String, i64> = HashMap::default();
                 for (e, x) in &ff.cond_line {
                     m.entry(cond_key(ir, *e, 0)).or_insert(*x);
                 }
@@ -536,7 +536,7 @@ impl<'a> An<'a> {
             .iter()
             .map(|(pc, f)| (f.name.clone(), *pc))
             .collect();
-        let mut check_at: HashMap<i64, HashMap<usize, usize>> = HashMap::new();
+        let mut check_at: HashMap<i64, HashMap<usize, usize>> = HashMap::default();
         for (ci, c) in a.ixs[xi].checks.iter().enumerate() {
             if self.fo(c.fn_pc).is_none() {
                 continue;
@@ -554,7 +554,7 @@ impl<'a> An<'a> {
         };
         let caller_ctl = |fn_: i64, e: E, p: Pos| s.of(fn_, e, p).iter().any(|x| x.kind == "ix");
         let mut arith: Vec<ArithSite> = Vec::new();
-        let mut keys_of: HashMap<usize, Vec<(bool, String)>> = HashMap::new();
+        let mut keys_of: HashMap<usize, Vec<(bool, String)>> = HashMap::default();
         let site = |arith: &mut Vec<ArithSite>,
                     keys_of: &mut HashMap<usize, Vec<(bool, String)>>,
                     fn_: i64,
@@ -915,7 +915,7 @@ impl<'a> An<'a> {
                     .filter(|c| c.how != "before")
                     .collect();
                 let conds: Vec<PathCond> = all.iter().take(40).map(|c| p3.shown(c)).collect();
-                let mut acct: HashSet<String> = HashSet::new();
+                let mut acct: HashSet<String> = HashSet::default();
                 if let Some(t) = &o.target {
                     let h = t.split('.').next().unwrap_or("");
                     if !h.is_empty() {
@@ -984,7 +984,7 @@ impl<'a> An<'a> {
     pub fn state_machine(&self, a: &Analysis) -> Vec<StateField> {
         let small =
             |s: &str| crate::jre!(r"(?i)^(0x[0-9a-f]{1,2}|\d{1,3}|true|false)$").is_match(s);
-        let mut out: indexmap::IndexMap<String, StateField> = indexmap::IndexMap::new();
+        let mut out: sbpf_ir::fx::IndexMap<String, StateField> = sbpf_ir::fx::IndexMap::default();
         let mut writes: Vec<(String, &IxOut, &OpOut)> = Vec::new();
         for ix in &a.ixs {
             for o in &ix.ops {

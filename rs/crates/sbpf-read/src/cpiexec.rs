@@ -8,7 +8,7 @@ use sbpf_exec::{BranchKey, Exc, Exec, ExecMem, Hooks, MemObserver, ProgCtx, Stic
 use sbpf_ir::{BinOp, Ir, E};
 use sbpf_program::Func;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 const TOP_FP: u64 = 0x2_0000_3000;
@@ -365,8 +365,8 @@ fn run_once<'c>(
     let mut mem = ExecMem::new(ctx, seed);
     let log = Rc::new(RefCell::new(Log::default()));
     let mut sym = Sym {
-        markers: HashMap::new(),
-        loads8: HashMap::new(),
+        markers: HashMap::default(),
+        loads8: HashMap::default(),
         small: Vec::new(),
         bases: Vec::new(),
     };
@@ -613,7 +613,7 @@ fn model0<'c>(
     steps: &mut i64,
 ) -> Result<Option<ExecModel<'c>>, String> {
     let ir = env.ir;
-    let mut no_flip: HashSet<BranchKey> = HashSet::new();
+    let mut no_flip: HashSet<BranchKey> = HashSet::default();
     let mut b_run: Option<Run> = None;
     for _ in 0..4 {
         let used = no_flip.clone();

@@ -10,11 +10,11 @@ use super::phase2::Finding;
 use super::report::{Analysis, IxOut, Loc, OpOut};
 use super::sources::{Source, SourceCtx};
 use super::{js_slice, js_trim, An, FK};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Node, Stmt, Term, E, L};
 use sbpf_program::Func;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -399,8 +399,8 @@ impl<'a> An<'a> {
         if let Some(x) = m.def_sites.borrow().get(&pc) {
             return x.clone();
         }
-        let mut sets: HashMap<u32, Vec<(E, Pos)>> = HashMap::new();
-        let mut stores: HashMap<FK, Vec<(E, Pos)>> = HashMap::new();
+        let mut sets: HashMap<u32, Vec<(E, Pos)>> = HashMap::default();
+        let mut stores: HashMap<FK, Vec<(E, Pos)>> = HashMap::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (i, st) in b.stmts.iter().enumerate() {
                 match st {
@@ -1035,7 +1035,7 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
         if out.is_empty() || out.iter().any(|o| o.sysvar.is_some()) {
             return out;
         }
-        let mut borrowed: IndexSet<String> = IndexSet::new();
+        let mut borrowed: IndexSet<String> = IndexSet::default();
         let fis: Vec<usize> = (0..self.sc.len())
             .filter(|&fi| out.iter().any(|o| o.fi == fi))
             .collect();
@@ -1062,7 +1062,7 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
         let keyed: Vec<String> = if self.an.anchor {
             vec![]
         } else {
-            let mut s: IndexSet<String> = IndexSet::new();
+            let mut s: IndexSet<String> = IndexSet::default();
             for k in self.compares().iter() {
                 if !self.is_sysvar_cmp(k) {
                     continue;
@@ -1420,11 +1420,11 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
         if !loads.iter().any(|x| x.off == 0xd0 && x.size == 8) {
             return vec![];
         }
-        let mut by: IndexMap<String, Vec<&Access>> = IndexMap::new();
+        let mut by: IndexMap<String, Vec<&Access>> = IndexMap::default();
         for x in &loads {
             by.entry(x.base.clone()).or_default().push(x);
         }
-        let mut magic_at: IndexSet<String> = IndexSet::new();
+        let mut magic_at: IndexSet<String> = IndexSet::default();
         for k in self.compares().iter() {
             let ir = fir(self.sc[k.fi].f);
             let (c, o) = if matches!(ir.get(k.a), Node::Const(_)) {
@@ -1981,7 +1981,7 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
             None
         };
         let allowed = |fn_: i64, b: usize| self.ctx.allowed(fn_, b) != Some(false);
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::default();
         for o in cpis {
             let fpc = o.fn_pc.unwrap();
             let Some(cp0) = an.pos_at(fpc, o.at.pc, o.ret) else {
@@ -2054,8 +2054,8 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
                         continue;
                     }
                     let mut stale: Vec<(String, String)> = Vec::new();
-                    let mut fresh: HashSet<String> = HashSet::new();
-                    let mut operands: HashSet<E> = HashSet::new();
+                    let mut fresh: HashSet<String> = HashSet::default();
+                    let mut operands: HashSet<E> = HashSet::default();
                     for (_, n) in walk_nodes(ir, *bc) {
                         if let Node::Cmp(_, a, b2) = n {
                             for y in [a, b2] {
@@ -2553,7 +2553,7 @@ impl<'a, 'x, 'y> X<'a, 'x, 'y> {
         let ix = self.ix;
         let mut out: Vec<F> = Vec::new();
         let mut divs: Vec<Div> = Vec::new();
-        let mut muls: HashMap<i64, HashSet<FK>> = HashMap::new();
+        let mut muls: HashMap<i64, HashSet<FK>> = HashMap::default();
         for (fi, c) in self.each_call().iter() {
             let pc = self.sc[*fi].pc;
             if crate::jre!(r"^(__multi3)(_[0-9a-f]+)?$").is_match(&c.name) && !c.args.is_empty() {

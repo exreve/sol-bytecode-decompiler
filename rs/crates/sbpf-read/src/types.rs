@@ -12,20 +12,20 @@ use crate::fieldnames::{name_fields, role_names, FieldNameCfg};
 use crate::structs::{infer_structs, StructCfg};
 use crate::util::*;
 use crate::views::{expr_type, fid, Field, View, Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E};
 use sbpf_program::Func;
 use sbpf_struct::{SNode, Tree};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// declaredId: the one key compared in the functions using DeclaredProgramIdMismatch (4100).
 pub fn declared_id(d: &Dx) -> Option<String> {
-    let mut keys: IndexSet<String> = IndexSet::new();
+    let mut keys: IndexSet<String> = IndexSet::default();
     let key_at = |a: u64| d.sem.key_at(a);
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         let mut raises = false;
-        let mut found: IndexSet<String> = IndexSet::new();
+        let mut found: IndexSet<String> = IndexSet::default();
         let mut visit = |e: E, found: &mut IndexSet<String>, raises: &mut bool| {
             ir.walk(e, &mut |_, x| {
                 if x == Node::Const(0x1004) {
@@ -116,7 +116,7 @@ pub fn key_b58(ir: &Ir, args: sbpf_ir::L, from: u32) -> String {
 /// keyCompares: known keys the 32 bytes at `ptr` are compared with somewhere in f.
 pub fn key_compares(d: &Dx, f: &Func, ptr: E) -> Vec<String> {
     let ir = f.ir.as_ref().unwrap();
-    let mut out: IndexSet<String> = IndexSet::new();
+    let mut out: IndexSet<String> = IndexSet::default();
     let name = |b: &str| crate::sem::known_key(b).map_or(format!("key {b}"), |s| s.to_string());
     let other = |xs: &[E]| -> Option<E> {
         if xs.len() < 2 {
@@ -320,7 +320,7 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
         Some(_) => idl_addr.clone(),
         None => None,
     };
-    let mut named_discs: IndexMap<u64, String> = IndexMap::new();
+    let mut named_discs: IndexMap<u64, String> = IndexMap::default();
     for (dv, n) in &d.sem.disc {
         if let Some(r) = n.strip_prefix("account:") {
             if !d.idl.is_some_and(|i| i.accounts.iter().any(|a| a.1 == *dv)) {
@@ -337,7 +337,7 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
     });
     d.state_idl_address = state_addr.clone();
     if let (Some(nf), false) = (name_fn, d.try_of.is_empty()) {
-        let mut seen = IndexSet::new();
+        let mut seen = IndexSet::default();
         for &t in d.try_of.values() {
             seen.insert(t);
         }
@@ -378,7 +378,7 @@ pub fn anchor_accounts(d: &mut Dx, name_fn: Option<i64>) {
 }
 
 fn accounts_views(d: &mut Dx) {
-    let mut acct_field_type: IndexMap<(String, K), (String, bool)> = IndexMap::new();
+    let mut acct_field_type: IndexMap<(String, K), (String, bool)> = IndexMap::default();
     for (hpc, tpc) in d.try_of.clone() {
         let ix = d.sem.ix_names[&hpc].clone();
         let objs = d.obj_vars.get(&tpc).cloned();
@@ -521,7 +521,7 @@ fn accounts_views(d: &mut Dx) {
             continue;
         };
         let fo = |e: Option<E>| e.and_then(|e| fo_any(hir, e, Some(fpv)));
-        let mut defs: HashMap<u32, Vec<E>> = HashMap::new();
+        let mut defs: HashMap<u32, Vec<E>> = HashMap::default();
         for b in &hf.blocks {
             for st in &b.stmts {
                 if let Stmt::Set { dst, e, .. } = st {
@@ -554,7 +554,7 @@ fn accounts_views(d: &mut Dx) {
             }
         }
         let Some(rr) = r_ else { continue };
-        let mut copies_s: HashSet<K> = HashSet::new();
+        let mut copies_s: HashSet<K> = HashSet::default();
         if let Some(ss) = s_ {
             for b in &hf.blocks {
                 for st in &b.stmts {
@@ -648,7 +648,7 @@ fn accounts_views(d: &mut Dx) {
             }
             None
         }
-        let mut slot_vals: HashMap<K, Vec<E>> = HashMap::new();
+        let mut slot_vals: HashMap<K, Vec<E>> = HashMap::default();
         for b in &hf.blocks {
             for st in &b.stmts {
                 match st {
@@ -1159,7 +1159,7 @@ pub fn compute_types(
 ) -> IndexMap<u32, String> {
     let fi = d.idx[&pc];
     let f = d.fs[fi];
-    let mut t: IndexMap<u32, String> = IndexMap::new();
+    let mut t: IndexMap<u32, String> = IndexMap::default();
     for (k, kind) in &d.account_infos[fi] {
         if let Some(n) = k.strip_prefix('v') {
             if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) {
@@ -1242,9 +1242,9 @@ fn loader_pass(d: &mut Dx, fi: usize, t: &mut IndexMap<u32, String>) -> bool {
     let ir = f.ir.as_ref().unwrap();
     let fo = |e: E| fo_any(ir, e, Some(fpv));
     let mut grew = false;
-    let mut multi: IndexMap<u32, (String, IndexSet<(usize, usize)>)> = IndexMap::new();
+    let mut multi: IndexMap<u32, (String, IndexSet<(usize, usize)>)> = IndexMap::default();
     for (bi, b) in f.blocks.iter().enumerate() {
-        let mut live: IndexMap<K, String> = IndexMap::new();
+        let mut live: IndexMap<K, String> = IndexMap::default();
         for (si, st) in b.stmts.iter().enumerate() {
             if let Stmt::Set { dst, e, .. } = st {
                 if let Node::Load { size: 8, addr } = ir.get(*e) {
@@ -1258,7 +1258,7 @@ fn loader_pass(d: &mut Dx, fi: usize, t: &mut IndexMap<u32, String>) -> bool {
                             } else {
                                 match multi.get_mut(&dst) {
                                     None => {
-                                        let mut s = IndexSet::new();
+                                        let mut s = IndexSet::default();
                                         s.insert((bi, si));
                                         multi.insert(dst, (dv, s));
                                     }
@@ -1372,9 +1372,9 @@ fn only_reached_by(f: &Func, v: u32, defs: &IndexSet<(usize, usize)>) -> bool {
     }
     let ir = f.ir.as_ref().unwrap();
     let is_def = |s: &Stmt| dst_of(s) == Some(v);
-    let mut out: HashMap<usize, IndexSet<Df>> = HashMap::new();
+    let mut out: HashMap<usize, IndexSet<Df>> = HashMap::default();
     let in_of = |bi: usize, out: &HashMap<usize, IndexSet<Df>>| -> IndexSet<Df> {
-        let mut r = IndexSet::new();
+        let mut r = IndexSet::default();
         if bi == 0 {
             r.insert(Df::Entry);
         }
@@ -1531,7 +1531,7 @@ impl StructCfg for SCfg<'_, '_> {
             .find(|(_, t)| **t == pc)
             .map(|(h, _)| *h)?;
         let fs = self.d.acct_layouts.get(&hpc)?;
-        let mut m = IndexMap::new();
+        let mut m = IndexMap::default();
         for x in fs {
             m.insert(K::of(x.off), x.clone());
         }
@@ -1543,14 +1543,14 @@ impl StructCfg for SCfg<'_, '_> {
 }
 
 fn view_types(d: &mut Dx) {
-    let no_structs: IndexMap<i64, IndexMap<u32, String>> = IndexMap::new();
+    let no_structs: IndexMap<i64, IndexMap<u32, String>> = IndexMap::default();
     let pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
     for &pc in &pcs {
         let t = compute_types(d, pc, &no_structs);
         d.base_types.insert(pc, t);
     }
     // direct calls once: callee -> (caller, callee param var, argument)
-    let mut call_args: IndexMap<i64, Vec<(i64, u32, E)>> = IndexMap::new();
+    let mut call_args: IndexMap<i64, Vec<(i64, u32, E)>> = IndexMap::default();
     for f in &d.fs {
         let ir = f.ir.as_ref().unwrap();
         let pc = f.pc;
@@ -1590,7 +1590,7 @@ fn view_types(d: &mut Dx) {
             }
         }
     }
-    let mut struct_types: IndexMap<i64, IndexMap<u32, String>> = IndexMap::new();
+    let mut struct_types: IndexMap<i64, IndexMap<u32, String>> = IndexMap::default();
     propagate(d, &call_args, &struct_types);
     // inferred struct layouts, then propagated again
     let mut views = std::mem::take(&mut d.views);
@@ -1684,7 +1684,7 @@ fn propagate(
     for _round in 0..6 {
         let mut changed: Vec<i64> = Vec::new();
         // up: a caller's variable passed where the callee's parameter has a view type
-        let mut up: IndexMap<i64, IndexMap<u32, (Option<String>, Vec<String>)>> = IndexMap::new();
+        let mut up: IndexMap<i64, IndexMap<u32, (Option<String>, Vec<String>)>> = IndexMap::default();
         for (cpc, sites) in call_args {
             let ct = d.base_types[cpc].clone();
             for (caller, v, a) in sites {
@@ -1758,7 +1758,7 @@ fn propagate(
         }
         for (cpc, sites) in call_args {
             let mut seen: IndexMap<u32, (Option<Option<String>>, u32, u32, Vec<String>)> =
-                IndexMap::new();
+                IndexMap::default();
             for (caller, v, a) in sites {
                 let cf = d.f(*caller).unwrap();
                 let ir = cf.ir.as_ref().unwrap();
@@ -1816,7 +1816,7 @@ fn propagate(
         if changed.is_empty() {
             break;
         }
-        let mut done = IndexSet::new();
+        let mut done = IndexSet::default();
         for pc in changed {
             if done.insert(pc) {
                 let t = compute_types(d, pc, struct_types);
@@ -1827,7 +1827,7 @@ fn propagate(
 }
 
 fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
-    let mut tried: HashSet<i64> = HashSet::new();
+    let mut tried: HashSet<i64> = HashSet::default();
     let pcs: Vec<i64> = d.fs.iter().map(|f| f.pc).collect();
     for pc in pcs {
         let fi = d.idx[&pc];
@@ -1958,7 +1958,7 @@ fn native_deserializers(d: &mut Dx, synth: &IndexSet<String>) {
                 let cf = d.f(cpc).unwrap();
                 let cir = cf.ir.as_ref().unwrap();
                 let rv = param_var(cf, 1);
-                let mut const_at: HashSet<K> = HashSet::new();
+                let mut const_at: HashSet<K> = HashSet::default();
                 for b2 in &cf.blocks {
                     for s2 in &b2.stmts {
                         let (addr, size, vals): (E, u8, Vec<E>) = match s2 {

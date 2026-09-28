@@ -5,9 +5,10 @@
 use super::anchor::snake2;
 use super::flow::*;
 use super::An;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub struct Indirect {
@@ -19,8 +20,8 @@ impl<'a> An<'a> {
     pub fn indirect_targets(&self) -> Indirect {
         let p = self.p;
         let img = p.image();
-        let mut targets: IndexMap<i64, Vec<i64>> = IndexMap::new();
-        let mut by_disc: IndexMap<u64, Vec<i64>> = IndexMap::new();
+        let mut targets: IndexMap<i64, Vec<i64>> = IndexMap::default();
+        let mut by_disc: IndexMap<u64, Vec<i64>> = IndexMap::default();
         let text = p.text_vaddr;
         let fn_at = |a: u64| -> Option<i64> {
             if a < text {
@@ -43,7 +44,7 @@ impl<'a> An<'a> {
         };
         let read = |a: u64, k: u64| a.checked_add(k).and_then(|x| img.read_const(x, 8));
         let discs: HashSet<u64> = self.instructions.iter().map(|i| i.disc).collect();
-        let mut const_fns: HashMap<u64, Vec<i64>> = HashMap::new();
+        let mut const_fns: HashMap<u64, Vec<i64>> = HashMap::default();
         let mut lowest = text;
         for g in &p.elf.regions {
             if g.vaddr < lowest {
@@ -53,9 +54,9 @@ impl<'a> An<'a> {
         for fo in &self.funcs {
             let f = fo.f;
             let ir = fir(f);
-            let mut out: IndexSet<i64> = IndexSet::new();
-            let mut consts: HashMap<u32, Vec<(u64, usize)>> = HashMap::new();
-            let mut other: HashSet<u32> = HashSet::new();
+            let mut out: IndexSet<i64> = IndexSet::default();
+            let mut consts: HashMap<u32, Vec<(u64, usize)>> = HashMap::default();
+            let mut other: HashSet<u32> = HashSet::default();
             for (bi, b) in f.blocks.iter().enumerate() {
                 for s in &b.stmts {
                     match s {
@@ -266,7 +267,7 @@ impl<'a> An<'a> {
             return None;
         }
         let ir = fir(f);
-        let mut defs: HashMap<u32, Vec<E>> = HashMap::new();
+        let mut defs: HashMap<u32, Vec<E>> = HashMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Set { dst, e, .. } = s {
@@ -274,7 +275,7 @@ impl<'a> An<'a> {
                 }
             }
         }
-        let mut cmp_consts: IndexMap<u32, IndexSet<u64>> = IndexMap::new();
+        let mut cmp_consts: IndexMap<u32, IndexSet<u64>> = IndexMap::default();
         for b in &f.blocks {
             if let Term::Br { c, .. } = &b.term {
                 leaves(ir, *c, &mut |x| {
@@ -334,7 +335,7 @@ impl<'a> An<'a> {
             return None;
         }
         let primary = primary.unwrap();
-        let mut family: IndexSet<u32> = IndexSet::new();
+        let mut family: IndexSet<u32> = IndexSet::default();
         family.insert(primary);
         for (&v, ks) in &cmp_consts {
             if v != primary && ks.len() >= 2 && tag_like(v, true) {
@@ -347,7 +348,7 @@ impl<'a> An<'a> {
         let n = f.blocks.len();
         let mut in_s: Vec<Option<Tags>> = vec![None; n];
         in_s[0] = Some(new_tags(true));
-        let mut mask_memo: HashMap<(E, bool), Option<Tags>> = HashMap::new();
+        let mut mask_memo: HashMap<(E, bool), Option<Tags>> = HashMap::default();
         fn narrow(
             ir: &Ir,
             family: &IndexSet<u32>,
@@ -568,7 +569,7 @@ impl<'a> An<'a> {
     /// The instructions of a native program whose handler is `root` (splitDispatch)
     pub fn split_dispatch(&self, root: i64, roots: &HashSet<i64>) -> Option<DispatchGroups> {
         let mut q: VecDeque<(i64, i32)> = VecDeque::from([(root, 0)]);
-        let mut seen: HashSet<i64> = HashSet::from([root]);
+        let mut seen: HashSet<i64> = HashSet::from_iter([root]);
         while let Some((pc, d)) = q.pop_front() {
             if self.fo(pc).is_none() {
                 continue;
@@ -596,7 +597,7 @@ impl<'a> An<'a> {
 
     fn split_from(&self, first: TagStates, roots: &HashSet<i64>) -> Option<DispatchGroups> {
         let mut ds: Vec<TagStates> = vec![first];
-        let mut tried: HashSet<i64> = HashSet::from([ds[0].fo]);
+        let mut tried: HashSet<i64> = HashSet::from_iter([ds[0].fo]);
         let mut i = 0;
         while i < ds.len() && ds.len() < 4 {
             let dpc = ds[i].fo;
@@ -651,7 +652,7 @@ impl<'a> An<'a> {
                 }
             }
         }
-        let mut sig: IndexMap<String, Vec<u32>> = IndexMap::new();
+        let mut sig: IndexMap<String, Vec<u32>> = IndexMap::default();
         for (v, parts) in per_tag.iter().enumerate() {
             if parts.is_empty() {
                 continue;
@@ -710,14 +711,14 @@ impl<'a> An<'a> {
             acts: i64,
         }
         let mut cand: Vec<Cand> = Vec::new();
-        let mut via: IndexMap<i64, Vec<u32>> = IndexMap::new();
+        let mut via: IndexMap<i64, Vec<u32>> = IndexMap::default();
         let mut via_rest: Vec<(i64, u32)> = Vec::new();
         for (k, tags) in &sig {
             let mask = mk_mask(tags);
             let mut other = false;
             let mut acts = 0i64;
-            let mut logs: IndexSet<String> = IndexSet::new();
-            let mut hs: IndexSet<i64> = IndexSet::new();
+            let mut logs: IndexSet<String> = IndexSet::default();
+            let mut hs: IndexSet<i64> = IndexSet::default();
             for part in k.split(',') {
                 let mut it = part.split(':');
                 let i: usize = it.next().unwrap().parse().unwrap();
@@ -930,7 +931,7 @@ impl<'a> An<'a> {
             }
         }
         groups.sort_by_key(|a| a.tags.first().map_or(-1, |&t| t as i64));
-        let mut names: HashMap<String, usize> = HashMap::new();
+        let mut names: HashMap<String, usize> = HashMap::default();
         for x in groups.iter_mut() {
             let n = names.get(&x.name).copied().unwrap_or(0);
             names.insert(x.name.clone(), n + 1);

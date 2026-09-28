@@ -5,7 +5,7 @@ use crate::anchor::{name_arg, out_aliases, StrAt};
 use crate::idl::{borsh_sample, get, js_string_opt, truthy, IdlInfo, LeafKind, SampleLeaf};
 use crate::util::{fo_any, is_memcpy_name, js_hex, stmt_exprs, term_br, to_int32, unb58, K, N};
 use crate::views::{fid, Field, View, Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_exec::{
     call_target_name, CallName, Exec, ExecMem, MemObserver, NoHooks, ProgCtx, TaintArg,
 };
@@ -14,7 +14,7 @@ use sbpf_program::Func;
 use sbpf_struct::{SNode, Tree};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// A (boxed) deserialized account: its account name, the view of the object, the Rust account type.
@@ -145,8 +145,8 @@ impl<'c> StateCtx<'c> {
     pub fn new(ctx: &'c ProgCtx<'c>) -> Self {
         StateCtx {
             ctx,
-            loader_memo: RefCell::new(HashMap::new()),
-            deser_memo: RefCell::new(HashMap::new()),
+            loader_memo: RefCell::new(HashMap::default()),
+            deser_memo: RefCell::new(HashMap::default()),
         }
     }
 
@@ -274,7 +274,7 @@ impl<'c> StateCtx<'c> {
             self.run_account_callee(x, &data_of(smp, bytes), &owner, [0, 1, 0], box_at, None)
         };
         let base = run(&smp.bytes)?;
-        let mut at4: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut at4: HashMap<u32, Vec<usize>> = HashMap::default();
         let mut i = 0;
         while i + 4 <= base.len() {
             let k = u32::from_le_bytes(base[i..i + 4].try_into().unwrap());
@@ -297,7 +297,7 @@ impl<'c> StateCtx<'c> {
             }
             hit
         };
-        let mut at: IndexMap<String, Loc> = IndexMap::new();
+        let mut at: IndexMap<String, Loc> = IndexMap::default();
         let mut big = 0;
         for l in &smp.leaves {
             if l.heap || l.size < 4.0 {
@@ -576,7 +576,7 @@ fn decode_copies(
     let v1 = run(&|i| hash(i, 1));
     let v2 = run(&|i| hash(i, 2));
     let (v1, v2) = (v1?, v2?);
-    let mut map = IndexMap::new();
+    let mut map = IndexMap::default();
     for m in 0..base.len() {
         if base[m] != 0 {
             continue;
@@ -606,7 +606,7 @@ fn decode_copies(
 
 /// copyLeaves: runs of consecutive copied bytes cut at their natural alignment: d0x21_u64.
 pub fn copy_leaves(map: &IndexMap<usize, usize>, shift: usize) -> IndexMap<String, Loc> {
-    let mut at = IndexMap::new();
+    let mut at = IndexMap::default();
     let mut ms: Vec<usize> = map.keys().copied().collect();
     ms.sort();
     let mut q = 0;
@@ -905,7 +905,7 @@ fn strip_obj_suffix(n: &str) -> &str {
 
 /// inlineString: an identifier written with constant stores to consecutive bytes of one base.
 pub fn inline_string(ir: &Ir, tree: &Tree, ns: &[SNode]) -> Option<String> {
-    let mut bytes: IndexMap<u32, IndexMap<i64, Option<u8>>> = IndexMap::new();
+    let mut bytes: IndexMap<u32, IndexMap<i64, Option<u8>>> = IndexMap::default();
     fn put(
         ir: &Ir,
         bytes: &mut IndexMap<u32, IndexMap<i64, Option<u8>>>,
@@ -1059,9 +1059,9 @@ fn immediates(
     if let Some(r) = memo.get(&(pc, depth)) {
         return r.clone();
     }
-    memo.insert((pc, depth), IndexSet::new());
+    memo.insert((pc, depth), IndexSet::default());
     if !(pc >= 0 && (pc as usize) < p.insns.len()) {
-        return IndexSet::new();
+        return IndexSet::default();
     }
     let end = ctx.extent_of(pc);
     let v2 = p.version == 2;
@@ -1163,8 +1163,8 @@ pub fn account_objects(
     named: Option<(&IndexMap<u64, String>, &str)>,
 ) -> IndexMap<i64, AccountObjs> {
     let ctx = st.ctx;
-    let mut res = IndexMap::new();
-    let mut discs: IndexMap<u64, String> = IndexMap::new();
+    let mut res = IndexMap::default();
+    let mut discs: IndexMap<u64, String> = IndexMap::default();
     if idl_address.is_some_and(|a| !a.is_empty()) {
         for (name, d) in &idl.unwrap().accounts {
             discs.insert(*d, name.clone());
@@ -1178,11 +1178,11 @@ pub fn account_objects(
             None
         }
     };
-    let mut memo: HashMap<(i64, u32), IndexSet<u64>> = HashMap::new();
-    let mut type_of: HashMap<i64, Option<String>> = HashMap::new();
-    let mut view_of: HashMap<(i64, String), Option<String>> = HashMap::new();
-    let mut box_at_of: HashMap<(i64, String), N> = HashMap::new();
-    let mut spl_memo: HashMap<(i64, u32), IndexSet<String>> = HashMap::new();
+    let mut memo: HashMap<(i64, u32), IndexSet<u64>> = HashMap::default();
+    let mut type_of: HashMap<i64, Option<String>> = HashMap::default();
+    let mut view_of: HashMap<(i64, String), Option<String>> = HashMap::default();
+    let mut box_at_of: HashMap<(i64, String), N> = HashMap::default();
+    let mut spl_memo: HashMap<(i64, u32), IndexSet<String>> = HashMap::default();
     fn spl_of(
         p: &sbpf_program::Program,
         ctx: &ProgCtx,
@@ -1194,7 +1194,7 @@ pub fn account_objects(
         if let Some(r) = memo.get(&(pc, depth)) {
             return r.clone();
         }
-        memo.insert((pc, depth), IndexSet::new());
+        memo.insert((pc, depth), IndexSet::default());
         let nm = fnames(pc).unwrap_or_default();
         if let Some(k) = spl_kind(&nm) {
             memo.get_mut(&(pc, depth)).unwrap().insert(k.into());
@@ -1220,7 +1220,7 @@ pub fn account_objects(
         memo[&(pc, depth)].clone()
     }
     let mut disc_at_memo: Option<HashMap<u64, String>> = None;
-    let mut info_words: HashMap<i64, Option<InfoAt>> = HashMap::new();
+    let mut info_words: HashMap<i64, Option<InfoAt>> = HashMap::default();
     for &(pc, f, tree) in fns {
         let ir = f.ir.as_ref().unwrap();
         let fp = crate::util::fp_var(f);
@@ -1228,7 +1228,7 @@ pub fn account_objects(
         if fp.is_none() || out_p.is_none() {
             continue;
         }
-        let mut defs: HashMap<i32, usize> = HashMap::new();
+        let mut defs: HashMap<i32, usize> = HashMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 match s {
@@ -1256,7 +1256,7 @@ pub fn account_objects(
             }
         };
         // spill-like frame words
-        let mut own: HashMap<K, bool> = HashMap::new();
+        let mut own: HashMap<K, bool> = HashMap::default();
         {
             let mut touch = |o: N, n: N, word: bool| {
                 let mut w = (to_int32(o) & !7) as N - 8.0;
@@ -1376,12 +1376,12 @@ pub fn account_objects(
         }
         let mut s = S {
             objs: Vec::new(),
-            call_obj: IndexMap::new(),
+            call_obj: IndexMap::default(),
             org: UndoMap::default(),
-            var_org: HashMap::new(),
+            var_org: HashMap::default(),
             var_log: Vec::new(),
-            out_words: IndexMap::new(),
-            box_vars: IndexMap::new(),
+            out_words: IndexMap::default(),
+            box_vars: IndexMap::default(),
             own: &own,
         };
         let origin_of = |s: &S, e: E| -> Option<Org> {
@@ -1496,7 +1496,7 @@ pub fn account_objects(
             if let Some(t) = env.type_of.get(&x) {
                 return t.clone();
             }
-            let mut hits: IndexSet<String> = IndexSet::new();
+            let mut hits: IndexSet<String> = IndexSet::default();
             for v in immediates(env.p, env.st.ctx, x, 4, env.memo) {
                 let t = env
                     .discs
@@ -1504,7 +1504,7 @@ pub fn account_objects(
                     .cloned()
                     .or_else(|| {
                         if env.disc_at_memo.is_none() {
-                            let mut m = HashMap::new();
+                            let mut m = HashMap::default();
                             for (d, name) in env.discs {
                                 let needle = d.to_le_bytes();
                                 let img = env.p.image();
@@ -1883,12 +1883,12 @@ pub fn account_objects(
             &name_inline,
         );
         // objects in place in the returned struct
-        let mut inline: IndexMap<K, AccountObj> = IndexMap::new();
-        let mut bases: IndexMap<(usize, K), u32> = IndexMap::new();
+        let mut inline: IndexMap<K, AccountObj> = IndexMap::default();
+        let mut bases: IndexMap<(usize, K), u32> = IndexMap::default();
         for (k, o) in &s.out_words {
             *bases.entry((o.obj, K::of(k.get() - o.off))).or_default() += 1;
         }
-        let mut infos: IndexMap<K, (String, Option<String>, bool)> = IndexMap::new();
+        let mut infos: IndexMap<K, (String, Option<String>, bool)> = IndexMap::default();
         let rust = |t: &str| {
             t.strip_prefix("spl:")
                 .or_else(|| t.strip_prefix("disc:"))
@@ -1900,8 +1900,8 @@ pub fn account_objects(
             view: ob.view.clone().unwrap_or_else(|| "undefined".into()),
             rust: rust(ob.ty.as_deref().unwrap_or("")),
         };
-        let mut boxes = IndexMap::new();
-        let mut refs = IndexMap::new();
+        let mut boxes = IndexMap::default();
+        let mut refs = IndexMap::default();
         for (v, id) in &s.box_vars {
             let ob = &s.objs[*id];
             if ob.name.is_some() && ob.ty.is_some() {
@@ -1960,7 +1960,7 @@ pub fn account_objects(
                 },
             );
         }
-        let mut calls = IndexMap::new();
+        let mut calls = IndexMap::default();
         for (at, id) in &s.call_obj {
             let o = &s.objs[*id];
             calls.insert(

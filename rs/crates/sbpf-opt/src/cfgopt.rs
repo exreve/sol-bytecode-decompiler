@@ -769,7 +769,7 @@ pub fn global_const_prop(x: &mut Fx, f: &mut Func) -> bool {
     let mut slot = vec![-1i32; nv];
     let mut slot_var: Vec<u32> = vec![];
     let mut cval: Vec<u64> = vec![];
-    let mut cid_of: std::collections::HashMap<u64, i32> = std::collections::HashMap::new();
+    let mut cid_of: sbpf_ir::fx::HashMap<u64, i32> = sbpf_ir::fx::HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             if let Stmt::Set { dst, e, .. } = s {

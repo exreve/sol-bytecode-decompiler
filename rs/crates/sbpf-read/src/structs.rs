@@ -3,10 +3,10 @@
 
 use crate::util::{fo_add, js_hex, n_s, K, N};
 use crate::views::{fid, Field, View, Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E, L};
 use sbpf_program::Func;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// The questions inferStructs asks about the program (structs.ts StructCfg).
 pub trait StructCfg {
@@ -140,7 +140,7 @@ struct G<'c, C: StructCfg + ?Sized> {
 impl<C: StructCfg + ?Sized> G<'_, C> {
     fn param_var(&mut self, pc: i64, reg: i32) -> Option<u32> {
         if !self.params.contains_key(&pc) {
-            let mut m = HashMap::new();
+            let mut m = HashMap::default();
             if let Some(f) = self.cfg.func(pc) {
                 for v in &f.vars {
                     if v.param >= 0 {
@@ -304,7 +304,7 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
 
     fn stored_at(s: &mut FnState, off: N) -> Vec<u32> {
         if s.stored.is_none() {
-            let mut m: HashMap<K, IndexSet<u32>> = HashMap::new();
+            let mut m: HashMap<K, IndexSet<u32>> = HashMap::default();
             for b in &s.f.blocks {
                 for st in &b.stmts {
                     let (addr, size, vals): (E, u8, Vec<E>) = match st {
@@ -338,13 +338,13 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
 
     fn roots_of(s: &FnState, v: u32, seen: &mut HashSet<u32>) -> IndexSet<Root> {
         if seen.contains(&v) {
-            return IndexSet::new();
+            return IndexSet::default();
         }
         seen.insert(v);
         if crate::util::is_param(s.f, v) {
             return [Root::P(v)].into_iter().collect();
         }
-        let mut r = IndexSet::new();
+        let mut r = IndexSet::default();
         for at in s.defs.get(&v).cloned().unwrap_or_default() {
             match Self::stmt(s, at) {
                 Stmt::Set { e, .. } if matches!(s.ir.get(*e), Node::Var(_)) => {
@@ -374,9 +374,9 @@ impl<C: StructCfg + ?Sized> G<'_, C> {
         if let Some(&ok) = s.ok_memo.get(&K::of(off)) {
             return ok;
         }
-        let mut r: IndexSet<Root> = IndexSet::new();
+        let mut r: IndexSet<Root> = IndexSet::default();
         for v in Self::stored_at(s, off) {
-            for x in Self::roots_of(s, v, &mut HashSet::new()) {
+            for x in Self::roots_of(s, v, &mut HashSet::default()) {
                 if x != Root::C(K::of(off)) {
                     r.insert(x);
                 }
@@ -678,9 +678,9 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
             cls: Vec::new(),
         },
         edges: Vec::new(),
-        direct: HashSet::new(),
+        direct: HashSet::default(),
         field_edges: Vec::new(),
-        params: HashMap::new(),
+        params: HashMap::default(),
     };
     let mut node_of: Vec<(i64, IndexMap<u32, Option<usize>>)> = Vec::new();
     let mut arith_vars: Vec<(usize, u32)> = Vec::new();
@@ -691,7 +691,7 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
             continue;
         }
         let ir = f.ir.as_ref().unwrap();
-        let mut defs: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
+        let mut defs: HashMap<u32, Vec<(usize, usize)>> = HashMap::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (si, s) in b.stmts.iter().enumerate() {
                 if let Some(d) = crate::util::dst_of(s) {
@@ -719,15 +719,15 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
             ir,
             fp,
             defs,
-            memo: IndexMap::new(),
-            busy: HashSet::new(),
-            cells: HashMap::new(),
+            memo: IndexMap::default(),
+            busy: HashSet::default(),
+            cells: HashMap::default(),
             stored: None,
-            ok_memo: HashMap::new(),
+            ok_memo: HashMap::default(),
             starts,
         };
         let fi = node_of.len();
-        node_of.push((pc, IndexMap::new()));
+        node_of.push((pc, IndexMap::default()));
         for (bi, b) in f.blocks.iter().enumerate() {
             for (si, st) in b.stmts.iter().enumerate() {
                 match st {
@@ -817,7 +817,7 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
         }
     }
     // ---- phase 2: unify ----
-    let mut param_node: HashMap<i64, usize> = HashMap::new();
+    let mut param_node: HashMap<i64, usize> = HashMap::default();
     for (pc, memo) in &node_of {
         let f = cfg.func(*pc).unwrap();
         for (v, n) in memo {
@@ -919,7 +919,7 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
             To::Param(k) => param_node.get(&k).copied(),
         };
         let Some(y) = y else { continue };
-        if agree(&mut g.uf, x, y, &mut HashSet::new()) {
+        if agree(&mut g.uf, x, y, &mut HashSet::default()) {
             merge(&mut g.uf, x, y);
         }
     }
@@ -933,7 +933,7 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
             continue;
         }
         let y = g.uf.pointee(pn, rel);
-        if agree(&mut g.uf, x, y, &mut HashSet::new()) {
+        if agree(&mut g.uf, x, y, &mut HashSet::default()) {
             merge(&mut g.uf, x, y);
         }
     }
@@ -943,11 +943,11 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
         cfg,
         uf: &mut uf,
         views,
-        view_of: HashMap::new(),
-        synth: IndexSet::new(),
+        view_of: HashMap::default(),
+        synth: IndexSet::default(),
         node_of: &node_of,
     };
-    let mut out: IndexMap<i64, IndexMap<u32, String>> = IndexMap::new();
+    let mut out: IndexMap<i64, IndexMap<u32, String>> = IndexMap::default();
     for (pc, memo) in &node_of {
         let f = cfg.func(*pc).unwrap();
         for (v, n) in memo {
@@ -984,8 +984,8 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
     let views = p3.views;
     let mut synth = synth0;
     // small layouts of plain words shared by every object with that layout
-    let mut rename: HashMap<String, String> = HashMap::new();
-    let mut shared: IndexMap<String, Vec<String>> = IndexMap::new();
+    let mut rename: HashMap<String, String> = HashMap::default();
+    let mut shared: IndexMap<String, Vec<String>> = IndexMap::default();
     for nm in &synth {
         let v = &views.map[nm];
         if v.fields.len() > 4
@@ -1126,7 +1126,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
         }
         seen.insert(root);
         let accs: Vec<Acc> = self.uf.cls[root].acc.values().copied().collect();
-        let mut hit: IndexSet<K> = IndexSet::new();
+        let mut hit: IndexSet<K> = IndexSet::default();
         for a in &accs {
             let Some(r) = self.views.resolve(view, a.off) else {
                 return -1;
@@ -1148,7 +1148,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             .map(|(k, v)| (*k, *v))
             .collect();
         for (o, t) in ptrs {
-            if self.empty(t, &mut HashSet::new()) {
+            if self.empty(t, &mut HashSet::default()) {
                 continue;
             }
             let Some(r) = self.views.resolve(view, o.get()) else {
@@ -1220,7 +1220,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
                     self.known(t, &to);
                 }
                 Some(FT::Ref(_)) if view == "DataCell" && o.get() == 24.0 => {
-                    if !self.empty(t, &mut HashSet::new()) {
+                    if !self.empty(t, &mut HashSet::default()) {
                         let ft = self.uf.find(t);
                         self.uf.cls[ft].is_data = true;
                     }
@@ -1237,7 +1237,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
         if self.views.map.contains_key("AccountInfo")
             && !self.uf.cls[root].ptr.is_empty()
             && self.info_evidence(root)
-            && self.matches(root, "AccountInfo", &mut HashSet::new()) >= 3
+            && self.matches(root, "AccountInfo", &mut HashSet::default()) >= 3
         {
             self.known(root, "AccountInfo");
             return Some("AccountInfo".into());
@@ -1248,7 +1248,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
                 let c = &self.uf.cls[root];
                 at(c, 16.0) && at(c, 24.0) && at(c, 32.0)
             }
-            && self.matches(root, "DataCell", &mut HashSet::new()) >= 3
+            && self.matches(root, "DataCell", &mut HashSet::default()) >= 3
         {
             self.known(root, "DataCell");
             return Some("DataCell".into());
@@ -1330,7 +1330,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             builtin: false,
         });
         self.synth.insert(name.clone());
-        let mut hints: IndexMap<K, Field> = IndexMap::new();
+        let mut hints: IndexMap<K, Field> = IndexMap::default();
         let mut hint_why: Option<String> = None;
         for x in &c.members {
             let f = self.cfg.func(x.0).unwrap();
@@ -1345,7 +1345,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
                 hints.entry(o).or_insert(fd);
             }
         }
-        let mut names: HashSet<String> = HashSet::new();
+        let mut names: HashSet<String> = HashSet::default();
         let mut hinted = 0;
         let mut fields: Vec<Field> = Vec::new();
         for a in &chosen {
@@ -1369,7 +1369,7 @@ impl<C: StructCfg + ?Sized> P3<'_, C> {
             }
             let t = if a.size == 8 {
                 match c.ptr.get(&K::of(a.off)).copied() {
-                    Some(p) if !self.empty(p, &mut HashSet::new()) => {
+                    Some(p) if !self.empty(p, &mut HashSet::default()) => {
                         self.build(p, &format!("{name}_{hex}"))
                     }
                     _ => None,

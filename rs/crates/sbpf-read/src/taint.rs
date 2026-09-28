@@ -1,7 +1,7 @@
 //! `src/taint.ts`: instruction-data taint (flow-insensitive, interprocedural) from the handlers' ix_args.
 
 use crate::util::{arg_reg, fo_any, n_s, N};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E, L};
 use sbpf_program::Func;
 
@@ -30,8 +30,8 @@ pub fn instruction_taint(
     funcs: &IndexMap<i64, &Func>,
     seeds: &IndexMap<i64, Vec<u32>>,
 ) -> IndexMap<i64, FnTaint> {
-    let mut res: IndexMap<i64, FnTaint> = IndexMap::new();
-    let mut queue: IndexSet<i64> = IndexSet::new();
+    let mut res: IndexMap<i64, FnTaint> = IndexMap::default();
+    let mut queue: IndexSet<i64> = IndexSet::default();
     for (pc, vs) in seeds {
         let t = res.entry(*pc).or_default();
         for v in vs {
@@ -51,7 +51,7 @@ pub fn instruction_taint(
         let mut t = res.entry(pc).or_default().clone();
         let fp = crate::util::fp_var(f);
         let fo = |e: E| fo_any(ir, e, fp);
-        let mut bases: IndexSet<crate::util::K> = IndexSet::new();
+        let mut bases: IndexSet<crate::util::K> = IndexSet::default();
         let note_base = |e: E, bases: &mut IndexSet<crate::util::K>| {
             ir.walk(e, &mut |x, _| {
                 if let Some(o) = fo(x) {

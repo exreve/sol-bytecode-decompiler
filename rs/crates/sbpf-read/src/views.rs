@@ -6,7 +6,7 @@
 
 use crate::idl::{borsh_prefix, struct_fields, BKind, BorshField};
 use crate::util::{js_hex, js_num, n_s, pad_end, u16len, N};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, Ir, Node, E};
 use serde_json::Value;
 use std::cell::Cell;
@@ -272,11 +272,11 @@ impl Default for Views {
 
 impl Views {
     pub fn new() -> Self {
-        let mut map = IndexMap::new();
+        let mut map = IndexMap::default();
         for v in builtin_views() {
             map.insert(v.name.clone(), v);
         }
-        let mut opaque = IndexMap::new();
+        let mut opaque = IndexMap::default();
         opaque.insert(
             "Pubkey".to_string(),
             Opaque {
@@ -542,8 +542,8 @@ impl Views {
 
     /// render: TypeScript declarations of the given views (and the views they mention).
     pub fn render(&self, names: &[String]) -> Vec<String> {
-        let mut want: std::collections::HashSet<String> = std::collections::HashSet::new();
-        fn visit(v: &Views, n: &str, want: &mut std::collections::HashSet<String>) {
+        let mut want: sbpf_ir::fx::HashSet<String> = sbpf_ir::fx::HashSet::default();
+        fn visit(v: &Views, n: &str, want: &mut sbpf_ir::fx::HashSet<String>) {
             if want.contains(n) {
                 return;
             }

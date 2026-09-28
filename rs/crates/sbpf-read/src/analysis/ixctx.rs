@@ -7,10 +7,11 @@ use super::acct::{account_resolver, seed_from, Resolver};
 use super::dispatch::{DispatchGroup, DispatchGroups, Indirect};
 use super::flow::*;
 use super::An;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{CallTarget, Stmt, E};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
@@ -146,7 +147,7 @@ impl<'a> An<'a> {
         let roots = self.roots();
         let root_pcs: HashSet<i64> = roots.iter().copied().collect();
         let mut out: Vec<IxInfo<'a>> = Vec::new();
-        let lib_memo: RefCell<HashMap<i64, Vec<i64>>> = RefCell::new(HashMap::new());
+        let lib_memo: RefCell<HashMap<i64, Vec<i64>>> = RefCell::new(HashMap::default());
         let lib_calls = |pc: i64| -> Vec<i64> {
             if let Some(l) = lib_memo.borrow().get(&pc) {
                 return l.clone();
@@ -196,10 +197,10 @@ impl<'a> An<'a> {
                     };
                     b.is_none_or(|b| g.allowed(fn_, b))
                 };
-                let mut main: IndexMap<i64, bool> = IndexMap::from([(hpc, true)]);
-                let mut lib: HashSet<i64> = HashSet::new();
+                let mut main: IndexMap<i64, bool> = IndexMap::from_iter([(hpc, true)]);
+                let mut lib: HashSet<i64> = HashSet::default();
                 let mut q: VecDeque<i64> = VecDeque::from([hpc]);
-                let mut parents: IndexMap<i64, Parent> = IndexMap::new();
+                let mut parents: IndexMap<i64, Parent> = IndexMap::default();
                 let mut from: Option<Parent> = None;
                 #[allow(clippy::too_many_arguments)]
                 fn reach(
@@ -387,9 +388,9 @@ impl<'a> An<'a> {
                     grp: grp.cloned(),
                     restricted,
                     tag: grp.map(|g| g.tag),
-                    res: RefCell::new(HashMap::new()),
-                    ridom: RefCell::new(HashMap::new()),
-                    ev: RefCell::new(HashMap::new()),
+                    res: RefCell::new(HashMap::default()),
+                    ridom: RefCell::new(HashMap::default()),
+                    ev: RefCell::new(HashMap::default()),
                     ev_ready: std::cell::Cell::new(false),
                 });
                 out.push(IxInfo {
@@ -456,7 +457,7 @@ impl<'a> An<'a> {
     pub fn splits(&self) -> IndexMap<i64, DispatchGroups> {
         let roots = self.roots();
         let root_pcs: HashSet<i64> = roots.iter().copied().collect();
-        let mut splits: IndexMap<i64, DispatchGroups> = IndexMap::new();
+        let mut splits: IndexMap<i64, DispatchGroups> = IndexMap::default();
         if !self.anchor {
             for &h in &roots {
                 if !self.fo(h).unwrap().name.starts_with("ix_") {

@@ -4,11 +4,11 @@
 use crate::sem::known_key;
 use crate::util::{b58, call_of, expr_eq, is_fn_hex, jkey_s, js_hex, n_s, stmt_exprs, u16len, N};
 use crate::views::{expr_type, fid, Field, Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use regex::Regex;
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
 use sbpf_program::Func;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 pub struct FieldNameCfg<'a> {
@@ -242,7 +242,7 @@ impl Votes {
 }
 
 fn pick(vs: &[Vote]) -> Vote {
-    let mut c: IndexMap<String, (Vote, u32)> = IndexMap::new();
+    let mut c: IndexMap<String, (Vote, u32)> = IndexMap::default();
     for v in vs {
         match c.get_mut(&v.name) {
             None => {
@@ -273,12 +273,12 @@ fn pick(vs: &[Vote]) -> Vote {
 /// nameFields: rename the generated fields of the views after how the functions use them.
 pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
     let mut vt = Votes {
-        votes: IndexMap::new(),
-        added: IndexMap::new(),
+        votes: IndexMap::default(),
+        added: IndexMap::default(),
         edges: Vec::new(),
-        shared_memo: HashMap::new(),
+        shared_memo: HashMap::default(),
     };
-    let mut gen: HashMap<String, bool> = HashMap::new();
+    let mut gen: HashMap<String, bool> = HashMap::default();
     fn reach(views: &Views, t: &str, gen: &mut HashMap<String, bool>) -> bool {
         if let Some(&g) = gen.get(t) {
             return g;
@@ -327,7 +327,7 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
         }
     }
     let mut n = 0;
-    let mut by_view: IndexMap<String, Vec<(u32, Vote)>> = IndexMap::new();
+    let mut by_view: IndexMap<String, Vec<(u32, Vote)>> = IndexMap::default();
     for (fid_, (view, v)) in &vt.votes {
         by_view
             .entry(view.clone())
@@ -367,14 +367,14 @@ pub fn name_fields(cfg: &FieldNameCfg, views: &mut Views) -> usize {
                 .push((id, pick(vs)));
         }
     }
-    let mut chosen: IndexMap<u32, Vote> = IndexMap::new();
+    let mut chosen: IndexMap<u32, Vote> = IndexMap::default();
     for l in by_view.values() {
         for (fd, v) in l {
             chosen.insert(*fd, v.clone());
         }
     }
     for _round in 0..3 {
-        let mut add: IndexMap<u32, (Loc, Vote)> = IndexMap::new();
+        let mut add: IndexMap<u32, (Loc, Vote)> = IndexMap::default();
         for (a, b) in &vt.edges {
             for (x, y, dir) in [(a, b, "from"), (b, a, "to")] {
                 let yid = y.field.as_ref().unwrap().id;
@@ -789,7 +789,7 @@ impl<'a> Scan<'a> {
     }
     fn words(&mut self) -> &HashMap<crate::util::K, Option<E>> {
         if self.words.is_none() {
-            let mut w: HashMap<crate::util::K, Option<E>> = HashMap::new();
+            let mut w: HashMap<crate::util::K, Option<E>> = HashMap::default();
             for b in &self.f.blocks {
                 for s in &b.stmts {
                     let (addr, vals): (E, Vec<E>) = match s {
@@ -916,7 +916,7 @@ impl<'a> Scan<'a> {
     }
     fn signers(&mut self) -> &IndexSet<String> {
         if self.signers.is_none() {
-            let mut r = IndexSet::new();
+            let mut r = IndexSet::default();
             let ir = self.ir;
             for b in &self.f.blocks {
                 let mut es: Vec<E> = Vec::new();
@@ -1027,10 +1027,10 @@ impl<'a> Scan<'a> {
         if self.cx.is_none() {
             let ir = self.ir;
             let mut c = Conds {
-                cond_of: HashMap::new(),
-                cond_vars: HashMap::new(),
-                set_of: HashMap::new(),
-                used_by: HashMap::new(),
+                cond_of: HashMap::default(),
+                cond_vars: HashMap::default(),
+                set_of: HashMap::default(),
+                used_by: HashMap::default(),
             };
             for (bi, b) in self.f.blocks.iter().enumerate() {
                 if let Term::Br { c: cc, .. } = &b.term {
@@ -1284,16 +1284,16 @@ fn scan(
         ir,
         tys,
         fp: crate::util::fp_var(f),
-        defs: HashMap::new(),
-        def_at: HashMap::new(),
+        defs: HashMap::default(),
+        def_at: HashMap::default(),
         logs: false,
         cur: (0, 0),
-        loc_memo: HashMap::new(),
+        loc_memo: HashMap::default(),
         words: None,
         signers: None,
         cx: None,
         clock_slots: Vec::new(),
-        byte_copies: HashMap::new(),
+        byte_copies: HashMap::default(),
         fnm: (cfg.fn_name)(pc),
     };
     let mut pda = false;
@@ -1370,8 +1370,8 @@ fn scan(
     }
     let fnm = sc.fnm.clone();
     // tags and flags
-    let mut uses: IndexMap<u32, Use> = IndexMap::new();
-    let mut var_field: HashMap<u32, Loc> = HashMap::new();
+    let mut uses: IndexMap<u32, Use> = IndexMap::default();
+    let mut var_field: HashMap<u32, Loc> = HashMap::default();
     let defs: Vec<(u32, Option<E>)> = sc.defs.iter().map(|(k, v)| (*k, *v)).collect();
     for (v, d) in defs {
         let Some(d) = d else { continue };
@@ -1929,7 +1929,7 @@ fn on_stmt(sc: &mut Scan, vt: &mut Votes, s: &Stmt, pda: bool, fnm: &str) {
 
 /// roleNames: `keys_eq` / `require_signer` for small unnamed functions.
 pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::default();
     for (&pc, f) in &cfg.funcs {
         if !is_fn_hex(&(cfg.fn_name)(pc)) {
             continue;
@@ -2009,7 +2009,7 @@ pub fn role_names(cfg: &FieldNameCfg) -> IndexMap<i64, (String, String)> {
                 .iter()
                 .any(|b| matches!(b.term, Term::Ret { e: Some(_) }))
         {
-            let mut offs: IndexSet<String> = IndexSet::new();
+            let mut offs: IndexSet<String> = IndexSet::default();
             for &l in &loads {
                 let w = match ir.get(l) {
                     Node::Load { size: 8, addr } => word_of(addr),

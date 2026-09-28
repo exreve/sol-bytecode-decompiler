@@ -6,13 +6,13 @@
 use crate::consts::{PRELUDE, PROVENANCE, TYPES};
 use crate::names::{name_functions, semantics, sha8, Sem};
 use crate::print::{declarations, print_body, stmt_exprs, Printer, ProgNames};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_elf::Image;
 use sbpf_ir::{CallTarget, Node, Stmt, Term, E};
 use sbpf_opt::Fx;
 use sbpf_program::{fn_addr, load_program, Func, Program};
 use sbpf_struct::Tree;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// One decompiled function.
 pub struct RawFunc {
@@ -168,7 +168,7 @@ pub fn prog_names(p: &Program) -> ProgNames {
 /// callsOf (decompile.ts): call targets and function-address constants of the blocks.
 fn calls_of(f: &Func, pc_by_addr: &HashMap<u64, i64>) -> Vec<i64> {
     let ir = f.ir.as_ref().unwrap();
-    let mut out: IndexSet<i64> = IndexSet::new();
+    let mut out: IndexSet<i64> = IndexSet::default();
     let visit = |e: E, out: &mut IndexSet<i64>| {
         ir.walk(e, &mut |_, n| match n {
             Node::Call(t, _) => {
@@ -517,9 +517,9 @@ pub fn render_single_of(r: &SingleIn) -> String {
     let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0).collect();
     let is_root = |i: usize| name(i).starts_with("ix_") || proc_names.contains(name(i));
     let handlers: Vec<usize> = (0..r.funcs.len()).filter(|&i| is_root(i)).collect();
-    let mut owners: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut owners: HashMap<usize, Vec<usize>> = HashMap::default();
     for &h in &handlers {
-        let mut seen: HashSet<usize> = HashSet::from([h]);
+        let mut seen: HashSet<usize> = HashSet::from_iter([h]);
         let mut q = vec![h];
         while let Some(x) = q.pop() {
             let o = owners.entry(x).or_default();
@@ -632,7 +632,7 @@ pub fn render_single_of(r: &SingleIn) -> String {
     }
     out.extend(r.summary.iter().cloned());
     out.push(String::new());
-    let mut calls: IndexSet<String> = IndexSet::new();
+    let mut calls: IndexSet<String> = IndexSet::default();
     for f in &r.funcs {
         called(f.text, &mut calls);
     }
@@ -665,7 +665,7 @@ pub fn render_single_of(r: &SingleIn) -> String {
         out.extend(helpers.iter().map(|s| s.to_string()));
         out.push(String::new());
     }
-    let mut vnames: IndexSet<String> = IndexSet::new();
+    let mut vnames: IndexSet<String> = IndexSet::default();
     for f in &r.funcs {
         scan_views(f.text, &mut vnames);
     }

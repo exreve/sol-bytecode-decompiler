@@ -3,10 +3,10 @@
 //! (`serde_json` with `preserve_order`); values are read with JS semantics (`??`, truthiness, String()).
 
 use crate::util::{js_num, upper_first, N};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_exec::hash::{sha256, sha8};
 use serde_json::Value;
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 
 pub struct IdlIx {
     pub name: String,
@@ -300,9 +300,9 @@ pub fn parse_idl(json: &Value) -> IdlInfo {
     let mut info = IdlInfo {
         address,
         instructions: Vec::new(),
-        errors: HashMap::new(),
-        discs: IndexMap::new(),
-        types: IndexMap::new(),
+        errors: HashMap::default(),
+        discs: IndexMap::default(),
+        types: IndexMap::default(),
         accounts: Vec::new(),
     };
     for t in arr(nn(get(json, "types"))) {

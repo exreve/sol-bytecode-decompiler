@@ -10,7 +10,7 @@ use sbpf_read::analysis::An;
 use sbpf_read::decompile::{decompile_read_hook, ReadOut};
 use sbpf_read::idl::IdlInfo;
 use sbpf_read::views::FT;
-use std::collections::HashSet;
+use sbpf_ir::fx::HashSet;
 
 fn ex(ir: &Ir, e: E) -> String {
     to_s(ir, &e, |ir, e, o| expr(ir, *e, o))
@@ -553,8 +553,8 @@ pub fn flow_lines(an: &An, analyzed: bool) -> String {
                 pts.push((fnpc, b));
             }
         }
-        let mut seen_pt: HashSet<(i64, usize)> = HashSet::new();
-        let mut seen_c: HashSet<(i64, usize)> = HashSet::new();
+        let mut seen_pt: HashSet<(i64, usize)> = HashSet::default();
+        let mut seen_c: HashSet<(i64, usize)> = HashSet::default();
         for (fnpc, b) in pts {
             let Some(b) = b else { continue };
             if !seen_pt.insert((fnpc, b)) {

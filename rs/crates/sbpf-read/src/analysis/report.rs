@@ -17,10 +17,10 @@ use super::phase2::{AuthorityRow, Finding, Relation, StoredKeys, TrustRow};
 use super::phase3::{ArithSite, Chain, DivSite, PathInfo, Proof, StateField};
 use super::An;
 use crate::cpi::PartAcc;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{CallTarget, Node, Stmt, E};
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub fn rank(s: &str) -> i32 {
@@ -367,7 +367,7 @@ impl<'a, 'x> IxB<'a, 'x> {
             name: nm.to_string(),
             source: "code",
             expected: Expected::default(),
-            constraints: IndexMap::new(),
+            constraints: IndexMap::default(),
         });
         self.known.insert(nm.to_string());
         self.accounts.len() - 1
@@ -599,7 +599,7 @@ impl<'a, 'x> IxB<'a, 'x> {
         let g = an.cfg(ff.pc);
         let blocks = &fo.f.blocks;
         let ir = fir(fo.f);
-        let mut calls: HashMap<Pos, String> = HashMap::new();
+        let mut calls: HashMap<Pos, String> = HashMap::default();
         for c in &ff.checks {
             let (Some(named), Some(before), Some(_)) = (&c.named, c.before, c.c) else {
                 continue;
@@ -632,8 +632,8 @@ impl<'a, 'x> IxB<'a, 'x> {
         if calls.is_empty() {
             return None;
         }
-        let mut ipos: HashMap<Pos, String> = HashMap::new();
-        let mut ivars: HashMap<u32, String> = HashMap::new();
+        let mut ipos: HashMap<Pos, String> = HashMap::default();
+        let mut ivars: HashMap<u32, String> = HashMap::default();
         for c in &ff.checks {
             let (Some(named), Some(_), Some(pp)) = (&c.named, c.c, c.pass_pc) else {
                 continue;
@@ -709,7 +709,7 @@ impl<'a> An<'a> {
                     let ctx = &infos[ix.info].ctx;
                     ctx.grp.as_ref()?;
                     let restricted = ctx.restricted.clone().unwrap_or_default();
-                    let mut marks: HashMap<i64, Option<Vec<u8>>> = HashMap::new();
+                    let mut marks: HashMap<i64, Option<Vec<u8>>> = HashMap::default();
                     for pc in std::iter::once(ctx.handler).chain(restricted.iter().copied()) {
                         marks.entry(pc).or_insert_with(|| self.slice_marks(ctx, pc));
                     }
@@ -835,7 +835,7 @@ impl<'a> An<'a> {
             }
         }
         // program-level views: PDAs, state writes, read / write dependencies
-        let mut pdas: IndexMap<String, PdaOut> = IndexMap::new();
+        let mut pdas: IndexMap<String, PdaOut> = IndexMap::default();
         let pda_outs = |o: &OpOut| -> Vec<f64> {
             let Some(fo) = o.fn_pc.and_then(|f| self.fo(f)) else {
                 return vec![];
@@ -858,8 +858,8 @@ impl<'a> An<'a> {
                 l.push(v.to_string());
             }
         }
-        let mut writes: IndexMap<String, Vec<WriteOut>> = IndexMap::new();
-        let mut reads: IndexMap<String, IndexSet<String>> = IndexMap::new();
+        let mut writes: IndexMap<String, Vec<WriteOut>> = IndexMap::default();
+        let mut reads: IndexMap<String, IndexSet<String>> = IndexMap::default();
         for ix in &ixs {
             let pda_accts: Vec<&AcctOut> = ix
                 .accounts
@@ -966,7 +966,7 @@ impl<'a> An<'a> {
             for c in &ix.checks {
                 for m in crate::jre!(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)").captures_iter(&c.cond)
                 {
-                    let Some(rf) = ref_of(&m[1], &IndexMap::new()) else {
+                    let Some(rf) = ref_of(&m[1], &IndexMap::default()) else {
                         continue;
                     };
                     let Some(field) = rf.field.as_ref().filter(|f| !f.is_empty()) else {
@@ -1051,11 +1051,11 @@ impl<'a> An<'a> {
                 name: x.name.clone(),
                 source: x.source,
                 expected: x.expected.clone(),
-                constraints: IndexMap::new(),
+                constraints: IndexMap::default(),
             })
             .collect();
         let known: HashSet<String> = accounts.iter().map(|x| x.name.clone()).collect();
-        let mut by_snake: HashMap<String, Option<String>> = HashMap::new();
+        let mut by_snake: HashMap<String, Option<String>> = HashMap::default();
         for x in &accounts {
             if x.source == "idl" {
                 let k = snake(&x.name);
@@ -1099,7 +1099,7 @@ impl<'a> An<'a> {
             checks: vec![],
             pend: vec![],
             ops: vec![],
-            res_memo: RefCell::new(HashMap::new()),
+            res_memo: RefCell::new(HashMap::default()),
             idl_paths,
         };
         let fns: Vec<&FnFacts> = info.fns.iter().filter_map(|pc| facts.get(pc)).collect();
@@ -1874,7 +1874,7 @@ impl<'a> An<'a> {
                 let ir = fir(fo.f);
                 for (i, x) in cur.iter().enumerate() {
                     let t = x.text.strip_prefix('*').unwrap_or(&x.text);
-                    let r = ref_of(t, &IndexMap::new()).map_or(t.to_string(), |r| r.acct);
+                    let r = ref_of(t, &IndexMap::default()).map_or(t.to_string(), |r| r.acct);
                     if b.known.contains(&b.canon(Some(&r)).unwrap_or_default()) {
                         continue;
                     }
@@ -1984,7 +1984,7 @@ impl<'a> An<'a> {
                 .unwrap_or((vec![], false));
             for x in &accs {
                 let t = x.text.strip_prefix('*').unwrap_or(&x.text);
-                let r = ref_of(t, &IndexMap::new()).map_or(t.to_string(), |r| r.acct);
+                let r = ref_of(t, &IndexMap::default()).map_or(t.to_string(), |r| r.acct);
                 let Some(ca) = b.canon(Some(&r)) else {
                     continue;
                 };
@@ -2044,7 +2044,7 @@ impl<'a> An<'a> {
         // effects and the sensitivity score
         let mut effects: Vec<String> = Vec::new();
         let mut score: i64 = 0;
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::default();
         let mut eff = |t: String, w: i64| {
             if seen.contains(&t) {
                 return;

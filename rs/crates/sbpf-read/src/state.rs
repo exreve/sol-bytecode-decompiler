@@ -4,14 +4,14 @@
 use crate::idl::{get, js_string_opt, truthy, IdlInfo};
 use crate::util::{stmt_exprs, term_br, upper_first, uses_var};
 use crate::views::Views;
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Node, Stmt, E};
 use sbpf_program::Func;
 use serde_json::Value;
 
 /// accountViews: views of the IDL's account types; discriminator -> view name.
 pub fn account_views(idl: &IdlInfo, views: &mut Views) -> IndexMap<u64, String> {
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::default();
     for (name, disc) in &idl.accounts {
         let Some(def) = idl.types.get(name) else {
             continue;
@@ -72,13 +72,13 @@ pub fn account_data_vars(
     discs: &IndexMap<u64, String>,
     views: &mut Views,
 ) -> IndexMap<i64, IndexMap<u32, String>> {
-    let mut res: IndexMap<i64, IndexMap<u32, String>> = IndexMap::new();
+    let mut res: IndexMap<i64, IndexMap<u32, String>> = IndexMap::default();
     if discs.is_empty() {
         return res;
     }
-    let mut slices: IndexMap<i64, IndexMap<u32, String>> = IndexMap::new();
+    let mut slices: IndexMap<i64, IndexMap<u32, String>> = IndexMap::default();
     let defs_of = |f: &Func| {
-        let mut d: IndexMap<u32, Vec<Option<E>>> = IndexMap::new();
+        let mut d: IndexMap<u32, Vec<Option<E>>> = IndexMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 match s {
@@ -95,7 +95,7 @@ pub fn account_data_vars(
     };
     let info: Vec<(i64, &Func, IndexMap<u32, Vec<Option<E>>>)> =
         funcs.iter().map(|f| (f.pc, *f, defs_of(f))).collect();
-    let idx: std::collections::HashMap<i64, usize> =
+    let idx: sbpf_ir::fx::HashMap<i64, usize> =
         info.iter().enumerate().map(|(i, x)| (x.0, i)).collect();
     for (pc, f, defs) in &info {
         let ir = f.ir.as_ref().unwrap();
@@ -163,7 +163,7 @@ pub fn account_data_vars(
             });
         };
         for b in &f.blocks {
-            let mut local: IndexMap<u32, E> = IndexMap::new();
+            let mut local: IndexMap<u32, E> = IndexMap::default();
             for s in &b.stmts {
                 for e in stmt_exprs(ir, s) {
                     note(e, &local, &mut res, &mut slices, views);

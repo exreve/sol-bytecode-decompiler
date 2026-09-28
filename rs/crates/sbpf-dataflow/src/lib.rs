@@ -8,13 +8,13 @@
 pub mod stack;
 pub mod stackargs;
 
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{CallTarget, Ir, Node, Stmt, Term, E};
 use sbpf_program::syscalls::Syscall;
 use sbpf_program::{
     has_pending_blocks, materialize_blocks, reaches_return_pending, Block, Func, Program, VarInfo,
 };
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 const ARG_MASK: [i32; 6] = [0, 0b10, 0b110, 0b1110, 0b11110, 0b111110]; // r1..rk
 const CLOBBER: i32 = 0b111111; // r0..r5
@@ -235,7 +235,7 @@ pub fn postorder(f: &Func) -> Vec<usize> {
 }
 
 fn compute_ind_clobber(cx: &Ctx, sigs: &[Sig], f: &Func) -> Clob {
-    let mut clob = Clob::new();
+    let mut clob = Clob::default();
     let has_ind = f.blocks.iter().any(|b| {
         b.stmts.iter().any(|s| {
             matches!(
@@ -332,9 +332,9 @@ pub fn infer_signatures(p: &mut Program) {
     {
         let cx = Ctx::of(p);
         // noreturn: optimistic start, worklist over callers of newly noreturn functions
-        let mut nr_callers: HashMap<i64, Vec<usize>> = HashMap::new();
+        let mut nr_callers: HashMap<i64, Vec<usize>> = HashMap::default();
         for (fi, f) in p.funcs.values().enumerate() {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             for &t in sbpf_program::pending_calls(f) {
                 if seen.insert(t) {
                     nr_callers.entry(t).or_default().push(fi);
@@ -394,10 +394,10 @@ pub fn infer_signatures(p: &mut Program) {
             && (f.is_entry || defines_r0(f));
     }
     // worklist fixed point (monotone), callees first
-    let mut callers: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut callers: HashMap<i64, Vec<usize>> = HashMap::default();
     let mut callees: Vec<Vec<usize>> = Vec::with_capacity(n);
     for (fi, f) in funcs.iter().enumerate() {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut out = vec![];
         for b in &f.blocks {
             for s in &b.stmts {

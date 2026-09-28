@@ -3,10 +3,10 @@
 //! helper-name suffixes and symbol sanitizing. Runs on the register-level blocks (after
 //! inferSignatures, before variable recovery), as the TS pipeline does.
 
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{CallTarget, Node, Stmt, Term};
 use sbpf_program::Program;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 /// What the raw output uses of `Semantics` (src/semantics.ts).
 #[derive(Clone, Debug, Default)]
@@ -113,7 +113,7 @@ pub fn semantics(p: &Program) -> Sem {
         }
     }
     // scanInstructionLogs
-    let mut ix_logs: IndexMap<i64, Vec<String>> = IndexMap::new();
+    let mut ix_logs: IndexMap<i64, Vec<String>> = IndexMap::default();
     let mut sites: Vec<LogSite> = Vec::new();
     for f in p.funcs.values() {
         let ir = f.ir(p);
@@ -173,7 +173,7 @@ pub fn semantics(p: &Program) -> Sem {
             sem.processors.insert(pc, names.clone());
         }
     }
-    let mut callers: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut callers: HashMap<i64, HashSet<i64>> = HashMap::default();
     for f in p.funcs.values() {
         for b in &f.blocks {
             for s in &b.stmts {
@@ -187,8 +187,8 @@ pub fn semantics(p: &Program) -> Sem {
             }
         }
     }
-    let mut found: IndexMap<i64, String> = IndexMap::new();
-    let mut dup: HashSet<i64> = HashSet::new();
+    let mut found: IndexMap<i64, String> = IndexMap::default();
+    let mut dup: HashSet<i64> = HashSet::default();
     for site in &sites {
         if !sem.processors.contains_key(&site.fpc) {
             continue;
@@ -454,7 +454,7 @@ pub fn name_functions_lib(
             f.name.push('_');
         }
     }
-    let mut notes = IndexMap::new();
+    let mut notes = IndexMap::default();
     let mut taken: HashSet<String> = p.funcs.values().map(|f| f.name.clone()).collect();
     let text_addr = p.elf.text().addr;
     for f in p.funcs.values_mut() {

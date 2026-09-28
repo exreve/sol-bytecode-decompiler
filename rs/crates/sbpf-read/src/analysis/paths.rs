@@ -7,7 +7,7 @@ use super::ixctx::IxCtx;
 use super::An;
 use sbpf_ir::{BinOp, CmpOp, Node, Stmt, Term, E};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -108,7 +108,7 @@ impl<'a> An<'a> {
             match hit {
                 Some(m) => m,
                 None => {
-                    let mut m: HashMap<i64, (usize, usize)> = HashMap::new();
+                    let mut m: HashMap<i64, (usize, usize)> = HashMap::default();
                     if let Some(fo) = self.fo(fn_) {
                         let g = self.cfg(fn_);
                         for (bi, b) in fo.f.blocks.iter().enumerate() {

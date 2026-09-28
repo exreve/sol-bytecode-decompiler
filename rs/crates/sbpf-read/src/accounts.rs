@@ -2,10 +2,10 @@
 //! AccountInfo field order, the deprecated loader's unaligned input.
 
 use crate::util::{dst_of, jkey, n_s, stmt_exprs, term_br, term_ret, var_of, N};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E};
 use sbpf_program::Func;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -173,7 +173,7 @@ pub fn find_accounts(funcs: &[&Func], unaligned: bool, legacy: bool) -> Vec<Type
         .iter()
         .map(|f| FnInfo {
             f,
-            typed: IndexMap::new(),
+            typed: IndexMap::default(),
             params: f
                 .vars
                 .iter()
@@ -185,8 +185,8 @@ pub fn find_accounts(funcs: &[&Func], unaligned: bool, legacy: bool) -> Vec<Type
         })
         .collect();
     let idx: HashMap<i64, usize> = funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
-    let mut param_typed: IndexMap<i64, IndexMap<i32, Kind>> = IndexMap::new();
-    let mut blocked: IndexMap<i64, Vec<i32>> = IndexMap::new();
+    let mut param_typed: IndexMap<i64, IndexMap<i32, Kind>> = IndexMap::default();
+    let mut blocked: IndexMap<i64, Vec<i32>> = IndexMap::default();
     for _round in 0..6 {
         let mut changed = false;
         for fi in info.iter_mut() {
@@ -269,7 +269,7 @@ fn local(
             typed.insert(k, kind);
         }
     };
-    let mut defs: IndexMap<u32, Vec<Option<E>>> = IndexMap::new();
+    let mut defs: IndexMap<u32, Vec<Option<E>>> = IndexMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
@@ -339,8 +339,8 @@ fn local(
         }
         e
     };
-    let mut loads: IndexMap<String, IndexMap<crate::util::K, u8>> = IndexMap::new();
-    let mut wide: HashSet<String> = HashSet::new();
+    let mut loads: IndexMap<String, IndexMap<crate::util::K, u8>> = IndexMap::default();
+    let mut wide: HashSet<String> = HashSet::default();
     let use32 = |wide: &mut HashSet<String>, e: E| {
         let (b, o) = split(ir, single(e));
         wide.insert(off_key(&key(ir, b), o));
@@ -496,7 +496,7 @@ fn propagate(typed: &mut Typed, prop: &[(String, Split, Option<String>)]) {
 
 fn field_addrs(f: &Func) -> HashMap<String, HashSet<i64>> {
     let ir = f.ir.as_ref().unwrap();
-    let mut addrs: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut addrs: HashMap<String, HashSet<i64>> = HashMap::default();
     fn visit(ir: &Ir, x: E, is_addr: bool, addrs: &mut HashMap<String, HashSet<i64>>) {
         let n = ir.get(x);
         if !is_addr {
@@ -644,7 +644,7 @@ pub fn account_addr(typed: Option<&Typed>, ir: &Ir, e: E) -> Option<&'static str
 
 /// legacyAccountInfo: the pre-repr(C) AccountInfo field order, told by the entrypoint's deserializer.
 pub fn legacy_account_info(funcs: &HashMap<i64, &Func>, entry_pc: i64) -> bool {
-    let mut seen: HashSet<i64> = HashSet::new();
+    let mut seen: HashSet<i64> = HashSet::default();
     let (mut legacy, mut current) = (0, 0);
     fn visit(
         funcs: &HashMap<i64, &Func>,
@@ -660,7 +660,7 @@ pub fn legacy_account_info(funcs: &HashMap<i64, &Func>, entry_pc: i64) -> bool {
         }
         seen.insert(pc);
         let ir = f.ir.as_ref().unwrap();
-        let mut defs: HashMap<u32, Vec<E>> = HashMap::new();
+        let mut defs: HashMap<u32, Vec<E>> = HashMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Set { dst, e, .. } = s {
@@ -679,8 +679,8 @@ pub fn legacy_account_info(funcs: &HashMap<i64, &Func>, entry_pc: i64) -> bool {
             e
         };
         let key_addr = |e: E| matches!(ir.get(one(e)), Node::Bin(BinOp::Add, _, b) if ir.get(b) == Node::Const(8));
-        let mut flags: IndexMap<String, HashSet<crate::util::K>> = IndexMap::new();
-        let mut words: HashMap<String, HashMap<crate::util::K, E>> = HashMap::new();
+        let mut flags: IndexMap<String, HashSet<crate::util::K>> = IndexMap::default();
+        let mut words: HashMap<String, HashMap<crate::util::K, E>> = HashMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Call {
@@ -746,7 +746,7 @@ pub fn unaligned_input(p: &sbpf_program::Program) -> bool {
         return false;
     };
     let offs = |pc: i64, size: u8, reg: Option<u8>| -> HashSet<u64> {
-        let mut out = HashSet::new();
+        let mut out = HashSet::default();
         let Some(f) = p.funcs.get(&pc) else {
             return out;
         };
@@ -774,7 +774,7 @@ pub fn unaligned_input(p: &sbpf_program::Program) -> bool {
         }
         out
     };
-    let mut callees = indexmap::IndexSet::new();
+    let mut callees = sbpf_ir::fx::IndexSet::default();
     callees.insert(entry.pc);
     for b in &entry.blocks {
         for s in &b.stmts {

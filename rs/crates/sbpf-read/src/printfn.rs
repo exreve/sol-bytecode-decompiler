@@ -18,14 +18,14 @@ use crate::taint::expr_tainted;
 use crate::types::key_compares;
 use crate::util::*;
 use crate::views::{Views, FT};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E};
 use sbpf_print::print::{declarations_of, fmt_const, print_nodes, Printer, Role, Sugar};
 use sbpf_print::raw::{ShortNames, PARAM_NAME};
 use sbpf_program::Func;
 use sbpf_struct::{SNode, Tree};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 const BUILTIN_NAMES: &[&str] = &[
@@ -65,8 +65,8 @@ fn builtin_name(t: &str) -> bool {
 
 /// undefOnly: variables whose every definition is `x = undef`.
 fn undef_only(ir: &Ir, tree: &Tree, ns: &[SNode], is_param: &dyn Fn(u32) -> bool) -> HashSet<u32> {
-    let mut undef: IndexSet<u32> = IndexSet::new();
-    let mut other: HashSet<u32> = HashSet::new();
+    let mut undef: IndexSet<u32> = IndexSet::default();
+    let mut other: HashSet<u32> = HashSet::default();
     fn walk(
         ir: &Ir,
         tree: &Tree,
@@ -500,7 +500,7 @@ impl Frame {
             return String::new();
         }
         list.sort_by(|a, b| (b.1).0.partial_cmp(&(a.1).0).unwrap());
-        let mut why: IndexSet<String> = IndexSet::new();
+        let mut why: IndexSet<String> = IndexSet::default();
         for x in &list {
             if let Some(w) = &(x.1).2 {
                 why.insert(w.clone());
@@ -1079,10 +1079,10 @@ impl Sugar for HelperSugar<'_> {
 
 /// storedStrings: runs of constant stores through one base writing printable text: keyed by the last store.
 fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     fn visit(ir: &Ir, tree: &Tree, ns: &[SNode], out: &mut HashMap<u32, String>) {
         let mut base: Option<E> = None;
-        let mut bytes: IndexMap<i128, u8> = IndexMap::new();
+        let mut bytes: IndexMap<i128, u8> = IndexMap::default();
         let mut last: Option<u32> = None;
         let mut flush = |base: &mut Option<E>,
                          bytes: &mut IndexMap<i128, u8>,
@@ -1103,7 +1103,7 @@ fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> 
                     }
                 }
                 *base = None;
-                *bytes = IndexMap::new();
+                *bytes = IndexMap::default();
                 *last = None;
             }
         };
@@ -1170,11 +1170,11 @@ fn stored_strings(ir: &Ir, tree: &Tree, body: &[SNode]) -> HashMap<u32, String> 
 /// frameRoles: roles of stack objects (CPI / PDA / fmt sites, out parameters, keys).
 #[allow(clippy::too_many_arguments)]
 fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec<FrameClaim>> {
-    let mut claims: IndexMap<K, Vec<FrameClaim>> = IndexMap::new();
+    let mut claims: IndexMap<K, Vec<FrameClaim>> = IndexMap::default();
     let Some(fp) = fp_var(f) else { return claims };
     let ir = f.ir.as_ref().unwrap();
     let rd = |a: u128, n: usize| d.sem.read_ro(a, n);
-    let mut sited: IndexMap<K, Vec<FrameClaim>> = IndexMap::new();
+    let mut sited: IndexMap<K, Vec<FrameClaim>> = IndexMap::default();
     for s in sites {
         for o in site_objects(ir, s, Some(fp), Some(&rd)) {
             sited.entry(K::of(o.off)).or_default().push(FrameClaim {
@@ -1187,12 +1187,12 @@ fn frame_roles(d: &Dx, f: &Func, sites: &[&CpiSite], pc: i64) -> IndexMap<K, Vec
         }
     }
     let fo = |e: E| fo_add(ir, e, Some(fp));
-    let mut escapes: HashMap<K, u32> = HashMap::new();
-    let mut arg_esc: HashMap<K, u32> = HashMap::new();
-    let mut outs: IndexMap<K, Vec<FrameClaim>> = IndexMap::new();
-    let mut generic: IndexMap<K, Vec<FrameClaim>> = IndexMap::new();
-    let mut key_uses: IndexMap<K, u32> = IndexMap::new();
-    let mut typed_args: IndexMap<K, Vec<FrameClaim>> = IndexMap::new();
+    let mut escapes: HashMap<K, u32> = HashMap::default();
+    let mut arg_esc: HashMap<K, u32> = HashMap::default();
+    let mut outs: IndexMap<K, Vec<FrameClaim>> = IndexMap::default();
+    let mut generic: IndexMap<K, Vec<FrameClaim>> = IndexMap::default();
+    let mut key_uses: IndexMap<K, u32> = IndexMap::default();
+    let mut typed_args: IndexMap<K, Vec<FrameClaim>> = IndexMap::default();
     struct V<'x> {
         escapes: &'x mut HashMap<K, u32>,
         arg_esc: &'x mut HashMap<K, u32>,
@@ -1755,14 +1755,14 @@ pub fn run(
     }
     let d = &dm;
     // the analysis facts; Anchor try-call checks: what the callee whose result they test checks
-    let mut facts: IndexMap<i64, FnFacts> = IndexMap::new();
+    let mut facts: IndexMap<i64, FnFacts> = IndexMap::default();
     for rf in funcs.iter_mut() {
         if let Some(ff) = rf.facts.take() {
             facts.insert(rf.pc, ff);
         }
     }
     if d.sem.anchor {
-        let mut memo: HashMap<i64, Vec<&'static str>> = HashMap::new();
+        let mut memo: HashMap<i64, Vec<&'static str>> = HashMap::default();
         let en = |v: u64| d.sem.anchor_error(v);
         for ff in facts.values_mut() {
             for c in ff.checks.iter_mut() {
@@ -1989,7 +1989,7 @@ fn print_func<'p>(
         nm
     };
     // IDL: the instruction data as a view of its arguments
-    let mut arg_types: IndexMap<u32, String> = IndexMap::new();
+    let mut arg_types: IndexMap<u32, String> = IndexMap::default();
     let mut arg_names: Vec<String> = Vec::new();
     let ix_name = d.sem.ix_names.get(&pc).cloned();
     let ix_def = ix_name.as_ref().and_then(|ix| {
@@ -2114,7 +2114,7 @@ fn print_func<'p>(
     });
     let acc_typed = Some(&d.account_infos[fi]);
     // typed views
-    let mut var_types: IndexMap<u32, String> = IndexMap::new();
+    let mut var_types: IndexMap<u32, String> = IndexMap::default();
     let mut data_notes: Vec<String> = Vec::new();
     let mut ctx_notes: Vec<String> = Vec::new();
     if let Some(bt) = d.base_types.get(&pc) {
@@ -2280,7 +2280,7 @@ fn print_func<'p>(
     }
     let stored = stored_strings(ir, tree, body);
     // outlined uses in this function
-    let mut outl_map: HashMap<(*const Vec<SNode>, usize), (String, Vec<E>, bool)> = HashMap::new();
+    let mut outl_map: HashMap<(*const Vec<SNode>, usize), (String, Vec<E>, bool)> = HashMap::default();
     for ((ffi, list), m) in &outl.at {
         if *ffi != fi {
             continue;
@@ -2309,10 +2309,10 @@ fn print_func<'p>(
             ),
             _ => None,
         }),
-        None => indexmap::IndexMap::new(),
+        None => sbpf_ir::fx::IndexMap::default(),
     };
     let site_list: Vec<&CpiSite> = sites.values().map(|x| &x.1).collect();
-    let site_notes: Rc<RefCell<HashMap<NodeKey, SiteNote>>> = Rc::new(RefCell::new(HashMap::new()));
+    let site_notes: Rc<RefCell<HashMap<NodeKey, SiteNote>>> = Rc::new(RefCell::new(HashMap::default()));
     TREE_STMTS.with(|t| *t.borrow_mut() = tree.stmts.clone());
     let sugar = FnSugar {
         d,
@@ -2327,7 +2327,7 @@ fn print_func<'p>(
         note: RefCell::new(None),
         arg_notes: !d.error_from.is_empty(),
         ir,
-        spans: RefCell::new(HashMap::new()),
+        spans: RefCell::new(HashMap::default()),
     };
     let names_final = names.clone();
     // the CPI node notes
@@ -2337,7 +2337,7 @@ fn print_func<'p>(
         let defs_by_key: RefCell<Option<HashMap<String, u32>>> = RefCell::new(None);
         let names_r = names_final.clone();
         let exec_memo: RefCell<HashMap<(i64, u8), (Option<crate::cpi::CpiDesc>, i64)>> =
-            RefCell::new(HashMap::new());
+            RefCell::new(HashMap::default());
         let sites_by_node: HashMap<*const SNode, CpiSite> =
             sites.iter().map(|(k, v)| (*k, v.1.clone())).collect();
         let tree_ref = tree;
@@ -2346,7 +2346,7 @@ fn print_func<'p>(
             let s = sites_by_node.get(&(n as *const SNode))?;
             let named = |e: E| -> E {
                 if defs_by_key.borrow().is_none() {
-                    let mut m: HashMap<String, u32> = HashMap::new();
+                    let mut m: HashMap<String, u32> = HashMap::default();
                     for b in &f.blocks {
                         for st in &b.stmts {
                             let Stmt::Set { dst, e, .. } = st else {
@@ -2515,11 +2515,11 @@ fn print_func<'p>(
     if let Some(fpv) = fp_v {
         let claims = frame_roles(d, f, &site_list, pc);
         let mut bases: IndexSet<K> = d.frame_offsets(fi, fpv);
-        let mut obj_name: IndexMap<K, String> = IndexMap::new();
-        let mut obj_type: IndexMap<K, String> = IndexMap::new();
-        let mut obj_why: IndexMap<K, String> = IndexMap::new();
-        let mut out_obj: HashSet<K> = HashSet::new();
-        let mut extent_of: HashMap<K, N> = HashMap::new();
+        let mut obj_name: IndexMap<K, String> = IndexMap::default();
+        let mut obj_type: IndexMap<K, String> = IndexMap::default();
+        let mut obj_why: IndexMap<K, String> = IndexMap::default();
+        let mut out_obj: HashSet<K> = HashSet::default();
+        let mut extent_of: HashMap<K, N> = HashMap::default();
         let mut cl: Vec<(&K, &Vec<FrameClaim>)> = claims.iter().collect();
         cl.sort_by(|a, b| b.0.get().partial_cmp(&a.0.get()).unwrap());
         for (o, cs) in cl {
@@ -2678,7 +2678,7 @@ fn print_func<'p>(
             sorted,
             rg,
             cur: Rc::new(Vec::new()),
-            used: IndexMap::new(),
+            used: IndexMap::default(),
             typed,
         });
     }
@@ -3053,7 +3053,7 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
     let v = d.views.map.get(view)?;
-    let mut cands: IndexSet<u32> = IndexSet::new();
+    let mut cands: IndexSet<u32> = IndexSet::default();
     for x in &f.vars {
         if x.param >= 1 && x.param != 10 {
             cands.insert(x.id);
@@ -3070,7 +3070,7 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
             }
         }
     }
-    let mut loads: IndexMap<u32, Vec<(N, u8)>> = IndexMap::new();
+    let mut loads: IndexMap<u32, Vec<(N, u8)>> = IndexMap::default();
     let visit = |e: E, loads: &mut IndexMap<u32, Vec<(N, u8)>>| {
         ir.walk(e, &mut |_, x| {
             let Node::Load { size, addr } = x else { return };
@@ -3103,7 +3103,7 @@ fn args_var(d: &Dx, fi: usize, view: &str) -> Option<u32> {
     }
     let (mut best, mut score) = (None, 0usize);
     for (id, ls) in &loads {
-        let mut hit: HashSet<String> = HashSet::new();
+        let mut hit: HashSet<String> = HashSet::default();
         let mut ok = true;
         for &(off, size) in ls {
             let fd = v
@@ -3146,7 +3146,7 @@ fn calls_of(d: &Dx, f: &Func) -> Vec<i64> {
 /// callsOf with the function-address table given.
 pub fn calls_of_with(f: &Func, pc_by_addr: &HashMap<u64, i64>) -> Vec<i64> {
     let ir = f.ir.as_ref().unwrap();
-    let mut out: IndexSet<i64> = IndexSet::new();
+    let mut out: IndexSet<i64> = IndexSet::default();
     let visit = |e: E, out: &mut IndexSet<i64>| {
         ir.walk(e, &mut |_, n| match n {
             Node::Call(t, _) => {
@@ -3394,7 +3394,7 @@ pub fn expr_printer<'a>(
     d: &'a Dx<'a>,
     snaps: Vec<SugarSnap>,
 ) -> Box<dyn Fn(i64, E) -> Option<String> + 'a> {
-    let mut by_pc: HashMap<i64, (FnSugar<'a>, Vec<Option<String>>)> = HashMap::new();
+    let mut by_pc: HashMap<i64, (FnSugar<'a>, Vec<Option<String>>)> = HashMap::default();
     for sn in snaps {
         let f = d.fs[sn.fi];
         let sugar = FnSugar {
@@ -3406,11 +3406,11 @@ pub fn expr_printer<'a>(
             frame: RefCell::new(sn.frame),
             ok_at: sn.ok_at,
             stored: sn.stored,
-            outl: HashMap::new(),
+            outl: HashMap::default(),
             note: RefCell::new(None),
             arg_notes: sn.arg_notes,
             ir: f.ir.as_ref().unwrap(),
-            spans: RefCell::new(HashMap::new()),
+            spans: RefCell::new(HashMap::default()),
         };
         by_pc.insert(f.pc, (sugar, sn.names));
     }

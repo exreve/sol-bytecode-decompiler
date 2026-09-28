@@ -3,13 +3,13 @@
 use crate::{SNode, Tree};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Node, Stmt, E};
 use sbpf_opt::{is_div_op, Fx, Intr, CALL, LOAD, M64, TRAP};
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 
 pub fn statement_idioms(fx: &mut Fx, tree: &mut Tree, fp: Option<u32>) {
     if !has_candidate(fx, tree, &tree.body) {
         return;
     }
-    let mut uses: HashMap<u32, i32> = HashMap::new();
+    let mut uses: HashMap<u32, i32> = HashMap::default();
     scan(fx, tree, &tree.body, &mut uses);
     let body = std::mem::take(&mut tree.body);
     tree.body = rewrite(fx, tree, body, &uses, fp);

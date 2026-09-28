@@ -15,6 +15,8 @@
 //! Pcs are `i64`: jump and call targets may fall outside the text (negative or past the end) and are
 //! kept as computed, like the TS numbers.
 
+pub mod fx;
+
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 

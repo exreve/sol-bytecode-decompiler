@@ -2,11 +2,11 @@
 //! names, the checks on them, the variables holding them; the Accounts struct layout of try_accounts.
 
 use crate::util::{fo_any, stmt_exprs, term_br, var_of, K, N};
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E, L};
 use sbpf_program::Func;
 use sbpf_struct::{SNode, Tree};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 pub struct AnchorFn {
     pub accounts: Vec<String>,
@@ -71,7 +71,7 @@ pub fn name_arg(ir: &Ir, args: L, str_at: StrAt) -> Option<String> {
 
 /// findNameFn: the callee most often called with an identifier string as its last argument pair (3+).
 pub fn find_name_fn(funcs: &[&Func], str_at: StrAt) -> Option<i64> {
-    let mut count: IndexMap<i64, u32> = IndexMap::new();
+    let mut count: IndexMap<i64, u32> = IndexMap::default();
     for f in funcs {
         let ir = f.ir.as_ref().unwrap();
         for b in &f.blocks {
@@ -190,9 +190,9 @@ impl Ctx<'_> {
             count: vec![0; len + 1],
             one: vec![None; len + 1],
             codes: vec![None; len + 1],
-            top_last: HashMap::new(),
+            top_last: HashMap::default(),
         };
-        let mut names: IndexSet<String> = IndexSet::new();
+        let mut names: IndexSet<String> = IndexSet::default();
         let mut codes: Vec<String> = Vec::new();
         r.codes[len] = Some(codes.clone());
         for k in (0..len).rev() {
@@ -237,7 +237,7 @@ impl Ctx<'_> {
 
 /// topNames: names of the name-function calls a list makes unconditionally (its own statements).
 fn top_names(ir: &Ir, tree: &Tree, ns: &[SNode], name_fn: i64, str_at: StrAt) -> IndexSet<String> {
-    let mut out = IndexSet::new();
+    let mut out = IndexSet::default();
     for n in ns {
         let calls = match n {
             SNode::Stmt(si) => calls_in(ir, tree.stmt(*si)),
@@ -287,9 +287,9 @@ pub fn anchor_fn(
     let fp = crate::util::fp_var(f);
     let mut res = AnchorFn {
         accounts: Vec::new(),
-        checks: IndexMap::new(),
-        var_names: IndexMap::new(),
-        account_vars: IndexSet::new(),
+        checks: IndexMap::default(),
+        var_names: IndexMap::default(),
+        account_vars: IndexSet::default(),
     };
     let mut cx = Ctx {
         ir,
@@ -297,9 +297,9 @@ pub fn anchor_fn(
         name_fn,
         str_at,
         err_name,
-        cache: HashMap::new(),
-        node_cache: HashMap::new(),
-        suf: HashMap::new(),
+        cache: HashMap::default(),
+        node_cache: HashMap::default(),
+        suf: HashMap::default(),
     };
     if cx.info(&tree.body).names.is_empty() {
         return None;
@@ -333,7 +333,7 @@ pub fn anchor_fn(
     order(&cx, &tree.body, &mut res);
 
     // try-call result groups
-    let mut group: IndexMap<u32, u32> = IndexMap::new();
+    let mut group: IndexMap<u32, u32> = IndexMap::default();
     let mut gid = 0u32;
     fn groups(
         ir: &Ir,
@@ -397,7 +397,7 @@ pub fn anchor_fn(
     groups(ir, tree, fp, &tree.body, &mut group, &mut gid);
 
     // candidate names
-    let mut cand: IndexMap<u32, IndexSet<String>> = IndexMap::new();
+    let mut cand: IndexMap<u32, IndexSet<String>> = IndexMap::default();
     fn branches(
         cx: &mut Ctx,
         ns: &Vec<SNode>,
@@ -444,7 +444,7 @@ pub fn anchor_fn(
                         continue;
                     }
                     if top_has {
-                        let mut vs = IndexSet::new();
+                        let mut vs = IndexSet::default();
                         vars_in(cx.ir, *c, &mut vs);
                         if let Some(fp) = fp {
                             vs.shift_remove(&fp);
@@ -472,7 +472,7 @@ pub fn anchor_fn(
     branches(&mut cx, &tree.body, fp, &mut cand, &mut res);
 
     let evidence = account_evidence(f);
-    let mut by_group: IndexMap<u32, IndexSet<String>> = IndexMap::new();
+    let mut by_group: IndexMap<u32, IndexSet<String>> = IndexMap::default();
     for (v, names) in &cand {
         if let Some(&g) = group.get(v) {
             let s = by_group.entry(g).or_default();
@@ -509,8 +509,8 @@ pub fn out_aliases(f: &Func) -> Option<IndexSet<u32>> {
     let ir = f.ir.as_ref().unwrap();
     let out = crate::util::param_var(f, 1)?;
     let fp = crate::util::fp_var(f);
-    let mut defs: IndexMap<i32, Vec<Option<E>>> = IndexMap::new();
-    let mut slots: IndexMap<K, Option<E>> = IndexMap::new();
+    let mut defs: IndexMap<i32, Vec<Option<E>>> = IndexMap::default();
+    let mut slots: IndexMap<K, Option<E>> = IndexMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
@@ -588,7 +588,7 @@ pub fn out_aliases(f: &Func) -> Option<IndexSet<u32>> {
             _ => None,
         }
     };
-    let mut res: IndexSet<u32> = IndexSet::new();
+    let mut res: IndexSet<u32> = IndexSet::default();
     res.insert(out);
     for (v, ds) in &defs {
         if ds.iter().all(|e| src(*e).is_some()) {
@@ -619,13 +619,13 @@ pub fn out_aliases(f: &Func) -> Option<IndexSet<u32>> {
 pub fn accounts_layout(f: &Func, names: &IndexMap<u32, String>) -> IndexMap<K, String> {
     let ir = f.ir.as_ref().unwrap();
     let fp = crate::util::fp_var(f);
-    let mut res: IndexMap<K, String> = IndexMap::new();
-    let mut bad: IndexSet<K> = IndexSet::new();
+    let mut res: IndexMap<K, String> = IndexMap::default();
+    let mut bad: IndexSet<K> = IndexSet::default();
     let Some(aliases) = out_aliases(f) else {
         return res;
     };
     let fo = |e: E| fo_any(ir, e, fp);
-    let mut slot: HashMap<K, Option<E>> = HashMap::new();
+    let mut slot: HashMap<K, Option<E>> = HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             match s {
@@ -730,7 +730,7 @@ pub fn accounts_layout(f: &Func, names: &IndexMap<u32, String>) -> IndexMap<K, S
     for o in &bad {
         res.shift_remove(o);
     }
-    let mut seen: HashMap<String, K> = HashMap::new();
+    let mut seen: HashMap<String, K> = HashMap::default();
     let snap: Vec<(K, String)> = res.iter().map(|(k, v)| (*k, v.clone())).collect();
     for (o, nm) in snap {
         if let Some(&p) = seen.get(&nm) {
@@ -746,8 +746,8 @@ pub fn accounts_layout(f: &Func, names: &IndexMap<u32, String>) -> IndexMap<K, S
 /// accountEvidence: variables used like an AccountInfo pointer.
 fn account_evidence(f: &Func) -> HashSet<u32> {
     let ir = f.ir.as_ref().unwrap();
-    let mut out = HashSet::new();
-    let mut defs: HashMap<u32, Vec<E>> = HashMap::new();
+    let mut out = HashSet::default();
+    let mut defs: HashMap<u32, Vec<E>> = HashMap::default();
     for b in &f.blocks {
         for s in &b.stmts {
             if let Stmt::Set { dst, e, .. } = s {

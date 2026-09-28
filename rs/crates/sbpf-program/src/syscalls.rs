@@ -1,7 +1,7 @@
 //! Syscall table: a port of `src/syscalls.ts` (same order, same signatures).
 
 use crate::murmur::hash_name;
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::sync::OnceLock;
 
 /// Syscall signature. `ret` = returns a meaningful u64.
@@ -100,8 +100,8 @@ pub fn tables() -> &'static Tables {
             .iter()
             .map(|&(n, p, r, d, nr)| mk(n, p.to_vec(), r, d, nr))
             .collect();
-        let mut by_hash = HashMap::new();
-        let mut by_name = HashMap::new();
+        let mut by_hash = HashMap::default();
+        let mut by_name = HashMap::default();
         for (i, &(n, ..)) in TABLE.iter().enumerate() {
             by_hash.insert(hash_name(n), i); // (Map constructor: a later duplicate key wins)
             by_name.insert(n, i);

@@ -5,10 +5,10 @@
 
 use crate::idl::IdlInfo;
 use crate::util::{b58, unb58};
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_exec::hash::sha8;
 use sbpf_program::Program;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
@@ -419,7 +419,7 @@ fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
     let mut w: Vec<u64> = wants.to_vec();
     w.sort_unstable();
     w.dedup();
-    let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
+    let mut out: HashMap<u64, Vec<u32>> = HashMap::default();
     if w.is_empty() {
         return out;
     }
@@ -483,7 +483,7 @@ fn vocab_lookup_many(wants: &[u64]) -> HashMap<u64, String> {
     // are kept, only values not looked up yet are scanned for)
     static SEEN: std::sync::Mutex<Option<HashMap<u64, Option<String>>>> = std::sync::Mutex::new(None);
     let mut seen = SEEN.lock().unwrap();
-    let seen = seen.get_or_insert_with(HashMap::new);
+    let seen = seen.get_or_insert_with(HashMap::default);
     let new: Vec<u64> = wants
         .iter()
         .copied()
@@ -558,7 +558,7 @@ fn snake_sem(s: &str) -> String {
 }
 
 /// `/[A-Za-z][A-Za-z0-9_]{2,40}/g` over latin1 bytes
-fn words_in(b: &[u8], out: &mut indexmap::IndexSet<String>) {
+fn words_in(b: &[u8], out: &mut sbpf_ir::fx::IndexSet<String>) {
     let w = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut i = 0;
     while i < b.len() {
@@ -616,7 +616,7 @@ impl SemR {
             let r = &p.elf.regions[i];
             regions.push((r.vaddr, p.elf.region_bytes(r).to_vec(), r.exec));
         }
-        let mut key_chunks = HashMap::new();
+        let mut key_chunks = HashMap::default();
         for (k, n) in KNOWN_KEYS {
             let b = unb58(k);
             if k.starts_with("1111") {
@@ -639,8 +639,8 @@ impl SemR {
             ix_names: base.ix_names.clone(),
             processors: base.processors.clone(),
             key_chunks,
-            key_addrs: HashMap::new(),
-            disc: IndexMap::new(),
+            key_addrs: HashMap::default(),
+            disc: IndexMap::default(),
             result_ok: None,
             result_ok_tag: None,
             sys_alias: p
@@ -667,14 +667,14 @@ impl SemR {
     }
 
     fn scan_rodata(&mut self) {
-        let mut known: HashMap<Vec<u8>, &str> = HashMap::new();
-        let mut prefixes: HashSet<u32> = HashSet::new();
+        let mut known: HashMap<Vec<u8>, &str> = HashMap::default();
+        let mut prefixes: HashSet<u32> = HashSet::default();
         for (k, n) in KNOWN_KEYS {
             let kb = unb58(k);
             prefixes.insert(u32::from_le_bytes(kb[..4].try_into().unwrap()));
             known.insert(kb, n);
         }
-        let mut words: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+        let mut words: sbpf_ir::fx::IndexSet<String> = sbpf_ir::fx::IndexSet::default();
         for (vaddr, b, exec) in &self.regions {
             if *exec {
                 continue;
@@ -738,7 +738,7 @@ impl SemR {
     }
 
     /// resolveCandidates
-    pub fn resolve_candidates(&mut self, values: &indexmap::IndexSet<u64>) {
+    pub fn resolve_candidates(&mut self, values: &sbpf_ir::fx::IndexSet<u64>) {
         let want: Vec<u64> = values
             .iter()
             .copied()
@@ -1017,7 +1017,7 @@ mod tests {
     use super::*;
     #[test]
     fn words_and_parts() {
-        let mut w = indexmap::IndexSet::new();
+        let mut w = sbpf_ir::fx::IndexSet::default();
         words_in(b"xx ab abc 9Hello_World1 ", &mut w);
         assert_eq!(
             w.iter().cloned().collect::<Vec<_>>(),

@@ -4,7 +4,7 @@
 use crate::util::{fo_add, to_int32, K, N};
 use sbpf_ir::{CallTarget, Ir, Node, Stmt, E};
 use sbpf_struct::{SNode, Tree};
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::rc::Rc;
 
 /// The object a call writes through its first argument.
@@ -70,7 +70,7 @@ struct UMap<Kx: std::hash::Hash + Eq + Copy> {
 impl<Kx: std::hash::Hash + Eq + Copy> UMap<Kx> {
     fn new() -> Self {
         UMap {
-            m: HashMap::new(),
+            m: HashMap::default(),
             log: Vec::new(),
         }
     }
@@ -763,7 +763,7 @@ pub fn frame_regions<C: RegionCfg + ?Sized>(
         ir,
         tree,
         list: Vec::new(),
-        at: HashMap::new(),
+        at: HashMap::default(),
         org: UMap::new(),
         var_org: UMap::new(),
         act: Rc::new(Vec::new()),
@@ -831,7 +831,7 @@ pub fn frame_regions<C: RegionCfg + ?Sized>(
             w.list[id].args = true;
         }
     }
-    let mut per_slot: HashMap<K, u32> = HashMap::new();
+    let mut per_slot: HashMap<K, u32> = HashMap::default();
     for r in &w.list {
         if r.out && !r.dropped {
             *per_slot.entry(K::of(r.lo)).or_default() += 1;

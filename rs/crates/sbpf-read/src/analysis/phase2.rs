@@ -7,7 +7,7 @@ use super::ixctx::IxCtx;
 use super::report::{CheckOut, Loc, OpOut};
 use super::An;
 use sbpf_ir::CallTarget;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct TrustRow {
@@ -122,8 +122,8 @@ pub fn binding_shaped(c: &CheckOut) -> bool {
 }
 
 /// the accounts an operation names (target, CPI accounts)
-pub fn op_accounts(o: &OpOut) -> indexmap::IndexSet<String> {
-    let mut s = indexmap::IndexSet::new();
+pub fn op_accounts(o: &OpOut) -> sbpf_ir::fx::IndexSet<String> {
+    let mut s = sbpf_ir::fx::IndexSet::default();
     if let Some(t) = &o.target {
         s.insert(t.split('.').next().unwrap_or("").to_string());
     }
@@ -157,7 +157,7 @@ impl<'a> An<'a> {
     ) {
         let mut findings: Vec<Finding> = Vec::new();
         // stored authority field -> instructions writing it
-        let mut auth_fields: IndexMap<String, Vec<String>> = IndexMap::new();
+        let mut auth_fields: IndexMap<String, Vec<String>> = IndexMap::default();
         for (t, ws) in &a.state_writes {
             let is_auth = a.ixs.iter().any(|ix| {
                 ix.ops
@@ -200,7 +200,7 @@ impl<'a> An<'a> {
         findings.extend(inc);
         // (native: one finding at one place found by several arms of a dispatcher: the first instruction's, naming the
         // others; inside the dispatcher itself from two arms on, elsewhere from three)
-        let mut arm_of: HashMap<&str, Option<String>> = HashMap::new();
+        let mut arm_of: HashMap<&str, Option<String>> = HashMap::default();
         for ix in &a.ixs {
             let d = ix.dispatch.as_deref().unwrap_or("");
             arm_of.insert(
@@ -210,7 +210,7 @@ impl<'a> An<'a> {
                     .map(|m| m[1].to_string()),
             );
         }
-        let mut groups: IndexMap<String, Vec<usize>> = IndexMap::new();
+        let mut groups: IndexMap<String, Vec<usize>> = IndexMap::default();
         for (i, f) in findings.iter().enumerate() {
             let Some(Some(d)) = arm_of.get(f.ix.as_str()) else {
                 continue;
@@ -223,7 +223,7 @@ impl<'a> An<'a> {
                 .or_default()
                 .push(i);
         }
-        let mut drop: HashSet<usize> = HashSet::new();
+        let mut drop: HashSet<usize> = HashSet::default();
         for (k, g) in &groups {
             let d = &k[k.rfind('|').unwrap() + 1..];
             let pre = format!("{d}:");
@@ -782,7 +782,7 @@ impl<'a> An<'a> {
                     let ca = c.account.as_ref().unwrap();
                     let fields = self.idl_fields(&ix.handler, ca);
                     let tt = snake(ca);
-                    let mut by_name: IndexMap<String, &AcctOut> = IndexMap::new();
+                    let mut by_name: IndexMap<String, &AcctOut> = IndexMap::default();
                     for x in &ix.accounts {
                         let k = snake(&x.name);
                         if k != tt
@@ -1131,7 +1131,7 @@ impl<'a> An<'a> {
             Some(ty) if idl.accounts.iter().any(|x| x.0 == ty) => vec![ty],
             _ => idl.accounts.iter().map(|x| x.0.clone()).collect(),
         };
-        let mut out = HashSet::new();
+        let mut out = HashSet::default();
         for x in &types {
             for (n, _) in crate::idl::struct_fields(x, &idl.types).unwrap_or_default() {
                 out.insert(snake(&n));
@@ -1444,7 +1444,7 @@ impl<'a> An<'a> {
                     } else {
                         None
                     };
-                    let mut calls: HashSet<usize> = HashSet::new();
+                    let mut calls: HashSet<usize> = HashSet::default();
                     if let Some(child) = child {
                         let ir = fir(g.f);
                         for (bi, bl) in g.f.blocks.iter().enumerate() {
@@ -1505,7 +1505,7 @@ impl<'a> An<'a> {
                                 && c.kinds.iter().any(|k| GUARD_KINDS.contains(k))
                         }
                     };
-                    let mut others: HashSet<usize> = HashSet::new();
+                    let mut others: HashSet<usize> = HashSet::default();
                     for (cj, c) in checks.iter().enumerate() {
                         if same(c) {
                             for x in &site_of[cj] {
@@ -1539,7 +1539,7 @@ use super::sources::{Source, SourceCtx};
 use crate::analysis::facts::cpi_kinds;
 use crate::cpi::PartAcc;
 use crate::views::FT;
-use indexmap::IndexMap;
+use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, Node, Stmt, E};
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;

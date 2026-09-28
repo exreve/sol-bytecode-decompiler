@@ -574,6 +574,7 @@ name = "sbpf-elf"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "sbpf-ir",
 ]
 
 [[package]]
@@ -581,12 +582,16 @@ name = "sbpf-exec"
 version = "0.1.0"
 dependencies = [
  "sbpf-elf",
+ "sbpf-ir",
  "sbpf-program",
 ]
 
 [[package]]
 name = "sbpf-ir"
 version = "0.1.0"
+dependencies = [
+ "indexmap",
+]
 
 [[package]]
 name = "sbpf-lib"

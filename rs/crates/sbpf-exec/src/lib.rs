@@ -11,12 +11,12 @@ pub mod hash;
 use indexmap_lite::IndexSet;
 use sbpf_program::Program;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Minimal insertion-ordered set (the crate avoids other dependencies).
 mod indexmap_lite {
-    use std::collections::HashSet;
+    use sbpf_ir::fx::HashSet;
     use std::hash::Hash;
     #[derive(Clone, Debug, Default)]
     pub struct IndexSet<T: Hash + Eq + Clone> {
@@ -27,7 +27,7 @@ mod indexmap_lite {
         pub fn new() -> Self {
             IndexSet {
                 v: Vec::new(),
-                s: HashSet::new(),
+                s: HashSet::default(),
             }
         }
         pub fn insert(&mut self, x: T) -> bool {
@@ -173,7 +173,7 @@ impl<'p> ProgCtx<'p> {
     pub fn new(p: &'p Program) -> Self {
         let img = p.image();
         let mut regions = Vec::new();
-        let mut image_pages = HashSet::new();
+        let mut image_pages = HashSet::default();
         for &i in &img.order {
             let r = &p.elf.regions[i];
             let b = p.elf.region_bytes(r);
@@ -191,11 +191,11 @@ impl<'p> ProgCtx<'p> {
             p,
             regions,
             image_pages,
-            calls: RefCell::new(HashMap::new()),
+            calls: RefCell::new(HashMap::default()),
             extents: RefCell::new(None),
-            cfgs: RefCell::new(HashMap::new()),
-            reach: RefCell::new(HashMap::new()),
-            ret: RefCell::new(HashMap::new()),
+            cfgs: RefCell::new(HashMap::default()),
+            reach: RefCell::new(HashMap::default()),
+            ret: RefCell::new(HashMap::default()),
         }
     }
 
@@ -228,7 +228,7 @@ impl<'p> ProgCtx<'p> {
         let m = e.get_or_insert_with(|| {
             let mut starts: Vec<i64> = self.p.funcs.keys().copied().collect();
             starts.sort();
-            let mut m = HashMap::new();
+            let mut m = HashMap::default();
             for (i, &s) in starts.iter().enumerate() {
                 m.insert(
                     s,
@@ -463,7 +463,7 @@ impl<'c> ExecMem<'c> {
         ExecMem {
             ctx,
             fill_seed: seed,
-            pages: HashMap::new(),
+            pages: HashMap::default(),
             observer: None,
         }
     }
@@ -725,14 +725,14 @@ impl<'c> Exec<'c> {
             taint,
             no_panic: false,
             flip: false,
-            no_flip: HashSet::new(),
+            no_flip: HashSet::default(),
             blamed: false,
             flipped: IndexSet::new(),
             flip_log: Vec::new(),
             sticky: Sticky::NoFlip,
             loop_cap: 0,
-            branch_count: HashMap::new(),
-            capped: HashSet::new(),
+            branch_count: HashMap::default(),
+            capped: HashSet::default(),
             variant: 0,
             pda_calls: 0,
             force: None,

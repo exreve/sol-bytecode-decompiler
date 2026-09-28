@@ -7,7 +7,7 @@ use super::json::{utf16_len, Jv};
 use super::phase2::Finding;
 use super::report::{AcctOut, Analysis, CheckOut, Evidence, IxOut, Loc, OpOut};
 use crate::util::js_num;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 
 /// Where a location is in the written files (`file`, `line`), or None (single-file output).
 pub type Where<'w> = &'w dyn Fn(Option<&str>, &Loc) -> Option<(String, i64)>;
@@ -739,7 +739,7 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
     if utf16_len(&text) <= max {
         return text;
     }
-    let mut omitted: IndexMap<String, f64> = IndexMap::new();
+    let mut omitted: IndexMap<String, f64> = IndexMap::default();
     fn cap(o: &mut Jv, key: &str, n: usize, label: &str, omitted: &mut IndexMap<String, f64>) {
         let Some(Jv::Arr(a)) = o.get_mut(key) else {
             return;
@@ -833,7 +833,7 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
                 let mut cut = 0;
                 if let Some(Jv::Arr(fs)) = doc.get_mut("findings") {
                     let n = fs.len();
-                    let mut per: HashMapS = HashMapS::new();
+                    let mut per: HashMapS = HashMapS::default();
                     fs.retain(|f| {
                         let k = format!(
                             "{}@{}",
@@ -922,7 +922,7 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
     s
 }
 
-type HashMapS = std::collections::HashMap<String, usize>;
+type HashMapS = sbpf_ir::fx::HashMap<String, usize>;
 
 // ---- markdown ----
 
@@ -937,7 +937,7 @@ fn has(x: &AcctOut, k: &str) -> bool {
 
 /// Flags an auditor should look at first, per instruction.
 fn flags(ix: &IxOut) -> Vec<String> {
-    let mut out: IndexSet<String> = IndexSet::new();
+    let mut out: IndexSet<String> = IndexSet::default();
     for x in &ix.accounts {
         for k in ["signer", "pda", "address", "writable"] {
             if x.constraints
@@ -994,7 +994,7 @@ fn flags(ix: &IxOut) -> Vec<String> {
 
 /// informational rule results (not findings): counts per rule
 fn info_line(fs: &[&Finding]) -> Option<String> {
-    let mut n: IndexMap<&str, usize> = IndexMap::new();
+    let mut n: IndexMap<&str, usize> = IndexMap::default();
     for f in fs {
         if f.confidence == "info" {
             *n.entry(f.rule).or_insert(0) += 1;
@@ -1051,7 +1051,7 @@ fn render_findings(a: &Analysis) -> Vec<String> {
             fs.len() - 15
         ));
     }
-    let mut by_rule: IndexMap<&str, usize> = IndexMap::new();
+    let mut by_rule: IndexMap<&str, usize> = IndexMap::default();
     for f in &fs {
         *by_rule.entry(f.rule).or_insert(0) += 1;
     }
@@ -1462,7 +1462,7 @@ pub fn render_summary(a: &Analysis, w: Where, bundled: &[bool]) -> String {
                 .map(|(ix, v, _)| format!("{ix} (= {v})"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let mut chk: IndexSet<&str> = IndexSet::new();
+            let mut chk: IndexSet<&str> = IndexSet::default();
             for (ix, _, _) in &x.checked_by {
                 chk.insert(ix);
             }
@@ -1868,7 +1868,7 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
                 .map(|&i| &ix.checks[i])
                 .filter(|c| c.kinds.iter().any(|k| *k != "count"))
                 .collect();
-            let mut ks: IndexSet<String> = IndexSet::new();
+            let mut ks: IndexSet<String> = IndexSet::default();
             for c in &g {
                 for k in &c.kinds {
                     ks.insert(format!(
@@ -2247,16 +2247,16 @@ pub fn render_ix(ix: &IxOut, w: Where, a: &Analysis) -> String {
             .map(|s| s.to_string()),
         );
         for v in mine.iter().take(12) {
-            let mut ixn: IndexSet<&str> = IndexSet::new();
+            let mut ixn: IndexSet<&str> = IndexSet::default();
             for m in &v.members {
                 ixn.insert(&m.ix);
             }
             let cnt = ixn.len();
             for m in v.members.iter().filter(|m| m.ix == ix.name) {
-                let mut others: IndexMap<&str, usize> = IndexMap::new();
+                let mut others: IndexMap<&str, usize> = IndexMap::default();
                 for o in &v.members {
                     if o.ix != ix.name {
-                        let mut seen: IndexSet<&str> = IndexSet::new();
+                        let mut seen: IndexSet<&str> = IndexSet::default();
                         for x in &o.validations {
                             seen.insert(x);
                         }

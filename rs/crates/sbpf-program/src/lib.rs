@@ -4,10 +4,10 @@
 pub mod murmur;
 pub mod syscalls;
 
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_elf::{parse_elf, CallReloc, Elf, Image};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, Term, E};
-use std::collections::{HashMap, HashSet};
+use sbpf_ir::fx::{HashMap, HashSet};
 use std::sync::Arc;
 use syscalls::Syscall;
 
@@ -228,7 +228,7 @@ impl Lifter {
     pub fn new(version: u32, n: usize) -> Self {
         Lifter {
             v: version,
-            pc_by_hash: HashMap::new(),
+            pc_by_hash: HashMap::default(),
             memo: vec![None; n],
             steps: vec![
                 Step {
@@ -653,7 +653,7 @@ impl Lifter {
 /// Symbol names by pc: function symbols inside the text (first one wins).
 pub fn symbol_names(elf: &Elf) -> IndexMap<i64, String> {
     let t = elf.text();
-    let mut out = IndexMap::new();
+    let mut out = IndexMap::default();
     for s in elf.dynsyms.iter().chain(elf.symbols.iter()) {
         if s.ty == 2 && s.value >= t.addr && s.value < t.addr + t.size && !s.name.is_empty() {
             let pc = (s.value - t.addr) / 8.0;
@@ -684,10 +684,10 @@ pub fn prepare(elf: Elf) -> Result<Program, String> {
         text_vaddr: elf.text_vaddr,
         elf,
         insns,
-        funcs: IndexMap::new(),
-        syscalls: IndexMap::new(),
+        funcs: IndexMap::default(),
+        syscalls: IndexMap::default(),
         symbol_names,
-        address_taken: IndexSet::new(),
+        address_taken: IndexSet::default(),
         lazy: None,
         ir: Ir::new(),
     })
@@ -719,7 +719,7 @@ pub fn discover(p: &mut Program, lazy: bool) {
     let mut lifter = Lifter::new(p.version, p.insns.len());
     let starts = instruction_starts(p);
     let n = p.insns.len() as i64;
-    let mut entries: HashSet<i64> = HashSet::new();
+    let mut entries: HashSet<i64> = HashSet::default();
     let add = |entries: &mut HashSet<i64>, pc: i64| {
         if pc >= 0 && pc < n && starts[pc as usize] != 0 {
             entries.insert(pc);
@@ -733,7 +733,7 @@ pub fn discover(p: &mut Program, lazy: bool) {
     }
     let text_lo = p.text_vaddr as u128;
     let text_hi = text_lo + n as u128 * 8;
-    let mut address_taken = IndexSet::new();
+    let mut address_taken = IndexSet::default();
     let mut fn_ptr = |entries: &mut HashSet<i64>, v: u64| {
         let v = v as u128;
         if v >= text_lo && v < text_hi && (v - text_lo) % 8 == 0 {
@@ -786,7 +786,7 @@ pub fn discover(p: &mut Program, lazy: bool) {
         symbol_names: &p.symbol_names,
         elf: &p.elf,
     };
-    let mut funcs = IndexMap::new();
+    let mut funcs = IndexMap::default();
     for (k, &pc) in sorted.iter().enumerate() {
         let stamp = k as i32 + 1;
         let f = if lazy {
@@ -815,8 +815,8 @@ struct Leaders {
 fn find_leaders(cx: &mut Cx, lifter: &mut Lifter, w: &mut Walk, entry: i64, stamp: i32) -> Leaders {
     let n = cx.insns.len() as i64;
     let mut list = vec![entry];
-    let mut outside = HashSet::new();
-    let mut calls = IndexSet::new();
+    let mut outside = HashSet::default();
+    let mut calls = IndexSet::default();
     let add_leader = |list: &mut Vec<i64>, outside: &mut HashSet<i64>, lead: &mut [i32], x: i64| {
         if x >= 0 && x < n {
             if lead[x as usize] != stamp {
@@ -985,7 +985,7 @@ fn new_func(p: &Names, entry: i64) -> Func {
         pc: entry,
         name: name_of(p.symbol_names, p.elf, entry),
         blocks: vec![],
-        block_at: IndexMap::new(),
+        block_at: IndexMap::default(),
         noreturn: false,
         nparams: 5,
         extra_in: vec![],
@@ -997,7 +997,7 @@ fn new_func(p: &Names, entry: i64) -> Func {
         vars: vec![],
         promoted: None,
         arg_area_elided: None,
-        ind_clobber: HashMap::new(),
+        ind_clobber: HashMap::default(),
     }
 }
 
@@ -1040,7 +1040,7 @@ fn build_func(
     link_blocks(&mut f.blocks, &f.block_at);
     // (the full CFG also keeps the lazy path's call list: the same walk)
     f.pending = Some(Pending {
-        leaders: HashSet::new(),
+        leaders: HashSet::default(),
         sorted: vec![],
         calls: l.calls.into_iter().collect(),
     });
@@ -1094,7 +1094,7 @@ pub fn has_pending_blocks(p: &Program) -> bool {
 pub fn reaches_return_pending(p: &Program, f: &Func, noret: &dyn Fn(&Stmt) -> bool) -> bool {
     let lz = p.lazy.as_ref().expect("lazy");
     let pd = f.pending.as_ref().expect("pending");
-    let mut seen: HashSet<i64> = HashSet::new();
+    let mut seen: HashSet<i64> = HashSet::default();
     seen.insert(f.pc);
     let mut st = vec![f.pc];
     while let Some(mut pc) = st.pop() {
@@ -1145,7 +1145,7 @@ pub fn materialize_blocks(
     let lz = p.lazy.as_ref().expect("lazy");
     let pd = f.pending.as_ref().expect("pending");
     let is_leader = |x: i64| pd.leaders.contains(&x);
-    let mut formed: HashMap<i64, Option<Block>> = HashMap::new();
+    let mut formed: HashMap<i64, Option<Block>> = HashMap::default();
     let mut st = vec![f.pc];
     formed.insert(f.pc, None);
     while let Some(l) = st.pop() {
@@ -1173,7 +1173,7 @@ pub fn materialize_blocks(
         }
     }
     let mut blocks: Vec<Block> = vec![];
-    let mut block_at = IndexMap::new();
+    let mut block_at = IndexMap::default();
     for l in &pd.sorted {
         if let Some(Some(b)) = formed.get_mut(l) {
             let mut b = std::mem::replace(

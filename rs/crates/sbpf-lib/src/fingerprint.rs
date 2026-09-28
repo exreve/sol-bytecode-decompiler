@@ -2,7 +2,7 @@
 //! per-function signatures of program diffing and `security/fingerprints.json`.
 
 use crate::sha1::sha1_16;
-use indexmap::{IndexMap, IndexSet};
+use sbpf_ir::fx::{IndexMap, IndexSet};
 use sbpf_elf::{CallReloc, Image};
 use sbpf_ir::{CallTarget, Stmt};
 use sbpf_program::{Func, Program};
@@ -117,7 +117,7 @@ fn print_of(p: &Program, img: &Image, f: &Func, norm: bool, pcs: &[i64]) -> FnPr
     };
     let mut sys_at: Option<IndexMap<i64, String>> = None;
     if norm && v >= 3 {
-        let mut m = IndexMap::new();
+        let mut m = IndexMap::default();
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Call {
@@ -357,7 +357,7 @@ pub struct SigShape {
 }
 
 pub fn sig_shape(f: &Func) -> SigShape {
-    let mut targets = IndexMap::new();
+    let mut targets = IndexMap::default();
     let mut edges = 0;
     for b in &f.blocks {
         edges += b.succs.len();
@@ -415,10 +415,10 @@ pub fn shape_signature_of(p: &ShapeProg, img: &Image, f: &SigShape) -> FnSig {
     let mut rf: Vec<String> = Vec::new();
     let mut consts: Vec<String> = Vec::new();
     let mut hist = [0u32; 16];
-    let mut ren: IndexMap<u8, u32> = IndexMap::new();
+    let mut ren: IndexMap<u8, u32> = IndexMap::default();
     ren.insert(10, 10);
     let mut calls: Vec<i64> = Vec::new();
-    let mut sys: IndexSet<String> = IndexSet::new();
+    let mut sys: IndexSet<String> = IndexSet::default();
     let mut n = 0usize;
     let mut k = 0;
     while k < pcs.len() {

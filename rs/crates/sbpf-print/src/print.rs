@@ -7,7 +7,7 @@
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E};
 use sbpf_program::Func;
 use sbpf_struct::{Form, SNode, Tree};
-use std::collections::HashMap;
+use sbpf_ir::fx::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// A fast hasher for integer keys (lookups only: no iteration order depends on it).
@@ -31,7 +31,7 @@ impl Hasher for IntHasher {
     }
 }
 
-pub type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
+pub type IntMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<IntHasher>>;
 use std::fmt::Write;
 
 /// Program-level names the printer looks up (PrintCtx fnName / fnAddrName / sysName).
