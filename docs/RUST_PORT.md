@@ -1033,7 +1033,104 @@ Check: from the repository root, `sbpf-fixtures --fixtures F [--ofile] [-j 2] [-
 Modest, as expected: the readable printing's facts collection (stage 8a / 8b regression, see *Stage 8c results*) is
 not fixed here.
 
+## Performance pass results (after stage 9)
+
+Goal: the fastest `sbpf-decompile` with **zero output change**. Guarded by `sbpf-fixtures` (every mode, all 615
+binaries, IDL 184, diff pairs 199) and, after each step, a quick comparison of the 5 programs below (default, `--full`,
+project; all threads and 1 thread) against the pre-pass binary.
+
+### Profiling
+
+No `perf` / root on the box (`perf_event_paranoid` = 2: `samply` cannot record). `sbpf-dump --prof out.folded <cli
+args>` (optional feature `prof`: `pprof`, a SIGPROF sampler over all threads' CPU time, folded stacks) on the
+`profiling` cargo profile (release + line tables); 1 thread with `taskset -c 0`. Findings of the first profile (jup,
+1 thread): 24 % of the CPU in the `regex` PikeVM (the crate was built without its `perf` features: no DFA, no literal
+prefilters), 10 % hashing the 1.8M-name selector vocabulary with software SHA-256, ~20 % malloc / free, 7 % SipHash,
+per-function arena allocations sized by the whole program, and the phase-4 printing running on the main thread only
+(the rest of the pipeline had little parallel work: ~90 % of the samples on the main thread).
+
+### Changes (in commit order)
+
+- Build: `regex` with its `perf` features; release `lto = "fat"` (`codegen-units = 1` was already set);
+  `mimalloc` as the global allocator of `sbpf-decompile` (−8–15 %); build scripts run optimized.
+- Selector vocabulary (`sem.rs`): SHA-NI block function (runtime detected, the software one otherwise; 4 names hashed
+  interleaved), names built without allocation, only the wanted hashes kept (no 1.8M-entry sort), results cached per
+  process, and a **build-time Bloom filter** of all vocabulary hashes (`sbpf-read/build.rs`, 4 MiB, 13 probes, no false
+  negatives — tested over the whole vocabulary): a lookup whose values are in no entry (most programs) skips the scan.
+  Tiny programs: memo 950 → 50 ms.
+- `jsre` regexes compiled once per thread and pattern; the per-function Ok-out-parameter regex replaced by a line test.
+- Hashing: every `HashMap` / `HashSet` / `IndexMap` / `IndexSet` uses an Fx hasher (`sbpf_ir::fx` aliases; iteration
+  order of the unordered maps was already random per process, never part of an output).
+- Per-function IR arena of variable recovery sized by the function (was a quarter of the program arena per function:
+  mapping cost dominated small functions).
+- Parallel where the work is independent and merged in order: variable recovery (`recover_some_par`: the program arena
+  is only read; results applied in function order, first error in function order), fingerprint shape signatures
+  (`par_map` over a `Sync` view of the program), the diff's two program profiles (two threads).
+- Smaller items: `memmem` string search in the rodata, callsOf's address table built once, reaching-definition candidate
+  lists shared instead of copied, taint queries that do not materialize untouched memory pages and a faster page fill of
+  the interpreter, the `analysis.json` size budget measured without printing (one print at the end; was up to 9 prints
+  plus document copies), JSON string fast path, integer fast path of `js_num`, `called` names from each `(` (memchr),
+  outlined helpers scanned once per project, the result left to the OS at exit.
+
+### Parity
+
+Full `sbpf-fixtures --ofile` run: single (stdout) **615 / 615**, `-o file` **615 / 615**, project **615 / 615**, `--full`
+**615 / 615**, `--idl` single / project **184 / 184**, diff stdout / `-o` **199 / 199** (runner time 40 min → 8 min).
+1 thread vs all threads: the 5 programs (default, `--full`, project) identical, and the fixture subset (samples, regress,
+compat, bench, eval and 3 of the largest corpus binaries: 216 binaries, IDL 110, 144 diff pairs, every mode) under
+`taskset -c 0` identical.
+
+### Timings (whole process wall time, ms, best of 3 interleaved, before → after)
+
+| program | single, 8 thr | project, 8 thr | single, 1 thr | project, 1 thr |
+|---|---:|---:|---:|---:|
+| jup | 3238 → 1161 | 3488 → 1231 | 3946 → 1492 | 4302 → 1670 |
+| whirlpool | 2656 → 706 | 2967 → 862 | 3058 → 808 | 3677 → 1104 |
+| token22 | 1260 → 346 | 1335 → 364 | 1717 → 429 | 1925 → 488 |
+| svault_v3 | 5064 → 1274 | 5621 → 1454 | 5820 → 1565 | 6318 → 1901 |
+| token | 776 → 111 | 975 → 162 | 1024 → 109 | 1111 → 163 |
+
+- Whole fixture set (615 binaries one after the other, all threads): default output **723 s → 155 s**, project
+  **741 s → 177 s**.
+- `--full`: jup 4764 → 1581, whirlpool 4024 → 1168, svault_v3 6267 → 1591, token22 1810 → 462.
+- Diff (`a.so b.so`, terminal report): token / token22 986 → 129, whirlpool / svault_v3 835 → 404, jup / whirlpool
+  680 → 326.
+
+(The box is a VM with noisy neighbours: single runs vary by ±10 %.)
+
+### Not done: parallel phase-4 printing
+
+`print_func` is still sequential, and it is now the largest part (jup: 50 % of the main thread, svault_v3: 33 %). It
+cannot run on worker threads without changing the design, because printing function i depends on state the earlier
+functions left, and results depend on it:
+
+- the concrete-execution budgets (`exec_budget` 250k / `wrap_budget` 150k steps) are shared by all functions in order
+  (a function's CPI-site notes depend on what the earlier functions consumed);
+- the `FlowCtx` memos (account resolvers of callees, `Defs`, the evaluator memos) are shared with the later functions
+  and with the analysis, and a memoized value is used where a fresh evaluation would hit the depth cut (`ev_cuts`), so
+  memo contents (i.e. the order) can change results;
+- printing appends nodes to the per-function IR arenas (`Ir::mk` through `&Ir`) while other functions' IR is read
+  (callee analysis): the arenas are not `Sync`; `Rc` / `RefCell` caches throughout `Dx`, `SemR`, `ProgCtx`;
+- view registration (`add_args_view`) and name-collision checks against the view table depend on function order.
+
+A parallel design would need budget speculation with validation (a function's run is valid when the budget left at its
+turn covers what it consumed), per-function memo scopes merged in order, and thread-safe arenas; a stage of its own,
+with the fixtures as the oracle.
+
+### Remaining hotspots (main thread, after the pass)
+
+jup: `print_func` 50 % (`function_facts` ≈ half of it: the native account resolvers — `classify_roots` /
+`slice_params` / the AV evaluator — and the printed-line regexes; `print_nodes` with the CPI-site concrete runs),
+`analysis_out` 16 %, `prepare_read` 11 % (`infer_signatures` 5 %), `anchor_accounts` 7 % (`view_types`),
+`render_project` 5 %. svault_v3: `print_func` 33 %, `analysis_out` 20 % (`add_exit_writes` / `callee_writes`,
+incident rules), `anchor_accounts` 15 %, `prepare_read` 11 %, `render_project` 7 %. Leaf costs are now spread thin
+(allocation ~10 %, hash tables ~5 %). Not tried: PGO (needs `llvm-profdata` and a multi-step build).
+
 ## Plan changes
+
+- **Performance pass is done** (above): 2.6–7× faster on the samples, 4.2–4.7× on the whole fixture set, byte-identical
+  in every mode. Left for later: parallel phase-4 printing (needs a design, see *Not done*), the analysis' account
+  resolvers and anchor evaluation. Next: the tooling port and the TS removal (item 2 below).
 
 - **Stage 9 is done** (above): `sbpf-decompile` is byte-identical to the TS CLI in every mode on all 615 binaries
   (IDL 184, diff pairs 199), `--rpc` / on-chain IDL identical on mainnet programs; the TS outputs are frozen as fixtures
