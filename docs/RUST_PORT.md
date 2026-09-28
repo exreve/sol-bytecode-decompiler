@@ -16,6 +16,8 @@ Tooling (details and the dump format: [`rs/README.md`](../rs/README.md)):
 - `scripts/cpuprof.ts`: per-stage breakdown of `node --cpu-prof` profiles of the whole CLI.
 - `scripts/fixtures.ts` / `sbpf-fixtures`: the frozen TS CLI outputs (outside the repository) and the Rust runner
   comparing `sbpf-decompile` against them (see *Stage 9 results*).
+- The Rust replacements of the Node tooling (benchmarks, eval, compat, data maintenance, fetchers, fuzz mutants, CI):
+  see *Tooling port*.
 
 ## Stage order
 
@@ -1126,7 +1128,112 @@ jup: `print_func` 50 % (`function_facts` ≈ half of it: the native account reso
 incident rules), `anchor_accounts` 15 %, `prepare_read` 11 %, `render_project` 7 %. Leaf costs are now spread thin
 (allocation ~10 %, hash tables ~5 %). Not tried: PGO (needs `llvm-profdata` and a multi-step build).
 
+## Tooling port (after the performance pass)
+
+Every tool the project still needs runs without Node. The binaries build with the workspace (`cargo build --release`
+in `rs/`); the tools that read the repository's data sets (`bench/`, `eval/`, `compat/`) find it from their crate
+(`CARGO_MANIFEST_DIR`), the maintenance tools run from the repository root. Parity: each port was run against the TS
+tool on the same inputs (outputs compared byte for byte; timings aside).
+
+### Tooling map
+
+| TS tool | Rust | parity evidence |
+|---|---|---|
+| `src/cli.ts` | `sbpf-decompile` (`sbpf-cli`) | stage 9 fixtures (615 binaries, IDL runs, 199 diff pairs) + the fuzz fixtures below |
+| `src/selector.ts` | `sbpf-selector` (`sbpf-cli`) | same lines on hex selectors (both byte orders, unknown, `0X` prefix) and names |
+| `test/equiv.ts`, `test/evaluate.ts`, `src/emu.ts` | `sbpf-equiv` (`sbpf-equiv`: `emu.rs`, `tsparse.rs`, `evaluate.rs`) | same report lines (the ms field aside) on 113 runs: samples (8, readable 3 trials and `--raw` 2), samples/regress (2, readable, `--raw`, `--idl`), compat/bin (19, 3 trials), the 60 smallest corpus programs (2 trials, `--idl` when the corpus has one) and the 12 smallest corpus programs with an IDL; all 0 failing functions, 0 errors |
+| `test/decompiler.test.ts` | `cargo test -p sbpf-equiv` (`tests/decompiler.rs`) | the same cases (see its header) |
+| `scripts/equiv-corpus.sh` (node) | the same script on `sbpf-equiv` (`SBPF_BIN`, default `rs/target/release`) | |
+| `bench/run.ts` + `eval/analyze.ts` | `sbpf-bench` (`sbpf-bench`; `sbpf_bench::eval`) | same report, verbose and filtered (all, `pairs`, `o_`, `g_n -v`, `a_`): score 99.2, generated 73/78, oss 9/16, eval 7/10; ~10 s instead of ~60 s |
+| `bench/corpus.ts` | `sbpf-bench-corpus` | on 402 corpus programs: every row equal to `bench/corpus-baseline.json` (no baseline column), `--save` writes the same rows and per-program counts (programs in name order instead of completion order; `about` / `date`); 55 s |
+| `bench/gen/gen.ts`, `anchor.ts`, `native.ts`, `risk.ts` | `sbpf-bench-gen`; templates as Rust data in `sbpf-bench/src/gen/{anchor,native,risk}.rs` (raw-string code blocks) | with the old citation, every committed crate, IDL and expectation reproduced byte for byte; the files now cite `sbpf-bench-gen` |
+| `bench/real/idl.ts` | `sbpf-bench-real-idl` (compact type syntax: `vec<T>`, `option<T>`, `[T; n]`, capitalized = defined) | the four IDLs byte for byte |
+| `bench/real/verify.ts` | `sbpf-bench-verify` | same report on the oss set; `--write` gives the same expected files |
+| `compat/run.ts` | `sbpf-compat` (runs `sbpf-decompile` / `sbpf-equiv` next to it) | same table on the 19 binaries (decompile timing aside); 3 s |
+| `compat/fetch.ts` | `sbpf-fetch compat` | re-fetched members byte-identical |
+| `eval/score.ts` | `sbpf-eval-score` | same output (default, `--verbose`, `--min-confidence 0.7`, filter) |
+| `eval/packets.ts` | `sbpf-eval-packets` | same packet trees and `stats.json` (7 packets) |
+| `scripts/readability.ts` | `sbpf-readability` | same table / `--json` (samples, `--idl`, `.ts` inputs) |
+| `scripts/build-libdb.ts` | `sbpf-build-libdb` (`sbpf-data`) | same `data/libsigs.json` and log on corpus + samples (410 programs) |
+| `scripts/build-libnames.ts` (+ `src/demangle.ts`) | `sbpf-build-libnames` (`sbpf_data::demangle`) | same `data/libnames.json` on compat/bin, corpus, bench/bin (~1400 symbols) |
+| `scripts/build-selectors.ts` | `sbpf-build-selectors` | same `selectors.json` content (IDLs + Rust sources of 5 trees + the GitHub harvest); the gzip stream is miniz's, not zlib's |
+| `scripts/gh-anchor-names.ts` | `sbpf-gh-anchor-names` | same `data-src/gh-names.json` when re-saved; a live run adds names |
+| `scripts/fetch-samples.ts` | `sbpf-fetch samples` | memo / token re-fetched byte-identical |
+| `scripts/corpus.ts` | `sbpf-fetch corpus` | live run: decompilable programs (the chain moves, so no byte comparison) |
+| `scripts/refbuild.ts` | `sbpf-refbuild` | `native-sol2.2.1-t1.48` builds to the same `.so` |
+| `mutate()` of `scripts/parity.ts` | `sbpf-fixtures --fuzz` / `--write-mutants` (`mutate`, xorshift32) | the 4000 mutants of `fuzz.json` byte for byte |
+| `.github/workflows/ci.yml` (npm) | cargo build / test + `sbpf-equiv`, `sbpf-decompile`, `sbpf-compat`, `sbpf-bench` | |
+
+Shared JS semantics the ports needed: `Number.prototype.toFixed` (`sbpf_bench::to_fixed`: the exact decimal value,
+ties away from zero; Rust's `{:.N}` rounds ties to even), `String.prototype.localeCompare`
+(`sbpf_read::analysis::locale_cmp`), the default `sort` (UTF-16 order, `sbpf_lib::js_str_cmp`), `JSON.stringify(x,
+null, indent)` (`sbpf_bench::pretty_indent`), JS `\s` / `\w` / `\b` in regexes (explicit classes: the workspace's
+`regex` has no Unicode-Perl classes), and the evaluation order of `rand()` calls inside array literals (`mutate`).
+
+### Fuzz fixtures
+
+`fuzz.json`'s four runs (seeds 1, 7, 11 over samples + compat/bin; seed 3 over corpus + bench/bin + eval/bin; 1000
+mutants each) are frozen next to the other fixtures: `fuzz/seed<S>/fuzz<i>.so.jsonl.zst` (the TS CLI outputs as
+`scripts/fixtures.ts` records them: default single file, project, `--full`; 22 MB) and `fuzz/seed<S>/mutants.sha256`.
+`sbpf-fixtures --fixtures <dir> --fuzz [-j N]` regenerates the mutants from the base sets under `--root` (a mutant
+whose sha-256 differs from the manifest is reported as `MUTANT`, i.e. the base set changed) and checks the real
+binary: 4000 / 4000 identical in each mode (43 s). 5721 of the compared outputs are errors (corrupt inputs); their
+first line is compared modulo the JS runtime error name (`TypeError:` / `RangeError:` → `Error:`, and the DataView /
+array-length range errors → `out of bounds`, as `sbpf-elf` reports them): the TS CLI printed V8's error classes,
+which the Rust binary does not imitate.
+
+### Dropped (not ported), with the reason
+
+- `scripts/dump.ts`, `scripts/dump8.ts`: the TS side of the stage dumps. Without the TS oracle there is nothing to
+  compare `sbpf-dump`'s dumps with; the whole-output fixtures (`sbpf-fixtures`, including the fuzz mutants) are the
+  regression reference. `sbpf-dump` stays as the Rust dev tool (stage dumps, timers, `--prof`).
+- `scripts/parity.ts` (TS vs Rust stage dumps; its `mutate()` is ported), `scripts/cliparity.ts` (TS CLI vs Rust CLI,
+  replaced by `sbpf-fixtures`), `scripts/fixtures.ts` (freezes TS outputs: nothing to freeze once `src/` is gone;
+  it is the last TS tool to delete).
+- `scripts/stagetime.ts`, `scripts/cpuprof.ts`, `scripts/profile.ts`: profiling of the TS pipeline;
+  `sbpf-dump --time*` / `--prof` and the `profiling` cargo profile (samply) cover the Rust one.
+- `scripts/show.ts`, `scripts/callers.ts`, `scripts/coverage.ts`, `scripts/libstats.ts`, `scripts/match-ref.ts`:
+  one-off dev printouts of TS internals (IR of one function, callers, discovery coverage, library counts, library-sig
+  hits of a reference build). The stage dumps give the same facts (`sbpf-dump --stages cfg,lift,text,library,
+  fingerprint`), and the CLI's `security/fingerprints.json` has the library counts; `libstats` also needs
+  `inferSignatures` on the full-CFG path, which the port does not have (lazy path only).
+
+### Final decommission pass (not done here: `src/` is still in the tree)
+
+Delete (all tracked unless noted):
+
+- `src/` (54 files), `test/` (`decompiler.test.ts`, `equiv.ts`, `evaluate.ts`)
+- `scripts/`: `build-libdb.ts`, `build-libnames.ts`, `build-selectors.ts`, `callers.ts`, `cliparity.ts`, `corpus.ts`,
+  `coverage.ts`, `cpuprof.ts`, `dump.ts`, `dump8.ts`, `fetch-samples.ts`, `fixtures.ts`, `gh-anchor-names.ts`,
+  `libstats.ts`, `match-ref.ts`, `parity.ts`, `profile.ts`, `readability.ts`, `refbuild.ts`, `show.ts`, `stagetime.ts`
+  (keep `scripts/equiv-corpus.sh`)
+- `bench/run.ts`, `bench/corpus.ts`, `bench/gen/gen.ts`, `bench/gen/anchor.ts`, `bench/gen/native.ts`,
+  `bench/gen/risk.ts`, `bench/real/idl.ts`, `bench/real/verify.ts`
+- `eval/analyze.ts`, `eval/packets.ts`, `eval/score.ts`
+- `compat/run.ts`, `compat/fetch.ts`
+- `package.json`, `package-lock.json`, `tsconfig.json`; `node_modules/` (untracked) and its `.gitignore` line
+- `o/` (350 files: TS decompiler output of two programs committed with bb401a9, apparently by accident; not
+  referenced anywhere)
+
+Rewrite (they describe the TS implementation or run Node):
+
+- `README.md` (commands `node src/cli.ts …` → `sbpf-decompile …`, the module table `src/*.ts` → crates, the tools
+  table, `test/equiv.ts` section → `sbpf-equiv`, maintenance commands → `sbpf-data` binaries), `docs/USAGE.md`,
+  `docs/INTERNALS.md`, `docs/ANALYSIS_SPEC.md` (`src/…` paths → `rs/crates/…`), `rs/README.md` (the TS column,
+  the parity / cliparity / fixtures commands, "byte-identical to scripts/dump.ts"), and this file (history of the
+  port: drop it or move it out of `docs/`).
+- Doc comments in the Rust sources that cite the TS files they were ported from (~210 lines in 83 files mention
+  `.ts` sources or "TS"): reword to describe the Rust code where the citation carries no information.
+- `rs/.cargo/config.toml` sets `target-dir = /tmp/claude-1000/rs-target` (this machine); CI overrides it with
+  `CARGO_TARGET_DIR`. Drop it or make it opt-in.
+- The fixture directory (`~/.cache/sbpf-fixtures`, ~1–2 GB uncompressed per set, compressed here): move it to a
+  durable place (release asset) and document `sbpf-fixtures` there.
+
 ## Plan changes
+
+- **Tooling port is done** (above, *Tooling port*): every tool still needed has a Rust binary with the TS tool's
+  output on the same inputs, the fuzz mutants' TS outputs are frozen, CI runs the Rust binaries. Next: the final
+  decommission pass (the delete / rewrite lists above), then moving the fixtures to a durable place.
 
 - **Performance pass is done** (above): 2.6–7× faster on the samples, 4.2–4.7× on the whole fixture set, byte-identical
   in every mode. Left for later: parallel phase-4 printing (needs a design, see *Not done*), the analysis' account
