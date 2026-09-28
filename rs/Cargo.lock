@@ -578,6 +578,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbpf-equiv"
+version = "0.1.0"
+dependencies = [
+ "sbpf-elf",
+ "sbpf-ir",
+ "sbpf-opt",
+ "sbpf-print",
+ "sbpf-program",
+ "sbpf-read",
+ "sbpf-struct",
+ "serde_json",
+]
+
+[[package]]
 name = "sbpf-exec"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,17 @@
+[package]
+name = "sbpf-equiv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sbpf-elf.workspace = true
+sbpf-program.workspace = true
+sbpf-print.workspace = true
+sbpf-read.workspace = true
+
+[dev-dependencies]
+sbpf-ir.workspace = true
+sbpf-opt.workspace = true
+sbpf-struct.workspace = true
