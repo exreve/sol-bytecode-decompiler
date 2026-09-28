@@ -1779,15 +1779,7 @@ impl ParPrint<'_, '_> {
     }
     /// The function printed speculatively (a panic gives None: it is printed again for real).
     fn try_print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
-        static HOOK: std::sync::Once = std::sync::Once::new();
-        HOOK.call_once(|| {
-            let prev = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                if !QUIET.with(|q| q.get()) {
-                    prev(info)
-                }
-            }));
-        });
+        quiet_panics();
         QUIET.with(|q| q.set(true));
         crate::views::forbid_new_fields(true);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.print(fi, view, left)));
@@ -1795,6 +1787,19 @@ impl ParPrint<'_, '_> {
         QUIET.with(|q| q.set(false));
         r.unwrap_or(SendPrinted(None, Vec::new()))
     }
+}
+
+/// (once: the panic hook prints nothing for a speculative computation's panic)
+fn quiet_panics() {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(|q| q.get()) {
+                prev(info)
+            }
+        }));
+    });
 }
 
 /// `(0..n).map(f)` on up to `threads` threads with the main thread's stack size (deep recursion).
@@ -1822,23 +1827,30 @@ fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
     out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
 }
 
-/// Every function's text, as printed one after the other in function order, on `threads` threads.
-/// Order matters through two things: the argument views of the instructions, added to the shared view
-/// table before each function is printed (the functions between two additions are printed together),
-/// and the concrete-run budgets, spent in function order. The functions are printed speculatively with
-/// unbounded budgets (those still positive) and checked in order against the real budgets by their logs;
-/// the first one whose printing would have been different is printed again with the real budgets, and
-/// the later ones that tested a budget now exhausted are printed again speculatively (at most twice: two
-/// budgets). The result is the one of the sequential printing, for any thread count.
-fn print_all(
-    dm: &mut Dx,
+/// Every function's text and facts, as printed one after the other in function order (each function's
+/// facts right after its text), on `threads` threads. Order matters through three things:
+/// - the argument views of the instructions, added to the shared view table before each function is
+///   printed: the functions between two additions (a segment) are printed together;
+/// - the concrete-run budgets, spent in function order: the functions are printed speculatively with
+///   unbounded budgets (those still positive) and checked in order against the real budgets by their
+///   logs; the first one whose printing would have been different is printed again with the real
+///   budgets, and the later ones that tested a budget it exhausted are printed again speculatively (at
+///   most twice: two budgets);
+/// - the flow layer's memos (native programs' facts): the facts are made in order on this thread (Anchor
+///   programs' facts do not use it: on the worker threads).
+/// A panic while speculating is caught; the computation is redone for real in its sequential turn (the
+/// same panic, its message printed then from this thread). The result is the one of the sequential
+/// printing, for any thread count.
+fn print_all<'p: 'f, 'f>(
+    dm: &mut Dx<'p>,
     finals: &[Tree],
     outl: &Outlines,
     helper_names: &HashSet<String>,
+    fl: &FlowCtx<'f>,
     threads: usize,
-) -> Vec<Printed> {
+) -> Vec<(Printed, FnFacts)> {
     let n = dm.fs.len();
-    let mut out: Vec<Printed> = Vec::with_capacity(n);
+    let mut out: Vec<(Printed, FnFacts)> = Vec::with_capacity(n);
     let mut left: [i64; 2] = [250_000, 150_000];
     let mut i = 0;
     while i < n {
@@ -1863,8 +1875,10 @@ fn print_all(
         let mut regime = spec(left);
         let mut got: Vec<Option<SendPrinted>> = (i..j).map(|_| None).collect();
         let mut todo: Vec<usize> = (0..j - i).collect();
+        // (the first function whose printing panics for real: the later ones are not printed)
+        let mut stop = j - i;
         let mut k = 0;
-        while k < j - i {
+        while k < stop {
             let rs = par_map_big(todo.len(), threads, |t| {
                 let x = todo[t];
                 pp.try_print(i + x, views[x].clone(), regime)
@@ -1874,7 +1888,7 @@ fn print_all(
             }
             todo.clear();
             // in order: keep the printings the real budgets give the same result
-            while k < j - i {
+            while k < stop {
                 let r = got[k].as_ref().unwrap();
                 if r.0.is_some() {
                     if let Some(l) = Budgets::replay(&r.1, left) {
@@ -1884,7 +1898,11 @@ fn print_all(
                     }
                 }
                 // printed again with the real budgets, then the later ones that tested a budget it exhausted
-                let r = pp.print(i + k, views[k].clone(), left);
+                let r = pp.try_print(i + k, views[k].clone(), left);
+                if r.0.is_none() {
+                    stop = k;
+                    break;
+                }
                 left = Budgets::replay(&r.1, left).expect("the real budgets");
                 got[k] = Some(r);
                 k += 1;
@@ -1905,7 +1923,38 @@ fn print_all(
                 }
             }
         }
-        out.extend(got.into_iter().map(|r| r.unwrap().0.unwrap()));
+        let printed: Vec<Printed> = got
+            .into_iter()
+            .take(stop)
+            .map(|r| r.unwrap().0.unwrap())
+            .collect();
+        // the facts
+        let facts: Vec<FnFacts> = if dm.sem.anchor {
+            let pf = ParFacts {
+                d: dm,
+                finals,
+                printed: &printed,
+            };
+            let rs = par_map_big(printed.len(), threads, |x| pf.try_facts(x));
+            rs.into_iter()
+                .enumerate()
+                .map(|(x, r)| match r.0 {
+                    Some(ff) => ff,
+                    None => pf.facts(x),
+                })
+                .collect()
+        } else {
+            printed
+                .iter()
+                .map(|p| func_facts(&*dm, &finals[p.fi], p, Some(fl)))
+                .collect()
+        };
+        out.extend(printed.into_iter().zip(facts));
+        if stop < j - i {
+            // (the printing that panics, in its turn)
+            let _ = pp_real(dm, finals, outl, helper_names, i + stop, views[stop].clone(), left);
+            unreachable!("the printing panicked while speculating");
+        }
         i = j;
     }
     // (the printer's statement table is left, as after printing the functions one by one on this thread)
@@ -1913,6 +1962,48 @@ fn print_all(
         TREE_STMTS.with(|x| *x.borrow_mut() = t.stmts.clone());
     }
     out
+}
+
+/// A function printed for real on this thread.
+fn pp_real(
+    d: &Dx,
+    finals: &[Tree],
+    outl: &Outlines,
+    helper_names: &HashSet<String>,
+    fi: usize,
+    view: Option<String>,
+    left: [i64; 2],
+) -> Printed {
+    let bud = Budgets::new(left);
+    print_body(d, fi, &finals[fi], outl, helper_names, view, &bud)
+}
+
+/// The facts of an Anchor program's printed functions (they do not use the flow layer), shared by the
+/// worker threads: the state is read only (see `ParPrint`; the facts append to no IR arena).
+struct ParFacts<'a, 'p> {
+    d: &'a Dx<'p>,
+    finals: &'a [Tree],
+    printed: &'a [Printed],
+}
+unsafe impl Sync for ParFacts<'_, '_> {}
+
+struct SendFacts(Option<FnFacts>);
+unsafe impl Send for SendFacts {}
+
+impl ParFacts<'_, '_> {
+    fn facts(&self, x: usize) -> FnFacts {
+        let p = &self.printed[x];
+        func_facts(self.d, &self.finals[p.fi], p, None)
+    }
+    fn try_facts(&self, x: usize) -> SendFacts {
+        quiet_panics();
+        QUIET.with(|q| q.set(true));
+        crate::views::forbid_new_fields(true);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.facts(x)));
+        crate::views::forbid_new_fields(false);
+        QUIET.with(|q| q.set(false));
+        SendFacts(r.ok())
+    }
 }
 
 pub fn run(
@@ -1986,9 +2077,7 @@ pub fn run(
     };
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
-    let printed = print_all(&mut dm, &finals, &outl, &helper_names, threads);
-    for pd in printed {
-        let ff = func_facts(&dm, &finals[pd.fi], &pd, &fl);
+    for (pd, ff) in print_all(&mut dm, &finals, &outl, &helper_names, &fl, threads) {
         let (rf, sn) = read_func(&dm, pd, ff);
         funcs.push(rf);
         snaps.push(sn);
@@ -3178,7 +3267,9 @@ struct Printed {
 }
 
 /// The analysis facts of a printed function (native programs: the account resolver of the flow layer).
-fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnFacts {
+fn func_facts<'x, 'p>(d: &'x Dx<'p>, tree: &Tree, p: &Printed, flo: Option<&FlowCtx<'p>>) -> FnFacts {
+    // (native programs only: the account resolver)
+    let fl = || flo.expect("the flow layer");
     let f = d.fs[p.fi];
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
@@ -3204,15 +3295,15 @@ fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnF
             .get_or_insert_with(|| Rc::new(cfg_of(f)))
             .clone()
     };
-    let res = || account_resolver(fl, f, &p.names_final, true, None);
+    let res = || account_resolver(fl(), f, &p.names_final, true, None);
     let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
         let r = res();
-        let x = r.refs(fl, e, None);
+        let x = r.refs(fl(), e, None);
         let x = if !x.is_empty() || fail.is_none() {
             x
         } else {
             match decision_block(&cfg(), Some(e), fail, pass) {
-                Some(b) => r.refs(fl, e, Some(b)),
+                Some(b) => r.refs(fl(), e, Some(b)),
                 None => x,
             }
         };
@@ -3225,7 +3316,7 @@ fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnF
         } else {
             decision_block(&cfg(), Some(e), fail, pass)
         };
-        r.cmp32(fl, e, b)
+        r.cmp32(fl(), e, b)
     };
     let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
         let r = res();
@@ -3234,7 +3325,7 @@ fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnF
         } else {
             decision_block(&cfg(), Some(e), fail, pass)
         };
-        r.pda_eq(fl, e, b)
+        r.pda_eq(fl(), e, b)
     };
     let ir_store = |si: u32| -> Option<StoreRef> {
         let r = res();
@@ -3242,7 +3333,7 @@ fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnF
             .origin
             .get(&si)
             .map(|&(b, i)| pos_of(b as usize, i as usize));
-        r.store(fl, p).map(|(a, how)| StoreRef {
+        r.store(fl(), p).map(|(a, how)| StoreRef {
             index: a.index,
             field: a.field,
             how,
