@@ -740,7 +740,9 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Result<Recov
     // variables for every class that is read (in use order)
     let use_vars: Vec<u32> = uses.iter().map(|&(n, r)| cv.var_of(n, r as i32)).collect();
     // rewrite (the uses are visited in the same order as in the first pass)
-    let ir = Ir::with_capacity(pir.len() / 4);
+    // (sized by the function, not the program arena: a program-sized block per function is costly to map)
+    let est: usize = f.blocks.iter().map(|b| b.stmts.len() + 1).sum::<usize>() * 12 + 64;
+    let ir = Ir::with_capacity(est.min(pir.len() / 4));
     let mut rw = Rw {
         uses: &uses,
         use_vars: &use_vars,
