@@ -7,7 +7,7 @@ use crate::analysis::acct::account_resolver;
 use crate::analysis::facts::{function_facts, FnFacts, FnInput, NodeKey, SiteNote, StoreRef};
 use crate::analysis::flow::{cfg_of, decision_block, pos_of, Callee, Cfg, FlowCtx};
 use crate::cpi::{cpi_desc, find_cpi_sites, format_ix, site_objects, CpiEnv, CpiSite, SiteKind};
-use crate::cpiexec::{describe_model, ExecSiteKind};
+use crate::cpiexec::{describe_model, ExecBudget, ExecSiteKind};
 use crate::decompile::{
     call_insns, invoke_abi, pascal_ix, pda_abi, Dx, FrameClaim, IxRow, ReadFunc, ReadOut,
     GENERIC_RESULT, RESERVED_TS,
@@ -1677,6 +1677,51 @@ impl RegionCfg for RC<'_> {
 /// The analysis hook: given the result as the analysis reads it (after printing), its text output.
 pub type AnalysisHook<'h> = &'h dyn for<'a> Fn(&crate::analysis::An<'a>) -> String;
 
+/// The concrete-run budgets (interpreter steps) all functions' printing shares in function order: `Exec`,
+/// the CPI sites' descriptions (250k), `Wrap`, the runs through user functions wrapping invoke (150k).
+/// A run is made only while its budget is positive; a run's result does not depend on the budget. Each
+/// test of a budget and each spending is logged: the log replayed against other starting budgets tells
+/// whether the printing would have been the same (every test with the same outcome).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BK {
+    Exec = 0,
+    Wrap = 1,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BudgetEv {
+    Test(BK, bool),
+    Spend(BK, i64),
+}
+
+struct Budgets {
+    left: Cell<[i64; 2]>,
+    log: RefCell<Vec<BudgetEv>>,
+}
+
+impl Budgets {
+    fn new(left: [i64; 2]) -> Self {
+        Budgets {
+            left: Cell::new(left),
+            log: RefCell::new(Vec::new()),
+        }
+    }
+    fn left(&self, k: BK) -> i64 {
+        self.left.get()[k as usize]
+    }
+    fn test(&self, k: BK) -> bool {
+        let ok = self.left(k) > 0;
+        self.log.borrow_mut().push(BudgetEv::Test(k, ok));
+        ok
+    }
+    fn spend(&self, k: BK, n: i64) {
+        let mut l = self.left.get();
+        l[k as usize] -= n;
+        self.left.set(l);
+        self.log.borrow_mut().push(BudgetEv::Spend(k, n));
+    }
+}
+
 pub fn run(
     mut dm: Dx,
     _name_fn: Option<i64>,
@@ -1747,9 +1792,10 @@ pub fn run(
     };
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
+    let bud = Budgets::new([250_000, 150_000]);
     for i in 0..n {
         let v = add_args_view(&mut dm, i);
-        let (rf, sn) = print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl);
+        let (rf, sn) = print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl, &bud);
         funcs.push(rf);
         snaps.push(sn);
     }
@@ -1910,6 +1956,7 @@ fn print_func<'p>(
     helper_names: &HashSet<String>,
     args_view: Option<String>,
     fl: &FlowCtx<'p>,
+    bud: &Budgets,
 ) -> (ReadFunc, SugarSnap) {
     let f = d.fs[fi];
     let pc = f.pc;
@@ -2446,7 +2493,7 @@ fn print_func<'p>(
                 .as_ref()
                 .is_some_and(|x| x.family.is_some() && !x.guessed);
             if let Some(kind) = kind {
-                if !decoded && d.exec_budget.borrow().steps > 0 {
+                if !decoded && bud.test(BK::Exec) {
                     let at = match n {
                         SNode::Stmt(si) if matches!(tree_ref.stmt(*si), Stmt::Call { .. }) => {
                             Some(stmt_pc(tree_ref.stmt(*si)))
@@ -2470,17 +2517,16 @@ fn print_func<'p>(
                         let hit = exec_memo.borrow().get(&k).cloned();
                         let r = match hit {
                             Some(r) => {
-                                d.exec_budget.borrow_mut().steps -= r.1;
+                                bud.spend(BK::Exec, r.1);
                                 r
                             }
                             None => {
-                                let b0 = d.exec_budget.borrow().steps;
-                                let m = {
-                                    let mut bud = d.exec_budget.borrow_mut();
-                                    describe_model(d.ctx, f, at, kind, &mut env, &mut bud)
-                                };
+                                let mut b = ExecBudget { steps: bud.left(BK::Exec) };
+                                let m = describe_model(d.ctx, f, at, kind, &mut env, &mut b);
+                                let spent = bud.left(BK::Exec) - b.steps;
+                                bud.spend(BK::Exec, spent);
                                 let x = m.and_then(|m| m.format(&mut env));
-                                let r = (x, b0 - d.exec_budget.borrow().steps);
+                                let r = (x, spent);
                                 exec_memo.borrow_mut().insert(k, r.clone());
                                 r
                             }
@@ -2507,8 +2553,8 @@ fn print_func<'p>(
     let mut pr = Printer::new(ir, &d.pn, &names_final).with_sugar(&sugar);
     // (analysis only: CPIs made through small user functions wrapping invoke; runs with their own budget)
     if let Some(fpv) = fp_v {
-        if !d.user_invoke.is_empty() && d.wrap_budget.borrow().steps > 0 {
-            wrapper_runs(d, f, tree, body, fpv, &mut pr, &site_notes);
+        if !d.user_invoke.is_empty() && bud.test(BK::Wrap) {
+            wrapper_runs(d, f, tree, body, fpv, &mut pr, &site_notes, bud);
         }
     }
     // stack objects
@@ -3262,6 +3308,7 @@ fn wrapper_runs(
     fpv: u32,
     pr: &mut Printer,
     notes: &RefCell<HashMap<NodeKey, SiteNote>>,
+    bud: &Budgets,
 ) {
     let ir = f.ir.as_ref().unwrap();
     let pc = f.pc;
@@ -3275,11 +3322,12 @@ fn wrapper_runs(
         pr: &mut Printer,
         taint: Option<&crate::taint::FnTaint>,
         notes: &RefCell<HashMap<NodeKey, SiteNote>>,
+        bud: &Budgets,
     ) {
         let ir = f.ir.as_ref().unwrap();
         for n in ns {
             if let SNode::Stmt(si) = n {
-                if d.wrap_budget.borrow().steps > 0 {
+                if bud.test(BK::Wrap) {
                     let s = tree.stmt(*si);
                     if let Some((CallTarget::Fn { pc: t }, _)) = call_of(ir, s) {
                         if d.user_invoke.contains(&t) && t != f.pc {
@@ -3304,15 +3352,17 @@ fn wrapper_runs(
                                 tainted: Some(&tainted),
                             };
                             let m = {
-                                let mut b = d.wrap_budget.borrow_mut();
-                                describe_model(
+                                let mut b = ExecBudget { steps: bud.left(BK::Wrap) };
+                                let m = describe_model(
                                     d.ctx,
                                     f,
                                     stmt_pc(s),
                                     ExecSiteKind::Wrapper,
                                     &mut env,
                                     &mut b,
-                                )
+                                );
+                                bud.spend(BK::Wrap, bud.left(BK::Wrap) - b.steps);
+                                m
                             };
                             if let Some(x) = m.and_then(|m| m.format(&mut env)) {
                                 notes.borrow_mut().insert(
@@ -3329,12 +3379,12 @@ fn wrapper_runs(
                 }
             }
             for c in child_lists(n) {
-                visit(d, f, tree, c, fpv, pr, taint, notes);
+                visit(d, f, tree, c, fpv, pr, taint, notes, bud);
             }
         }
     }
     let _ = ir;
-    visit(d, f, tree, body, fpv, pr, taint, notes);
+    visit(d, f, tree, body, fpv, pr, taint, notes, bud);
 }
 
 #[allow(dead_code)]

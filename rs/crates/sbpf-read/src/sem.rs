@@ -594,7 +594,7 @@ pub struct SemR {
     sys_alias: HashMap<String, String>,
     /// image regions in address order: (vaddr, bytes, exec)
     regions: Vec<(u64, Vec<u8>, bool)>,
-    str_cache: std::cell::RefCell<HashMap<String, Option<u64>>>,
+    str_cache: std::sync::Mutex<HashMap<String, Option<u64>>>,
     /// idl error names (code -> String(name), None: undefined)
     idl_errors: Option<HashMap<u64, Option<String>>>,
 }
@@ -1018,7 +1018,7 @@ impl SemR {
 
     /// stringAddr: the address of the first occurrence of the UTF-8 bytes in program memory.
     pub fn string_addr(&self, s: &str) -> Option<u64> {
-        if let Some(r) = self.str_cache.borrow().get(s) {
+        if let Some(r) = self.str_cache.lock().unwrap().get(s) {
             return *r;
         }
         let needle = s.as_bytes();
@@ -1029,7 +1029,7 @@ impl SemR {
                 break;
             }
         }
-        self.str_cache.borrow_mut().insert(s.to_string(), at);
+        self.str_cache.lock().unwrap().insert(s.to_string(), at);
         at
     }
 

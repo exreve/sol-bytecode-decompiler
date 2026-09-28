@@ -137,16 +137,16 @@ const LC: u64 = BASE + 0x300;
 /// The shared state of the runs of a decompilation (memo tables the TS keeps per program).
 pub struct StateCtx<'c> {
     pub ctx: &'c ProgCtx<'c>,
-    loader_memo: RefCell<HashMap<(i64, u64), Option<N>>>,
-    deser_memo: RefCell<HashMap<i64, Option<IndexMap<usize, usize>>>>,
+    loader_memo: std::sync::Mutex<HashMap<(i64, u64), Option<N>>>,
+    deser_memo: std::sync::Mutex<HashMap<i64, Option<IndexMap<usize, usize>>>>,
 }
 
 impl<'c> StateCtx<'c> {
     pub fn new(ctx: &'c ProgCtx<'c>) -> Self {
         StateCtx {
             ctx,
-            loader_memo: RefCell::new(HashMap::default()),
-            deser_memo: RefCell::new(HashMap::default()),
+            loader_memo: std::sync::Mutex::new(HashMap::default()),
+            deser_memo: std::sync::Mutex::new(HashMap::default()),
         }
     }
 
@@ -216,7 +216,7 @@ impl<'c> StateCtx<'c> {
 
     /// loaderWord: the out word AccountLoader::load gives the data pointer in (from runs).
     pub fn loader_word(&self, x: i64, disc: u64, owner: &[u8], size: N) -> Option<N> {
-        if let Some(r) = self.loader_memo.borrow().get(&(x, disc)) {
+        if let Some(r) = self.loader_memo.lock().unwrap().get(&(x, disc)) {
             return *r;
         }
         let n = (size + 256.0).max(1024.0).min(262144.0) as usize;
@@ -248,7 +248,7 @@ impl<'c> StateCtx<'c> {
                 break;
             }
         }
-        self.loader_memo.borrow_mut().insert((x, disc), hit);
+        self.loader_memo.lock().unwrap().insert((x, disc), hit);
         hit
     }
 
@@ -399,7 +399,7 @@ impl<'c> StateCtx<'c> {
 
     /// probeDeserializer: output bytes a native deserializer x(out, data, len) copies from the data.
     pub fn probe_deserializer(&self, x: i64, lens: &[usize]) -> Option<IndexMap<usize, usize>> {
-        if let Some(r) = self.deser_memo.borrow().get(&x) {
+        if let Some(r) = self.deser_memo.lock().unwrap().get(&x) {
             return r.clone();
         }
         let db = BASE + 0x1000;
@@ -495,7 +495,7 @@ impl<'c> StateCtx<'c> {
                 }
             }
         }
-        self.deser_memo.borrow_mut().insert(x, res.clone());
+        self.deser_memo.lock().unwrap().insert(x, res.clone());
         res
     }
 }
