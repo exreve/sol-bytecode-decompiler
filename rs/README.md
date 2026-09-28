@@ -45,6 +45,11 @@ cd rs && cargo build --release
 /tmp/claude-1000/rs-target/release/sbpf-dump --cli <sbpf-decompile arguments>  # the CLI (same entry, honours SBPF_THREADS)
 /tmp/claude-1000/rs-target/release/sbpf-dump --timecli --iters 5 a.so   # whole CLI output timing (single file, project; 1 / n threads)
 
+# profiling (no perf on the box: a SIGPROF sampler in-process, optional dev feature, folded stacks)
+cargo build --profile profiling -p sbpf-dump --features prof   # release + line tables
+/tmp/claude-1000/rs-target/profiling/sbpf-dump --prof out.folded [--hz 1000] <sbpf-decompile arguments>
+# 1 thread: prefix with `taskset -c 0` (available_parallelism follows the affinity mask)
+
 node scripts/dump.ts prog.so out_dir                                     # the TS oracle's dumps
 node scripts/parity.ts --root <repo with corpus/>                        # all standard binary sets
 node scripts/parity.ts samples/token.so compat/bin                       # given files / dirs

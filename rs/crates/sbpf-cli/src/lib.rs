@@ -297,5 +297,7 @@ fn run_inner(args: &[String], threads: usize) -> Result<(), Exit> {
         )?,
         None => stdout_write(&sbpf_read::decompile::render_read(&r)),
     }
+    // (the process ends after the run: the result's many small allocations are left to the OS)
+    std::mem::forget(r);
     Ok(())
 }
