@@ -127,7 +127,7 @@ pub struct PrepRead {
 
 pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead, String> {
     let mut p = load_program(bytes, true)?;
-    sbpf_dataflow::infer_signatures(&mut p);
+    sbpf_dataflow::infer_signatures_par(&mut p, threads);
     let sem = semantics(&p);
     let mut libs = if full {
         IndexMap::default()

@@ -323,6 +323,11 @@ fn is_noret(cx: &Ctx, sigs: &[Sig], s: &Stmt) -> bool {
 /// Interprocedural fixed point for noreturn, returns, nparams, extraIn (dataflow.ts inferSignatures,
 /// lazily formed blocks: the decompiler's path).
 pub fn infer_signatures(p: &mut Program) {
+    infer_signatures_par(p, 1)
+}
+
+/// `infer_signatures` with the blocks of the functions formed on `threads` worker threads.
+pub fn infer_signatures_par(p: &mut Program, threads: usize) {
     assert!(
         has_pending_blocks(p),
         "infer_signatures: only the lazyBlocks path is ported"
@@ -366,10 +371,19 @@ pub fn infer_signatures(p: &mut Program) {
     // cut blocks after calls to noreturn callees: form the remaining blocks
     let formed: Vec<_> = {
         let cx = Ctx::of(p);
-        p.funcs
-            .values()
-            .map(|f| materialize_blocks(p, f, &|s| is_noret(&cx, &sigs, s)))
-            .collect()
+        /// The program read by the block forming: `materialize_blocks` clones the lifted statements
+        /// (no arena is written) and the signatures are read only: sharing them between the threads is
+        /// sound.
+        struct Shared<'a>(&'a Program, &'a Ctx<'a>, &'a [Sig]);
+        unsafe impl Sync for Shared<'_> {}
+        impl Shared<'_> {
+            fn form(&self, fi: usize) -> (Vec<Block>, IndexMap<i64, usize>) {
+                let (p, cx, sigs) = (self.0, self.1, self.2);
+                materialize_blocks(p, &p.funcs[fi], &|s| is_noret(cx, sigs, s))
+            }
+        }
+        let sh = Shared(p, &cx, &sigs);
+        sbpf_ir::par_map_n(p.funcs.len(), threads, |fi| sh.form(fi))
     };
     for (f, (blocks, block_at)) in p.funcs.values_mut().zip(formed) {
         f.blocks = blocks;

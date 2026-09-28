@@ -1668,6 +1668,7 @@ fn view_types(d: &mut Dx) {
         let fname = move |pc: i64| pn.fn_name(pc);
         let sem = &d.sem;
         let sa = |p: u64, n: u64| sem.str_at(p, n, true);
+        let threads = d.threads;
         let cfg = FieldNameCfg {
             funcs,
             types: &types,
@@ -1675,7 +1676,7 @@ fn view_types(d: &mut Dx) {
             str_at: &sa,
         };
         let mut views = std::mem::take(&mut d.views);
-        name_fields(&cfg, &mut views);
+        name_fields(&cfg, &mut views, threads);
         drop(cfg);
         d.views = views;
     }
