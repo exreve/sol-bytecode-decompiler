@@ -13,10 +13,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 
-// JS `\s`
-const S: &str = r"[\t\n\x0B\x0C\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]";
-const W: &str = r"[A-Za-z0-9_]";
-
 fn hex8(s: &str) -> String {
     sbpf_print::names::sha256(s.as_bytes())[..8]
         .iter()
@@ -114,18 +110,7 @@ fn main() {
         let s = r2.replace_all(&s, "${1}_${2}");
         s.replace(['-', ' '], "_").to_lowercase()
     };
-    let handler = Regex::new(&format!(
-        r"pub fn ({W}+){S}*(?:<[^>]*>)?{S}*\({S}*(?:mut{S}+)?{W}+{S}*:{S}*Context<"
-    ))
-    .unwrap();
-    let account = Regex::new(&format!(
-        r"#\[account(?:\([^)]*\))?\]{S}*(?:#\[[^\]]*\]{S}*)*pub struct ({W}+)"
-    ))
-    .unwrap();
-    let event = Regex::new(&format!(
-        r"#\[event\]{S}*(?:#\[[^\]]*\]{S}*)*pub struct ({W}+)"
-    ))
-    .unwrap();
+    let rust_names = sbpf_data::AnchorNames::default();
 
     let mut files = vec![];
     for d in &dirs {
@@ -201,15 +186,10 @@ fn main() {
                 }
             }
         } else {
-            for m in handler.captures_iter(&src) {
-                ins.insert(m[1].to_string());
-            }
-            for m in account.captures_iter(&src) {
-                accs.insert(m[1].to_string());
-            }
-            for m in event.captures_iter(&src) {
-                evs.insert(m[1].to_string());
-            }
+            let [i, a, e] = rust_names.extract(&src);
+            ins.extend(i);
+            accs.extend(a);
+            evs.extend(e);
         }
     }
     // names harvested from GitHub (sbpf-gh-anchor-names)

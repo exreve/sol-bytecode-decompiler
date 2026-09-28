@@ -118,3 +118,38 @@ fn unescape(s: &str) -> String {
     o2.push_str(rest);
     o2.replace("..", "::")
 }
+
+/// Anchor names in Rust source: `Context<>` handlers, `#[account]` and `#[event]` structs.
+pub struct AnchorNames {
+    handler: regex::Regex,
+    account: regex::Regex,
+    event: regex::Regex,
+}
+
+impl Default for AnchorNames {
+    fn default() -> Self {
+        // JS `\s` and `\w`
+        const S: &str = r"[\t\n\x0B\x0C\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]";
+        const W: &str = r"[A-Za-z0-9_]";
+        let re = |s: String| regex::Regex::new(&s).unwrap();
+        AnchorNames {
+            handler: re(format!(
+                r"pub fn ({W}+){S}*(?:<[^>]*>)?{S}*\({S}*(?:mut{S}+)?{W}+{S}*:{S}*Context<"
+            )),
+            account: re(format!(
+                r"#\[account(?:\([^)]*\))?\]{S}*(?:#\[[^\]]*\]{S}*)*pub struct ({W}+)"
+            )),
+            event: re(format!(
+                r"#\[event\]{S}*(?:#\[[^\]]*\]{S}*)*pub struct ({W}+)"
+            )),
+        }
+    }
+}
+
+impl AnchorNames {
+    /// (instruction handlers, account structs, event structs) in source order
+    pub fn extract(&self, src: &str) -> [Vec<String>; 3] {
+        let all = |r: &regex::Regex| r.captures_iter(src).map(|m| m[1].to_string()).collect();
+        [all(&self.handler), all(&self.account), all(&self.event)]
+    }
+}
