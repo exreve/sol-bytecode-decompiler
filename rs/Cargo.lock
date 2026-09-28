@@ -559,7 +559,10 @@ name = "sbpf-data"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "miniz_oxide",
+ "regex",
  "sbpf-lib",
+ "sbpf-print",
  "sbpf-program",
  "serde_json",
 ]
