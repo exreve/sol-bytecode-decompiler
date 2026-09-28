@@ -759,10 +759,11 @@ fn main() {
     let missing = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
+        let mut hs = Vec::new(); // joined below: a dropped handle detaches its thread
         for slot in 0..jobs {
             let (cfg, files, counts, next, missing, fuzzed) =
                 (&cfg, &files, &counts, &next, &missing, &fuzzed);
-            s.spawn(move || loop {
+            hs.push(s.spawn(move || loop {
                 let k = next.fetch_add(1, Ordering::SeqCst);
                 let Some(f) = files.get(k) else { break };
                 let fix = cfg.fixtures.join(format!("{f}.jsonl.zst"));
@@ -813,7 +814,12 @@ fn main() {
                         Err(m) => println!("DIFF {f}: {m}"),
                     }
                 }
-            });
+            }));
+        }
+        for h in hs {
+            if let Err(e) = h.join() {
+                std::panic::resume_unwind(e);
+            }
         }
     });
     let mut c = counts.into_inner().unwrap();

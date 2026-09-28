@@ -51,18 +51,26 @@ pub fn par_map<J: Sync, R: Send>(jobs: &[J], n: usize, f: impl Fn(&J) -> R + Syn
     let next = AtomicUsize::new(0);
     let out: Mutex<Vec<Option<R>>> = Mutex::new((0..jobs.len()).map(|_| None).collect());
     std::thread::scope(|s| {
-        for _ in 0..n.clamp(1, jobs.len().max(1)) {
-            std::thread::Builder::new()
-                .stack_size(1 << 30)
-                .spawn_scoped(s, || loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= jobs.len() {
-                        break;
-                    }
-                    let r = f(&jobs[i]);
-                    out.lock().unwrap()[i] = Some(r);
-                })
-                .expect("spawn");
+        // joined, not dropped: a dropped handle detaches its thread (see sbpf_read::util::par_map_big)
+        let hs: Vec<_> = (0..n.clamp(1, jobs.len().max(1)))
+            .map(|_| {
+                std::thread::Builder::new()
+                    .stack_size(1 << 30)
+                    .spawn_scoped(s, || loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= jobs.len() {
+                            break;
+                        }
+                        let r = f(&jobs[i]);
+                        out.lock().unwrap()[i] = Some(r);
+                    })
+                    .expect("spawn")
+            })
+            .collect();
+        for h in hs {
+            if let Err(e) = h.join() {
+                std::panic::resume_unwind(e);
+            }
         }
     });
     out.into_inner()

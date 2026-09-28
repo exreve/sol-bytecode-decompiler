@@ -805,18 +805,28 @@ pub fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + S
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
     std::thread::scope(|s| {
-        for _ in 0..threads.min(n) {
-            std::thread::Builder::new()
-                .stack_size(1 << 30)
-                .spawn_scoped(s, || loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let r = f(i);
-                    out.lock().unwrap()[i] = Some(r);
-                })
-                .expect("spawn");
+        // The handles are joined, not dropped: dropping one detaches its thread, and glibc's
+        // pthread_detach can read the descriptor of a thread that just exited and unmapped its
+        // (large, uncached) stack (a rare segfault under load).
+        let hs: Vec<_> = (0..threads.min(n))
+            .map(|_| {
+                std::thread::Builder::new()
+                    .stack_size(1 << 30)
+                    .spawn_scoped(s, || loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let r = f(i);
+                        out.lock().unwrap()[i] = Some(r);
+                    })
+                    .expect("spawn")
+            })
+            .collect();
+        for h in hs {
+            if let Err(e) = h.join() {
+                std::panic::resume_unwind(e);
+            }
         }
     });
     out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()

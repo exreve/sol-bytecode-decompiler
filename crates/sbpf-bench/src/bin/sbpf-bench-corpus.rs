@@ -192,8 +192,9 @@ fn main() {
     let done_n = AtomicUsize::new(0);
     let results: Mutex<BTreeMap<String, Res>> = Mutex::new(BTreeMap::new());
     std::thread::scope(|s| {
+        let mut hs = Vec::new(); // joined below: a dropped handle detaches its thread
         for _ in 0..nw {
-            s.spawn(|| loop {
+            hs.push(s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((id, so, _)) = queue.get(i) else {
                     break;
@@ -213,7 +214,12 @@ fn main() {
                         fixed0(t0.elapsed().as_secs_f64())
                     );
                 }
-            });
+            }));
+        }
+        for h in hs {
+            if let Err(e) = h.join() {
+                std::panic::resume_unwind(e);
+            }
         }
     });
     let skipped = skipped.into_inner();
