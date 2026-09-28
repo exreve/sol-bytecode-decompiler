@@ -1,4 +1,4 @@
-//! `src/accounts.ts`: account recognition (AccountInfo / serialized input records), the legacy
+//! Account recognition (AccountInfo / serialized input records), the legacy
 //! AccountInfo field order, the deprecated loader's unaligned input.
 
 use crate::util::{dst_of, jkey, n_s, stmt_exprs, term_br, term_ret, var_of, N};

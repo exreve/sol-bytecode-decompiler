@@ -1,5 +1,5 @@
 //! Ground-truth benchmarks of the analysis layer and their shared pieces: the repository layout, one decompilation
-//! as the CLI project output renders `security/analysis.json`, a worker pool, and the JS number / string formatting
+//! as the CLI project output renders `security/analysis.json`, a worker pool, and the number / string formatting
 //! the reports use.
 
 pub mod eval;
@@ -167,7 +167,7 @@ pub fn pad_start(s: &str, n: usize) -> String {
     format!("{s:>n$}")
 }
 
-/// JS truthiness of an optional JSON value.
+/// Truthiness of an optional JSON value (null, false, 0, NaN and "" are false).
 pub fn truthy(v: Option<&Value>) -> bool {
     match v {
         None | Some(Value::Null) => false,

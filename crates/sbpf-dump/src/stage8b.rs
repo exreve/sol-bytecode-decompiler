@@ -1,4 +1,4 @@
-//! Stage 8b dump: the analysis before the incident rules (scripts/dump8.ts analysisLines).
+//! Stage 8b dump: the analysis before the incident rules.
 
 use crate::enc::*;
 use sbpf_read::analysis::facts::{OpCpi, Pda};

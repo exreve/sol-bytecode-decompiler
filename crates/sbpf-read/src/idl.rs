@@ -1,6 +1,6 @@
-//! `src/idl.ts`: Anchor IDL parsing (legacy <= 0.29 and 0.30+ formats), Borsh layouts (fixed-offset
+//! Anchor IDL parsing (legacy <= 0.29 and 0.30+ formats), Borsh layouts (fixed-offset
 //! prefixes, sizes) and Borsh samples (anchorstate). The IDL JSON keeps its key order
-//! (`serde_json` with `preserve_order`); values are read with JS semantics (`??`, truthiness, String()).
+//! (`serde_json` with `preserve_order`); values are read leniently (a missing or null member takes the default, truthiness, a value's text).
 
 use crate::util::{js_num, upper_first, N};
 use sbpf_ir::fx::IndexMap;
@@ -85,7 +85,7 @@ pub fn js_string_opt(v: Option<&Value>) -> String {
         Some(v) => js_string(v),
     }
 }
-/// JSON.stringify of a value (numbers as JS prints them)
+/// Compact JSON text of a value (numbers in their shortest round-trip form)
 pub fn js_stringify(v: &Value, o: &mut String) {
     match v {
         Value::Null => o.push_str("null"),
@@ -120,7 +120,7 @@ fn num(v: Option<&Value>) -> Option<N> {
     v.and_then(|x| x.as_f64())
 }
 
-/// snake (idl.ts): `aB` -> `a_B`, `ABc` -> `A_Bc`, lower case (no whitespace rule).
+/// snake: `aB` -> `a_B`, `ABc` -> `A_Bc`, lower case (no whitespace rule).
 pub fn snake(s: &str) -> String {
     let b: Vec<char> = s.chars().collect();
     let mut s1: Vec<char> = Vec::with_capacity(b.len() + 4);
@@ -163,7 +163,7 @@ pub fn snake(s: &str) -> String {
     s2.into_iter().collect::<String>().to_lowercase()
 }
 
-/// pascal (idl.ts): split on runs of `_`, whitespace, `-`; each word's first letter upper-cased.
+/// pascal: split on runs of `_`, whitespace, `-`; each word's first letter upper-cased.
 pub fn pascal(s: &str) -> String {
     s.split(|c: char| c == '_' || c == '-' || c.is_whitespace())
         .filter(|w| !w.is_empty())
@@ -774,7 +774,7 @@ pub fn borsh_sample(
     }
 }
 
-/// sha256 digest (idl.ts sha): used for the discriminators only through sha8.
+/// sha256 digest: used for the discriminators only through sha8.
 #[allow(dead_code)]
 pub fn digest(s: &[u8]) -> [u8; 32] {
     sha256(s)

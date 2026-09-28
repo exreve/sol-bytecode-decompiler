@@ -1,5 +1,5 @@
-//! `src/compact.ts`: final exact compaction of statement runs (sinkFrameLoads, compactStores).
-//! Offsets are `bigint` in TS (unbounded): i128 here.
+//! Final exact compaction of statement runs (sinkFrameLoads, compactStores).
+//! Offsets are unbounded integers: i128.
 
 use crate::*;
 use sbpf_ir::{BinOp, Node, Stmt, Term, E};
@@ -31,7 +31,7 @@ fn is_var(x: &Fx, e: E, v: u32) -> bool {
     x.node(e) == Node::Var(v)
 }
 
-/// Move `v = <loads of the own frame>` down to the one use of v in its block (see compact.ts).
+/// Move `v = <loads of the own frame>` down to the one use of v in its block.
 pub fn sink_frame_loads(x: &mut Fx, f: &mut Func) {
     let Some(fp) = fp_of(f) else { return };
     let mut defd = vec![false; f.vars.len()];

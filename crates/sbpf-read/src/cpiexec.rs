@@ -1,4 +1,4 @@
-//! `src/cpiexec.ts`: CPIs whose instruction is not visible in the frame, described from two runs of
+//! CPIs whose instruction is not visible in the frame, described from two runs of
 //! the function (sbpf-exec) on synthetic inputs, traced back to the function's inputs.
 
 use crate::cpi::{wrap, Acc, CpiEnv, DataAt, IxModel, KeyText};

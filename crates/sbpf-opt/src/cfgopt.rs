@@ -1,4 +1,4 @@
-//! `src/cfgopt.ts`: CFG-level transforms on variable IR (tail duplication, jump threading, block
+//! CFG-level transforms on variable IR (tail duplication, jump threading, block
 //! merging, local/global constant propagation, copy propagation, dead stores).
 
 use crate::simplify::VarMap;

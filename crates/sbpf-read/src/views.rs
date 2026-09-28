@@ -1,8 +1,8 @@
-//! `src/views.ts`: typed views (named fields over memory, printed as `x.field`).
+//! Typed views (named fields over memory, printed as `x.field`).
 //!
-//! Views live in an insertion-ordered map (JS `Map` semantics: `add` of an existing name keeps its
-//! position, delete + add moves it to the end). Fields carry an identity (`id`): the TS mutates field
-//! objects in place and keys maps by them (fieldnames.ts); a copy (`{ ...f }`) is a new id.
+//! Views live in an insertion-ordered map (the declaration order of the output: `add` of an existing
+//! name keeps its position, delete + add moves it to the end). Fields carry an identity (`id`): fields
+//! are renamed in place and maps are keyed by them (fieldnames.rs); a copy is a new id.
 
 use crate::idl::{borsh_prefix, struct_fields, BKind, BorshField};
 use crate::util::{js_hex, js_num, n_s, pad_end, u16len, N};
@@ -253,7 +253,7 @@ pub fn unaligned_views() -> Vec<View> {
     ]
 }
 
-/// Opaque embedded types of views.ts OPAQUE.
+/// Opaque embedded types (OPAQUE).
 pub fn is_static_opaque(n: &str) -> bool {
     n == "Pubkey" || n == "bytes"
 }

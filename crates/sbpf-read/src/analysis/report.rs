@@ -1,4 +1,4 @@
-//! The report layer (`src/analysis/report.ts` analyze0): per instruction (ixctx.rs contexts) the check rows
+//! The report layer (analyze0): per instruction (ixctx.rs contexts) the check rows
 //! (canonical account names, Anchor key comparisons, sysvar checks, native account resolvers), the operation
 //! rows (CPIs completed by the instruction built before them, library CPI helpers), the Anchor post-passes
 //! (cross-account data comparisons, Vec membership, CpiContext accounts), the dominance statuses (phase2.rs), the
@@ -584,7 +584,7 @@ impl<'a, 'x> IxB<'a, 'x> {
         })
     }
 
-    /// Anchor try_accounts: the accounts a check's key comparison reads (flow.ts compareAccounts)
+    /// Anchor try_accounts: the accounts a check's key comparison reads (compareAccounts)
     fn anchor_compares(&self, ff: &FnFacts) -> Option<AnchorCmp<'a>> {
         let an = self.an;
         let fo = an.fo(ff.pc)?;
@@ -723,7 +723,7 @@ impl<'a> An<'a> {
         Ok(AnalysisOut { a, parts })
     }
 
-    /// layout.ts slice's line marks of a function: 1 = code of this instruction, 2 = only code of others, 0 = no
+    /// The project slicer's line marks of a function: 1 = code of this instruction, 2 = only code of others, 0 = no
     /// code; None when the function has no facts or no line of other instructions
     fn slice_marks(&self, ctx: &IxCtx<'a>, pc: i64) -> Option<Vec<u8>> {
         let fo = self.fo(pc)?;
@@ -2263,7 +2263,7 @@ impl<'a> An<'a> {
     }
 }
 
-/// JS default sort / `<` on strings: UTF-16 code units
+/// String order by UTF-16 code units (default sort / `<` of names)
 pub fn js_str_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }

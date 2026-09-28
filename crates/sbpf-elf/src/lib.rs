@@ -1,13 +1,11 @@
-//! ELF64 loader for Solana sBPF programs: a faithful port of `src/elf.ts` (itself mirroring agave's
-//! `solana-sbpf` loader). Relocations are applied exactly like the runtime does.
+//! ELF64 loader for Solana sBPF programs, mirroring agave's `solana-sbpf` loader. Relocations are
+//! applied exactly like the runtime does.
 //!
-//! Parity notes (see docs/RUST_PORT.md):
-//! - TS reads u64 header fields through `Number(...)` and does its offset arithmetic in doubles. Those
-//!   fields are `f64` here (`Num`) with the same arithmetic, so corrupt headers (values above 2^53)
-//!   behave identically. Dumps print them with `JSON.stringify`'s number format.
-//! - TS `DataView` reads throw `RangeError` out of bounds (reported as "out of bounds"); typed-array
-//!   indexing yields `undefined` silently. Both are reproduced where they matter.
-//! - `Uint8Array.subarray` clamps its bounds; regions reproduce that.
+//! Behavior on corrupt inputs (part of the output: error messages, see docs/INTERNALS.md):
+//! - u64 header fields are read as doubles (`Num`) and the offset arithmetic is done in doubles, so
+//!   values above 2^53 round. Dumps print them in JSON number format.
+//! - Bounds-checked reads fail with "out of bounds"; a few unchecked byte reads yield 0 silently.
+//! - Sub-slices clamp their bounds; regions reproduce that.
 //! - Two corners are rejected with an explicit "unsupported" error instead: a call relocation whose
 //!   target is not a whole pc, and a VM address that rounds to 2^64 or more.
 
@@ -23,7 +21,7 @@ pub const R_BPF_64_32: u32 = 10;
 
 pub const OOB: &str = "out of bounds";
 
-/// A JS number holding a u64 header field (`Number(getBigUint64(..))`) or arithmetic on such fields.
+/// A double holding a u64 header field (rounded to nearest) or arithmetic on such fields.
 pub type Num = f64;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +83,7 @@ pub struct Elf {
     pub dynsyms: Vec<Symbol>,
     pub symbols: Vec<Symbol>,
     pub relocs: Vec<Reloc>,
-    /// pc (a JS number: `f64::to_bits`, may be fractional for a misaligned relocation) -> resolved
+    /// pc (a double: `f64::to_bits`, may be fractional for a misaligned relocation) -> resolved
     /// symbol for R_BPF_64_32, in insertion order. Look up with [`Elf::call_reloc`].
     pub call_relocs: IndexMap<u64, CallReloc>,
     pub regions: Vec<Region>,
@@ -112,7 +110,7 @@ pub fn to_int32_bits(x: Num) -> u32 {
     x as u128 as u32
 }
 
-/// `BigInt(x)` of a non-negative integer-valued double, as a VM address (u64).
+/// A non-negative integer-valued double as a VM address (u64).
 fn big(x: Num) -> R<u128> {
     Ok(x as u128)
 }
@@ -121,7 +119,7 @@ fn vm(a: u128) -> R<u64> {
     u64::try_from(a).map_err(|_| "unsupported: VM address of 2^64 or more".to_string())
 }
 
-/// DataView reads at JS-number offsets (RangeError out of bounds).
+/// Little-endian reads at double offsets ("out of bounds" errors).
 struct Rd<'a>(&'a [u8]);
 impl Rd<'_> {
     fn get<const N: usize>(&self, o: Num) -> R<[u8; N]> {
@@ -140,7 +138,7 @@ impl Rd<'_> {
     fn u64(&self, o: Num) -> R<u64> {
         self.get::<8>(o).map(u64::from_le_bytes)
     }
-    /// `Number(getBigUint64(o))` (round to nearest, ties to even, like `u64 as f64`)
+    /// The u64 at `o` as a double (round to nearest, ties to even: `u64 as f64`)
     fn u64n(&self, o: Num) -> R<Num> {
         Ok(self.u64(o)? as f64)
     }
@@ -536,7 +534,7 @@ pub struct Image<'a> {
 
 impl<'a> Image<'a> {
     pub fn new(elf: &'a Elf) -> Self {
-        // TS: [...regions].sort((a, b) => (a.vaddr < b.vaddr ? -1 : 1)); V8's TimSort keeps equal keys in order
+        // stable sort by vaddr: equal keys keep their order
         let mut order: Vec<usize> = (0..elf.regions.len()).collect();
         order.sort_by_key(|&i| elf.regions[i].vaddr);
         Image { elf, order }

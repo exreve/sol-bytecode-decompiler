@@ -1,4 +1,4 @@
-//! `src/outline.ts`: outlining of repeated function tails (exact): runs of statements ending in a
+//! Outlining of repeated function tails (exact): runs of statements ending in a
 //! return that recur in several places are printed once as helpers (`ret_tail_N` / `tail_N`).
 
 use crate::util::{js_hex, json_str, n_s, N};

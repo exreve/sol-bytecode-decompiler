@@ -1,4 +1,4 @@
-//! Syscall table: a port of `src/syscalls.ts` (same order, same signatures).
+//! Syscall table (the order is part of the output: the stubs' declaration order).
 
 use crate::murmur::hash_name;
 use sbpf_ir::fx::HashMap;

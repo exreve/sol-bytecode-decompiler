@@ -59,7 +59,7 @@ impl Default for Opts {
     }
 }
 
-/// xorshift64 seeded as the TS harness does
+/// xorshift64 (the seed and draw order fix the inputs: reports are reproducible)
 pub struct Rng(u64);
 impl Rng {
     pub fn new(seed: u64) -> Rng {

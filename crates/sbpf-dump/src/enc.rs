@@ -1,4 +1,5 @@
-//! Canonical JSON encoding (rs/README.md): keys in a fixed order, compact, `JSON.stringify` escaping.
+//! Canonical JSON encoding of the stage dumps (docs/INTERNALS.md): keys in a fixed order, compact,
+//! `JSON.stringify` escaping.
 
 use sbpf_ir::{CallTarget, Ir, Node, Stmt, Term, E, L};
 
@@ -34,7 +35,7 @@ impl J {
         self.0.push_str(&v.to_string());
         self
     }
-    /// a JS number (JSON.stringify format)
+    /// a double (JSON number format)
     pub fn f(&mut self, k: &str, v: f64) -> &mut Self {
         self.key(k);
         self.0.push_str(&js_num(v));

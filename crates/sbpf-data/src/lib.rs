@@ -128,7 +128,7 @@ pub struct AnchorNames {
 
 impl Default for AnchorNames {
     fn default() -> Self {
-        // JS `\s` and `\w`
+        // `\s` (Unicode whitespace) and `\w` (ASCII word characters)
         const S: &str = r"[\t\n\x0B\x0C\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]";
         const W: &str = r"[A-Za-z0-9_]";
         let re = |s: String| regex::Regex::new(&s).unwrap();

@@ -1,5 +1,5 @@
-//! Instruction decoding, function discovery, CFG construction and lifting to IR: a faithful port of
-//! `src/program.ts` (same algorithms, same iteration orders).
+//! Instruction decoding, function discovery, CFG construction and lifting to IR. Discovery and
+//! block orders are part of the output (function and block numbering): every walk is deterministic.
 
 pub mod murmur;
 pub mod syscalls;
@@ -149,9 +149,9 @@ fn jcc(i: u8) -> Option<CmpOp> {
     })
 }
 
-/// `decode(bytes, base, count)` with TS's JS-number arguments (`text.offset`, `floor(text.size / 8)`).
+/// `decode(bytes, base, count)` with double arguments (`text.offset`, `floor(text.size / 8)`).
 pub fn decode(bytes: &[u8], base: f64, count: f64) -> Result<Vec<Insn>, String> {
-    // TS: `new Array(count)` throws past 2^32 - 1; DataView reads throw once an instruction extends past the buffer
+    // a count past 2^32 - 1 is an error, and so is an instruction extending past the buffer
     if count > u32::MAX as f64
         || (count >= 1.0 && base + (count - 1.0) * 8.0 + 8.0 > bytes.len() as f64)
     {
@@ -183,7 +183,7 @@ pub struct Cx<'a> {
 pub struct Lifter {
     pub v: u32,
     pc_by_hash: HashMap<u32, i64>,
-    /// lift() memoized per pc (see program.ts liftShared)
+    /// lift() memoized per pc (liftShared: the lifted statements are shared)
     pub memo: Vec<Option<Lifted>>,
     /// control flow of each memoized pc, packed for the discovery walks (Rust-only, derived from memo)
     steps: Vec<Step>,
@@ -970,7 +970,7 @@ fn name_of(symbol_names: &IndexMap<i64, String>, elf: &Elf, entry: i64) -> Strin
     if entry == elf.entry_pc {
         return "entrypoint".into();
     }
-    // (a JS number: `(text.addr + entry * 8).toString(16)`)
+    // (computed as a double: `text.addr + entry * 8` in hex)
     format!("fn_{:x}", (elf.text().addr + (entry * 8) as f64) as u128)
 }
 
@@ -1089,7 +1089,7 @@ pub fn has_pending_blocks(p: &Program) -> bool {
     p.lazy.is_some()
 }
 
-/// reachesReturn on the full CFG (program.ts reachesReturnPending): from the entry block, is a `ret`
+/// reachesReturn on the full CFG (reachesReturnPending): from the entry block, is a `ret`
 /// reached through blocks without a call to a noreturn callee?
 pub fn reaches_return_pending(p: &Program, f: &Func, noret: &dyn Fn(&Stmt) -> bool) -> bool {
     let lz = p.lazy.as_ref().expect("lazy");
@@ -1134,7 +1134,7 @@ pub fn reaches_return_pending(p: &Program, f: &Func, noret: &dyn Fn(&Stmt) -> bo
     false
 }
 
-/// program.ts materializeBlocks: the full CFG's blocks that remain after cutting blocks after their
+/// materializeBlocks: the full CFG's blocks that remain after cutting blocks after their
 /// first noreturn call and pruning unreachable blocks. Returns (blocks, blockAt); the caller stores
 /// them in the function and drops its pending state.
 pub fn materialize_blocks(

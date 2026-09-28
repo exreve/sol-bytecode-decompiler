@@ -1,8 +1,8 @@
-//! `src/print.ts`: the TypeScript printer (expressions with the TS precedence / parenthesization rules,
-//! statements, the structured body) and decompile's `declarations`.
+//! The TypeScript printer (expressions with TypeScript's precedence / parenthesization rules,
+//! statements, the structured body) and the variable `declarations`.
 //!
-//! Only the plain (raw) rendering is ported so far: no typed views, frame objects, string / key
-//! literals, comments or outlining (the `PrintCtx` hooks the readable output sets).
+//! This is the plain (raw) rendering: typed views, frame objects, string / key literals, comments and
+//! outlining come from the `PrintCtx` hooks the readable output sets (sbpf-read's printfn.rs).
 
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Ir, Node, Stmt, E};
 use sbpf_program::Func;
@@ -101,7 +101,7 @@ pub fn fmt_const(v: u64) -> String {
 
 const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-/// base58 (semantics.ts b58)
+/// base58
 pub fn b58(b: &[u8]) -> String {
     let mut digits: Vec<u8> = Vec::new(); // little-endian base-58 digits
     for &x in b {
@@ -204,8 +204,8 @@ pub enum Role {
     Ret,
 }
 
-/// The readable output's printing hooks (print.ts PrintCtx beyond names). Every method has the TS
-/// default (hook absent); `has_*` tell which optional hooks are present.
+/// The readable output's printing hooks (PrintCtx beyond names). Every method has the plain output's
+/// behavior as its default (hook absent); `has_*` tell which optional hooks are present.
 #[allow(unused_variables)]
 pub trait Sugar {
     /// viewExpr, the exprHook chain and frameRef, in that order: the expression written, its precedence.
@@ -266,7 +266,7 @@ pub trait Sugar {
 }
 
 /// The expression printer. Text is written into one buffer; a subexpression that needs parentheses
-/// (its precedence below the context's, or one of the TS-ambiguity rules looking at its text) is
+/// (its precedence below the context's, or one of the TypeScript-ambiguity rules looking at its text) is
 /// wrapped in place after it is written.
 pub struct Printer<'a> {
     pub ir: &'a Ir,
@@ -318,7 +318,7 @@ impl<'a> Printer<'a> {
         self.names.by_addr.get(&v).map(|s| s.as_str())
     }
 
-    /// maxBits (simplify.ts)
+    /// maxBits (as the simplifier computes it)
     fn max_bits(&self, e: E) -> u32 {
         match self.ir.get(e) {
             Node::Const(v) => 64 - v.leading_zeros(),
@@ -670,7 +670,7 @@ impl<'a> Printer<'a> {
         p
     }
 
-    /// A binary operand; a `<<` operand is parenthesized (TS could read `<1 | (b>` as type arguments).
+    /// A binary operand; a `<<` operand is parenthesized (TypeScript could read `<1 | (b>` as type arguments).
     fn operand(&mut self, x: E, pp: u8, s_ok: bool, o: &mut String) {
         let start = o.len();
         self.u_to(x, pp, s_ok, o);
@@ -996,7 +996,7 @@ struct BodyPrinter<'p, 'a> {
     indent: &'p str,
     decls: &'p Decls,
     out: Vec<String>,
-    /// prevStmt: the statement printed just before (same list; leaks out of nested lists as in the TS)
+    /// prevStmt: the statement printed just before (same list; it leaks out of nested lists, and the output depends on that)
     prev: Option<u32>,
 }
 
@@ -1518,9 +1518,9 @@ impl BodyPrinter<'_, '_> {
     }
 }
 
-// ---------------- declarations (decompile.ts) ----------------
+// ---------------- declarations ----------------
 
-/// stmtExprs (simplify.ts)
+/// stmtExprs: the expressions of a statement
 pub fn stmt_exprs(ir: &Ir, s: &Stmt, out: &mut Vec<E>) {
     out.clear();
     match s {
@@ -1571,9 +1571,9 @@ struct VarRefs {
     common: u32,
 }
 
-/// The references of `declarations`, walked in the TS order. The TS keeps each reference's path of
-/// enclosing lists and takes the longest common prefix; here the lists form a tree (parent, depth)
-/// and the common prefix's last list is the lowest common ancestor.
+/// The references of `declarations`, in walk order (it decides the declaration order). A variable is
+/// declared in the deepest list enclosing all its references: the lists form a tree (parent, depth)
+/// and that list is the lowest common ancestor.
 struct DeclWalk<'a> {
     ir: &'a Ir,
     tree: &'a Tree,

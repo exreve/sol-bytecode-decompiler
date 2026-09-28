@@ -1,4 +1,4 @@
-//! `src/frameregions.ts`: frame regions, stack objects known from where their bytes come from (a call's
+//! Frame regions, stack objects known from where their bytes come from (a call's
 //! result of a known layout, and copies of it), flow-sensitive over the structured body.
 
 use crate::util::{fo_add, to_int32, K, N};
@@ -62,7 +62,7 @@ struct Org {
     off: N,
 }
 
-/// An undoable map (UMap): `clear` is not logged, as in the TS (Map.prototype.clear is not overridden).
+/// An undoable map (UMap): `clear` is not logged (an undo after a clear does not restore the entries).
 struct UMap<Kx: std::hash::Hash + Eq + Copy> {
     m: HashMap<Kx, Org>,
     log: Vec<(Kx, Option<Org>)>,

@@ -1,4 +1,4 @@
-//! `src/semantics.ts` (the readable-output parts): well-known keys, the discriminator dictionary
+//! Semantics (the readable-output parts): well-known keys, the discriminator dictionary
 //! (rodata names, the selector vocabulary, the IDL), rodata strings and keys, Result layouts, and the
 //! comments constants get. The instruction-log naming (anchor flag, ix names, processors) is in
 //! `sbpf_print::names`.
@@ -414,7 +414,7 @@ fn name_at(db: &SelDb, i: usize) -> String {
 
 /// The indices of the expanded vocabulary whose `sha8("global:" + name)` is one of `wants`, by wanted value
 /// (ascending indices). The vocabulary is hashed on worker threads and only the wanted values are kept (the
-/// TS caches the whole (hash, index) table sorted by hash; a lookup finds the same names).
+/// same names a lookup in the whole (hash, index) table sorted by hash would find).
 fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
     let mut w: Vec<u64> = wants.to_vec();
     w.sort_unstable();
@@ -548,7 +548,7 @@ fn vocab_lookup_many(wants: &[u64]) -> HashMap<u64, String> {
         .collect()
 }
 
-/// selector.ts lookup: the name of an 8-byte discriminator given as 16 hex digits (`0x` optional), either
+/// Selector lookup: the name of an 8-byte discriminator given as 16 hex digits (`0x` optional), either
 /// byte order: the dataset's names, then `i:<verb>_<noun>` of the vocabulary (first in vocabulary order).
 pub fn selector_lookup(hex: &str) -> Option<String> {
     let h = hex.strip_prefix("0x").unwrap_or(hex).to_ascii_lowercase();
@@ -1092,7 +1092,7 @@ mod tests {
     }
     #[test]
     fn selector_lookups() {
-        // (node src/selector.ts <hex>)
+        // (sbpf-selector <hex>)
         let l = |h: &str| selector_lookup(h);
         assert_eq!(l("0xf8c69e91e17587c8").as_deref(), Some("i:swap"));
         assert_eq!(l("afaf6d1f0d989bed").as_deref(), Some("i:initialize"));

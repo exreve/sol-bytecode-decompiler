@@ -1,4 +1,4 @@
-//! The readable decompiler output (`decompile(bytes, { full: true, idl })`): decompile.ts from phase 3
+//! The readable decompiler output (library code included, with the IDL): from phase 3
 //! on (constants, Result layouts, out parameters, Anchor / selector naming, taint, CPI wrappers,
 //! accounts, Anchor Accounts / Context views, CPI naming, view types, inferred structs, field names,
 //! stripUndef, outlining), then per-function printing (printfn.rs) and the single file (layout.rs).
@@ -228,7 +228,7 @@ pub struct ReadFunc {
     pub var_types: Vec<(u32, String)>,
     /// the variables' names (by id)
     pub names: Vec<Option<String>>,
-    /// the analysis facts (src/analysis/facts.ts)
+    /// the analysis facts (analysis/facts.rs)
     pub facts: Option<crate::analysis::facts::FnFacts>,
 }
 
@@ -930,7 +930,7 @@ pub fn decompile_read_opts(
             sbpf_opt::optimize_only(f, Some(&img));
         }
     }
-    // (read in phase 4 of the TS, where p.funcs are the built functions: recoverVars works in place)
+    // (read in phase 4, where p.funcs are the built functions: recoverVars works in place)
     let mut facts = reg_facts(&pr.p);
     if let Some(l) = loader {
         facts.unaligned = l.starts_with("BPFLoader1111");
@@ -1075,7 +1075,7 @@ fn stubs(d: &mut Dx) {
     d.stubs = out;
 }
 
-/// security/fingerprints.json of a default-output result (layout.ts fingerprints).
+/// security/fingerprints.json of a default-output result.
 pub fn render_fingerprints(r: &ReadOut) -> String {
     let p = r.program.as_ref().unwrap();
     let img = p.image();
@@ -2223,7 +2223,7 @@ pub fn call_insns(d: &Dx, fpc: i64, target: &str) -> Vec<i64> {
     out
 }
 
-/// layout.ts renderSingle of the readable output (without the analysis summary block).
+/// The single file of the readable output (without the analysis summary block).
 pub fn render_read(r: &ReadOut) -> String {
     use sbpf_print::raw::{render_single_of, SingleFunc, SingleIn, SingleIx};
     let funcs = r

@@ -3,7 +3,7 @@
 //! and inside functions `const` / `let`, `if` / `else`, `while`, `do … while`, labels, `break` / `continue`,
 //! `return`, `switch`, and expressions with the TypeScript precedences (including `as` casts, member and
 //! element access, calls, `?:`, `void`). Statements end at `;`, `}` or a line break (automatic semicolon
-//! insertion). Nodes keep their source span (`text()` = TypeScript's `getText()`).
+//! insertion). Nodes keep their source span (`text()`: the node's source text).
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tk {
@@ -55,7 +55,7 @@ pub enum Ex {
 }
 
 impl Ex {
-    /// TypeScript's SyntaxKind name of the node (error messages)
+    /// the node kind's name (error messages)
     pub fn kind_name(&self) -> &'static str {
         match self {
             Ex::Num(_) => "NumericLiteral",

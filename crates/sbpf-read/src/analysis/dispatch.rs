@@ -1,4 +1,4 @@
-//! Indirect calls and native dispatchers (`src/analysis/flow.ts`, part 4): functions reached through
+//! Indirect calls and native dispatchers (flow layer, part 4): functions reached through
 //! constant function pointers / tables, and the per-instruction regions of a function matching on the
 //! instruction tag (splitDispatch).
 

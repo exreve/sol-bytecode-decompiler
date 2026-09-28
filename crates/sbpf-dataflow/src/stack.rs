@@ -1,7 +1,8 @@
-//! Stack slot promotion (`src/stack.ts`): frame locations accessed only directly (fp + const, one
+//! Stack slot promotion: frame locations accessed only directly (fp + const, one
 //! fixed size) and not reachable through any escaped frame pointer become ordinary variables.
 //!
-//! Offsets are JS numbers in TS (`Number(BigInt.asIntN(64, c))`, rounded past 2^53): `f64` here.
+//! Offsets are doubles (`f64`: the signed constant, rounded past 2^53); their arithmetic and
+//! comparisons are part of the output (slot names), so they stay doubles.
 
 use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E, L};
@@ -9,12 +10,12 @@ use sbpf_program::{Block, Func, Promoted, VarInfo};
 
 const FRAME: f64 = 4096.0;
 
-/// `Number(BigInt.asIntN(64, v))`
+/// The signed value of `v` as a double (rounded past 2^53).
 pub fn js_i64(v: u64) -> f64 {
     v as i64 as f64
 }
 
-/// fp + const → the constant (as a JS number), fp → 0.
+/// fp + const → the constant (as a double), fp → 0.
 pub fn fp_offset(ir: &Ir, e: E, fp: u32) -> Option<f64> {
     match ir.get(e) {
         Node::Var(id) if id == fp => Some(0.0),
@@ -26,7 +27,7 @@ pub fn fp_offset(ir: &Ir, e: E, fp: u32) -> Option<f64> {
     }
 }
 
-/// `BigInt.asUintN(64, BigInt(x))` of an integral double.
+/// An integral double as a u64 (modulo 2^64).
 pub fn js_as_u64(x: f64) -> u64 {
     debug_assert!(x.fract() == 0.0);
     (x as i128) as u64
@@ -145,8 +146,8 @@ impl Scan<'_> {
     }
 }
 
-/// Rebuilds `e` in the same arena, replacing nodes where `f` says so (pre-order), as TS's
-/// `{ ...e, a: rw(e.a) }` rewrites do (new nodes for every inner node, leaves kept).
+/// Rebuilds `e` in the same arena, replacing nodes where `f` says so (pre-order): new nodes for every
+/// inner node, leaves kept.
 pub fn rebuild(ir: &Ir, e: E, f: &mut dyn FnMut(&Ir, E, Node) -> Option<E>) -> E {
     let n = ir.get(e);
     if let Some(r) = f(ir, e, n) {

@@ -1,4 +1,4 @@
-//! Phase 3 (`src/analysis/phase3.ts`): path conditions of the operations, authority chains, arithmetic and
+//! Phase 3: path conditions of the operations, authority chains, arithmetic and
 //! division sites, per-operation proof checklists, the state machine of status-like fields.
 
 use super::report::Loc;

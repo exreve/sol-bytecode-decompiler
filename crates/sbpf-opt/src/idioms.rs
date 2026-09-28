@@ -1,4 +1,4 @@
-//! `src/idioms.ts`: multi-step bit tricks become named helpers (popcount, clz, ctz), multi-word
+//! Multi-step bit tricks become named helpers (popcount, clz, ctz), multi-word
 //! memory comparisons become memeq / keyeq.
 
 use crate::cfgopt::live_in_sets;
@@ -356,7 +356,7 @@ fn add_addr(x: &Fx, base: E, off: u64) -> E {
     }
 }
 
-/// JSON.stringify([stmts with pc 0, term]) equality of two blocks (sameBody).
+/// Structural equality of two blocks (statements with pc 0, terminator): sameBody.
 fn same_body(x: &Fx, f: &Func, a: usize, b: usize) -> bool {
     let (p, q) = (&f.blocks[a], &f.blocks[b]);
     if p.id == q.id {

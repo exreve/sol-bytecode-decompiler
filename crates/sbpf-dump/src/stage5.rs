@@ -1,4 +1,4 @@
-//! Stage 5 dumps (`types`, `rtext`, `readfile`): scripts/dump.ts dumpStage5.
+//! Stage 5 dumps (`types`, `rtext`, `readfile`).
 
 use crate::enc::*;
 use crate::stage3::threads;

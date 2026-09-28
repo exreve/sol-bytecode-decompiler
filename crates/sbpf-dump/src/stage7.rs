@@ -1,5 +1,5 @@
-//! Stage 7 dumps (`library`, `fingerprint`, the default-output line of `readfile`): scripts/dump.ts
-//! dumpStage7, and the program diff report (dumpDiff).
+//! Stage 7 dumps (`library`, `fingerprint`, the default-output line of `readfile`), and the program
+//! diff report.
 
 use crate::enc::*;
 use crate::stage3::threads;

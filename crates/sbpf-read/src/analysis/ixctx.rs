@@ -1,4 +1,4 @@
-//! The instructions and their contexts as the report layer builds them (the start of report.ts analyze0):
+//! The instructions and their contexts as the report layer builds them (the start of the report layer's analyze0):
 //! roots (instruction handlers, processors, else the entrypoint), native dispatch splits, the functions
 //! each instruction reaches through direct calls / function pointers (main path, call parents), its initial
 //! account rows; ctxResolver (native account resolvers along the call path).
@@ -31,7 +31,7 @@ pub struct IxCtx<'a> {
     pub tag: Option<(i64, u32)>,
     pub res: RefCell<HashMap<i64, Option<Rc<Resolver<'a>>>>>,
     pub ridom: RefCell<HashMap<i64, Rc<Vec<i32>>>>,
-    /// evaluatorsFor (audit.ts): the Anchor evaluation contexts of the instruction's functions
+    /// evaluatorsFor (audit): the Anchor evaluation contexts of the instruction's functions
     pub ev: RefCell<HashMap<i64, Option<Rc<super::anchor::ACtx<'a>>>>>,
     pub ev_ready: std::cell::Cell<bool>,
 }

@@ -1,5 +1,5 @@
-//! `src/rpc.ts` (minimal Solana JSON-RPC client for program binaries) and `idl.ts fetchIdl` (the on-chain
-//! Anchor IDL). There is no built-in endpoint: callers pass one. Error messages are the TS ones.
+//! A minimal Solana JSON-RPC client for program binaries, and the on-chain Anchor IDL fetch.
+//! There is no built-in endpoint: callers pass one.
 
 use sbpf_read::util::{b58, unb58};
 use serde_json::{json, Value};
@@ -13,7 +13,7 @@ pub fn is_address(s: &str) -> bool {
 }
 
 /// One HTTP POST of a JSON-RPC request (as `fetch` sends it): (status, body). A transport failure is
-/// `fetch failed` (an unparsable URL: `Failed to parse URL from <url>`), as the TS error message.
+/// `fetch failed` (an unparsable URL: `Failed to parse URL from <url>`).
 /// One JSON-RPC request: (HTTP status, body).
 pub fn post(rpc: &str, method: &str, params: Value) -> Result<(u16, String), String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
@@ -70,7 +70,7 @@ fn call(rpc: &str, method: &str, params: Value) -> Result<Value, String> {
     }
 }
 
-/// String(x) of a JSON value (numbers / booleans as JS prints them; objects as `[object Object]`).
+/// The text of a JSON value in an error message (numbers / booleans in their JSON form; objects as `[object Object]`).
 fn js_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn idl_address() {
-        // the TS anchorIdlAddress
+        // the Anchor IDL account address: create_with_seed(base, "anchor:idl", program)
         for (p, a) in [
             (
                 "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",

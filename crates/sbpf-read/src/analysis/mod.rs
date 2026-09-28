@@ -1,4 +1,4 @@
-//! Stage 8: the program analysis (`src/analysis/*`). 8a: the foundation — per-function facts collected
+//! Stage 8: the program analysis. 8a: the foundation — per-function facts collected
 //! while printing (facts.rs), the IR-level flow support (flow.rs: CFGs, dominators, reaching definitions,
 //! the account models, exit writes, dispatch splits, function pointers), value sources (sources.rs) and
 //! path conditions (paths.rs).
@@ -24,7 +24,7 @@ pub mod sources;
 
 use regex::Regex;
 
-/// A JS regex source as a `regex` crate pattern: `\w` `\d` `\b` `\W` are ASCII in JS (`\s` is Unicode in both).
+/// A rule pattern as a `regex` crate pattern: `\w` `\d` `\b` `\W` are ASCII in the rule patterns (`\s` is Unicode).
 pub fn jsre(p: &str) -> Regex {
     // compiled once per thread and pattern (the callers build patterns from names: the same ones recur)
     thread_local! {
@@ -81,7 +81,7 @@ fn jsre0(p: &str) -> Regex {
             continue;
         }
         if in_class && matches!(c, '[' | '&' | '~') {
-            // (literal in a JS class; nested classes / set operations in the regex crate)
+            // (literal in a rule pattern's class; nested classes / set operations in the regex crate)
             o.push('\\');
             o.push(c);
             continue;
@@ -94,10 +94,10 @@ fn jsre0(p: &str) -> Regex {
     Regex::new(&o).unwrap_or_else(|e| panic!("regex {p}: {e}"))
 }
 
-/// JS `\s` as class members
+/// `\s` (Unicode whitespace) as class members
 const JS_WS: &str = r"\t\n\x0B\x0C\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}";
 
-/// A static JS regex (compiled once).
+/// A static rule pattern (compiled once).
 #[macro_export]
 macro_rules! jre {
     ($p:expr) => {{
@@ -106,7 +106,7 @@ macro_rules! jre {
     }};
 }
 
-/// JS whitespace (`\s`, String.prototype.trim)
+/// Whitespace as `\s` and `trim` see it (Unicode)
 pub fn js_ws(c: char) -> bool {
     matches!(
         c,
@@ -253,7 +253,7 @@ pub fn locale_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-/// f64 map key (JS Map semantics for numbers: -0 is 0)
+/// f64 map key (SameValueZero: -0 is 0)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FK(pub u64);
 impl FK {
@@ -273,7 +273,7 @@ use std::cell::RefCell;
 use sbpf_ir::fx::HashMap;
 use std::rc::Rc;
 
-/// A built function as the analysis reads it (decompile.ts FuncOut).
+/// A built function as the analysis reads it (FuncOut).
 pub struct FnRef<'a> {
     pub pc: i64,
     pub name: String,
@@ -282,8 +282,8 @@ pub struct FnRef<'a> {
     pub names: Vec<Option<String>>,
 }
 
-/// The decompiler's result as the analysis reads it (decompile.ts Result), with the flow layer's state
-/// (shared with the printing phase: the same memos, as the TS's WeakMaps keyed by the same functions).
+/// The decompiler's result as the analysis reads it, with the flow layer's state (shared with the
+/// printing phase: the same memos, keyed by the same functions).
 pub struct An<'a> {
     pub p: &'a Program,
     pub fl: FlowCtx<'a>,
@@ -307,15 +307,15 @@ pub struct An<'a> {
     pub lib_pcs: sbpf_ir::fx::HashSet<i64>,
     /// the program's address (Result.programId)
     pub program_id: Option<String>,
-    /// (instruction context ids: every context object distinct, as the TS's memo keys)
+    /// (instruction context ids: every context distinct, as memo keys)
     pub ctx_ids: std::cell::Cell<u32>,
-    /// libcpi.ts memo
+    /// libcpi memo
     pub lib_cpi: RefCell<HashMap<i64, Option<libcpi::LibCpi>>>,
     /// phase2.ts lamportsGetter memo
     pub getters: RefCell<HashMap<i64, bool>>,
-    /// a TS exception the analysis would throw (its message; the analysis dump reports it)
+    /// a fatal error of the analysis (its message; the analysis dump reports it)
     pub err: RefCell<Option<String>>,
-    /// report-layer memos (per function, as the TS's WeakMaps): condition lines by condKey, the first pc of each
+    /// report-layer memos (per function): condition lines by condKey, the first pc of each
     /// printed line, the sysvar scan of each block, whether a function's text names SYSVAR_INSTRUCTIONS
     pub cond_lines: RefCell<HashMap<i64, Rc<HashMap<String, i64>>>>,
     pub line_pcs: RefCell<HashMap<i64, Rc<HashMap<i64, i64>>>>,

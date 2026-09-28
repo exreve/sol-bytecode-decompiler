@@ -1,4 +1,4 @@
-//! `src/ifconv.ts`: branches whose arms only assign variables become selects.
+//! Branches whose arms only assign variables become selects.
 
 use crate::cfgopt::distinct;
 use crate::*;
@@ -37,7 +37,7 @@ fn reads_any(x: &mut Fx, e: E, vs: &[u32]) -> bool {
     r
 }
 
-/// definitelyAssigned: per (block, variable) backward search over preds (see ifconv.ts).
+/// definitelyAssigned: per (block, variable) backward search over preds.
 struct Da {
     seen: Vec<u32>,
     stamp: u32,

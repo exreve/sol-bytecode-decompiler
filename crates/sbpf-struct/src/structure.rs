@@ -1,5 +1,5 @@
-//! `src/structure.ts`: stackifier structuring, controlled node splitting, the dispatcher fallback and
-//! the clean-up passes, in the TS order (same iteration orders, same budgets).
+//! Stackifier structuring, controlled node splitting, the dispatcher fallback and the clean-up passes.
+//! Iteration orders and budgets are part of the output (which shape a function gets).
 
 use crate::{Form, Label, SNode, Tree};
 use sbpf_ir::{BinOp, CallTarget, Node, Stmt, Term, E};
@@ -101,7 +101,7 @@ fn irreducible_edge(f: &Func, rpo: &[i32], idom: &[i32], order: &[usize]) -> boo
     false
 }
 
-/// An ordered set of block ids (JS `Set<number>`: insertion order, membership).
+/// An ordered set of block ids (insertion order, membership).
 #[derive(Clone, Default)]
 struct OSet {
     list: Vec<usize>,
@@ -553,7 +553,7 @@ fn dispatcher(f: &mut Func, order: &[usize], tree: &mut Tree) {
 
 // ======================= clean-up =======================
 
-/// A set of break labels, as a chain through the enclosing frames (JS `new Set([...c.breaks, label])`).
+/// A set of break labels, as a chain through the enclosing frames (the enclosing set plus `label`).
 struct Link<'a> {
     l: Label,
     next: Option<&'a Link<'a>>,
@@ -1156,7 +1156,7 @@ impl Cx<'_, '_> {
                 },
                 SNode::Block { label, body } => {
                     let mut body = self.dup_pass(body);
-                    // (checked cheapest first, as in TS; the rest nodes are still in place)
+                    // (checked cheapest first; the rest nodes are still in place)
                     let rest_len = len - i - 1;
                     let has_rest = rest_len > 0 && rest_len <= 4 && ends_in_jump(&ns, self.stmts);
                     let sz = if has_rest {

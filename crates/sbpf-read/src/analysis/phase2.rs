@@ -1,4 +1,4 @@
-//! Phase 2 (`src/analysis/phase2.ts`): dominance of the checks over the operations (across calls), trust rows,
+//! Phase 2: dominance of the checks over the operations (across calls), trust rows,
 //! parameter sources, relations, stored keys, authority rows, the rule engine; it runs phase 3 / audit /
 //! consistency on the way.
 

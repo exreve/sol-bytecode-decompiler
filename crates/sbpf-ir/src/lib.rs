@@ -1,19 +1,18 @@
-//! Intermediate representation: a port of `src/ir.ts`. Every value is an unsigned 64-bit integer;
-//! every operator has exactly the sBPF VM semantics.
+//! Intermediate representation. Every value is an unsigned 64-bit integer; every operator has
+//! exactly the sBPF VM semantics.
 //!
-//! Representation (see docs/RUST_PORT.md, "IR representation"): expressions are immutable 16-byte
+//! Representation (see docs/INTERNALS.md, "IR"): expressions are immutable 16-byte
 //! nodes in an append-only arena ([`Ir`]) addressed by [`E`] ids; lists (call arguments, `stores`
 //! values) are runs of consecutive `Item` nodes in the same arena ([`L`]). There is no hash-consing:
-//! every constructor call creates a new node, so an id is the exact counterpart of a JS object
-//! reference (`a === b` in TS is `a == b` on ids, and "the pass returned the same object" keeps its
-//! meaning). Statements and terminators are small `Clone` values holding ids.
+//! every constructor call creates a new node, so an id is a node's identity (two ids are equal
+//! exactly when they name the same node, and "the pass returned the same node" is id equality). Statements and terminators are small `Clone` values holding ids.
 //!
 //! The arena uses interior mutability so that nested constructors (`ir.bin(Add, ir.reg(1), ir.c(8))`)
 //! work through a shared reference. It is sound because no method ever hands out a reference into its
 //! vectors: every read copies a `Node` / `E` out.
 //!
 //! Pcs are `i64`: jump and call targets may fall outside the text (negative or past the end) and are
-//! kept as computed, like the TS numbers.
+//! kept as computed.
 
 pub mod fx;
 
@@ -308,8 +307,7 @@ impl Ir {
         self.mk(Node::Load { size, addr })
     }
 
-    /// Deep copy of `e` from another arena (new nodes for every node, as the TS object graph would
-    /// be rebuilt), with `leaf` replacing nodes first (pre-order, `mapExprPre`).
+    /// Deep copy of `e` from another arena (new nodes for every node), with `leaf` replacing nodes first (pre-order, `mapExprPre`).
     pub fn import(&self, from: &Ir, e: E, leaf: &mut impl FnMut(&Ir, E, Node) -> Option<E>) -> E {
         let n = from.get(e);
         if let Some(r) = leaf(self, e, n) {

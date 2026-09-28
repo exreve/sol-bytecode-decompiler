@@ -1,4 +1,4 @@
-//! `src/anchor.ts`: Anchor account recovery from `Error::with_account_name("<field>")` calls: account
+//! Anchor account recovery from `Error::with_account_name("<field>")` calls: account
 //! names, the checks on them, the variables holding them; the Accounts struct layout of try_accounts.
 
 use crate::util::{fo_any, stmt_exprs, term_br, var_of, K, N};

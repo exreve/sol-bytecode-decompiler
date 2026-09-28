@@ -1,4 +1,4 @@
-//! Incident-class rules (`src/analysis/incidents.ts`) on the IR of each instruction's reachable functions (the
+//! Incident-class rules on the IR of each instruction's reachable functions (the
 //! blocks its dispatch allows): introspection-unchecked, flash-repay-unbound, stale-after-cpi,
 //! token2022-amount-assumed, oracle-unvalidated, signer-to-untrusted-program, rounding-favors-user; and the
 //! informational fund movers.
@@ -88,7 +88,7 @@ fn sum_of(ir: &sbpf_ir::Ir, e: E) -> Sum {
     s
 }
 
-/// incidents.ts stmtExprs (call statements: their arguments only)
+/// stmtExprs of the incident rules (call statements: their arguments only)
 fn stmt_exprs(ir: &sbpf_ir::Ir, s: &Stmt) -> Vec<E> {
     match s {
         Stmt::Set { e, .. } | Stmt::Eval { e, .. } => vec![*e],
@@ -186,7 +186,7 @@ struct F {
 
 type DefSites = (HashMap<u32, Vec<(E, Pos)>>, HashMap<FK, Vec<(E, Pos)>>);
 
-/// the program-wide memos (the TS WeakMaps keyed by the result / functions)
+/// the program-wide memos (keyed by the result / functions)
 #[derive(Default)]
 pub struct IncMemo {
     blocks: RefCell<HashMap<(i64, usize), Rc<BlockExprs>>>,

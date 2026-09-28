@@ -1,4 +1,4 @@
-//! `src/simplify.ts`: exact expression simplification, the optimizeFunc pass loop, variable
+//! Exact expression simplification, the optimizeFunc pass loop, variable
 //! propagation and dead code elimination.
 
 use crate::cfgopt::{

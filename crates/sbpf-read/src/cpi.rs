@@ -1,4 +1,4 @@
-//! `src/cpi.ts`: CPI / PDA / fmt call sites of a structured body (frame contents at the call along
+//! CPI / PDA / fmt call sites of a structured body (frame contents at the call along
 //! straight-line code), their one-line descriptions, and the frame objects they show the role of.
 
 use crate::sem::known_key;
@@ -46,7 +46,7 @@ pub struct CpiSite {
 /// Sites keyed by the node containing the call (in discovery order).
 pub type Sites<'t> = sbpf_ir::fx::IndexMap<*const SNode, (&'t SNode, CpiSite)>;
 
-/// addOff (cpi.ts)
+/// addOff
 pub fn add_off(ir: &Ir, e: E, i: N) -> E {
     if i == 0.0 {
         return e;
@@ -337,7 +337,7 @@ pub fn find_cpi_sites<'t>(
     w.sites
 }
 
-/// The environment of the descriptions (cpi.ts CpiEnv).
+/// The environment of the descriptions (CpiEnv).
 pub struct CpiEnv<'a> {
     pub ir: &'a Ir,
     pub fp: Option<u32>,
@@ -823,7 +823,7 @@ pub struct PartAcc {
     pub text: String,
     pub w: Option<N>,
     pub s: Option<N>,
-    /// the TS object's key order (security/analysis.json serializes it as-is)
+    /// the key order of security/analysis.json (serialized as-is)
     pub ord: KeyOrd,
 }
 

@@ -1,4 +1,4 @@
-//! Where the values of an instruction come from (`src/analysis/sources.ts`): a backward walk from an
+//! Where the values of an instruction come from: a backward walk from an
 //! expression through definitions, frame slots, parameters (up the call path) and pointers, down to the
 //! sources: instruction data, account keys / data / lamports / owners, sysvars, CPI return data.
 

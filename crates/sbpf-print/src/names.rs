@@ -1,14 +1,14 @@
 //! Function naming of `decompile` (the part the raw output uses): instruction handler names from the
 //! "Instruction: X" logs (`Semantics.scanInstructionLogs` / `classifyInstructionLogs`), `nameThunks`,
 //! helper-name suffixes and symbol sanitizing. Runs on the register-level blocks (after
-//! inferSignatures, before variable recovery), as the TS pipeline does.
+//! inferSignatures, before variable recovery).
 
 use sbpf_ir::fx::IndexMap;
 use sbpf_ir::{CallTarget, Node, Stmt, Term};
 use sbpf_program::Program;
 use sbpf_ir::fx::{HashMap, HashSet};
 
-/// What the raw output uses of `Semantics` (src/semantics.ts).
+/// What the raw output uses of `Semantics` (instruction-log classification).
 #[derive(Clone, Debug, Default)]
 pub struct Sem {
     /// the program contains "AnchorError occurred" (non-executable memory)
@@ -19,7 +19,7 @@ pub struct Sem {
     pub processors: IndexMap<i64, Vec<String>>,
 }
 
-/// snake (semantics.ts): `aB` -> `a_B`, `ABc` -> `A_Bc`, whitespace runs -> `_`, lower case.
+/// snake: `aB` -> `a_B`, `ABc` -> `A_Bc`, whitespace runs -> `_`, lower case.
 pub fn snake(s: &str) -> String {
     let b: Vec<char> = s.chars().collect();
     // /([a-z0-9])([A-Z])/g
@@ -263,7 +263,7 @@ const WRAP: &[(&str, &str)] = &[
     ("sol_get_rent_sysvar", "rent_get"),
 ];
 
-/// The output language's own helpers (decompile.ts HELPERS).
+/// The output language's own helpers (names a program function must not take).
 pub const HELPERS: &[&str] = &[
     "copy",
     "copyr",
@@ -371,7 +371,7 @@ fn is_ident(n: &str) -> bool {
             .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$')
 }
 
-/// The TS name sanitizing: `::` -> `__`, runs of non-`[\w$]` -> `_`, a leading digit (or nothing) gets `_`.
+/// Symbol name sanitizing: `::` -> `__`, runs of non-`[\w$]` -> `_`, a leading digit (or nothing) gets `_`.
 fn sanitize(n: &str) -> String {
     let n = n.replace("::", "__");
     let mut out = String::with_capacity(n.len());

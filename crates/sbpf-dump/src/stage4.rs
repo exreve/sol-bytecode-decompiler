@@ -1,4 +1,4 @@
-//! Stage 4 dumps (`struct`, `text`, `rawfile`): scripts/dump.ts dumpStage4.
+//! Stage 4 dumps (`struct`, `text`, `rawfile`).
 
 use crate::enc::*;
 use crate::stage3::threads;

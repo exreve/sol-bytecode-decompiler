@@ -1,30 +1,30 @@
-//! JS semantics helpers (numbers, strings, JSON) and IR helpers shared by the readable-output modules.
+//! Number, string and JSON helpers with the output's formatting rules, and IR helpers shared by the
+//! readable-output modules.
 //!
-//! Offsets and sizes that the TS computes as `number` from IR constants (`Number(BigInt.asIntN(64, c))`)
-//! are `f64` here ([`N`]), with the same double arithmetic: a constant beyond 2^53 rounds, and two such
-//! offsets can compare or hash equal exactly when they do in the TS. Map keys over them use [`K`]
-//! (SameValueZero: -0 and +0 are one key).
+//! Offsets and sizes computed from IR constants (the signed 64-bit value) are doubles ([`N`]): a
+//! constant beyond 2^53 rounds, and two such offsets compare or hash equal exactly when their doubles do
+//! (the output depends on it). Map keys over them use [`K`] (SameValueZero: -0 and +0 are one key).
 
 use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, Term, E, L};
 use sbpf_program::Func;
 use sbpf_struct::SNode;
 
-/// A TS runtime error (TypeError etc.) thrown out of the whole decompilation (caught at the top).
+/// A fatal error thrown out of the whole decompilation (caught at the top).
 pub struct JsError(pub String);
 
 pub fn js_throw(m: &str) -> ! {
     std::panic::panic_any(JsError(m.into()))
 }
 
-/// A JS number.
+/// A double (offsets, sizes, counts).
 pub type N = f64;
 
-/// Number(BigInt.asIntN(64, v))
+/// The signed value of `v` as a double (rounded past 2^53).
 #[inline]
 pub fn n_s(v: u64) -> N {
     v as i64 as f64
 }
-/// Number(v) of a u64 bigint
+/// The u64 `v` as a double (rounded past 2^53).
 #[inline]
 pub fn n_u(v: u64) -> N {
     v as f64
@@ -44,7 +44,7 @@ impl K {
     }
 }
 
-/// BigInt.asUintN(64, BigInt(x)) of an integral double.
+/// An integral double as a u64 (modulo 2^64).
 #[inline]
 pub fn big_u(x: N) -> u64 {
     (x as i128) as u64
@@ -114,7 +114,7 @@ pub fn json_str_into(o: &mut String, s: &str) {
     }
 }
 
-/// UTF-16 length of a string (JS `.length`).
+/// UTF-16 length of a string.
 pub fn u16len(s: &str) -> usize {
     // one unit per char (every byte but continuation bytes), two for 4-byte sequences
     s.bytes().filter(|&b| b & 0xc0 != 0x80).count() + s.bytes().filter(|&b| b >= 0xf0).count()
@@ -240,7 +240,7 @@ pub fn camel_split_space(s: &str) -> String {
 
 // ---------------- IR helpers ----------------
 
-/// exprEq (ir.ts): structural equality; calls are never equal.
+/// exprEq: structural equality; calls are never equal.
 pub fn expr_eq(ir: &Ir, a: E, b: E) -> bool {
     if a == b {
         // (the same object: equal unless it contains a call)
@@ -541,7 +541,7 @@ pub fn uses_var(ir: &Ir, e: E, v: u32) -> bool {
     u
 }
 
-/// stmtExprs (simplify.ts)
+/// stmtExprs: the expressions of a statement
 pub fn stmt_exprs(ir: &Ir, s: &Stmt) -> Vec<E> {
     let mut v = Vec::new();
     sbpf_opt::stmt_exprs(ir, s, &mut v);
@@ -788,7 +788,7 @@ mod tests {
     }
 }
 
-/// JS `Math.max(a, b)`: NaN when either is NaN.
+/// `max(a, b)`, NaN when either is NaN.
 pub fn jmax(a: N, b: N) -> N {
     if a.is_nan() || b.is_nan() {
         N::NAN

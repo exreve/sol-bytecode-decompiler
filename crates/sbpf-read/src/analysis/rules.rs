@@ -1,6 +1,6 @@
-//! The rule engine of phase 2 (`src/analysis/phase2.ts` RULES): declarative rules over the per-instruction facts
+//! The rule engine of phase 2 (RULES): declarative rules over the per-instruction facts
 //! (checks, operations, trust, relations, authority rows, audit facts, phase 3 sites). The incident rules
-//! (incidents.ts), the dispatcher grouping and the ranking of the findings come after (8c).
+//! (incidents.rs), the dispatcher grouping and the ranking of the findings come after (8c).
 
 use super::phase2::{is_value_or_auth, Finding};
 use super::phase3::close_zeroing;
@@ -633,8 +633,8 @@ fn mint_unanchored(ix: &IxOut) -> Vec<F> {
     out
 }
 
-/// V8's Array.prototype.sort for arrays shorter than 64 (one run: CountAndMakeRun, then binary insertion), with an
-/// inconsistent comparator as the TS gives it
+/// The sort of short lists (below 64: one run, CountAndMakeRun, then binary insertion) under an inconsistent
+/// comparator: the finding order depends on this exact algorithm (a TimSort's), so it is kept as is
 fn v8_sort<T>(v: &mut Vec<T>, cmp: impl Fn(&T, &T) -> i32) {
     let n = v.len();
     if n < 2 {

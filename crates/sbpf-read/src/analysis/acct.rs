@@ -1,4 +1,4 @@
-//! The native account model (`src/analysis/flow.ts`, part 2): abstract values of pointers into the
+//! The native account model (flow layer, part 2): abstract values of pointers into the
 //! accounts (an &[AccountInfo] slice, the input records, the RcBoxes of lamports / data, fields), the
 //! evaluator (avEvaluator), root classification, and the per-function account resolver.
 
@@ -201,7 +201,7 @@ fn c_info_field(o: f64) -> Option<(&'static str, u8)> {
     })
 }
 
-/// (JS `%` on numbers)
+/// (floating-point remainder: the sign of the dividend)
 fn jmod(a: f64, b: f64) -> f64 {
     a % b
 }
@@ -1343,7 +1343,7 @@ fn classify_roots<'a>(
     set
 }
 
-/// The account resolver of a native function (flow.ts accountResolver).
+/// The account resolver of a native function (accountResolver).
 pub struct Resolver<'a> {
     pub f: &'a Func,
     d: Rc<Defs<'a>>,
@@ -2222,7 +2222,7 @@ impl<'a> Resolver<'a> {
         }
         let mut seen: HashSet<E> = HashSet::default();
         let mut todo: Vec<(E, Pos, u32)> = vec![(c, p0, 0)];
-        // (a walk per expression, in the TS order: depth-first, a variable's definition scanned where it is met)
+        // (a walk per expression, depth-first, a variable's definition scanned where it is met)
         fn scan<'a>(
             r: &Resolver<'a>,
             fl: &FlowCtx<'a>,

@@ -1,4 +1,4 @@
-//! decompile.ts phase 4 printing: stripUndef, outlining, per-function names and view types, the
+//! Phase 4 printing: stripUndef, outlining, per-function names and view types, the
 //! printing hooks (typed views, account fields, input fields, frame objects and regions, strings, keys,
 //! Result tags, stored strings, CPI / PDA / fmt notes), the function texts and the outlined helpers.
 
@@ -3669,7 +3669,7 @@ fn unused() {
 }
 
 /// The IDL argument view of the function's instruction (`views.map.get(vname) ?? views.borshView(...)`):
-/// added to the shared table while the function is named, as in the TS.
+/// added to the shared table while the function is named (later functions see it).
 fn add_args_view(d: &mut Dx, fi: usize) -> Option<String> {
     match args_view_of(d, fi) {
         ArgsView::None => None,

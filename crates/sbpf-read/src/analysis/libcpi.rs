@@ -1,4 +1,4 @@
-//! Anchor CPI helpers the library database does not name (`src/analysis/libcpi.ts`: anchor_spl::token::
+//! Anchor CPI helpers the library database does not name (anchor_spl::token::
 //! initialize_account3 / initialize_mint2, behind `init` of token accounts and mints), recognized in the bytecode of
 //! the library function the handler calls; the accounts of a library helper's CpiContext (ctxAccounts).
 

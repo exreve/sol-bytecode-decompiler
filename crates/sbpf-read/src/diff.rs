@@ -1,4 +1,4 @@
-//! `src/diff.ts`: program diff from bytecode alone (upgrade diff / fork-family matching). Functions
+//! Program diff from bytecode alone (upgrade diff / fork-family matching). Functions
 //! are matched by address-independent hash, then register-renamed hash, instruction / symbol name,
 //! and finally by coarse shape + call-graph neighbourhood.
 
@@ -390,7 +390,7 @@ fn changed_insns(a: &[String], b: &[String]) -> usize {
     d
 }
 
-/// `x.toFixed(1)` of a non-negative number (JS rounds a tie up: 0.25 -> "0.3").
+/// `x` with one decimal, non-negative (the exact decimal value, a tie rounds up: 0.25 -> "0.3").
 fn to_fixed1(x: f64) -> String {
     if x.fract() == 0.25 {
         return format!("{}.3", x.trunc());

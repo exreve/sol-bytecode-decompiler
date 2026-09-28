@@ -1,4 +1,4 @@
-//! IR-level path conditions and value identity (`src/analysis/paths.ts`): the branch conditions holding on
+//! IR-level path conditions and value identity: the branch conditions holding on
 //! every path to a point (up the dominator tree, then up the instruction's call path), and canonical value
 //! keys of expressions at positions.
 
@@ -22,7 +22,7 @@ pub struct IrCond {
     pub panics: bool,
 }
 
-/// The memos of the value keys (paths.ts Ir: statements by pc, keys per expression).
+/// The memos of the value keys (statements by pc, keys per expression).
 #[derive(Default)]
 pub struct PathMemo {
     stmts: RefCell<HashMap<i64, Rc<HashMap<i64, (usize, usize)>>>>,

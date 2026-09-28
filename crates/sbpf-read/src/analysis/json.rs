@@ -1,5 +1,5 @@
-//! A small ordered JSON value for the security/ files: objects keep insertion order (as the TS objects
-//! `JSON.stringify` serializes), `undefined` members are left out by the builders.
+//! A small ordered JSON value for the security/ files: objects keep insertion order (the files' key
+//! order), absent members are left out by the builders.
 
 use crate::util::js_num;
 

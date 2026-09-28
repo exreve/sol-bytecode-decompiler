@@ -1,10 +1,9 @@
-//! Concrete execution for analyses (stage 6): a port of `src/exec.ts` (the `Exec` interpreter with all
-//! calls followed, syscall models, `ExecMem` paged memory with input taint, forced / flipped branches) and
-//! of `callTargetName` (`src/emu.ts`). Runs only ever produce comments, names and view layouts.
+//! Concrete execution for analyses (stage 6): the `Exec` interpreter with all calls followed, syscall
+//! models, `ExecMem` paged memory with input taint, forced / flipped branches, and `call_target_name`.
+//! Runs only ever produce comments, names and view layouts.
 //!
-//! Registers are plain `u64`s here (the TS keeps int32 halves for speed; the arithmetic is the same
-//! modulo 2^64). Step accounting follows the TS exactly: a frame's steps are counted when it returns,
-//! aborts or runs out of steps, not when a `Stop` / `Limit` from a call ends it.
+//! Step accounting is part of the output (a budget cut changes what a run finds): a frame's steps are
+//! counted when it returns, aborts or runs out of steps, not when a `Stop` / `Limit` from a call ends it.
 
 pub mod hash;
 
@@ -61,7 +60,7 @@ mod indexmap_lite {
 pub type BranchKey = i64;
 
 /// Exceptions of a run: `Abort` (an expected outcome), `Limit` (out of steps / too deep), `Stop` (a hook
-/// ended the run), `Fatal` (a TS runtime error: propagates out of the whole decompilation).
+/// ended the run), `Fatal` (an internal error: propagates out of the whole decompilation).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Exc {
     Abort(String),
@@ -100,7 +99,7 @@ fn sys_by_hash(h: u32) -> String {
     }
 }
 
-/// callTargetName (emu.ts): the target of the call instruction at pc, independent of the lifter.
+/// The target of the call instruction at pc, independent of the lifter.
 pub fn call_target_name(p: &Program, pc: i64, imm: i32) -> CallName {
     let n = p.insns.len() as i64;
     if p.version >= 3 {
@@ -127,7 +126,7 @@ pub fn call_target_name(p: &Program, pc: i64, imm: i32) -> CallName {
     CallName::Hash(imm as u32)
 }
 
-/// The exec target of a call instruction (exec.ts callTarget): a function entry, a syscall name, or
+/// The exec target of a call instruction: a function entry, a syscall name, or
 /// None (an invalid v3 call).
 #[derive(Clone, Debug)]
 enum Target {
@@ -156,8 +155,7 @@ struct Cfg {
     end: i64,
 }
 
-/// Per-program state shared by all runs of a decompilation (the TS keeps these in WeakMaps keyed by the
-/// program): call targets, function extents, machine-level CFGs and reachability sets, image pages.
+/// Per-program state shared by all runs of a decompilation: call targets, function extents, machine-level CFGs and reachability sets, image pages.
 pub struct ProgCtx<'p> {
     pub p: &'p Program,
     /// image regions in address order: (vaddr, bytes)
@@ -450,7 +448,7 @@ pub trait MemObserver {
     fn copy(&mut self, addr: u64, b: &[u8]);
 }
 
-/// Paged memory (see exec.ts ExecMem): image bytes read-only where mapped, else pseudo-random bytes from
+/// Paged memory: image bytes read-only where mapped, else pseudo-random bytes from
 /// the seed (0: zeros); per-byte input taint.
 pub struct ExecMem<'c> {
     ctx: &'c ProgCtx<'c>,
@@ -707,7 +705,7 @@ pub trait Hooks {
 pub struct NoHooks;
 impl Hooks for NoHooks {}
 
-/// Runs functions with all calls followed (exec.ts Exec).
+/// Runs functions with all calls followed.
 pub struct Exec<'c> {
     pub ctx: &'c ProgCtx<'c>,
     pub mem: ExecMem<'c>,
@@ -767,7 +765,7 @@ impl<'c> Exec<'c> {
         self.flipped.iter().copied().collect()
     }
 
-    /// Run the function at `pc` (see exec.ts run). `Err` only for a fatal (TS runtime) error.
+    /// Run the function at `pc`. `Err` only for a fatal (internal) error.
     pub fn run(
         &mut self,
         h: &mut dyn Hooks,
@@ -1298,7 +1296,7 @@ impl<'c> Exec<'c> {
         self.mem.write(addr, &b, TaintArg::All(1));
     }
 
-    /// Syscall models (exec.ts syscall). `at`: taint of the argument registers.
+    /// Syscall models. `at`: taint of the argument registers.
     pub fn syscall(&mut self, name: &str, a: &[u64; 5], at: &[u8; 5]) -> R<u64> {
         let n = (a[2] & 0xffff_ffff) as usize;
         let m = &mut self.mem;
@@ -1428,7 +1426,7 @@ impl<'c> Exec<'c> {
     }
 }
 
-/// The v2 product / quotient / remainder instructions (class 6), as emu.ts.
+/// The v2 product / quotient / remainder instructions (class 6), as the reference interpreter runs them.
 fn pqr_op(o: u8, d: u64, s: u64, imm32: i32) -> R<u64> {
     let bad = || Err(Exc::Abort(format!("invalid instruction 0x{o:x}")));
     let immu = imm32 as i64 as u64;

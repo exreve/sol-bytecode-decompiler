@@ -1,10 +1,11 @@
-//! Stage 4a: control-flow structuring. Ports `src/structure.ts` (stackifier structuring, node splitting
-//! for irreducible CFGs, the state-machine fallback, the clean-up passes) and `src/stmtidioms.ts`.
+//! Stage 4a: control-flow structuring ([`structure`]: stackifier structuring, node splitting for
+//! irreducible CFGs, the state-machine fallback, the clean-up passes) and statement idioms
+//! ([`stmtidioms`]).
 //!
 //! The structured body is a tree of [`SNode`]s. Statements live in a per-function table
-//! ([`Tree::stmts`]) and nodes refer to them by index: a TS statement *object* is an index here, so
-//! identity-keyed maps of the later stages (declarations) port 1:1 — a statement copied by the TS
-//! code (`{ ...s }`: node splitting, `cloneNodes`) is a new table entry, a moved one keeps its index.
+//! ([`Tree::stmts`]) and nodes refer to them by index: an index is a statement's identity, which the
+//! identity-keyed maps of the later stages (declarations) rely on — a copied statement (node
+//! splitting, `cloneNodes`) is a new table entry, a moved one keeps its index.
 
 use sbpf_ir::{Stmt, E};
 use std::sync::Arc;
@@ -64,7 +65,7 @@ impl Form {
     }
 }
 
-/// `src/structure.ts` `Node`.
+/// A node of the structured body.
 #[derive(Clone, Debug)]
 pub enum SNode {
     /// index into [`Tree::stmts`]
@@ -104,7 +105,7 @@ pub struct Tree {
     pub stmts: Vec<Stmt>,
     pub body: Vec<SNode>,
     pub irreducible: bool,
-    /// statements copied from a block of the function (the same TS object as `f.blocks[b].stmts[i]`):
+    /// statements taken from a block of the function (the same statement as `f.blocks[b].stmts[i]`):
     /// index -> (block, index in the block); copies made by later passes are not in it
     pub origin: sbpf_ir::fx::HashMap<u32, (u32, u32)>,
 }

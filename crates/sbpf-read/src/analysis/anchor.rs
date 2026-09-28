@@ -1,4 +1,4 @@
-//! Anchor support of the flow layer (`src/analysis/flow.ts`, part 3): account objects serialized back on
+//! Anchor support of the flow layer (part 3): account objects serialized back on
 //! exit (exit functions, exit writes), the handler's account evaluator (HVal: frame pointers,
 //! &AccountInfo words, RcBoxes of lamports / data), try_accounts' layout (tryInfo, byValueTry), the
 //! writes the handler's logic makes in the functions it calls (calleeWrites).
@@ -83,7 +83,7 @@ pub fn snake1(s: &str) -> String {
         .to_lowercase()
 }
 
-/// flow.ts snake
+/// snake case of an Anchor name
 pub fn snake2(s: &str) -> String {
     let a = crate::jre!(r"([a-z0-9])([A-Z])").replace_all(s, "${1}_${2}");
     let b = crate::jre!(r"([A-Z]+)([A-Z][a-z])").replace_all(&a, "${1}_${2}");
@@ -750,7 +750,7 @@ impl HK {
     }
 }
 
-/// a value that is not a frame pointer (a JS object: shared by reference, mutable in place)
+/// a value that is not a frame pointer (shared by reference, mutable in place)
 #[derive(Clone, Debug)]
 pub struct HA {
     pub k: HK,

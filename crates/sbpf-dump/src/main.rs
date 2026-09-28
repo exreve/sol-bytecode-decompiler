@@ -1,4 +1,4 @@
-//! Stage dumps, byte-identical to `scripts/dump.ts` (encoding: rs/README.md), and a stage timer.
+//! Stage dumps (canonical JSON lines per pipeline stage, see docs/INTERNALS.md) and a stage timer.
 //!
 //!   sbpf-dump prog.so [--idl x.json] [--stages elf,insns,cfg,lift,dataflow,vars,stack,stackargs,opt,optir,compact,struct,text,rawfile,types,rtext,readfile,library,fingerprint] out_dir
 //!   sbpf-dump --time [--iters N] prog.so...
@@ -257,7 +257,7 @@ fn dump_all(
     res
 }
 
-/// Stage timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts.
+/// Stage timings (ms, best of `iters`), per pipeline stage.
 fn time(files: &[String], iters: usize) {
     println!("file\telf\tdecode\tdiscover_lazy\tload_lazy\tload_full\tlift_all\tsignatures\trecover\tpromote\tstackargs");
     for f in files {
@@ -343,7 +343,7 @@ fn time(files: &[String], iters: usize) {
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
-    // deep expression trees are walked recursively (TS runs with --stack-size=65500)
+    // deep expression trees are walked recursively: a big stack
     let t = std::thread::Builder::new()
         .stack_size(1 << 30)
         .spawn(real_main)
@@ -571,7 +571,7 @@ fn timecli(files: &[String], iters: usize) {
     }
 }
 
-/// Stage 4 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage4
+/// Stage 4 timings (ms, best of `iters`)
 /// (struct = structure + cleanup + statementIdioms, print = names + declarations + text, summed over
 /// all functions), single-threaded, then the same on worker threads (wall time).
 fn time4(files: &[String], iters: usize) {
@@ -607,7 +607,7 @@ fn time4(files: &[String], iters: usize) {
     }
 }
 
-/// Stage 3 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage3.
+/// Stage 3 timings (ms, best of `iters`), per optimizer pass.
 fn time3(files: &[String], iters: usize) {
     use sbpf_opt::{compact, idioms, optimize_func, Fx};
     println!("file\topt1\tpromote\topt2\tidioms\topt3\tstackargs\tsink\tcompact\ttotal\tparallel");
@@ -693,12 +693,12 @@ fn time3(files: &[String], iters: usize) {
     }
 }
 
-/// Stage 5 timings (ms, best of `iters`): the same breakdown as scripts/stagetime.ts --stage5 (the whole
+/// Stage 5 timings (ms, best of `iters`) (the whole
 /// raw / readable output, single file included, without the analysis), on 1 thread and on worker threads.
 /// Stage 7 timings (ms, best of `iters`): the --full readable output and the default output (library
-/// code as stubs), single file included, on one thread and on worker threads (as scripts/stagetime.ts --stage7).
-/// Stage 8 timings (ms, best of `iters`): the analysis foundation on the default output (the flow dump, as
-/// scripts/stagetime.ts --stage8).
+/// code as stubs), single file included, on one thread and on worker threads.
+/// Stage 8 timings (ms, best of `iters`): the analysis foundation on the default output (the flow
+/// dump).
 /// The analysis column: the report layer up to phase 2's rule findings (stage 8b), on a fresh decompile.
 fn time8(files: &[String], iters: usize) {
     println!("file\tflow\tanalysis");

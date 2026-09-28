@@ -1,4 +1,4 @@
-//! Stage 3 dumps (`opt`, `optir`, `compact`): scripts/dump.ts dumpStage3.
+//! Stage 3 dumps (`opt`, `optir`, `compact`).
 
 use crate::enc::*;
 use crate::stage2::{func_ir, vars_of};

@@ -1,4 +1,4 @@
-//! SBF stack-passed arguments become ordinary parameters (`src/stackargs.ts`): the callee reads
+//! SBF stack-passed arguments become ordinary parameters: the callee reads
 //! arguments 5.. through `r5 - 0x1000 + 8k`; the caller stores them in its own frame's argument area.
 
 use crate::stack::{fp_offset, js_as_u64, rebuild};

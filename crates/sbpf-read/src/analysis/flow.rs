@@ -1,10 +1,10 @@
-//! IR-level support for the program analysis (`src/analysis/flow.ts`, part 1): control-flow graphs with
+//! IR-level support for the program analysis (flow layer, part 1): control-flow graphs with
 //! real dominators, decision blocks, small IR helpers, reaching definitions (`Defs`: per-variable /
 //! per-frame-slot fixpoint, order-independent), what calls write through pointer arguments.
 //!
-//! Expression identity: the TS compares expression objects; here a function's expressions are ids in its
-//! arena, and expressions the TS creates on the fly (a copy seen as a load, a call statement as a call
-//! expression) are new ids created at the same events.
+//! Expression identity: a function's expressions are ids in its arena; expressions made on the fly (a
+//! copy seen as a load, a call statement as a call expression) are new ids, created at fixed events so
+//! that memo keys over them are deterministic.
 
 use super::FK;
 use sbpf_ir::fx::IndexMap;
@@ -27,7 +27,7 @@ pub fn fir(f: &Func) -> &Ir {
     f.ir.as_ref().expect("variable IR")
 }
 
-/// Number(BigInt.asIntN(64, v))
+/// The signed value of `v` as a double (rounded past 2^53).
 pub fn s_num(v: u64) -> f64 {
     v as i64 as f64
 }
@@ -881,7 +881,7 @@ pub fn call_writes(fl: &FlowCtx, t: &CallTarget, j: usize, depth: i32) -> f64 {
     n
 }
 
-/// An accounts iterator advanced by a callee (see flow.ts iterAdvance): the AccountInfos taken on a path.
+/// An accounts iterator advanced by a callee (iterAdvance): the AccountInfos taken on a path.
 pub fn iter_advance(fl: &FlowCtx, pc: i64, j: usize, k: i64, depth: i32) -> i64 {
     let cl = &fl.callee;
     let key = (pc, j, k, depth);

@@ -1,4 +1,4 @@
-//! `src/anchorstate.ts`: in-memory layouts of deserialized Anchor accounts from concrete runs of the
+//! In-memory layouts of deserialized Anchor accounts from concrete runs of the
 //! account-taking callees of try_accounts (sbpf-exec), and the objects try_accounts builds from them.
 
 use crate::anchor::{name_arg, out_aliases, StrAt};
@@ -134,7 +134,7 @@ const K2: u64 = BASE + 0x100;
 const DC: u64 = BASE + 0x200;
 const LC: u64 = BASE + 0x300;
 
-/// The shared state of the runs of a decompilation (memo tables the TS keeps per program).
+/// The shared state of the runs of a decompilation (memo tables per program).
 pub struct StateCtx<'c> {
     pub ctx: &'c ProgCtx<'c>,
     loader_memo: std::sync::Mutex<HashMap<(i64, u64), Option<N>>>,
@@ -1618,7 +1618,7 @@ pub fn account_objects(
                             .get(&format!("{}Account", pascal(t.unwrap())))
                             .and_then(|v| v.size)
                             .unwrap_or(0.0);
-                        // (JS Math.max / min: NaN propagates; a length of NaN is 0)
+                        // (max / min propagate NaN; a length of NaN is 0)
                         let n = vs + 256.0;
                         if n.is_nan() {
                             0

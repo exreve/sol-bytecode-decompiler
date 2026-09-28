@@ -1,6 +1,6 @@
 //! Readability metrics of decompiled output: raw memory accesses vs named field accesses.
 //!   sbpf-readability prog.so|out.ts … [--idl x.json] [--json]
-//! A .so is decompiled as the CLI does (single-file output); a .ts is measured as is.
+//! A .so is decompiled as the CLI does (single-file output); a .ts (decompiler output) is measured as is.
 //! Counted in function bodies, outside comments and string literals:
 //!   code      code lines (not blank, not comment-only)
 //!   ld / st   raw ldN( / stN( calls; `frame` those whose address is a stack object (sNN / a named one)

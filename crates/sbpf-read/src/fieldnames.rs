@@ -1,4 +1,4 @@
-//! `src/fieldnames.ts`: semantic names for generated struct fields (after how the program uses them),
+//! Semantic names for generated struct fields (after how the program uses them),
 //! and role names of small unnamed functions.
 
 use crate::sem::known_key;

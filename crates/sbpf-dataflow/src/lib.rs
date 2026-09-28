@@ -1,5 +1,6 @@
-//! Register liveness, interprocedural parameter/return inference and variable recovery: a port of
-//! `src/dataflow.ts` (same algorithms, same iteration orders), plus `stack.ts` and `stackargs.ts`.
+//! Register liveness, interprocedural parameter/return inference and variable recovery, plus stack slot
+//! promotion ([`stack`]) and stack-passed arguments ([`stackargs`]). Iteration orders are part of the
+//! output (variable numbering), so every walk is deterministic.
 //!
 //! Signatures (`noreturn`, `returns`, `nparams`, `extraIn`) are read and written through a [`Sig`]
 //! table indexed like `Program::funcs` while a pass runs (so blocks can be borrowed at the same time),
@@ -320,8 +321,8 @@ fn is_noret(cx: &Ctx, sigs: &[Sig], s: &Stmt) -> bool {
     }
 }
 
-/// Interprocedural fixed point for noreturn, returns, nparams, extraIn (dataflow.ts inferSignatures,
-/// lazily formed blocks: the decompiler's path).
+/// Interprocedural fixed point for noreturn, returns, nparams, extraIn (inferSignatures, on lazily
+/// formed blocks: the decompiler's path).
 pub fn infer_signatures(p: &mut Program) {
     infer_signatures_par(p, 1)
 }
@@ -587,7 +588,7 @@ pub struct Recovered {
     pub ir: Ir,
 }
 
-/// Convert register IR into variable IR (dataflow.ts recoverVars): each maximal web of
+/// Convert register IR into variable IR (recoverVars): each maximal web of
 /// definitions/uses of a register becomes one variable. Reads the function (register IR in `pir`);
 /// the result is stored with [`apply_recovered`].
 pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Result<Recovered, String> {
@@ -864,8 +865,8 @@ pub fn recover_vars(cx: &Ctx, sigs: &[Sig], pir: &Ir, fi: usize) -> Result<Recov
     })
 }
 
-/// The rewrite's register reads, consumed in first-pass order. TS: a register read with no reaching
-/// node (`undefined`: registers 11..15) maps to one shared variable when it is the whole expression
+/// The rewrite's register reads, consumed in first-pass order. A register read with no reaching
+/// definition (registers 11..15) maps to one shared variable when it is the whole expression
 /// (`rwUse`), and throws when nested (`rwLeaf`).
 struct Rw<'a> {
     uses: &'a [(i32, u8)],

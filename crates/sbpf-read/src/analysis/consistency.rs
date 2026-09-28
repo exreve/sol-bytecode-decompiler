@@ -1,4 +1,4 @@
-//! Validation consistency across instructions (`src/analysis/consistency.ts`): the accounts of the same role
+//! Validation consistency across instructions: the accounts of the same role
 //! (IDL account type, data length, name) and the validations most of the other instructions apply to them.
 
 use super::report::Loc;

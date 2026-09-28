@@ -1,4 +1,4 @@
-//! `src/builtins.ts`: compiler-builtin 128-bit arithmetic recognized by behavior (library stub names).
+//! Compiler-builtin 128-bit arithmetic recognized by behavior (library stub names).
 
 use sbpf_exec::{Exec, ExecMem, NoHooks, ProgCtx};
 

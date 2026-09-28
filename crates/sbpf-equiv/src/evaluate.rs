@@ -3,7 +3,7 @@
 //! `ldN` / `stN`, `copy` / `copyr`, the pure helpers, `memeq` / `keyeq`, the `rc_*` idioms, typed views,
 //! outlined helpers, "text" arguments, `undef`). Used to check output == bytecode on random inputs.
 //!
-//! Values are exact integers (as the evaluator's JavaScript BigInts): operations that wrap are reduced mod
+//! Values are exact (unbounded) integers: operations that wrap are reduced mod
 //! 2^64, casts to signed types give negative values, and comparisons compare the values as they are.
 //! A function is compiled on its first run (errors outside the language are reported then, `Exc::Eval`).
 
@@ -97,7 +97,7 @@ fn big(text: &str) -> Result<V, Exc> {
     r.map_err(|_| Exc::Eval(format!("SyntaxError: Cannot convert {t} to a BigInt")))
 }
 
-/// JSON.stringify of a JavaScript string
+/// JSON string literal of a string (UTF-16 code units)
 fn json_str(v: &[u16]) -> String {
     let mut o = String::from("\"");
     let mut i = 0;
@@ -538,7 +538,7 @@ impl<'v> Comp<'v> {
         for s in body {
             c.scan_decls(s)?;
         }
-        // every name that is a variable of the function (the TS evaluator's slot map at run time)
+        // every name that is a variable of the function (its slot at run time)
         for s in body {
             c.scan_slots(s);
         }

@@ -1,4 +1,4 @@
-//! decompile.ts phase 4 before printing: Anchor account names and try_accounts, the Accounts /
+//! Phase 4 before printing: Anchor account names and try_accounts, the Accounts /
 //! Context views, CPI names, view types per function (with the AccountLoader pass), inferred structs,
 //! native deserializers, role names and field names.
 
@@ -522,7 +522,7 @@ fn accounts_views(d: &mut Dx) {
             .or_else(|| param_var(hf, 2));
         let (Some(fpv), Some(prog)) = (fpv, prog) else {
             if ctx_layout.is_none() {
-                // (never reached: the TS continues before the fallback below)
+                // (never reached: the loop continues before the fallback below)
             }
             continue;
         };
@@ -1240,7 +1240,7 @@ pub fn compute_types(
     t
 }
 
-/// The AccountLoader pass (see decompile.ts loaderPass).
+/// The AccountLoader pass (loaderPass).
 fn loader_pass(d: &mut Dx, fi: usize, t: &mut IndexMap<u32, String>) -> bool {
     let f = d.fs[fi];
     let pc = f.pc;

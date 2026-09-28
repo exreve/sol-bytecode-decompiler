@@ -1,4 +1,4 @@
-//! The multi-file project (`src/layout.ts` renderProject): index.ts, entrypoint.ts, ix/<name>.ts, shared.ts,
+//! The multi-file project (renderProject): index.ts, entrypoint.ts, ix/<name>.ts, shared.ts,
 //! processor modules, outlined.ts, lib.d.ts, the self-contained bundle/<ix>.ts, security/.
 
 use crate::analysis::js_ws;
@@ -44,7 +44,7 @@ fn stub_name(s: &str) -> &str {
     &r[..n]
 }
 
-/// The program header lines of index.ts and the single file (layout.ts summary).
+/// The program header lines of index.ts and the single file.
 pub fn summary_lines(r: &ReadOut) -> Vec<String> {
     let mut out = vec![
         PROVENANCE.to_string(),
@@ -157,7 +157,7 @@ struct Group {
     funcs: Vec<usize>,
 }
 
-/// A function's text cut down to some of its paths (layout.ts Sliced)
+/// A function's text cut down to some of its paths (Sliced)
 struct Sliced {
     text: String,
     lines: usize,
@@ -267,7 +267,7 @@ fn slice(text: &str, st: &[u8], full: &str) -> Sliced {
     }
 }
 
-/// renderProject: path -> content, in the TS map's order
+/// renderProject: path -> content, in insertion order (the order files are written and listed)
 pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
     let fs = &r.funcs;
     let nf = fs.len();

@@ -1,12 +1,11 @@
-//! Stage 3: the per-function optimizer. Ports `src/simplify.ts` (expression simplification and the
-//! `optimizeFunc` pass loop), `src/cfgopt.ts`, `src/ifconv.ts`, `src/idioms.ts`, `src/compact.ts`, and
-//! the per-function phase of `src/decompile.ts` ([`phase2`]).
+//! Stage 3: the per-function optimizer: expression simplification and the `optimizeFunc` pass loop
+//! ([`simplify`]), CFG transforms ([`cfgopt`]), if-conversion ([`ifconv`]), idioms ([`idioms`]),
+//! compaction ([`compact`]), and the per-function phase of the decompiler ([`phase2`]).
 //!
 //! Every pass works on one function: its blocks ([`Func`]) and its expression arena, held by an
-//! [`Fx`] while the function is being optimized. Object identity in the TS code (`n !== s` after a
-//! rewrite, "the pass returned the same object") is id equality here: every TS object creation is a
-//! new arena node, every reuse is the same id. The TS per-statement caches (`StmtMeta`: `stmtInfo`,
-//! the `simple` mark) are pure functions of a statement's expressions; they are kept per expression
+//! [`Fx`] while the function is being optimized. Node identity ("the rewrite returned
+//! the same expression") is id equality: every construction is a new arena node, every reuse is the
+//! same id. Per-statement facts (`stmtInfo`, the `simple` mark) are pure functions of a statement's expressions; they are kept per expression
 //! id instead (nodes are immutable, so a cached answer for an id never goes stale).
 
 use sbpf_elf::Image;
@@ -27,7 +26,7 @@ pub const CALL: u8 = 2;
 pub const TRAP: u8 = 4;
 pub const M64: u64 = u64::MAX;
 
-/// Intrinsic helper names (`src/ir.ts`: INTRINSICS, MemIntrinsic, EffIntrinsic).
+/// Intrinsic helper names (INTRINSICS, MemIntrinsic, EffIntrinsic).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Intr {
     Popcount,
@@ -86,7 +85,7 @@ impl Intr {
     }
 }
 
-// ---------------- reference semantics (src/ir.ts) ----------------
+// ---------------- reference semantics of the IR operators ----------------
 
 /// evalBin; `None` = Trap.
 pub fn eval_bin(op: BinOp, a: u64, b: u64) -> Option<u64> {
@@ -623,7 +622,7 @@ impl<'i> Fx<'i> {
         }
     }
 
-    /// Structural equality as JSON.stringify sees it (calls included): idioms.ts `sameBody`.
+    /// Structural equality (calls included): `sameBody` of the idioms.
     pub fn json_eq(&self, a: E, b: E) -> bool {
         if a == b {
             return true;
@@ -1005,7 +1004,7 @@ impl<'i> Fx<'i> {
     }
 }
 
-/// pruneUnreachable (src/dataflow.ts): drop blocks unreachable from block 0, renumbering the rest.
+/// pruneUnreachable: drop blocks unreachable from block 0, renumbering the rest.
 pub fn prune_unreachable(f: &mut Func) {
     let n = f.blocks.len();
     let mut seen = vec![false; n];

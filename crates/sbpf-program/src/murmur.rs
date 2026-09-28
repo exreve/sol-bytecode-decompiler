@@ -1,4 +1,4 @@
-//! MurmurHash3 x86 32-bit, seed 0 — the hash sBPF uses for syscall / function keys (`src/murmur.ts`).
+//! MurmurHash3 x86 32-bit, seed 0 — the hash sBPF uses for syscall / function keys.
 
 pub fn murmur3(data: &[u8], seed: u32) -> u32 {
     const C1: u32 = 0xcc9e2d51;

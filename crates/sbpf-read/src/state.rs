@@ -1,4 +1,4 @@
-//! `src/state.ts`: account data layouts from the Anchor IDL (views `<Name>Account`) and the variables
+//! Account data layouts from the Anchor IDL (views `<Name>Account`) and the variables
 //! pointing to such data (from discriminator comparisons).
 
 use crate::idl::{get, js_string_opt, truthy, IdlInfo};

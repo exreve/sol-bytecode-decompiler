@@ -1,7 +1,6 @@
-//! `src/cli.ts`: the `sbpf-decompile` command line (argument handling, program loading from a file, stdin or
+//! The `sbpf-decompile` command line (argument handling, program loading from a file, stdin or
 //! an RPC endpoint, the on-chain Anchor IDL, the single file / project output, the two-program diff).
-//! Messages and exit codes are the TS CLI's; an uncaught TS exception (printed with its stack by Node) is
-//! printed as its first line (`Error: <message>`), exit code 1.
+//! A fatal error is printed as one line (`Error: <message>`), exit code 1.
 
 pub mod rpc;
 
@@ -32,13 +31,13 @@ fn fail(msg: impl std::fmt::Display) -> Exit {
     Exit(1)
 }
 
-/// An uncaught exception of the TS CLI (Node prints it with its stack; here its first line).
+/// A fatal error, printed as one `Error: <message>` line.
 fn thrown(msg: impl std::fmt::Display) -> Exit {
     eprintln!("{msg}");
     Exit(1)
 }
 
-/// Node's fs error text of an io error (`ENOENT: no such file or directory, open '<path>'`).
+/// The error text of a file-system error (`ENOENT: no such file or directory, open '<path>'`).
 fn fs_error(e: &std::io::Error, syscall: &str, path: Option<&str>) -> String {
     let (code, text) = match e.raw_os_error() {
         Some(2) => ("ENOENT", "no such file or directory"),
@@ -57,7 +56,7 @@ fn fs_error(e: &std::io::Error, syscall: &str, path: Option<&str>) -> String {
 /// readFileSync (Err: the exception's first line).
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| {
-        // a directory opens, then fails on read (as Node reports it)
+        // a directory opens, then fails on read (`EISDIR`)
         let dir = e.raw_os_error() == Some(21);
         fs_error(
             &e,
@@ -89,7 +88,7 @@ struct Loaded {
     loader: Option<String>,
 }
 
-/// The synchronous part of the TS `load` (up to the fetch): the bytes of a local input (or the exception reading
+/// The local part of loading an input (up to the fetch): the bytes of a local input (or the exception reading
 /// it threw), or the address to fetch. `Err`: the CLI exits (`fail`).
 enum Start<'a> {
     Local(Result<Vec<u8>, String>),
@@ -122,7 +121,8 @@ fn start<'a>(input: &'a str, rpc: Option<&'a str>) -> Result<Start<'a>, Exit> {
     )))
 }
 
-/// JSON.parse's SyntaxError (V8's text for the end of input; otherwise serde's description).
+/// The `SyntaxError` line of a malformed IDL file (`Unexpected end of JSON input` for a truncated one; otherwise
+/// serde's description).
 fn json_parse(text: &[u8]) -> Result<serde_json::Value, Exit> {
     serde_json::from_str(&String::from_utf8_lossy(text)).map_err(|e| {
         thrown(if e.is_eof() {
@@ -220,13 +220,13 @@ fn run_inner(args: &[String], threads: usize) -> Result<(), Exit> {
             1
         }));
     }
-    // (JS truthiness: an empty value is no value)
+    // (an empty value is no value)
     let rpc = opt("--rpc").filter(|s| !s.is_empty());
     let out = opt("-o").filter(|s| !s.is_empty());
 
     if inputs.len() == 2 {
-        // Promise.all(inputs.map(load)): the synchronous parts of both loads (a `fail` exits at once), then the
-        // first exception thrown there, then the fetches
+        // the local parts of both loads first (a `fail` exits at once, in input order), then the first error
+        // raised there, then the fetches
         let sa = start(inputs[0], rpc)?;
         let sb = start(inputs[1], rpc)?;
         for x in [&sa, &sb] {

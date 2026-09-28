@@ -1,4 +1,4 @@
-//! `src/stmtidioms.ts`: Rc count idioms on the structured body (rc_inc / rc_dec / rc_release).
+//! Rc count idioms on the structured body (rc_inc / rc_dec / rc_release).
 
 use crate::{SNode, Tree};
 use sbpf_ir::{BinOp, CallTarget, CmpOp, Node, Stmt, E};

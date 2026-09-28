@@ -1,4 +1,4 @@
-//! Stage 2 dumps (`dataflow`, `vars`, `stack`, `stackargs`): scripts/dump.ts dumpStage2.
+//! Stage 2 dumps (`dataflow`, `vars`, `stack`, `stackargs`).
 
 use crate::enc::*;
 use sbpf_dataflow::{infer_signatures, recover_all, stack::promote_stack, stackargs};

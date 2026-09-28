@@ -1,4 +1,4 @@
-//! `src/taint.ts`: instruction-data taint (flow-insensitive, interprocedural) from the handlers' ix_args.
+//! Instruction-data taint (flow-insensitive, interprocedural) from the handlers' ix_args.
 
 use crate::util::{arg_reg, fo_any, n_s, N};
 use sbpf_ir::fx::{IndexMap, IndexSet};

@@ -1,4 +1,4 @@
-//! Facts for the audit pattern rules (`src/analysis/audit.ts`): per instruction, on the IR: accounts whose data the
+//! Facts for the audit pattern rules: per instruction, on the IR: accounts whose data the
 //! logic borrows itself, PDA bumps from instruction data, CPI results never read, narrowing casts of value-path
 //! amounts, remaining accounts the checks read, authority writes of an init_if_needed account not gated by its
 //! state, sysvar layouts parsed by behavior. Also `evaluatorsFor` (the Anchor evaluation contexts of an

@@ -1,4 +1,4 @@
-//! `src/fingerprint.ts`: position-independent function fingerprints (library recognition) and the
+//! Position-independent function fingerprints (library recognition) and the
 //! per-function signatures of program diffing and `security/fingerprints.json`.
 
 use crate::sha1::sha1_16;
@@ -17,7 +17,7 @@ pub struct FnPrint {
 }
 
 /// The fingerprints read `p.insns[pc]` of every pc of every block: a block reaching past the instructions
-/// (corrupt input) is the TS TypeError.
+/// (corrupt input) is a fatal error.
 pub fn check_pcs(p: &Program) -> Result<(), String> {
     for f in p.funcs.values() {
         if f.blocks

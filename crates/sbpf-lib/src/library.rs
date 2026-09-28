@@ -1,4 +1,4 @@
-//! `src/library.ts` (+ `crateOf` of `src/demangle.ts`): library code recognition against
+//! Library code recognition (and the crate of a demangled symbol) against
 //! `data/libsigs.json` / `data/libnames.json`, the crate-aware policy and behavioral names.
 
 use crate::fingerprint::{fingerprint, FnPrint};
@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 pub const MIN_LIB_INSNS: usize = 6;
 
-/// `(p.elf.text.addr + pc * 8).toString(16)` (a JS number)
+/// `text.addr + pc * 8` in lowercase hex, computed as a double
 pub fn addr_hex(text_addr: f64, pc: i64) -> String {
     format!("{:x}", (text_addr + (pc * 8) as f64) as u128)
 }
@@ -221,7 +221,7 @@ pub fn ident_from_path(name: &str) -> String {
             }
         })
         .flat_map(|c| {
-            // (JS replaces per UTF-16 code unit: an astral character becomes two underscores)
+            // (replaced per UTF-16 code unit: an astral character becomes two underscores)
             let n = if c == '_' { 1 } else { c.len_utf16() };
             std::iter::repeat(c).take(n)
         })

@@ -1,4 +1,4 @@
-//! Per-function facts for the program analysis (`src/analysis/facts.ts`): the checks a function makes
+//! Per-function facts for the program analysis: the checks a function makes
 //! (a condition guarding an early exit), the operations it performs (CPIs, PDA derivations, lamport and
 //! account-data writes) and the calls it makes, each with its line in the function's printed text.
 //!
@@ -27,7 +27,7 @@ pub struct SiteNote {
 
 pub type NodeKey = *const SNode;
 
-/// A store's account field (flow.ts accountResolver.store)
+/// A store's account field (the account resolver's `store`)
 #[derive(Clone, Debug)]
 pub struct StoreRef {
     pub index: f64,

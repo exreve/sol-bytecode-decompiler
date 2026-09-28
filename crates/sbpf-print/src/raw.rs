@@ -1,7 +1,6 @@
-//! The raw decompiler output (`decompile(bytes, { sugar: false, full: true })`, what
-//! `test/equiv.ts --raw` evaluates): the pipeline of stages 1–4 in the TS order, each function's
-//! printed text, and the single-file rendering (`layout.ts` renderSingle) without the analysis
-//! summary (stage 8).
+//! The raw decompiler output (no readable sugar, library code included: what `sbpf-equiv --raw`
+//! evaluates): the pipeline of stages 1–4, each function's printed text, and the single-file
+//! rendering without the analysis summary (stage 8).
 
 use crate::consts::{PRELUDE, PROVENANCE, TYPES};
 use crate::names::{name_functions, semantics, sha8, Sem};
@@ -165,7 +164,7 @@ pub fn prog_names(p: &Program) -> ProgNames {
     n
 }
 
-/// callsOf (decompile.ts): call targets and function-address constants of the blocks.
+/// callsOf: call targets and function-address constants of the blocks.
 fn calls_of(f: &Func, pc_by_addr: &HashMap<u64, i64>) -> Vec<i64> {
     let ir = f.ir.as_ref().unwrap();
     let mut out: IndexSet<i64> = IndexSet::default();
@@ -347,7 +346,7 @@ pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str
     lines.join("\n")
 }
 
-// ---------------- single file (layout.ts renderSingle) ----------------
+// ---------------- single file ----------------
 
 /// Called names of a text (`\b([A-Za-z_][A-Za-z0-9_]*)\(`), in order of first appearance.
 pub fn called(text: &str, out: &mut IndexSet<String>) {
@@ -506,7 +505,7 @@ pub fn scan_views(text: &str, out: &mut IndexSet<String>) {
     }
 }
 
-/// layout.ts renderSingle (without the analysis summary block).
+/// The single file (without the analysis summary block).
 pub fn render_single_of(r: &SingleIn) -> String {
     let by_pc: HashMap<i64, usize> = r.funcs.iter().enumerate().map(|(i, f)| (f.pc, i)).collect();
     let name = |i: usize| r.funcs[i].name;

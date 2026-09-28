@@ -1,4 +1,4 @@
-//! `src/structs.ts`: inferred struct views ([heur]) for pointers without a known layout, unified along
+//! Inferred struct views ([heur]) for pointers without a known layout, unified along
 //! the program's data flow (Steensgaard style) when the layouts agree.
 
 use crate::util::{fo_add, js_hex, n_s, K, N};
@@ -8,7 +8,7 @@ use sbpf_ir::{BinOp, CallTarget, Ir, Node, Stmt, E, L};
 use sbpf_program::Func;
 use sbpf_ir::fx::{HashMap, HashSet};
 
-/// The questions inferStructs asks about the program (structs.ts StructCfg).
+/// The questions inferStructs asks about the program (StructCfg).
 pub trait StructCfg {
     fn funcs(&self) -> &[&Func];
     fn func(&self, pc: i64) -> Option<&Func>;
@@ -906,7 +906,7 @@ pub fn infer_structs<C: StructCfg + ?Sized>(cfg: &C, views: &mut Views) -> Struc
                 Some(u) => pend.push((*t, u)),
             }
         }
-        // (the class keeps its data for anything still holding it: the TS leaves the object in place)
+        // (the class keeps its data for anything still holding it)
         uf.cls[a] = ca;
         for (t, u) in pend {
             merge(uf, t, u);

@@ -1,6 +1,6 @@
-//! Stage 4b: printing. Ports `src/print.ts` (the TypeScript printer), the parts of
-//! `src/decompile.ts` the plain (raw) output needs (function naming, variable names, declarations,
-//! the per-function text) and `src/layout.ts` renderSingle for that output.
+//! Stage 4b: printing. The TypeScript printer ([`print`]), what the plain (raw) output needs of the
+//! decompiler (function naming, variable names, declarations, the per-function text) and the single
+//! file rendering of that output ([`raw`]).
 
 pub mod consts;
 pub mod names;

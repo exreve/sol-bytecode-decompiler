@@ -1,5 +1,5 @@
-//! Rendering of the analysis (`src/analysis/report.ts` renderJson / renderSummary / renderIx /
-//! renderSummaryComment, `src/budget.ts`): security/analysis.json, security/summary.md, security/<ix>.md and the
+//! Rendering of the analysis (renderJson / renderSummary / renderIx / renderSummaryComment, and the
+//! size budgets): security/analysis.json, security/summary.md, security/<ix>.md and the
 //! single file's summary comment.
 
 use super::js_slice;
@@ -2403,7 +2403,7 @@ pub fn render_summary_comment(a: &Analysis) -> Vec<String> {
     out
 }
 
-// ---- budgets (src/budget.ts) ----
+// ---- budgets ----
 
 struct Item {
     head: String,

@@ -1,4 +1,4 @@
-//! Stage 8 dumps (the analysis foundation): scripts/dump8.ts dumpStage8.
+//! Stage 8 dumps (the analysis foundation).
 
 use crate::enc::*;
 use crate::stage3::threads;
@@ -255,8 +255,8 @@ fn side_j(s: &Side) -> String {
     }
 }
 
-/// scripts/dump8.ts flowLines: the flow layer's outputs
-/// `analyzed`: the analysis ran before (its exit writes are in the facts; scripts/dump8.ts flowLines(r, check = true))
+/// The flow layer's outputs.
+/// `analyzed`: the analysis ran before (its exit writes are in the facts)
 pub fn flow_lines(an: &An, analyzed: bool) -> String {
     let mut out = String::new();
     // (analyze0's foundation calls, in its order)
@@ -659,7 +659,7 @@ pub fn dump_stage8(
         return;
     }
     let (wa, wf) = (want("analysis"), want("flow"));
-    // (the analysis first, as the TS single file runs it before the dump's flow walk)
+    // (the analysis first: the single file runs it before the dump's flow walk)
     let hook = |an: &An| {
         let a = if wa {
             an.analyze(|a, _| crate::stage8b::analysis_lines(an, a))
