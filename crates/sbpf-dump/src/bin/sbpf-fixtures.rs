@@ -1,19 +1,27 @@
-//! Regression runner against the frozen TS CLI fixtures (`scripts/fixtures.ts`, see docs/RUST_PORT.md): runs the
-//! real `sbpf-decompile` binary on every binary of the fixtures and compares its outputs byte for byte.
+//! Golden-output regression guard: runs the real `sbpf-decompile` binary on every binary of a golden set and
+//! compares its outputs (stdout, files, stderr, exit code) byte for byte with the recorded ones; `--write` records
+//! them instead (after an intentional output change).
 //!
-//!   sbpf-fixtures --fixtures dir [--bin sbpf-decompile] [--root repo (default .)] [-j N] [--ofile] [--no-diff | --only-diff] [substring...]
+//!   sbpf-fixtures --fixtures dir [--bin sbpf-decompile] [--root repo (default .)] [-j N] [--ofile] [--no-diff | --only-diff] [--fuzz] [substring...]
+//!   sbpf-fixtures --fixtures dir --write [--bin ...] [--root ...] [-j N] [--no-diff | --only-diff] [--fuzz] [substring...]
 //!
-//! Per binary (`<fixtures>/<path>.jsonl.zst`, decompressed with `zstd -dc --long=27`): the default single file on
-//! stdout (and `-o out.ts` with `--ofile`), the project (`-o dir/`), `--full` on stdout, and with the binary's IDL
-//! `--idl x.json` on stdout and as a project; stderr and the exit code too (`stderr/<mode>`, `error/<mode>`: the
-//! first line). `diff.jsonl.zst`: each pair on stdout (terminal report) and with `-o report.txt` (complete).
-//! The binaries and IDLs are read from `--root` (the paths in the fixtures are relative to it). Substrings select
-//! the binaries (and pairs) whose path contains one of them. Exit status 1 when anything differs.
+//! Layout of the golden directory (docs/INTERNALS.md, "Regression guards"):
+//! - `files.txt`: the binaries, paths relative to `--root` (`--write` creates it from `samples/`, `samples/regress/`,
+//!   `compat/bin/`, `eval/bin/`, `bench/bin/`, `corpus/` when missing; add a line to guard another binary).
+//! - `<path>.jsonl.zst` per binary (zstd `--long=27`, JSON lines): a header `{"file","idl"}` (the binary's Anchor IDL:
+//!   `<name>.json` next to it, in `../idl/` or `idl/`, `<name>` with or without its `@variant` suffix), then
+//!   `{"out","text"}` records: `single.ts` (the default single file on stdout, and `-o out.ts` with `--ofile`),
+//!   `project/<path>` (`-o dir/`), `full.ts` (`--full`), `idl.ts` / `idl-project/<path>` (`--idl x.json`), and
+//!   `stderr/<mode>` (warnings) or `error/<mode>` (the first line of a fatal error; exit code 1).
+//! - `diff.jsonl.zst`: per pair of `pairs.txt` (`a b` per line) the terminal report (stdout) and the complete one
+//!   (`-o report.txt`): `{"a","b","all","text"}`.
+//! - `fuzz.json`: fuzz runs (`seed`, `n`, the binary `sets` under `--root`); `--fuzz` checks the xorshift32 mutants
+//!   of the sets' binaries under 512 KB (see `mutate`) against `fuzz/seed<S>/fuzz<i>.so.jsonl.zst`, and their sha-256
+//!   against `fuzz/seed<S>/mutants.sha256` (a mismatch means the base sets changed). `--write-mutants dir`: write the
+//!   mutants to `dir/fuzz/seed<S>/fuzz<i>.so` and exit.
 //!
-//! `--fuzz`: instead, the fuzz mutants of `<fixtures>/fuzz.json` (per run: `seed`, `n`, the binary `sets` under
-//! `--root`; xorshift32 mutants of the binaries under 512 KB, see `mutate`), each checked like a binary against
-//! `<fixtures>/fuzz/seed<S>/fuzz<i>.so.jsonl.zst` (and its sha-256 against `fuzz/seed<S>/mutants.sha256`, which
-//! detects changed base sets). `--write-mutants dir`: write the mutants to `dir/fuzz/seed<S>/fuzz<i>.so` and exit.
+//! Substrings select the binaries (and pairs) whose path contains one of them. Exit status 1 when anything differs.
+//! Needs the `zstd` command.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -246,7 +254,7 @@ fn first_diff(a: &str, b: &str) -> String {
     let k = la.iter().zip(&lb).take_while(|(x, y)| x == y).count();
     let clip = |s: Option<&&str>| s.map_or("<end>".to_string(), |s| s.chars().take(160).collect());
     format!(
-        "line {}\n      ts: {}\n      rs: {}",
+        "line {}\n      want: {}\n       got: {}",
         k + 1,
         clip(la.get(k)),
         clip(lb.get(k))
@@ -277,14 +285,13 @@ fn read_tree(dir: &Path) -> BTreeMap<String, String> {
     out
 }
 
-/// Compares one CLI run against the fixture: `Ok` or the difference.
-/// error lines matched only modulo the JS runtime error names (see `js_error`)
+/// error lines matched only modulo the error class name (see `compat_error`)
 static NORMALIZED: AtomicUsize = AtomicUsize::new(0);
 
-/// A TS error line as the Rust port reports it: the JS engine's error classes (`TypeError`, `RangeError`) are plain
-/// errors, and its range errors on corrupt sizes (DataView reads, typed-array lengths) are `out of bounds`
-/// (sbpf-elf).
-fn js_error(e: &str) -> String {
+/// Golden compatibility: older goldens name some fatal errors by class (`TypeError: …`, `RangeError: …`) where the
+/// binary prints `Error: …`, and word the size errors of corrupt inputs differently (`out of bounds`, as sbpf-elf
+/// reports them). An error line matching after this mapping counts as identical (and is counted apart).
+fn compat_error(e: &str) -> String {
     let e = e
         .strip_prefix("TypeError: ")
         .or_else(|| e.strip_prefix("RangeError: "))
@@ -297,6 +304,7 @@ fn js_error(e: &str) -> String {
     }
 }
 
+/// Compares one CLI run against the golden: `Ok` or the difference.
 fn check(
     r: &Run,
     err: Option<&str>,
@@ -308,7 +316,7 @@ fn check(
         let first = r.stderr.lines().next().unwrap_or("");
         return if r.code == 1 && first == e {
             Ok(())
-        } else if r.code == 1 && first == js_error(e) {
+        } else if r.code == 1 && first == compat_error(e) {
             NORMALIZED.fetch_add(1, Ordering::SeqCst);
             Ok(())
         } else {
@@ -474,6 +482,155 @@ fn check_binary(cfg: &Cfg, fix: &Path, slot: usize) -> Vec<(&'static str, Result
     out
 }
 
+/// The binary sets a new golden directory covers (directories under the root; their *.so sorted by name).
+const SETS: &[&str] = &["samples", "samples/regress", "compat/bin", "eval/bin", "bench/bin", "corpus"];
+
+/// Lexical normalization of a relative path (`a/b/../c` -> `a/c`).
+fn normalize(p: &Path) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir if out.last().is_some_and(|l| l != "..") => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c.as_os_str().to_string_lossy().into_owned()),
+        }
+    }
+    out.join("/")
+}
+
+/// The binary's Anchor IDL, relative to the root: `<name>.json` next to it, in `../idl/` or in `idl/`, where
+/// `<name>` is the file name without `.so`, then without its `@variant` suffix.
+fn idl_of(root: &Path, f: &str) -> Option<String> {
+    let p = Path::new(f);
+    let d = p.parent().unwrap_or(Path::new(""));
+    let b = p.file_name()?.to_str()?;
+    let b = b.strip_suffix(".so").unwrap_or(b);
+    let mut names = vec![b];
+    let short = b.split('@').next().unwrap_or(b);
+    if short != b {
+        names.push(short);
+    }
+    for n in names {
+        for dd in [d.to_path_buf(), d.join("..").join("idl"), d.join("idl")] {
+            let c = dd.join(format!("{n}.json"));
+            if root.join(&c).is_file() {
+                return Some(normalize(&c));
+            }
+        }
+    }
+    None
+}
+
+fn rec(out: String, text: String) -> Value {
+    serde_json::json!({ "out": out, "text": text })
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").to_string()
+}
+
+/// JSON lines, compressed with zstd to `path`.
+fn write_zstd(path: &Path, recs: &[Value]) {
+    use std::io::Write;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text = String::new();
+    for r in recs {
+        text.push_str(&serde_json::to_string(r).unwrap());
+        text.push('\n');
+    }
+    let mut c = Command::new("zstd")
+        .args(["-17", "--long=27", "-q", "-f", "-o"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("zstd");
+    c.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    assert!(c.wait().unwrap().success(), "zstd -o {}", path.display());
+}
+
+/// The golden records of one binary (what `check_binary` compares against), from the binary under test.
+fn record_binary(cfg: &Cfg, f: &str, idl: Option<&str>, slot: usize) -> Vec<Value> {
+    let mut recs = vec![serde_json::json!({ "file": f, "idl": idl })];
+    let dir = cfg.tmp.join(format!("w{slot}"));
+    let d = format!("{}/", dir.display());
+    // (mode, arguments, single-file record, project records)
+    let mut modes: Vec<(&str, Vec<&str>, &str, Option<&str>)> = vec![
+        ("default", vec![f], "single.ts", Some("project")),
+        ("full", vec![f, "--full"], "full.ts", None),
+    ];
+    if let Some(i) = idl {
+        modes.push(("idl", vec![f, "--idl", i], "idl.ts", Some("idl-project")));
+    }
+    for (mode, args, single, project) in modes {
+        let r = run(cfg, &args);
+        if r.code != 0 {
+            recs.push(rec(format!("error/{mode}"), first_line(&r.stderr)));
+            continue;
+        }
+        if !r.stderr.is_empty() {
+            recs.push(rec(format!("stderr/{mode}"), r.stderr.clone()));
+        }
+        recs.push(rec(single.to_string(), String::from_utf8_lossy(&r.stdout).into_owned()));
+        if let Some(pd) = project {
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut a = args.clone();
+            a.extend(["-o", &d]);
+            let r = run(cfg, &a);
+            if r.code != 0 {
+                recs.push(rec(format!("error/{pd}"), first_line(&r.stderr)));
+            } else {
+                for (p, t) in read_tree(&dir) {
+                    recs.push(rec(format!("{pd}/{p}"), t));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    recs
+}
+
+/// The diff goldens: per pair of `pairs.txt`, the terminal report and the complete one. Pairs not selected keep
+/// their existing records.
+fn record_diffs(cfg: &Cfg, wanted: &dyn Fn(&str) -> bool) -> Vec<Value> {
+    let dfix = cfg.fixtures.join("diff.jsonl.zst");
+    let old = if dfix.exists() { zstd_lines(&dfix) } else { vec![] };
+    let pairs = std::fs::read_to_string(cfg.fixtures.join("pairs.txt")).unwrap_or_default();
+    let report = cfg.tmp.join("report.txt");
+    let rs = report.to_string_lossy().into_owned();
+    let mut recs = vec![];
+    for l in pairs.lines() {
+        let mut it = l.split_whitespace();
+        let (Some(a), Some(b)) = (it.next(), it.next()) else {
+            continue;
+        };
+        for all in [false, true] {
+            if !(wanted(a) || wanted(b)) {
+                recs.extend(
+                    old.iter()
+                        .filter(|r| r["a"] == a && r["b"] == b && r["all"] == all)
+                        .cloned(),
+                );
+                continue;
+            }
+            let _ = std::fs::remove_file(&report);
+            let x = if all { run(cfg, &[a, b, "-o", &rs]) } else { run(cfg, &[a, b]) };
+            let mut v = serde_json::json!({ "a": a, "b": b, "all": all });
+            if x.code != 0 {
+                v["error"] = first_line(&x.stderr).into();
+            } else if all {
+                v["text"] = std::fs::read_to_string(&report).unwrap_or_default().into();
+            } else {
+                v["text"] = String::from_utf8_lossy(&x.stdout).into_owned().into();
+            }
+            recs.push(v);
+        }
+    }
+    let _ = std::fs::remove_file(&report);
+    recs
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap();
@@ -488,7 +645,7 @@ fn main() {
         tmp: std::env::temp_dir().join(format!("sbpf-fixtures-{}", std::process::id())),
     };
     let (mut jobs, mut diffs, mut bins, mut filters) = (2usize, true, true, Vec::new());
-    let (mut fuzz, mut write_mutants) = (false, None::<PathBuf>);
+    let (mut fuzz, mut write_mutants, mut write) = (false, None::<PathBuf>, false);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -512,6 +669,7 @@ fn main() {
             "--no-diff" => diffs = false,
             "--only-diff" => bins = false,
             "--fuzz" => fuzz = true,
+            "--write" => write = true,
             "--write-mutants" => {
                 write_mutants = Some(PathBuf::from(&args[i + 1]));
                 i += 1;
@@ -539,8 +697,12 @@ fn main() {
                             .map(|(h, f)| (f.to_string(), h.to_string()))
                     })
                     .collect();
+            let mut new_sums = String::new();
             for (i, m) in mutants(&cfg.root, &sets, seed, n).into_iter().enumerate() {
                 let name = format!("fuzz{i}.so");
+                if write {
+                    new_sums.push_str(&format!("{}  {name}\n", sha256_hex(&m)));
+                }
                 if let Some(out) = &write_mutants {
                     let d = out.join(&dir);
                     std::fs::create_dir_all(&d).unwrap();
@@ -549,8 +711,14 @@ fn main() {
                 }
                 let rel = format!("{dir}/{name}");
                 if wanted(&rel) {
-                    fuzzed.insert(rel, (m, sums.get(&name).cloned()));
+                    let sum = if write { None } else { sums.get(&name).cloned() };
+                    fuzzed.insert(rel, (m, sum));
                 }
+            }
+            if write && write_mutants.is_none() {
+                let d = cfg.fixtures.join(&dir);
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("mutants.sha256"), new_sums).unwrap();
             }
         }
         if write_mutants.is_some() {
@@ -562,7 +730,26 @@ fn main() {
     let files: Vec<String> = if fuzz {
         fuzzed.keys().cloned().collect()
     } else {
-        let list = std::fs::read_to_string(cfg.fixtures.join("files.txt")).expect("files.txt");
+        let listed = cfg.fixtures.join("files.txt");
+        if write && !listed.exists() {
+            let mut list = String::new();
+            for s in SETS {
+                let Ok(rd) = std::fs::read_dir(cfg.root.join(s)) else {
+                    continue;
+                };
+                let mut names: Vec<String> = rd
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .filter(|f| f.ends_with(".so"))
+                    .collect();
+                names.sort();
+                for n in names {
+                    list.push_str(&format!("{s}/{n}\n"));
+                }
+            }
+            std::fs::create_dir_all(&cfg.fixtures).unwrap();
+            std::fs::write(&listed, list).unwrap();
+        }
+        let list = std::fs::read_to_string(&listed).expect("files.txt");
         list.lines()
             .filter(|l| bins && !l.is_empty() && wanted(l))
             .map(|s| s.to_string())
@@ -579,6 +766,23 @@ fn main() {
                 let k = next.fetch_add(1, Ordering::SeqCst);
                 let Some(f) = files.get(k) else { break };
                 let fix = cfg.fixtures.join(format!("{f}.jsonl.zst"));
+                if write {
+                    let written = fuzzed.get(f).map(|(bytes, _)| {
+                        let p = cfg.root.join(f);
+                        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                        std::fs::write(&p, bytes).unwrap();
+                        p
+                    });
+                    let idl = if fuzz { None } else { idl_of(&cfg.root, f) };
+                    write_zstd(&fix, &record_binary(cfg, f, idl.as_deref(), slot));
+                    if let Some(p) = written {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    let mut c = counts.lock().unwrap();
+                    let e = c.entry("written").or_default();
+                    (e.0, e.1) = (e.0 + 1, e.1 + 1);
+                    continue;
+                }
                 if !fix.exists() {
                     missing.fetch_add(1, Ordering::SeqCst);
                     println!("MISSING fixture {f}");
@@ -615,6 +819,22 @@ fn main() {
     let mut c = counts.into_inner().unwrap();
     // the program diffs
     let dfix = cfg.fixtures.join("diff.jsonl.zst");
+    if write {
+        let n = c.get("written").map_or(0, |e| e.0);
+        let mut pairs = 0;
+        if diffs && cfg.fixtures.join("pairs.txt").exists() {
+            let recs = record_diffs(&cfg, &wanted);
+            pairs = recs.len() / 2;
+            write_zstd(&dfix, &recs);
+        }
+        let _ = std::fs::remove_dir_all(&cfg.tmp);
+        println!(
+            "sbpf-fixtures: wrote the goldens of {n} binaries and {pairs} diff pairs to {} ({} s)",
+            cfg.fixtures.display(),
+            t0.elapsed().as_secs()
+        );
+        return;
+    }
     if diffs && dfix.exists() {
         let report = cfg.tmp.join("report.txt");
         let rs = report.to_string_lossy().into_owned();
@@ -667,7 +887,7 @@ fn main() {
     let norm = NORMALIZED.load(Ordering::SeqCst);
     if norm > 0 {
         println!(
-            "  ({norm} of them: the error line modulo the JS runtime error name, see js_error)"
+            "  ({norm} of them: the error line modulo the error class name, see compat_error)"
         );
     }
     std::process::exit(if bad > 0 { 1 } else { 0 });
