@@ -1,6 +1,6 @@
 #!/bin/sh
 # Rebuild bench/bin/*.so from bench/programs (not needed to run the bench: the binaries are committed).
-# Uses Solana platform-tools v1.48 (~/.cache/sbf-tools/v1.48, see scripts/refbuild.ts) in the sbf-builder container.
+# Uses Solana platform-tools v1.48 (~/.cache/sbf-tools/v1.48, see sbpf-refbuild) in the sbf-builder container.
 # usage: [WS=workspace-dir] bench/build.sh [crate-filter]   (WS: bench/programs by default; bench/gen/programs, bench/gen/programs29)
 set -e
 B=$(cd "$(dirname "$0")" && pwd)

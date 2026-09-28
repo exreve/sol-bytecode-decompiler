@@ -54,7 +54,7 @@ build() {
 }
 
 FILTER=$1 VARIANT=$2
-# no committed Cargo.lock: resolve with the toolchain's rust version, keeping edition-2024 crates out (as scripts/refbuild.ts)
+# no committed Cargo.lock: resolve with the toolchain's rust version, keeping edition-2024 crates out (as sbpf-refbuild)
 LOCK='[ -f Cargo.lock ] || { cargo generate-lockfile && for p in blake3@1.5.5 cc@1.1.31 jobserver@0.1.32; do cargo update -p ${p%@*} --precise ${p#*@} 2>/dev/null; done; true; };'
 BPF='--cfg target_arch="bpf"'
 

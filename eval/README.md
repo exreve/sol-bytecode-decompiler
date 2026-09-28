@@ -4,11 +4,11 @@ A dataset of real-world, publicly documented and since-fixed access-control / va
 programs, plus synthetic cases from `bench/`, turned into review packets (decompiler output only) with a scorer.
 
     sh eval/build.sh [case] [vuln|fixed]     # rebuild eval/bin/ from upstream sources (not needed: binaries are committed)
-    node eval/packets.ts [prog_NN ...]        # generate eval/packets/prog_NN/{code,full}/ (not committed, ~2 min)
-    node eval/score.ts [--verbose] [--min-confidence x] [filter]   # score eval/results/
+    sbpf-eval-packets [prog_NN ...]        # generate eval/packets/prog_NN/{code,full}/ (not committed, ~2 min)
+    sbpf-eval-score [--verbose] [--min-confidence x] [filter]   # score eval/results/
 
-Deterministic scoring of the analysis itself on the real pairs (no reviewer): `node bench/run.ts pairs [--verbose]`
-(`eval/analyze.ts`, target names in `cases.json` ground_truth.target; see bench/README.md).
+Deterministic scoring of the analysis itself on the real pairs (no reviewer): `sbpf-bench pairs [--verbose]`
+(`sbpf_bench::eval`, target names in `cases.json` ground_truth.target; see bench/README.md).
 
 **Never give a reviewer anything but one packet directory**: `cases.json`, `bin/`, `build.sh`, this README and the
 results name the programs and the bugs.
@@ -62,8 +62,8 @@ p_counter@no_signer. They have no fixed counterpart packet (the bench bases are 
 
 ## Packets
 
-`node eval/packets.ts` copies each binary (and IDL, with its name / address / docs removed) under a neutral id
-`prog_NN` (a seeded shuffle; mapping in `cases.json` → `packets`), runs the CLI (`node src/cli.ts prog_NN.so -o dir/
+`sbpf-eval-packets` copies each binary (and IDL, with its name / address / docs removed) under a neutral id
+`prog_NN` (a seeded shuffle; mapping in `cases.json` → `packets`), runs the CLI (`sbpf-decompile prog_NN.so -o dir/
 [--idl prog_NN.json]`) and writes:
 - `prog_NN/full/`: the complete project output (index.ts, bundle/, ix/, shared.ts, entrypoint.ts, lib.d.ts, security/);
 - `prog_NN/code/`: index.ts (without its pointer line to security/), lib.d.ts, bundle/*.ts, entrypoint.ts (the
@@ -107,7 +107,7 @@ order so a run never sees both packets of one program.
 
 ## Scoring
 
-`node eval/score.ts` matches each finding against the case's ground truth:
+`sbpf-eval-score` matches each finding against the case's ground truth:
 - instruction: the ground-truth instruction or an alias (native dispatch forms `tag_N`, sibling instructions sharing
   the bug), compared as words (`VerifySignatures` = `verify_signatures`, `tag 1` ≠ `tag_13`);
 - plus a ground-truth account (name or index form, in `accounts` or the issue text) or a category keyword in the issue.

@@ -3,7 +3,7 @@
 # p_counter: pinocchio 0.8) for the sbpfv2 / sbpfv3 targets of platform-tools v1.57 (cargo build --target
 # sbpfvN-solana-solana is what cargo build-sbf --arch vN runs), in the sbf-builder container like bench/build.sh.
 # v1.57, not v1.48: v1.48's sbpfv3 target still emits v2 opcodes (PQR, moved memory classes, hor64) under e_flags 3,
-# which the final v3 spec (and src/emu.ts) rejects.
+# which the final v3 spec (and the reference interpreter of sbpf-equiv) rejects.
 # usage: compat/src/rust/build.sh [crate ...]
 set -e
 D=$(cd "$(dirname "$0")" && pwd)

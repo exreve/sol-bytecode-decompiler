@@ -3,10 +3,10 @@
 Programs of kinds the mainnet corpus (mostly Rust: Anchor / native / pinocchio, sBPF v0) does not cover:
 other languages, hand-written assembly, the deprecated loader, sBPF v2 / v3, other SVM chains.
 
-`node compat/run.ts [filter] [--keep dir/] [--strict]` decompiles every `bin/*.so` in project mode and runs the
+`sbpf-compat [filter] [--keep dir/] [--strict]` decompiles every `bin/*.so` in project mode and runs the
 equivalence check (readable and `--raw`, 2 trials), one line per program (sBPF version, instructions, functions,
 recognized instructions = `security/*.md` files, decompile time, equivalence), then a summary. It exits non-zero on a
-crash or a failing function, except for the known issues listed in `KNOWN` in run.ts (`--strict` counts them).
+crash or a failing function, except for the known issues listed in `KNOWN` in `rs/crates/sbpf-bench/src/bin/sbpf-compat.rs` (`--strict` counts them).
 A `<name>.json` next to a binary is passed as `--idl`. Runs in CI (~45 s).
 
 ## Programs
@@ -18,7 +18,7 @@ A `<name>.json` next to a binary is passed as `--idl`. Runs in CI (~45 s).
 | `asm_counter_v0.so`, `asm_counter_v3.so` | hand-written sBPF assembly | `src/asm/counter.s` (signer / writable checks, loop, local call, syscalls); `src/asm/build.sh` | `sbpf` 0.3.1 (blueshift-gg, `cargo install sbpf`), `--arch v0` / `v3` |
 | `solang_counter.so` (+ `.json` IDL), `solang_counter_stripped.so` | Solidity (Solang) | `src/solang/counter.sol` (storage: u64, address, mapping; `@signer`; event; system-program CPI via `address.call{accounts:}`); `src/solang/build.sh` | Solang v0.3.5 release binary, `--target solana -O default`; the stripped copy by llvm-objcopy `--strip-all` |
 | `rust_n_vault_v2.so`, `rust_n_vault_v3.so`, `rust_p_counter_v2.so`, `rust_p_counter_v3.so` | native Rust (solana-program 2.2.1 / pinocchio 0.8), sBPF v2 and v3 | `src/rust/` (copies of `bench/programs/n_vault`, `p_counter`); `src/rust/build.sh` | platform-tools v1.57, `cargo build --release --target sbpfv2-solana-solana` / `sbpfv3-solana-solana` (what `cargo build-sbf --arch v2/v3` runs), stripped |
-| `bpf1_tiny_BYVBQ71C.so` | deprecated `BPFLoader1111…` | mainnet `BYVBQ71CYArTNbEpDnsPCjcoWkJL9181xvj52kfyFFHg` (2.3 KB) | `compat/fetch.ts` |
+| `bpf1_tiny_BYVBQ71C.so` | deprecated `BPFLoader1111…` | mainnet `BYVBQ71CYArTNbEpDnsPCjcoWkJL9181xvj52kfyFFHg` (2.3 KB) | `sbpf-fetch compat` |
 | `bpf1_small_8pXDrcpH.so` | " | mainnet `8pXDrcpHJuYk4niJMRTiYv5dVbCZN15xTzFcAnqHTvsx` (checks a program id, logs) | " |
 | `bpf1_break_BrEAK7zG.so` | " | mainnet `BrEAK7zGZ6dM71zUDACDqJnekihmwF15noTddWTsknjC` (Solana "Break" game) | " |
 | `bpf1_tokenv1_TokenSVp5.so` | " | mainnet `TokenSVp5gheXUvJ6jGWGeCsgPKgnE3YgdGKRVCMY9o` (SPL Token v1, 2020) | " |
@@ -29,10 +29,10 @@ A `<name>.json` next to a binary is passed as `--idl`. Runs in CI (~45 s).
 BPFLoader1 programs: `getProgramAccounts` on `BPFLoader1111111111111111111111111111111111` (mainnet, 2026-09-26:
 202 accounts, 136 executable; `Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo` is already in the corpus).
 Rebuild the local ones with `sh compat/src/<kind>/build.sh` (needs the tools above and the `sbf-builder` container),
-re-fetch the on-chain ones with `node compat/fetch.ts`.
+re-fetch the on-chain ones with `sbpf-fetch compat`.
 
 Not included: sBPF v3 from platform-tools v1.48: its `sbpfv3` target still emits v2 opcodes (PQR, moved memory
-classes, `hor64`) under `e_flags` 3; the final v3 spec (and `src/emu.ts`) rejects them, and equivalence fails on
+classes, `hor64`) under `e_flags` 3; the final v3 spec (and the reference interpreter of `sbpf-equiv`) rejects them, and equivalence fails on
 60 / 154 functions. The v3 binaries here are built with v1.57. `c_vault_v3.so` (C SDK `sbf.ld` link) was not
 validated against the agave loader.
 
@@ -40,7 +40,7 @@ validated against the agave loader.
 
 All decompile without crashing (< 2 s each) and pass equivalence in both modes (`--strict`: no known issues).
 
-Fixed since the first run (Phase A findings, now handled in src/):
+Fixed since the first run (Phase A findings, now handled in the decompiler):
 
 - Solang symbol names (`counter::counter::function::count`) are sanitized into identifiers (`counter__counter__function__count`,
   the original in a `// symbol:` comment); the output parses and is equivalent.
@@ -65,7 +65,7 @@ Fixed since the first run (Phase A findings, now handled in src/):
 - asm: no false-positive signer (the entrypoint's input is not taken as an `&[AccountInfo]` slice).
 - A warning (stderr) when reachable instructions are invalid for the declared sBPF version.
 
-## Known issues (for src/)
+## Known issues (for the decompiler)
 
 1. **BPFLoader1 Rust (`bpf1_tokenv1`)**: the layout is right, but "signers: none found": solana-program 2020 does not
    inline `next_account_info`; the accounts come back through an out parameter of the iterator, which the account

@@ -1,19 +1,19 @@
 # Analysis benchmark
 
-Ground truth for the analysis layer (`src/analysis/`, docs/ANALYSIS_SPEC.md): small programs compiled from source,
+Ground truth for the analysis layer (`rs/crates/sbpf-read/src/analysis/`, docs/ANALYSIS_SPEC.md): small programs compiled from source,
 their expected facts, and single-property variants whose expected finding is known.
 
-    node bench/run.ts [--verbose] [filter]      # or: npm run bench
+    sbpf-bench [--verbose] [filter]
 
 It decompiles every `bin/*.so` as the CLI project output does (`-o dir/ [--idl]`), reads `security/analysis.json`
 and prints TP / FP / FN, recall, precision and F1 per category, then one `score` line (mean F1 of the six
 categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. Without a filter it
-also scores the eval pairs (`eval/analyze.ts`, below); `node bench/run.ts pairs` runs only those. ~40 s (~7 s with a filter).
+also scores the eval pairs (below); `sbpf-bench pairs` runs only those. ~10 s.
 
 ## Generated programs (bench/gen)
 
-`node bench/gen/gen.ts` writes 9 programs from instruction templates (`bench/gen/anchor.ts`, `bench/gen/native.ts`,
-`bench/gen/risk.ts`; the two `*_risk` programs are described under Incident classes below):
+`sbpf-bench-gen` writes 9 programs from instruction templates (`rs/crates/sbpf-bench/src/gen/anchor.rs`, `native.rs`,
+`risk.rs`; the two `*_risk` programs are described under Incident classes below):
 `g_a31_vault`, `g_a31_pool` (Anchor 0.31.1), `g_a29_vault`, `g_a29_pool` (the same templates under Anchor 0.29.0 /
 solana-program 1.16.27), `g_n_bank`, `g_n_amm` (solana-program 2.2.1, spl-token), `g_p_jar` (pinocchio 0.8.4). Each
 template instruction is clean as written and names the properties its `v_<id>` features remove (signer, has_one /
@@ -24,18 +24,18 @@ authority, one of several instructions' validation). The generator writes the cr
 `"generated": true`; build with `WS=bench/gen/programs sh bench/build.sh g_` and `WS=bench/gen/programs29 sh
 bench/build.sh g_` (binaries in `bench/bin/`).
 
-`bench/run.ts` scores them for rules only, apart from the six categories: a variant is caught when one of its accepted
+`sbpf-bench` scores them for rules only, apart from the six categories: a variant is caught when one of its accepted
 rules is reported at its instruction (`~consistency`: a validation_consistency inconsistency there); every finding on a
 generated base is a false finding (inconsistencies on a base are counted as informational noise); findings a variant
 adds besides its expected ones are listed as unexpected (`--verbose`).
 
 ### Incident classes (g_a31_risk, g_n_risk)
 
-`bench/gen/risk.ts`: a lending reserve (vault PDA authority, ledger per user, TransferChecked through the token
+`gen/risk.rs`: a lending reserve (vault PDA authority, ledger per user, TransferChecked through the token
 interface, so SPL Token and Token-2022 mints) under Anchor 0.31 (`g_a31_risk`) and solana-program 2.2.1 (`g_n_risk`,
 token CPIs built by hand, tags 0-7). The Instructions sysvar is read by a hand-written parser (both programs, so the
 key check is the only difference) and the Pyth v2 price account by a hand-written layout (magic @0, type @8, expo @20,
-timestamp @96, price @208, conf @216, status @224). The incident rules are src/analysis/incidents.ts
+timestamp @96, price @208, conf @216, status @224). The incident rules are rs/crates/sbpf-read/src/analysis/incidents.rs
 (docs/ANALYSIS_SPEC.md, Incident-class rules):
 
 | class | instruction | variants (both programs unless noted) | accepted rules |
@@ -51,14 +51,14 @@ timestamp @96, price @208, conf @216, status @224). The incident rules are src/a
 `fund_movers` (expected file): `[{ ix, authority, from, index? }]`, an authority-only instruction that can move user
 funds to a destination of its choosing. It must not be a finding (every base finding is false) and is expected in
 analysis.json as `fund_movers: [{ instruction, authority, ... }]` (authority: the account name, or `account[index]`
-for native); `bench/run.ts` prints `fund movers listed n/m` (missing section: all NOT LISTED).
+for native); `sbpf-bench` prints `fund movers listed n/m` (missing section: all NOT LISTED).
 
 ## Realistic and open-source sets (bench/real, bench/real29)
 
 Hand-labelled programs of realistic size, scored for rules only and apart from the six categories and the generated
 (template) set; `expected.set` selects the set. Build with `WS=bench/real sh bench/build.sh <crate>` (Anchor 0.31.1,
 solana-program 2.2.1, pinocchio 0.8.4) and `WS=bench/real29 sh bench/build.sh r_a29_` (Anchor 0.29.0); IDLs with
-`node bench/real/idl.ts`.
+`sbpf-bench-real-idl`.
 
 - `realistic` (r_*): programs written for the bench in the styles real code uses, each meant to be correct as written:
   `r_a31_staking` (Anchor 0.31, 16 instructions: upgrade-authority-gated init, has_one / address / constraint with
@@ -78,20 +78,20 @@ solana-program 2.2.1, pinocchio 0.8.4) and `WS=bench/real29 sh bench/build.sh r_
   becomes unvalidated and the attack) and `verified`; `discarded` lists the removals left out as redundant or harmless,
   with the reason.
 
-`node bench/real/verify.ts [--write] [filter]` is the label check: it decompiles each variant and its clean build and
+`sbpf-bench-verify [--write] [filter]` is the label check: it decompiles each variant and its clean build and
 prints, at the variant's instruction, the check-related tokens of the decompiled code that differ (Anchor error
 constants, ProgramError returns, logged messages, `Signer::try_accounts`, memcmp / sol_memcmp, PDA derivations, calls of
 the function returning MissingRequiredSignature), the same over the whole program, and the per-account checks the
 analysis finds in one build only; `--write` records them in `variants.<v>.verified` (`note`: a hand-written addition
 where the tokens do not show it, e.g. a Signer replaced by a SystemAccount).
 
-`bench/run.ts` prints one line per set: clean programs, false findings on them (+ validation_consistency
+`sbpf-bench` prints one line per set: clean programs, false findings on them (+ validation_consistency
 inconsistencies, instructions the analysis does not find), and for `oss` the variants caught: an accepted rule reported
 at the variant's instruction that the clean build does not already report there.
 
 ## Eval pairs
 
-`eval/analyze.ts` decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
+`sbpf-bench` (`sbpf_bench::eval`) decompiles each real-world vuln / fixed pair of `eval/cases.json` (with its IDL) and looks for a
 signal at `ground_truth.target` (instruction + account names as the analysis names them): a finding (`finding`), or
 only an informational one (`informational`: a finding of confidence info, a validation_consistency inconsistency, a
 stored-key gap or a program account no stored field of which is compared); `missed` otherwise. `fixed` is `clean` when
@@ -115,7 +115,7 @@ Token-2022 received amount (no single-property program fix found; the public fix
 - Variants are cargo features `v_<name>` removing exactly one property (a_audit: seeding the bug its rule looks for);
   `bin/<prog>@<name>.so`.
 - `bin/`: the stripped binaries (platform-tools v1.48, as `cargo build-sbf` deploys them). `build.sh` rebuilds them
-  in the `sbf-builder` container (see scripts/refbuild.ts for the toolchain); not needed to run the bench.
+  in the `sbf-builder` container (see `sbpf-refbuild` for the toolchain); not needed to run the bench.
 - `idl/`: Anchor IDLs (0.30+ spec) written from the sources; passed as `--idl`.
 - `expected/<prog>.json`: per instruction (native: by dispatch `tag`, accounts in index order)
   - `accounts`: `{ name: [check kinds] }`, kinds from signer, writable, owner, discriminator, pda, has_one, address,
@@ -143,9 +143,9 @@ an IDL for Anchor, and `expected/<crate>.json`.
 
 ## Corpus noise baseline
 
-    node bench/corpus.ts [corpusDir=corpus] [--budget s=1800] [--timeout s=240] [--jobs n] [--save]
+    sbpf-bench-corpus [corpusDir=corpus] [--budget s=1800] [--timeout s=240] [--jobs n] [--save]
 
-Decompiles every `corpus/*.so` (with `corpus/idl/<id>.json` when present; ~7 min on 6 workers) and prints per rule the
+Decompiles every `corpus/*.so` (with `corpus/idl/<id>.json` when present; ~1 min on 6 workers) and prints per rule the
 programs hit, the findings and the findings per 100 programs; informational findings and the validation_consistency /
 stored-key gap signals get their own rows. The corpus programs are presumed clean, so this is the noise floor. The
 table is compared with `bench/corpus-baseline.json` (same programs only; a changed row shows the baseline programs /
@@ -166,7 +166,7 @@ Phase-2/3 rules after the eval precision pass (findings / programs; before → a
 `recipient-unbound` 34 / 14 → 22 / 9 (+55 informational: a destination the signer picks for itself),
 `value-move-no-signer` 262 / 53 → 188 / 53, `unverified-account-data` 91 / 15 → 79 / 18.
 
-Validation consistency (informational, no rule; src/analysis/consistency.ts): 100 inconsistencies in 28 of the 400
+Validation consistency (informational, no rule; rs/crates/sbpf-read/src/analysis/consistency.rs): 100 inconsistencies in 28 of the 400
 programs (first version, owner / type / signer / address included: 263 in 45). A spot-check of 10 corpus hits found no
 clear true positive (Anchor loaders the analysis does not see load, a counterpart created by the instruction, labels of
 the same field under two roles, SPL token's implicit owner rules), so it stays a view. Eval pairs: spl_lending_flashloan
@@ -175,7 +175,7 @@ the lending market, 4/4 others) show in @vuln only; bench clean bases: none. Sto
 (<= 5 lines each). Other rules unchanged by the pass except `cpi-unchecked-program` 1611 → 1606 findings (a check made
 word by word now counted on every non-failing path).
 
-Incident-class rules (src/analysis/incidents.ts; generated variants caught / false findings on the clean bases (generated,
+Incident-class rules (rs/crates/sbpf-read/src/analysis/incidents.rs; generated variants caught / false findings on the clean bases (generated,
 realistic r_*, open-source o_*) / 400-program corpus: programs, findings, per 100 programs):
 `introspection-unchecked` 6/6, 0, 4 / 4 / 1.0 (current-index parses with no key check found; marginfi's sorted-array
 `ld16(a + 2i - 2)` and Token-2022's check_id in library code were false hits, fixed); `flash-repay-unbound` 2/2, 0,
