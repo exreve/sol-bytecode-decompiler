@@ -1793,9 +1793,14 @@ pub fn run(
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
     let bud = Budgets::new([250_000, 150_000]);
+    let mut printed: Vec<Printed> = Vec::with_capacity(n);
     for i in 0..n {
         let v = add_args_view(&mut dm, i);
-        let (rf, sn) = print_func(&dm, i, &finals[i], &outl, &helper_names, v, &fl, &bud);
+        printed.push(print_body(&dm, i, &finals[i], &outl, &helper_names, v, &bud));
+    }
+    for pd in printed {
+        let ff = func_facts(&dm, &finals[pd.fi], &pd, &fl);
+        let (rf, sn) = read_func(&dm, pd, ff);
         funcs.push(rf);
         snaps.push(sn);
     }
@@ -1948,16 +1953,15 @@ fn is_short_temp(n: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn print_func<'p>(
+fn print_body<'p>(
     d: &Dx<'p>,
     fi: usize,
     tree: &Tree,
     outl: &Outlines,
     helper_names: &HashSet<String>,
     args_view: Option<String>,
-    fl: &FlowCtx<'p>,
     bud: &Budgets,
-) -> (ReadFunc, SugarSnap) {
+) -> Printed {
     let f = d.fs[fi];
     let pc = f.pc;
     let ir = f.ir.as_ref().unwrap();
@@ -2938,101 +2942,8 @@ fn print_func<'p>(
     lines.extend(body_lines);
     lines.push("}".into());
     drop(pr);
-    let facts = {
-        let spans = sugar.spans.borrow();
-        let notes = site_notes.borrow();
-        let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
-        let callee_name = |t: i64| d.fn_name(t);
-        let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
-        let callee_path = |t: i64| {
-            d.libs
-                .get(&t)
-                .filter(|i| i.lib)
-                .and_then(|i| i.hint.clone())
-        };
-        let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
-        let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
-        // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
-        let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
-        let cfg = || -> Rc<Cfg> {
-            ir_cfg
-                .borrow_mut()
-                .get_or_insert_with(|| Rc::new(cfg_of(f)))
-                .clone()
-        };
-        let res = || account_resolver(fl, f, &names_final, true, None);
-        let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
-            let r = res();
-            let x = r.refs(fl, e, None);
-            let x = if !x.is_empty() || fail.is_none() {
-                x
-            } else {
-                match decision_block(&cfg(), Some(e), fail, pass) {
-                    Some(b) => r.refs(fl, e, Some(b)),
-                    None => x,
-                }
-            };
-            x.into_iter().map(|y| y.field).collect()
-        };
-        let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
-            let r = res();
-            let b = if fail.is_none() {
-                None
-            } else {
-                decision_block(&cfg(), Some(e), fail, pass)
-            };
-            r.cmp32(fl, e, b)
-        };
-        let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
-            let r = res();
-            let b = if fail.is_none() {
-                None
-            } else {
-                decision_block(&cfg(), Some(e), fail, pass)
-            };
-            r.pda_eq(fl, e, b)
-        };
-        let ir_store = |si: u32| -> Option<StoreRef> {
-            let r = res();
-            let p = tree
-                .origin
-                .get(&si)
-                .map(|&(b, i)| pos_of(b as usize, i as usize));
-            r.store(fl, p).map(|(a, how)| StoreRef {
-                index: a.index,
-                field: a.field,
-                how,
-            })
-        };
-        let anchor = d.sem.anchor;
-        let inp = FnInput {
-            pc,
-            name: &name,
-            ir,
-            tree,
-            body,
-            lines: &lines,
-            at: body_at,
-            spans: &spans,
-            sites: &notes,
-            noreturn: &noreturn,
-            callee_name: &callee_name,
-            anchor: d.sem.anchor,
-            seeds_at: &seeds_at,
-            ir_refs: if anchor { None } else { Some(&ir_refs) },
-            ir_cmp: if anchor { None } else { Some(&ir_cmp) },
-            ir_pda: if anchor { None } else { Some(&ir_pda) },
-            ir_store: if anchor { None } else { Some(&ir_store) },
-            callee_path: &callee_path,
-            str_at: &str_at,
-            custom_error: &custom_error,
-        };
-        let mut ff = function_facts(&inp);
-        if d.user_invoke.contains(&pc) {
-            ff.wrapper = true;
-        }
-        ff
-    };
+    let spans = sugar.spans.take();
+    let notes = std::mem::take(&mut *site_notes.borrow_mut());
     let snap = SugarSnap {
         fi,
         var_types: sugar.var_types.clone(),
@@ -3044,17 +2955,154 @@ fn print_func<'p>(
         arg_notes: sugar.arg_notes,
         names: names_final.clone(),
     };
-    let rf = ReadFunc {
-        pc,
-        name,
+    Printed {
+        fi,
         text: lines.join("\n"),
-        calls: calls_of(d, f),
-        is_entry: f.is_entry,
-        var_types: var_types.into_iter().collect(),
+        name,
+        lines,
+        body_at,
+        spans,
+        notes,
+        names_final,
         names,
+        var_types,
+        calls: calls_of(d, f),
+        snap,
+    }
+}
+
+/// A function as printed (before its analysis facts, which read the shared flow layer: made in order).
+struct Printed {
+    fi: usize,
+    name: String,
+    text: String,
+    lines: Vec<String>,
+    /// index in `lines` of the body's first line
+    body_at: usize,
+    spans: HashMap<NodeKey, (usize, usize)>,
+    notes: HashMap<NodeKey, SiteNote>,
+    names_final: Vec<Option<String>>,
+    names: Vec<Option<String>>,
+    var_types: IndexMap<u32, String>,
+    calls: Vec<i64>,
+    snap: SugarSnap,
+}
+
+/// The analysis facts of a printed function (native programs: the account resolver of the flow layer).
+fn func_facts<'p>(d: &Dx<'p>, tree: &Tree, p: &Printed, fl: &FlowCtx<'p>) -> FnFacts {
+    let f = d.fs[p.fi];
+    let pc = f.pc;
+    let ir = f.ir.as_ref().unwrap();
+    let body = &tree.body;
+    let spans = &p.spans;
+    let notes = &p.notes;
+    let noreturn = |t: i64| d.p.funcs.get(&t).is_some_and(|x| x.noreturn);
+    let callee_name = |t: i64| d.fn_name(t);
+    let seeds_at = |ptr: u64, n: u64| seeds_at(d, ptr, n);
+    let callee_path = |t: i64| {
+        d.libs
+            .get(&t)
+            .filter(|i| i.lib)
+            .and_then(|i| i.hint.clone())
+    };
+    let str_at = |a: u64, n: u64| d.sem.str_at(a, n, false);
+    let custom_error = |t: i64| d.error_from.contains(&t) || d.error_or.contains(&t);
+    // (native: the account resolver; a condition the structuring rebuilt: the branch deciding it)
+    let ir_cfg: RefCell<Option<Rc<Cfg>>> = RefCell::new(None);
+    let cfg = || -> Rc<Cfg> {
+        ir_cfg
+            .borrow_mut()
+            .get_or_insert_with(|| Rc::new(cfg_of(f)))
+            .clone()
+    };
+    let res = || account_resolver(fl, f, &p.names_final, true, None);
+    let ir_refs = |e: E, fail: Option<i64>, pass: Option<i64>| -> Vec<Option<String>> {
+        let r = res();
+        let x = r.refs(fl, e, None);
+        let x = if !x.is_empty() || fail.is_none() {
+            x
+        } else {
+            match decision_block(&cfg(), Some(e), fail, pass) {
+                Some(b) => r.refs(fl, e, Some(b)),
+                None => x,
+            }
+        };
+        x.into_iter().map(|y| y.field).collect()
+    };
+    let ir_cmp = |e: E, fail: Option<i64>, pass: Option<i64>| -> bool {
+        let r = res();
+        let b = if fail.is_none() {
+            None
+        } else {
+            decision_block(&cfg(), Some(e), fail, pass)
+        };
+        r.cmp32(fl, e, b)
+    };
+    let ir_pda = |e: E, fail: Option<i64>, pass: Option<i64>| -> Option<f64> {
+        let r = res();
+        let b = if fail.is_none() {
+            None
+        } else {
+            decision_block(&cfg(), Some(e), fail, pass)
+        };
+        r.pda_eq(fl, e, b)
+    };
+    let ir_store = |si: u32| -> Option<StoreRef> {
+        let r = res();
+        let p = tree
+            .origin
+            .get(&si)
+            .map(|&(b, i)| pos_of(b as usize, i as usize));
+        r.store(fl, p).map(|(a, how)| StoreRef {
+            index: a.index,
+            field: a.field,
+            how,
+        })
+    };
+    let anchor = d.sem.anchor;
+    let inp = FnInput {
+        pc,
+        name: &p.name,
+        ir,
+        tree,
+        body,
+        lines: &p.lines,
+        at: p.body_at,
+        spans,
+        sites: notes,
+        noreturn: &noreturn,
+        callee_name: &callee_name,
+        anchor: d.sem.anchor,
+        seeds_at: &seeds_at,
+        ir_refs: if anchor { None } else { Some(&ir_refs) },
+        ir_cmp: if anchor { None } else { Some(&ir_cmp) },
+        ir_pda: if anchor { None } else { Some(&ir_pda) },
+        ir_store: if anchor { None } else { Some(&ir_store) },
+        callee_path: &callee_path,
+        str_at: &str_at,
+        custom_error: &custom_error,
+    };
+    let mut ff = function_facts(&inp);
+    if d.user_invoke.contains(&pc) {
+        ff.wrapper = true;
+    }
+    ff
+}
+
+/// A printed function with its facts.
+fn read_func(d: &Dx, p: Printed, facts: FnFacts) -> (ReadFunc, SugarSnap) {
+    let f = d.fs[p.fi];
+    let rf = ReadFunc {
+        pc: f.pc,
+        name: p.name,
+        text: p.text,
+        calls: p.calls,
+        is_entry: f.is_entry,
+        var_types: p.var_types.into_iter().collect(),
+        names: p.names,
         facts: Some(facts),
     };
-    (rf, snap)
+    (rf, p.snap)
 }
 
 /// seedsAt: a seed list (&[&[u8]]) in read-only program memory: ["text" | 0x<hex>, …]
