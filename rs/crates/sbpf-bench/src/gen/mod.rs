@@ -316,6 +316,23 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )
 }
 
+/// The IDL with the listed instructions' accounts replaced (`name:ws …`).
+pub fn patch_idl(idl: &Value, patch: &Map<String, Value>) -> Value {
+    let mut out = idl.clone();
+    for (ix, accs) in patch {
+        let ins = out
+            .get_mut("instructions")
+            .and_then(Value::as_array_mut)
+            .expect("instructions");
+        let i = ins
+            .iter_mut()
+            .find(|x| x.get("name").and_then(Value::as_str) == Some(ix))
+            .expect("instruction");
+        i["accounts"] = idl_accounts(accs.as_str().unwrap_or(""));
+    }
+    out
+}
+
 /// `name:ws …` → IDL account objects
 pub fn idl_accounts(s: &str) -> Value {
     Value::Array(
@@ -506,7 +523,7 @@ fn pretty(x: &Value, ind: &str, out: &mut String) {
 }
 
 /// `JSON.stringify(x, null, '\t')` with arrays of primitives on one line
-fn to_json(x: &Value) -> String {
+pub fn to_json(x: &Value) -> String {
     let mut s = String::new();
     pretty(x, "", &mut s);
     let flat = Regex::new(r"\[\n\t+([^\[\]{}]*?)\n\t+\]").unwrap();

@@ -140,7 +140,7 @@ fn main() {
                 continue;
             }
             let idl = match (&idl, ve.get("idl").and_then(Value::as_object)) {
-                (Some(i), Some(p)) => Some(patch_idl(i, p)),
+                (Some(i), Some(p)) => Some(gen::patch_idl(i, p)),
                 _ => idl.clone(),
             };
             jobs.push(Job {
@@ -289,40 +289,6 @@ fn main() {
         jobs.len(),
         fixed1(t0.elapsed().as_millis() as f64 / 1000.0)
     );
-}
-
-/// The IDL with the listed instructions' accounts replaced (`name:ws` = writable, signer).
-fn patch_idl(idl: &Value, patch: &Map<String, Value>) -> Value {
-    let mut out = idl.clone();
-    for (ix, accs) in patch {
-        let ins = out
-            .get_mut("instructions")
-            .and_then(Value::as_array_mut)
-            .expect("instructions");
-        let i = ins
-            .iter_mut()
-            .find(|x| x.get("name").and_then(Value::as_str) == Some(ix))
-            .expect("instruction");
-        let list: Vec<Value> = accs
-            .as_str()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(|a| {
-                let (name, f) = a.split_once(':').unwrap_or((a, ""));
-                let mut o = Map::new();
-                o.insert("name".into(), json!(name));
-                if f.contains('w') {
-                    o.insert("writable".into(), json!(true));
-                }
-                if f.contains('s') {
-                    o.insert("signer".into(), json!(true));
-                }
-                Value::Object(o)
-            })
-            .collect();
-        i["accounts"] = Value::Array(list);
-    }
-    out
 }
 
 fn run_all(jobs: &[Job]) -> Vec<Value> {

@@ -11,3 +11,4 @@ regex.workspace = true
 sbpf-read.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 sbpf-print.workspace = true
+sbpf-ir.workspace = true

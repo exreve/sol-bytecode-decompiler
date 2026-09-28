@@ -534,6 +534,8 @@ dependencies = [
  "indexmap",
  "mimalloc",
  "regex",
+ "sbpf-ir",
+ "sbpf-print",
  "sbpf-read",
  "serde_json",
 ]
