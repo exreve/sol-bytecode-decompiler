@@ -735,9 +735,9 @@ pub fn render_json(a: &Analysis, w: Where) -> String {
 
 /// budgetJson: cut analysis.json to `max` bytes (UTF-16 units), lowest-priority detail first
 fn budget_json(mut doc: Jv, max: usize) -> String {
-    let text = doc.pretty(1) + "\n";
-    if utf16_len(&text) <= max {
-        return text;
+    // (sizes are measured without printing: the document is printed once, as it ends up)
+    if doc.pretty_len(1) + 1 <= max {
+        return doc.pretty(1) + "\n";
     }
     let mut omitted: IndexMap<String, f64> = IndexMap::default();
     fn cap(o: &mut Jv, key: &str, n: usize, label: &str, omitted: &mut IndexMap<String, f64>) {
@@ -784,29 +784,37 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
             omitted.insert("findings (duplicates)".into(), (n - fs.len()) as f64);
         }
     }
-    let out = |doc: &mut Jv, omitted: &IndexMap<String, f64>| {
+    // the document with the budget member appended: printed (Some) or measured (None, in UTF-16 units)
+    let out = |doc: &mut Jv, omitted: &IndexMap<String, f64>, print: bool| -> (String, usize) {
         let b = Jv::obj()
                 .with("max_bytes", Jv::n(max as f64))
                 .with("note", Jv::s("detail dropped to fit the size budget, lowest priority first (<key>_omitted: entries cut from that list); the decompiled code is complete"))
                 .with("omitted", Jv::Obj(omitted.iter().map(|(k, v)| (k.clone(), Jv::n(*v))).collect()));
+        let emit = |d: &Jv| {
+            if print {
+                (d.pretty(1) + "\n", 0)
+            } else {
+                (String::new(), d.pretty_len(1) + 1)
+            }
+        };
         // (the budget appended for the printing, not a copy of the document)
         if let Jv::Obj(m) = doc {
             if !m.iter().any(|x| x.0 == "budget") {
                 m.push(("budget".to_string(), b));
-                let s = doc.pretty(1) + "\n";
+                let r = emit(doc);
                 if let Jv::Obj(m) = doc {
                     m.pop();
                 }
-                return s;
+                return r;
             }
         }
         let mut d = doc.clone();
         d.set("budget", b);
-        d.pretty(1) + "\n"
+        emit(&d)
     };
-    let mut s = out(&mut doc, &omitted);
+    let mut len = out(&mut doc, &omitted, false).1;
     for step in 0..8 {
-        if utf16_len(&s) <= max {
+        if len <= max {
             break;
         }
         let om = &mut omitted;
@@ -917,9 +925,9 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
                 });
             }
         }
-        s = out(&mut doc, &omitted);
+        len = out(&mut doc, &omitted, false).1;
     }
-    s
+    out(&mut doc, &omitted, true).0
 }
 
 type HashMapS = sbpf_ir::fx::HashMap<String, usize>;

@@ -114,6 +114,44 @@ impl Jv {
         }
     }
 
+    /// The UTF-16 length of `pretty(indent)`, without building it.
+    pub fn pretty_len(&self, indent: usize) -> usize {
+        self.pretty_len0(indent, 0)
+    }
+    fn pretty_len0(&self, ind: usize, depth: usize) -> usize {
+        match self {
+            Jv::Arr(a) if !a.is_empty() => {
+                // '[' + per item (',' except the first, '\n', pad) + '\n' + pad + ']'
+                let mut n = 1 + (a.len() - 1) + 1 + ind * depth + 1;
+                for x in a {
+                    n += 1 + ind * (depth + 1) + x.pretty_len0(ind, depth + 1);
+                }
+                n
+            }
+            Jv::Obj(m) if !m.is_empty() => {
+                let mut n = 1 + (m.len() - 1) + 1 + ind * depth + 1;
+                for (k, x) in m {
+                    n += 1 + ind * (depth + 1) + str_len(k) + 2 + x.pretty_len0(ind, depth + 1);
+                }
+                n
+            }
+            _ => self.compact_len(),
+        }
+    }
+    fn compact_len(&self) -> usize {
+        match self {
+            Jv::Null => 4,
+            Jv::Bool(b) => if *b { 4 } else { 5 },
+            Jv::Num(x) => num(*x).len(),
+            Jv::Str(s) => str_len(s),
+            Jv::Arr(a) => 2 + a.len().saturating_sub(1) + a.iter().map(|x| x.compact_len()).sum::<usize>(),
+            Jv::Obj(m) => {
+                2 + m.len().saturating_sub(1)
+                    + m.iter().map(|(k, x)| str_len(k) + 1 + x.compact_len()).sum::<usize>()
+            }
+        }
+    }
+
     /// JSON.stringify(v, null, indent)
     pub fn pretty(&self, indent: usize) -> String {
         let mut o = String::new();
@@ -157,6 +195,17 @@ impl Jv {
     }
 }
 
+/// UTF-16 length of JSON.stringify(s)
+fn str_len(s: &str) -> usize {
+    if s.bytes().any(|b| b < 0x20 || b == b'"' || b == b'\\') {
+        let mut o = String::new();
+        crate::util::json_str_into(&mut o, s);
+        utf16_len(&o)
+    } else {
+        utf16_len(s) + 2
+    }
+}
+
 fn pad(o: &mut String, n: usize) {
     for _ in 0..n {
         o.push(' ');
@@ -174,4 +223,22 @@ fn num(x: f64) -> String {
 /// String.prototype.length (UTF-16 code units)
 pub fn utf16_len(s: &str) -> usize {
     crate::util::u16len(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pretty_len_is_len() {
+        let d = Jv::obj()
+            .with("a", Jv::Arr(vec![Jv::n(1.5), Jv::s("x\"y\u{1F600}\u{e9}\u{1}"), Jv::obj(), Jv::Arr(vec![])]))
+            .with("b\n", Jv::obj().with("c", Jv::Null).with("d", Jv::Bool(false)))
+            .with("e", Jv::Arr(vec![Jv::obj().with("f", Jv::Arr(vec![Jv::Bool(true), Jv::n(-3.0), Jv::n(1e300)]))]));
+        for ind in [0, 1, 2] {
+            assert_eq!(d.pretty_len(ind), utf16_len(&d.pretty(ind)));
+            let mut c = String::new();
+            d.compact(&mut c);
+            assert_eq!(d.compact_len(), utf16_len(&c));
+        }
+    }
 }
