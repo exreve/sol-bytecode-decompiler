@@ -501,6 +501,24 @@ fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
 
 /// The vocabulary names of wanted hashes (a hash of several indices names them all the same: the names are
 /// equal, barring a 64-bit collision).
+/// The vocabulary's Bloom filter (build.rs): `[log2 bits: u32][probes: u32][bits: u64 LE...]`.
+static VOCAB_BLOOM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vocab_bloom.bin"));
+
+/// false: no vocabulary name hashes to v (true: maybe)
+fn vocab_may_have(v: u64) -> bool {
+    let b = VOCAB_BLOOM;
+    let log = u32::from_le_bytes(b[0..4].try_into().unwrap());
+    let probes = u32::from_le_bytes(b[4..8].try_into().unwrap());
+    let mask = (1u32 << log) - 1;
+    let (h1, h2) = (v as u32, (v >> 32) as u32 | 1);
+    (0..probes).all(|k| {
+        let x = h1.wrapping_add(k.wrapping_mul(h2)) & mask;
+        let at = 8 + (x >> 6) as usize * 8;
+        let w = u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        w & (1 << (x & 63)) != 0
+    })
+}
+
 fn vocab_lookup_many(wants: &[u64]) -> HashMap<u64, String> {
     // (a process decompiles more than once, e.g. the diff's two programs and their profiles: the answers
     // are kept, only values not looked up yet are scanned for)
@@ -512,6 +530,11 @@ fn vocab_lookup_many(wants: &[u64]) -> HashMap<u64, String> {
         .copied()
         .filter(|v| !seen.contains_key(v))
         .collect();
+    // (values the build-time filter rejects are in no vocabulary entry: no scan for them)
+    let (new, none): (Vec<u64>, Vec<u64>) = new.into_iter().partition(|&v| vocab_may_have(v));
+    for v in none {
+        seen.insert(v, None);
+    }
     if !new.is_empty() {
         let found = vocab_scan(&new);
         for v in new {
@@ -1053,6 +1076,19 @@ mod tests {
     fn selectors_load() {
         let db = sel_db();
         assert!(!db.verbs.is_empty());
+    }
+    #[test]
+    fn vocab_filter_has_every_name() {
+        let db = sel_db();
+        let n = db.verbs.len() * 2 * (db.nouns.len() + 1);
+        for i in 0..n {
+            let h = sha8(format!("global:{}", name_at(db, i)).as_bytes());
+            assert!(vocab_may_have(h), "{}", name_at(db, i));
+        }
+        let misses = (1..10000u64)
+            .filter(|&k| vocab_may_have(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+            .count();
+        assert!(misses < 20, "{misses}");
     }
     #[test]
     fn selector_lookups() {

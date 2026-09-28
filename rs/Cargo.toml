@@ -29,6 +29,13 @@ codegen-units = 1
 lto = "fat"
 debug = false
 
+# build scripts (sbpf-read's vocabulary filter hashes 1.8M names) run optimized
+[profile.release.build-override]
+opt-level = 3
+
+[profile.dev.build-override]
+opt-level = 3
+
 # `cargo build --profile profiling`: release + line tables, for sampling profilers (samply).
 [profile.profiling]
 inherits = "release"
