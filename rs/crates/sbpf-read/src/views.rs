@@ -46,10 +46,17 @@ pub struct Opaque {
 
 thread_local! {
     static FIELD_ID: Cell<u32> = const { Cell::new(1) };
+    static NO_FIELDS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// (the parallel printing: field identities are made on the main thread only)
+pub fn forbid_new_fields(on: bool) {
+    NO_FIELDS.with(|c| c.set(on));
 }
 
 /// A new field identity.
 pub fn fid() -> u32 {
+    assert!(!NO_FIELDS.with(|c| c.get()), "a field made during the parallel printing");
     FIELD_ID.with(|c| {
         let v = c.get();
         c.set(v + 1);

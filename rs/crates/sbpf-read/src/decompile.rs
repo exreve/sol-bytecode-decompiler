@@ -972,7 +972,7 @@ pub fn decompile_read_opts(
         d.data_vars = account_data_vars(&d.fs, &discs, &mut d.views);
     }
     crate::types::anchor_accounts(&mut d, name_fn);
-    let mut r = crate::printfn::run(d, name_fn, hook)?;
+    let mut r = crate::printfn::run(d, name_fn, hook, threads)?;
     drop(ctx);
     r.shapes = shapes;
     r.program = Some(pr.p);

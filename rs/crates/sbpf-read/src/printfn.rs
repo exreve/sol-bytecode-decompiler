@@ -1722,10 +1722,204 @@ impl Budgets {
     }
 }
 
+impl Budgets {
+    /// The budgets left after a printing whose log this is, from `left`, when the printing would have been
+    /// the same with those (every test with the same outcome); else None.
+    fn replay(log: &[BudgetEv], mut left: [i64; 2]) -> Option<[i64; 2]> {
+        for ev in log {
+            match *ev {
+                BudgetEv::Test(k, ok) => {
+                    if (left[k as usize] > 0) != ok {
+                        return None;
+                    }
+                }
+                BudgetEv::Spend(k, n) => left[k as usize] -= n,
+            }
+        }
+        Some(left)
+    }
+    /// Whether the printing tested budget `k`.
+    fn tests(log: &[BudgetEv], k: BK) -> bool {
+        log.iter().any(|ev| matches!(*ev, BudgetEv::Test(x, _) if x == k))
+    }
+}
+
+/// A budget no printing exhausts (a speculative printing's budget while the real one is positive).
+const UNBOUNDED: i64 = i64::MAX / 4;
+
+/// The shared state of the parallel printing. The printing of a function reads the decompilation state
+/// (`Dx`: every cache in it is thread-safe) and the outlines, and appends nodes to that function's IR
+/// arena only (it reads no other function's arena): each arena is used by one thread at a time, so
+/// sharing the (not `Sync`) arenas is sound. Nothing else writes the state while the threads run (`Dx`
+/// is only changed between the runs, by the argument views of the instructions).
+struct ParPrint<'a, 'p> {
+    d: &'a Dx<'p>,
+    finals: &'a [Tree],
+    outl: &'a Outlines,
+    helper_names: &'a HashSet<String>,
+}
+unsafe impl Sync for ParPrint<'_, '_> {}
+
+/// A printed function and its budget log, handed from a worker thread (the node keys it holds are
+/// addresses in the shared trees, only used as keys). None: the printing threw.
+struct SendPrinted(Option<Printed>, Vec<BudgetEv>);
+unsafe impl Send for SendPrinted {}
+
+thread_local! {
+    /// (speculative printing: a panic is caught, its message not printed)
+    static QUIET: Cell<bool> = const { Cell::new(false) };
+}
+
+impl ParPrint<'_, '_> {
+    /// The function printed with the given budgets on this thread (a panic unwinds).
+    fn print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
+        let bud = Budgets::new(left);
+        let p = print_body(self.d, fi, &self.finals[fi], self.outl, self.helper_names, view, &bud);
+        SendPrinted(Some(p), bud.log.into_inner())
+    }
+    /// The function printed speculatively (a panic gives None: it is printed again for real).
+    fn try_print(&self, fi: usize, view: Option<String>, left: [i64; 2]) -> SendPrinted {
+        static HOOK: std::sync::Once = std::sync::Once::new();
+        HOOK.call_once(|| {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if !QUIET.with(|q| q.get()) {
+                    prev(info)
+                }
+            }));
+        });
+        QUIET.with(|q| q.set(true));
+        crate::views::forbid_new_fields(true);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.print(fi, view, left)));
+        crate::views::forbid_new_fields(false);
+        QUIET.with(|q| q.set(false));
+        r.unwrap_or(SendPrinted(None, Vec::new()))
+    }
+}
+
+/// `(0..n).map(f)` on up to `threads` threads with the main thread's stack size (deep recursion).
+fn par_map_big<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    if threads <= 1 || n <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            std::thread::Builder::new()
+                .stack_size(1 << 30)
+                .spawn_scoped(s, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = f(i);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
+}
+
+/// Every function's text, as printed one after the other in function order, on `threads` threads.
+/// Order matters through two things: the argument views of the instructions, added to the shared view
+/// table before each function is printed (the functions between two additions are printed together),
+/// and the concrete-run budgets, spent in function order. The functions are printed speculatively with
+/// unbounded budgets (those still positive) and checked in order against the real budgets by their logs;
+/// the first one whose printing would have been different is printed again with the real budgets, and
+/// the later ones that tested a budget now exhausted are printed again speculatively (at most twice: two
+/// budgets). The result is the one of the sequential printing, for any thread count.
+fn print_all(
+    dm: &mut Dx,
+    finals: &[Tree],
+    outl: &Outlines,
+    helper_names: &HashSet<String>,
+    threads: usize,
+) -> Vec<Printed> {
+    let n = dm.fs.len();
+    let mut out: Vec<Printed> = Vec::with_capacity(n);
+    let mut left: [i64; 2] = [250_000, 150_000];
+    let mut i = 0;
+    while i < n {
+        // the segment: its first function may add views; the next ones up to one that would add
+        let mut views = vec![add_args_view(dm, i)];
+        let mut j = i + 1;
+        while j < n {
+            match args_view_of(dm, j) {
+                ArgsView::New => break,
+                ArgsView::None => views.push(None),
+                ArgsView::Existing(v) => views.push(Some(v)),
+            }
+            j += 1;
+        }
+        let pp = ParPrint {
+            d: dm,
+            finals,
+            outl,
+            helper_names,
+        };
+        let spec = |left: [i64; 2]| left.map(|b| if b > 0 { UNBOUNDED } else { b });
+        let mut regime = spec(left);
+        let mut got: Vec<Option<SendPrinted>> = (i..j).map(|_| None).collect();
+        let mut todo: Vec<usize> = (0..j - i).collect();
+        let mut k = 0;
+        while k < j - i {
+            let rs = par_map_big(todo.len(), threads, |t| {
+                let x = todo[t];
+                pp.try_print(i + x, views[x].clone(), regime)
+            });
+            for (x, r) in todo.iter().zip(rs) {
+                got[*x] = Some(r);
+            }
+            todo.clear();
+            // in order: keep the printings the real budgets give the same result
+            while k < j - i {
+                let r = got[k].as_ref().unwrap();
+                if r.0.is_some() {
+                    if let Some(l) = Budgets::replay(&r.1, left) {
+                        left = l;
+                        k += 1;
+                        continue;
+                    }
+                }
+                // printed again with the real budgets, then the later ones that tested a budget it exhausted
+                let r = pp.print(i + k, views[k].clone(), left);
+                left = Budgets::replay(&r.1, left).expect("the real budgets");
+                got[k] = Some(r);
+                k += 1;
+                let now = spec(left);
+                for b in [BK::Exec, BK::Wrap] {
+                    if now[b as usize] != regime[b as usize] {
+                        for x in k..j - i {
+                            if !todo.contains(&x) && Budgets::tests(&got[x].as_ref().unwrap().1, b) {
+                                todo.push(x);
+                            }
+                        }
+                    }
+                }
+                todo.sort();
+                regime = now;
+                if !todo.is_empty() {
+                    break;
+                }
+            }
+        }
+        out.extend(got.into_iter().map(|r| r.unwrap().0.unwrap()));
+        i = j;
+    }
+    // (the printer's statement table is left, as after printing the functions one by one on this thread)
+    if let Some(t) = finals.last() {
+        TREE_STMTS.with(|x| *x.borrow_mut() = t.stmts.clone());
+    }
+    out
+}
+
 pub fn run(
     mut dm: Dx,
     _name_fn: Option<i64>,
     hook: Option<AnalysisHook>,
+    threads: usize,
 ) -> Result<ReadOut, String> {
     let d = &dm;
     let n = d.fs.len();
@@ -1792,12 +1986,7 @@ pub fn run(
     };
     let fl = FlowCtx::new(callee);
     let mut snaps: Vec<SugarSnap> = Vec::with_capacity(n);
-    let bud = Budgets::new([250_000, 150_000]);
-    let mut printed: Vec<Printed> = Vec::with_capacity(n);
-    for i in 0..n {
-        let v = add_args_view(&mut dm, i);
-        printed.push(print_body(&dm, i, &finals[i], &outl, &helper_names, v, &bud));
-    }
+    let printed = print_all(&mut dm, &finals, &outl, &helper_names, threads);
     for pd in printed {
         let ff = func_facts(&dm, &finals[pd.fi], &pd, &fl);
         let (rf, sn) = read_func(&dm, pd, ff);
@@ -3443,29 +3632,69 @@ fn unused() {
 /// The IDL argument view of the function's instruction (`views.map.get(vname) ?? views.borshView(...)`):
 /// added to the shared table while the function is named, as in the TS.
 fn add_args_view(d: &mut Dx, fi: usize) -> Option<String> {
-    let pc = d.fs[fi].pc;
-    let ix_name = d.sem.ix_names.get(&pc).cloned()?;
-    let idl = d.idl?;
-    let ix_def = idl.instructions.iter().find(|x| x.name == ix_name)?;
-    if ix_def.arg_defs.is_empty() {
-        return None;
+    match args_view_of(d, fi) {
+        ArgsView::None => None,
+        ArgsView::Existing(v) => Some(v),
+        ArgsView::New => {
+            let pc = d.fs[fi].pc;
+            let ix_name = d.sem.ix_names.get(&pc).cloned()?;
+            let idl = d.idl?;
+            let ix_def = idl.instructions.iter().find(|x| x.name == ix_name)?;
+            let vname = args_view_name(&ix_name, idl);
+            d.views.borsh_view(
+                &vname,
+                &format!("arguments of instruction {ix_name} (Anchor IDL, Borsh layout; after the 8-byte discriminator)"),
+                &ix_def.arg_defs,
+                &idl.types,
+                0.0,
+            )
+        }
     }
-    let vbase = format!("{}Args", pascal_ix(&ix_name));
-    let vname = if idl.types.contains_key(&vbase) {
+}
+
+enum ArgsView {
+    /// no argument view
+    None,
+    /// the view is in the table already
+    Existing(String),
+    /// the view is added to the table
+    New,
+}
+
+fn args_view_name(ix_name: &str, idl: &crate::idl::IdlInfo) -> String {
+    let vbase = format!("{}Args", pascal_ix(ix_name));
+    if idl.types.contains_key(&vbase) {
         format!("{}IxArgs", vbase.strip_suffix("Args").unwrap())
     } else {
         vbase
-    };
-    if d.views.map.contains_key(&vname) {
-        return Some(vname);
     }
-    d.views.borsh_view(
-        &vname,
-        &format!("arguments of instruction {ix_name} (Anchor IDL, Borsh layout; after the 8-byte discriminator)"),
-        &ix_def.arg_defs,
-        &idl.types,
-        0.0,
-    )
+}
+
+/// What `add_args_view` does for the function (without doing it).
+fn args_view_of(d: &Dx, fi: usize) -> ArgsView {
+    let pc = d.fs[fi].pc;
+    let Some(ix_name) = d.sem.ix_names.get(&pc) else {
+        return ArgsView::None;
+    };
+    let Some(idl) = d.idl else {
+        return ArgsView::None;
+    };
+    let Some(ix_def) = idl.instructions.iter().find(|x| &x.name == ix_name) else {
+        return ArgsView::None;
+    };
+    if ix_def.arg_defs.is_empty() {
+        return ArgsView::None;
+    }
+    if ix_name.split('_').any(|w| w.is_empty()) {
+        // (pascal_ix throws: when its turn comes)
+        return ArgsView::New;
+    }
+    let vname = args_view_name(ix_name, idl);
+    if d.views.map.contains_key(&vname) {
+        ArgsView::Existing(vname)
+    } else {
+        ArgsView::New
+    }
 }
 
 /// A Dx reference with its lifetime shortened (Dx is covariant).
