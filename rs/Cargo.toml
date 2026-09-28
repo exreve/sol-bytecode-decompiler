@@ -11,6 +11,7 @@ license = "MIT"
 indexmap = "2"
 serde_json = { version = "1", features = ["preserve_order"] }
 miniz_oxide = "0.8"
+memchr = "2"
 regex = { version = "1", default-features = false, features = ["std", "unicode-case", "perf"] }
 sbpf-elf = { path = "crates/sbpf-elf" }
 sbpf-ir = { path = "crates/sbpf-ir" }

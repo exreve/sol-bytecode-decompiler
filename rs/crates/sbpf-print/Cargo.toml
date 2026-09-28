@@ -13,3 +13,4 @@ sbpf-program.workspace = true
 sbpf-dataflow.workspace = true
 sbpf-opt.workspace = true
 sbpf-struct.workspace = true
+memchr.workspace = true

@@ -623,6 +623,7 @@ name = "sbpf-print"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "memchr",
  "sbpf-dataflow",
  "sbpf-elf",
  "sbpf-ir",

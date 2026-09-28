@@ -14,7 +14,7 @@ use sbpf_print::raw::{called, scan_views};
 use sbpf_ir::fx::{HashMap, HashSet};
 
 fn line_count(t: &str) -> usize {
-    t.bytes().filter(|&b| b == b'\n').count() + 1
+    memchr::memchr_iter(b'\n', t.as_bytes()).count() + 1
 }
 
 /// `text.replace(/^function /m, 'export function ')`
@@ -519,6 +519,8 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
                 ff.calls.iter().map(|c| (c.callee, c.err_path)).collect()
             })
     };
+    // (the outlined helpers' called names, scanned once for every bundle)
+    let outl_names: Vec<IndexSet<String>> = r.outlined.iter().map(|o| names_in(&o.1)).collect();
     let mut bundle_loc: HashMap<String, HashMap<String, (i64, Option<Vec<usize>>)>> =
         HashMap::default();
     let mut bundle = |ix: &str,
@@ -566,8 +568,9 @@ pub fn render_project(r: &ReadOut) -> IndexMap<String, String> {
                         })
                         .collect()
                 }
-                Code::O(o) => names_in(&r.outlined[*o].1)
-                    .into_iter()
+                Code::O(o) => outl_names[*o]
+                    .iter()
+                    .cloned()
                     .map(|n| {
                         let e = by_name.contains_key(n.as_str()) && false;
                         (n, e)

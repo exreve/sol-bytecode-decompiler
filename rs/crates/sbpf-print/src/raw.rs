@@ -351,20 +351,16 @@ pub fn func_text(f: &Func, tree: &Tree, names: &ProgNames, sym_note: Option<&str
 
 /// Called names of a text (`\b([A-Za-z_][A-Za-z0-9_]*)\(`), in order of first appearance.
 pub fn called(text: &str, out: &mut IndexSet<String>) {
+    // each '(' and the maximal word run just before it (the words followed by '(' in text order)
     let b = text.as_bytes();
     let w = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0;
-    while i < b.len() {
-        if !w(b[i]) {
-            i += 1;
-            continue;
+    for j in memchr::memchr_iter(b'(', b) {
+        let mut s = j;
+        while s > 0 && w(b[s - 1]) {
+            s -= 1;
         }
-        let s = i;
-        while i < b.len() && w(b[i]) {
-            i += 1;
-        }
-        if !b[s].is_ascii_digit() && b.get(i) == Some(&b'(') && !out.contains(&text[s..i]) {
-            out.insert(text[s..i].to_string());
+        if s < j && !b[s].is_ascii_digit() && !out.contains(&text[s..j]) {
+            out.insert(text[s..j].to_string());
         }
     }
 }
