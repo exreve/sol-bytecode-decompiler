@@ -71,6 +71,10 @@ pub fn js_num(x: N) -> String {
     if x.is_infinite() {
         return if x > 0.0 { "Infinity" } else { "-Infinity" }.into();
     }
+    if x.fract() == 0.0 && x.abs() < 9007199254740992.0 {
+        // (integers: the same digits as the float's shortest form)
+        return (x as i64).to_string();
+    }
     if x.abs() < 1e21 && x.abs() >= 1e-6 {
         return format!("{x}");
     }

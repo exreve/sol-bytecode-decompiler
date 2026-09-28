@@ -625,7 +625,17 @@ impl<'c> ExecMem<'c> {
             let x = a.wrapping_add(i as u64);
             let k = (x & 0xfff) as usize;
             let c = (n - i).min(4096 - k);
-            let pg = self.page(x >> 12);
+            let pk = x >> 12;
+            // (a page not made yet and outside the image has no taint array: its taint is its t0; it is
+            // not made here: its bytes only depend on the page number when it is)
+            if !self.pages.contains_key(&pk) && !self.ctx.image_pages.contains(&pk) {
+                if c > 0 && !(0x30_0000..0x40_0000).contains(&pk) {
+                    t |= 1;
+                }
+                i += c;
+                continue;
+            }
+            let pg = self.page(pk);
             match &pg.t {
                 Some(tt) => {
                     for &y in &tt[k..k + c] {
@@ -648,7 +658,16 @@ impl<'c> ExecMem<'c> {
             let x = a.wrapping_add(i as u64);
             let k = (x & 0xfff) as usize;
             let c = (n - i).min(4096 - k);
-            let pg = self.page(x >> 12);
+            let pk = x >> 12;
+            // (the page's own taint on a page not made yet, outside the image: nothing to record)
+            if !self.pages.contains_key(&pk)
+                && !self.ctx.image_pages.contains(&pk)
+                && t == if (0x30_0000..0x40_0000).contains(&pk) { 0 } else { 1 }
+            {
+                i += c;
+                continue;
+            }
+            let pg = self.page(pk);
             if pg.t.is_some() || t != pg.t0 {
                 let t0 = pg.t0;
                 pg.t.get_or_insert_with(|| Box::new([t0; 4096]))[k..k + c].fill(t);
