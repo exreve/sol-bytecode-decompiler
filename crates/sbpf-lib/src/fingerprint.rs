@@ -572,7 +572,7 @@ pub fn render_fingerprints(
         .copied()
         .filter(|s| !lib.contains(&s.pc))
         .collect();
-    let about = format!("address-independent function hashes (bytecode only): hash = code with call targets, text/rodata addresses normalized; regfree = same, registers renamed; data = constants the code refers to in rodata (texts, 32-byte keys/tables; absent: none); fuzzy = \"<insns>i <blocks>b <edges>e <opcode-class histogram: {}>\"; codeHash = hash of the set of (hash, data). Compare programs with src/diff.ts", OP_CLASSES.join("."));
+    let about = format!("address-independent function hashes (bytecode only): hash = code with call targets, text/rodata addresses normalized; regfree = same, registers renamed; data = constants the code refers to in rodata (texts, 32-byte keys/tables; absent: none); fuzzy = \"<insns>i <blocks>b <edges>e <opcode-class histogram: {}>\"; codeHash = hash of the set of (hash, data). Compare programs with `sbpf-decompile <A> <B>`", OP_CLASSES.join("."));
     let head = format!(
         "{{\"sbpf\":{},\"functions\":{},\"library\":{},\"codeHash\":{},\"userCodeHash\":{},\"about\":{}}}",
         p.version,
