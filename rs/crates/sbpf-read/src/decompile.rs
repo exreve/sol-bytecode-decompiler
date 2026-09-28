@@ -1075,11 +1075,14 @@ fn stubs(d: &mut Dx) {
 pub fn render_fingerprints(r: &ReadOut) -> String {
     let p = r.program.as_ref().unwrap();
     let img = p.image();
-    let sigs: IndexMap<i64, sbpf_lib::fingerprint::FnSig> = r
-        .shapes
-        .iter()
-        .map(|x| (x.pc, sbpf_lib::fingerprint::shape_signature(p, &img, x)))
-        .collect();
+    let sp = sbpf_lib::fingerprint::ShapeProg::of(p);
+    let sigs: IndexMap<i64, sbpf_lib::fingerprint::FnSig> = sbpf_opt::par_map(
+        &r.shapes,
+        sbpf_opt::default_threads(),
+        |x| (x.pc, sbpf_lib::fingerprint::shape_signature_of(&sp, &img, x)),
+    )
+    .into_iter()
+    .collect();
     // handlerOwners: the handlers (ix_* and inline processors) reaching each function
     let by_pc: HashMap<i64, &ReadFunc> = r.funcs.iter().map(|f| (f.pc, f)).collect();
     let proc_names: HashSet<&str> = r.processors.iter().map(|x| x.0.as_str()).collect();

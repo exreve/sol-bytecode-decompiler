@@ -383,7 +383,30 @@ pub fn sig_shape(f: &Func) -> SigShape {
     }
 }
 
+/// The parts of a Program `shape_signature` reads (shareable between threads, unlike the IR arenas).
+pub struct ShapeProg<'a> {
+    pub elf: &'a sbpf_elf::Elf,
+    pub version: u32,
+    pub insns: &'a [sbpf_program::Insn],
+    pub text_vaddr: u64,
+}
+
+impl<'a> ShapeProg<'a> {
+    pub fn of(p: &'a Program) -> Self {
+        ShapeProg {
+            elf: &p.elf,
+            version: p.version,
+            insns: &p.insns,
+            text_vaddr: p.text_vaddr,
+        }
+    }
+}
+
 pub fn shape_signature(p: &Program, img: &Image, f: &SigShape) -> FnSig {
+    shape_signature_of(&ShapeProg::of(p), img, f)
+}
+
+pub fn shape_signature_of(p: &ShapeProg, img: &Image, f: &SigShape) -> FnSig {
     let pcs = &f.pcs;
     let text_lo = p.text_vaddr as u128;
     let text_hi = text_lo + (p.insns.len() as u128) * 8;

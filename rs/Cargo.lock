@@ -554,6 +554,7 @@ dependencies = [
 name = "sbpf-dump"
 version = "0.1.0"
 dependencies = [
+ "mimalloc",
  "pprof",
  "sbpf-cli",
  "sbpf-dataflow",

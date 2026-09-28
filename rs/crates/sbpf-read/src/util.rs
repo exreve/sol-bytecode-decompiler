@@ -94,12 +94,26 @@ pub fn js_hex(x: N) -> String {
 
 /// JSON.stringify of a string.
 pub fn json_str(s: &str) -> String {
-    serde_json::to_string(s).unwrap()
+    let mut o = String::with_capacity(s.len() + 2);
+    json_str_into(&mut o, s);
+    o
+}
+
+/// `JSON.stringify(s)` appended to `o` (serde_json's escaping; plain strings copied as they are).
+pub fn json_str_into(o: &mut String, s: &str) {
+    if s.bytes().any(|b| b < 0x20 || b == b'"' || b == b'\\') {
+        o.push_str(&serde_json::to_string(s).unwrap());
+    } else {
+        o.push('"');
+        o.push_str(s);
+        o.push('"');
+    }
 }
 
 /// UTF-16 length of a string (JS `.length`).
 pub fn u16len(s: &str) -> usize {
-    s.chars().map(|c| c.len_utf16()).sum()
+    // one unit per char (every byte but continuation bytes), two for 4-byte sequences
+    s.bytes().filter(|&b| b & 0xc0 != 0x80).count() + s.bytes().filter(|&b| b >= 0xf0).count()
 }
 
 /// `s.padEnd(n)` (UTF-16 length).

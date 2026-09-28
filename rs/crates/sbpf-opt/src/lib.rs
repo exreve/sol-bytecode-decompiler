@@ -1130,6 +1130,41 @@ pub fn par_each<T: Send>(
         .collect()
 }
 
+/// `items.iter().map(f).collect()` on `threads` worker threads (results in input order).
+pub fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let n = items.len();
+    if threads <= 1 || n <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            std::thread::Builder::new()
+                .stack_size(1 << 28)
+                .spawn_scoped(s, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = f(&items[i]);
+                    out.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn");
+        }
+    });
+    out.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.unwrap())
+        .collect()
+}
+
+/// The number of worker threads for the output stages (the machine's; the output never depends on it).
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 /// The per-function steps after rewriteStackArgs: sinkFrameLoads (unless exactMemory), compactStores.
 pub fn finish(f: &mut Func, exact_memory: bool) {
     let mut x = Fx::new(f.ir.take().expect("variable IR"), None);

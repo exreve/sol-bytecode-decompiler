@@ -16,6 +16,7 @@ sbpf-print.workspace = true
 sbpf-read.workspace = true
 sbpf-lib.workspace = true
 sbpf-cli.workspace = true
+mimalloc = { version = "0.1", default-features = false }
 pprof = { version = "0.15", optional = true, default-features = false }
 
 [features]

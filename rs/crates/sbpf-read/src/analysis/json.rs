@@ -1,7 +1,7 @@
 //! A small ordered JSON value for the security/ files: objects keep insertion order (as the TS objects
 //! `JSON.stringify` serializes), `undefined` members are left out by the builders.
 
-use crate::util::{js_num, json_str};
+use crate::util::js_num;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Jv {
@@ -88,7 +88,7 @@ impl Jv {
             Jv::Null => o.push_str("null"),
             Jv::Bool(b) => o.push_str(if *b { "true" } else { "false" }),
             Jv::Num(x) => o.push_str(&num(*x)),
-            Jv::Str(s) => o.push_str(&json_str(s)),
+            Jv::Str(s) => crate::util::json_str_into(o, s),
             Jv::Arr(a) => {
                 o.push('[');
                 for (i, x) in a.iter().enumerate() {
@@ -105,7 +105,7 @@ impl Jv {
                     if i > 0 {
                         o.push(',');
                     }
-                    o.push_str(&json_str(k));
+                    crate::util::json_str_into(o, k);
                     o.push(':');
                     x.compact(o);
                 }
@@ -144,7 +144,7 @@ impl Jv {
                     }
                     o.push('\n');
                     pad(o, ind * (depth + 1));
-                    o.push_str(&json_str(k));
+                    crate::util::json_str_into(o, k);
                     o.push_str(": ");
                     x.pretty0(o, ind, depth + 1);
                 }
@@ -173,5 +173,5 @@ fn num(x: f64) -> String {
 
 /// String.prototype.length (UTF-16 code units)
 pub fn utf16_len(s: &str) -> usize {
-    s.chars().map(|c| c.len_utf16()).sum()
+    crate::util::u16len(s)
 }

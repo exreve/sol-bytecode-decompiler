@@ -339,6 +339,9 @@ fn time(files: &[String], iters: usize) {
     }
 }
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     // deep expression trees are walked recursively (TS runs with --stack-size=65500)
     let t = std::thread::Builder::new()

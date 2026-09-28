@@ -784,18 +784,27 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
             omitted.insert("findings (duplicates)".into(), (n - fs.len()) as f64);
         }
     }
-    let out = |doc: &Jv, omitted: &IndexMap<String, f64>| {
-        let mut d = doc.clone();
-        d.set(
-            "budget",
-            Jv::obj()
+    let out = |doc: &mut Jv, omitted: &IndexMap<String, f64>| {
+        let b = Jv::obj()
                 .with("max_bytes", Jv::n(max as f64))
                 .with("note", Jv::s("detail dropped to fit the size budget, lowest priority first (<key>_omitted: entries cut from that list); the decompiled code is complete"))
-                .with("omitted", Jv::Obj(omitted.iter().map(|(k, v)| (k.clone(), Jv::n(*v))).collect())),
-        );
+                .with("omitted", Jv::Obj(omitted.iter().map(|(k, v)| (k.clone(), Jv::n(*v))).collect()));
+        // (the budget appended for the printing, not a copy of the document)
+        if let Jv::Obj(m) = doc {
+            if !m.iter().any(|x| x.0 == "budget") {
+                m.push(("budget".to_string(), b));
+                let s = doc.pretty(1) + "\n";
+                if let Jv::Obj(m) = doc {
+                    m.pop();
+                }
+                return s;
+            }
+        }
+        let mut d = doc.clone();
+        d.set("budget", b);
         d.pretty(1) + "\n"
     };
-    let mut s = out(&doc, &omitted);
+    let mut s = out(&mut doc, &omitted);
     for step in 0..8 {
         if utf16_len(&s) <= max {
             break;
@@ -908,7 +917,7 @@ fn budget_json(mut doc: Jv, max: usize) -> String {
                 });
             }
         }
-        s = out(&doc, &omitted);
+        s = out(&mut doc, &omitted);
     }
     s
 }
