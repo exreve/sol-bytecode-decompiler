@@ -1,3 +1,0 @@
-# /home is tight on disk: build artifacts live outside it.
-[build]
-target-dir = "/tmp/claude-1000/rs-target"

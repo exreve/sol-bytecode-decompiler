@@ -350,7 +350,7 @@ fn keyeq_memeq_print_and_evaluate_as_word_wise_memory_comparisons() {
 fn decompiled_samples_are_equivalent_to_the_bytecode() {
     for f in ["memo", "token", "ata"] {
         let bytes = std::fs::read(format!(
-            "{}/../../../samples/{f}.so",
+            "{}/../../samples/{f}.so",
             env!("CARGO_MANIFEST_DIR")
         ))
         .unwrap();
@@ -794,7 +794,7 @@ fn sbpf_v3_call_targets() {
 #[test]
 fn the_harness_catches_a_wrong_output() {
     let bytes = std::fs::read(format!(
-        "{}/../../../samples/token.so",
+        "{}/../../samples/token.so",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();

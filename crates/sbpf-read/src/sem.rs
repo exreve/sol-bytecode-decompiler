@@ -336,7 +336,7 @@ struct SelDb {
     nouns: Vec<String>,
 }
 
-static SELECTORS: &[u8] = include_bytes!("../../../../data/selectors.json.gz");
+static SELECTORS: &[u8] = include_bytes!("../../../data/selectors.json.gz");
 
 fn sel_db() -> &'static SelDb {
     static DB: OnceLock<SelDb> = OnceLock::new();

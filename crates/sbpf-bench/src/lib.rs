@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 /// The repository root (bench/, eval/, compat/, corpus/ live there).
 pub fn repo_root() -> PathBuf {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     p.canonicalize().unwrap_or(p)
 }
 

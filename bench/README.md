@@ -1,6 +1,6 @@
 # Analysis benchmark
 
-Ground truth for the analysis layer (`rs/crates/sbpf-read/src/analysis/`, docs/ANALYSIS_SPEC.md): small programs compiled from source,
+Ground truth for the analysis layer (`crates/sbpf-read/src/analysis/`, docs/ANALYSIS_SPEC.md): small programs compiled from source,
 their expected facts, and single-property variants whose expected finding is known.
 
     sbpf-bench [--verbose] [filter]
@@ -12,7 +12,7 @@ also scores the eval pairs (below); `sbpf-bench pairs` runs only those. ~10 s.
 
 ## Generated programs (bench/gen)
 
-`sbpf-bench-gen` writes 9 programs from instruction templates (`rs/crates/sbpf-bench/src/gen/anchor.rs`, `native.rs`,
+`sbpf-bench-gen` writes 9 programs from instruction templates (`crates/sbpf-bench/src/gen/anchor.rs`, `native.rs`,
 `risk.rs`; the two `*_risk` programs are described under Incident classes below):
 `g_a31_vault`, `g_a31_pool` (Anchor 0.31.1), `g_a29_vault`, `g_a29_pool` (the same templates under Anchor 0.29.0 /
 solana-program 1.16.27), `g_n_bank`, `g_n_amm` (solana-program 2.2.1, spl-token), `g_p_jar` (pinocchio 0.8.4). Each
@@ -35,7 +35,7 @@ adds besides its expected ones are listed as unexpected (`--verbose`).
 interface, so SPL Token and Token-2022 mints) under Anchor 0.31 (`g_a31_risk`) and solana-program 2.2.1 (`g_n_risk`,
 token CPIs built by hand, tags 0-7). The Instructions sysvar is read by a hand-written parser (both programs, so the
 key check is the only difference) and the Pyth v2 price account by a hand-written layout (magic @0, type @8, expo @20,
-timestamp @96, price @208, conf @216, status @224). The incident rules are rs/crates/sbpf-read/src/analysis/incidents.rs
+timestamp @96, price @208, conf @216, status @224). The incident rules are crates/sbpf-read/src/analysis/incidents.rs
 (docs/ANALYSIS_SPEC.md, Incident-class rules):
 
 | class | instruction | variants (both programs unless noted) | accepted rules |
@@ -166,7 +166,7 @@ Phase-2/3 rules after the eval precision pass (findings / programs; before → a
 `recipient-unbound` 34 / 14 → 22 / 9 (+55 informational: a destination the signer picks for itself),
 `value-move-no-signer` 262 / 53 → 188 / 53, `unverified-account-data` 91 / 15 → 79 / 18.
 
-Validation consistency (informational, no rule; rs/crates/sbpf-read/src/analysis/consistency.rs): 100 inconsistencies in 28 of the 400
+Validation consistency (informational, no rule; crates/sbpf-read/src/analysis/consistency.rs): 100 inconsistencies in 28 of the 400
 programs (first version, owner / type / signer / address included: 263 in 45). A spot-check of 10 corpus hits found no
 clear true positive (Anchor loaders the analysis does not see load, a counterpart created by the instruction, labels of
 the same field under two roles, SPL token's implicit owner rules), so it stays a view. Eval pairs: spl_lending_flashloan
@@ -175,7 +175,7 @@ the lending market, 4/4 others) show in @vuln only; bench clean bases: none. Sto
 (<= 5 lines each). Other rules unchanged by the pass except `cpi-unchecked-program` 1611 → 1606 findings (a check made
 word by word now counted on every non-failing path).
 
-Incident-class rules (rs/crates/sbpf-read/src/analysis/incidents.rs; generated variants caught / false findings on the clean bases (generated,
+Incident-class rules (crates/sbpf-read/src/analysis/incidents.rs; generated variants caught / false findings on the clean bases (generated,
 realistic r_*, open-source o_*) / 400-program corpus: programs, findings, per 100 programs):
 `introspection-unchecked` 6/6, 0, 4 / 4 / 1.0 (current-index parses with no key check found; marginfi's sorted-array
 `ld16(a + 2i - 2)` and Token-2022's check_id in library code were false hits, fixed); `flash-repay-unbound` 2/2, 0,

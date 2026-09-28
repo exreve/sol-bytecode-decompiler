@@ -11,7 +11,7 @@ const LOG_BITS: u32 = 25;
 const PROBES: u32 = 13;
 
 fn main() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/selectors.json.gz");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/selectors.json.gz");
     println!("cargo:rerun-if-changed={}", src.display());
     println!("cargo:rerun-if-changed=build.rs");
     let g = std::fs::read(&src).expect("selectors.json.gz");

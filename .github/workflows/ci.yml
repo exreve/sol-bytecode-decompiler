@@ -9,18 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/rs/target
-      BIN: ${{ github.workspace }}/rs/target/release
+      BIN: ${{ github.workspace }}/target/release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rs
       - name: Build
-        run: cargo build --release --manifest-path rs/Cargo.toml
+        run: cargo build --release
       - name: Unit tests
-        run: cargo test --release --manifest-path rs/Cargo.toml
+        run: cargo test --release
       - name: Equivalence (tracked samples)
         # (exits non-zero on a failing function or an error)
         run: |

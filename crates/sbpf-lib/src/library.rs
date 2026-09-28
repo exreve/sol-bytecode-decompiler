@@ -16,8 +16,8 @@ pub fn addr_hex(text_addr: f64, pc: i64) -> String {
     format!("{:x}", (text_addr + (pc * 8) as f64) as u128)
 }
 
-static LIBSIGS: &str = include_str!("../../../../data/libsigs.json");
-static LIBNAMES: &str = include_str!("../../../../data/libnames.json");
+static LIBSIGS: &str = include_str!("../../../data/libsigs.json");
+static LIBNAMES: &str = include_str!("../../../data/libnames.json");
 
 /// hash -> families (`sigs[hash][0]`)
 fn lib_db() -> &'static HashMap<String, f64> {

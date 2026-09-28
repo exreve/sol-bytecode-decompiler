@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# the benchmark and compatibility programs are Solana crates with workspaces of their own
+exclude = ["bench", "compat", "refbuild"]
 
 [workspace.package]
 version = "0.1.0"
