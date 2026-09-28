@@ -132,7 +132,7 @@ pub fn prepare_read(bytes: &[u8], threads: usize, full: bool) -> Result<PrepRead
     let mut libs = if full {
         IndexMap::default()
     } else {
-        sbpf_lib::library::classify(&p)?
+        sbpf_lib::library::classify_par(&p, threads)?
     };
     let shapes: Vec<SigShape> = p.funcs.values().map(sig_shape).collect();
     // unnamed library functions that are compiler-builtin u128 arithmetic (by behavior)

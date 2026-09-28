@@ -251,13 +251,30 @@ pub fn lookup<'a>(m: &'a HashMap<String, impl Sized>, fp: &FnPrint) -> Option<&'
 
 /// classify(p): library information per function (p.funcs order).
 pub fn classify(p: &Program) -> Result<IndexMap<i64, LibInfo>, String> {
+    classify_par(p, 1)
+}
+
+/// `classify` with the functions' fingerprints made on `threads` worker threads.
+pub fn classify_par(p: &Program, threads: usize) -> Result<IndexMap<i64, LibInfo>, String> {
     crate::fingerprint::check_pcs(p)?;
     let d = lib_db();
     let nm = lib_names();
     let img = p.image();
     let mut out: IndexMap<i64, LibInfo> = IndexMap::default();
     let mut used: HashMap<String, u32> = HashMap::default();
-    let prints: Vec<FnPrint> = p.funcs.values().map(|f| fingerprint(p, &img, f)).collect();
+    let prints: Vec<FnPrint> = {
+        /// The program read by the fingerprints (instructions, image, the functions' blocks): no arena
+        /// is written, so sharing it between the threads is sound.
+        struct Shared<'a>(&'a Program, &'a sbpf_elf::Image<'a>);
+        unsafe impl Sync for Shared<'_> {}
+        impl Shared<'_> {
+            fn print(&self, fi: usize) -> FnPrint {
+                fingerprint(self.0, self.1, &self.0.funcs[fi])
+            }
+        }
+        let sh = Shared(p, &img);
+        sbpf_ir::par_map_n(p.funcs.len(), threads, |fi| sh.print(fi))
+    };
     let name_of = |fp: &FnPrint| -> Option<&'static String> {
         nm.get(&fp.hash)
             .or_else(|| fp.alt.as_ref().and_then(|a| nm.get(a)))
