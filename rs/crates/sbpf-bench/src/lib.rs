@@ -3,6 +3,7 @@
 //! the reports use.
 
 pub mod eval;
+pub mod gen;
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
