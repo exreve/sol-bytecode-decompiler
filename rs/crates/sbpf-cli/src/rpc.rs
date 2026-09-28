@@ -14,7 +14,8 @@ pub fn is_address(s: &str) -> bool {
 
 /// One HTTP POST of a JSON-RPC request (as `fetch` sends it): (status, body). A transport failure is
 /// `fetch failed` (an unparsable URL: `Failed to parse URL from <url>`), as the TS error message.
-fn post(rpc: &str, method: &str, params: Value) -> Result<(u16, String), String> {
+/// One JSON-RPC request: (HTTP status, body).
+pub fn post(rpc: &str, method: &str, params: Value) -> Result<(u16, String), String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
     if !(rpc.starts_with("http://") || rpc.starts_with("https://"))
         || rpc.parse::<ureq::http::Uri>().is_err()

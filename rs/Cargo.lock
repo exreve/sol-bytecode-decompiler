@@ -561,9 +561,11 @@ dependencies = [
  "indexmap",
  "miniz_oxide",
  "regex",
+ "sbpf-cli",
  "sbpf-lib",
  "sbpf-print",
  "sbpf-program",
+ "sbpf-read",
  "serde_json",
 ]
 

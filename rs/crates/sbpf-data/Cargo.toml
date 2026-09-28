@@ -13,3 +13,5 @@ sbpf-lib.workspace = true
 regex.workspace = true
 miniz_oxide.workspace = true
 sbpf-print.workspace = true
+sbpf-cli.workspace = true
+sbpf-read.workspace = true
