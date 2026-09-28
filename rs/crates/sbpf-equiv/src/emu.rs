@@ -638,11 +638,22 @@ fn sys_name(h: u32) -> String {
 
 /// Name of a call target the way the test hooks identify it (independent of the lifter).
 pub fn call_target_name(p: &Program, pc: i64, imm: i32) -> String {
-    let n = p.insns.len() as i64;
+    call_target_of(p.version, &p.insns, p.elf.call_reloc(pc), pc, imm)
+}
+
+/// call_target_name from the program's parts: version, instructions, the call relocation at `pc`.
+pub fn call_target_of(
+    version: u32,
+    insns: &[sbpf_program::Insn],
+    reloc: Option<&sbpf_elf::CallReloc>,
+    pc: i64,
+    imm: i32,
+) -> String {
+    let n = insns.len() as i64;
     let rel_ok = |t: i64| t >= 0 && t < n;
-    if p.version >= 3 {
+    if version >= 3 {
         // static syscalls: src 0 = syscall by hash, src 1 = pc-relative call
-        let src = p.insns.get(pc as usize).map(|i| i.src);
+        let src = insns.get(pc as usize).map(|i| i.src);
         if src == Some(0) {
             return sys_name(imm as u32);
         }
@@ -651,7 +662,7 @@ pub fn call_target_name(p: &Program, pc: i64, imm: i32) -> String {
         }
         return format!("hash:{}", imm as u32);
     }
-    if let Some(rel) = p.elf.call_reloc(pc) {
+    if let Some(rel) = reloc {
         return match rel {
             sbpf_elf::CallReloc::Fn { target_pc, .. } => format!("fn:{target_pc}"),
             sbpf_elf::CallReloc::Syscall { name } => format!("sys:{name}"),
