@@ -1326,13 +1326,14 @@ impl<'a> Defs<'a> {
         key: f64,
         loose: bool,
     ) -> Option<Option<(E, Pos)>> {
-        let cand: Vec<usize> = if key >= 0.0 {
-            self.var_stmts(b)
-                .get(&(key as u32))
-                .cloned()
-                .unwrap_or_default()
+        // (the candidate lists are shared, not copied)
+        let (vs, ss);
+        let cand: &[usize] = if key >= 0.0 {
+            vs = self.var_stmts(b);
+            vs.get(&(key as u32)).map_or(&[], |v| v.as_slice())
         } else {
-            (*self.slot_stmts(b)).clone()
+            ss = self.slot_stmts(b);
+            ss.as_slice()
         };
         for &i in cand.iter().rev() {
             if i >= to {
