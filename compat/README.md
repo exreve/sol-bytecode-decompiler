@@ -7,7 +7,8 @@ other languages, hand-written assembly, the deprecated loader, sBPF v2 / v3, oth
 equivalence check (readable and `--raw`, 2 trials), one line per program (sBPF version, instructions, functions,
 recognized instructions = `security/*.md` files, decompile time, equivalence), then a summary. It exits non-zero on a
 crash or a failing function, except for the known issues listed in `KNOWN` in `crates/sbpf-bench/src/bin/sbpf-compat.rs` (`--strict` counts them).
-A `<name>.json` next to a binary is passed as `--idl`. Runs in CI (~45 s).
+A `<name>.json` next to a binary is passed as `--idl`. Runs in CI (~45 s). It runs the `sbpf-decompile` and
+`sbpf-equiv` built next to it (`cargo build --release`, `target/release/`).
 
 ## Programs
 

@@ -1,8 +1,239 @@
-# Internals: how names, views and annotations are recovered
+# Internals
 
-Reference for what the decompiled output contains beyond the plain code, and how each piece is inferred.
-User-facing overview: [../README.md](../README.md). Everything here is derived: names, view types and comments carry
-their provenance (`[idl]`, `[str]`, `[known]`, `[heur]`), and the printed code stays exact whatever they claim.
+How the decompiler is built (crates, pipeline, IR), the rules that keep its output deterministic, its performance,
+the regression guards, and how every name, view and annotation of the output is recovered. User-facing overview:
+[../README.md](../README.md), [USAGE.md](USAGE.md).
+
+## Architecture
+
+A Cargo workspace (`Cargo.toml` at the root, crates in `crates/`), in pipeline order:
+
+| crate | contents |
+|---|---|
+| `sbpf-elf` | ELF loader, relocations exactly as the runtime applies them, memory regions, `Image` |
+| `sbpf-ir` | the IR: an arena of 16-byte nodes (`Ir`, `E` ids, `L` lists), `Stmt`, `Term`, `CallTarget` |
+| `sbpf-program` | instruction decoding (all sBPF versions), function discovery, CFGs (full and lazily formed), lifting to IR; syscall table, murmur3 keys |
+| `sbpf-dataflow` | liveness, interprocedural parameters / returns / noreturn (`infer_signatures`), variable recovery, stack slot promotion (escape analysis), stack-passed arguments |
+| `sbpf-opt` | the per-function optimizer (`Fx`: arena + per-id caches): exact simplification, propagation, CFG transforms (tail duplication, jump threading, DSE), if-conversion, bit-trick / compare idioms, store / copy compaction; `phase2` |
+| `sbpf-struct` | structuring (stackifier; irreducible CFGs made reducible by node splitting; the state-machine fallback), clean-up passes, Rc idioms |
+| `sbpf-print` | the TypeScript printer, declarations, function naming (instruction logs, thunks, symbols), the raw output (`decompile_raw`, `render_single`) |
+| `sbpf-exec` | concrete interpreter of the built functions (syscall models, paged memory with input taint, SHA-256 / Keccak) for CPI / account runs |
+| `sbpf-lib` | function fingerprints and signatures, library classification against `data/libsigs.json` / `data/libnames.json` (crate-aware policy, behavioral names), u128 builtins by behavior |
+| `sbpf-read` | the readable output: views, accounts, inferred structs, frame regions, field names, Anchor accounts and in-memory layouts, IDL, CPI / PDA / fmt descriptions, outlining, taint (`decompile_read`, `render_read`), the project layout (`layout.rs`), the program analysis (`analysis/`), the program diff (`diff.rs`), selector lookup (`sem.rs`) |
+| `sbpf-cli` | `sbpf-decompile` (arguments, file / stdin / `--rpc` loading for every loader, the on-chain Anchor IDL, single file / project output, two-program diff) and `sbpf-selector` |
+| `sbpf-equiv` | `sbpf-equiv`: the reference sBPF interpreter (`emu.rs`), a parser (`tsparse.rs`) and evaluator (`evaluate.rs`) of the emitted TypeScript, the differential check; `cargo test` cases |
+| `sbpf-bench` | `sbpf-bench` (analysis benchmark + eval pairs), `sbpf-bench-corpus`, `sbpf-bench-gen`, `sbpf-bench-real-idl`, `sbpf-bench-verify`, `sbpf-compat`, `sbpf-eval-score`, `sbpf-eval-packets`, `sbpf-readability` |
+| `sbpf-data` | builders of the embedded data (`sbpf-build-libdb`, `sbpf-build-libnames`, `sbpf-build-selectors`, `sbpf-gh-anchor-names`), `sbpf-fetch` (samples, corpus, compat members), `sbpf-refbuild` |
+| `sbpf-dump` | `sbpf-dump` (stage dumps and timers, [DUMPS.md](DUMPS.md)), `sbpf-fixtures` (golden outputs, below) |
+
+`data/libsigs.json`, `data/libnames.json` and `data/selectors.json.gz` are embedded at build time
+(`include_str!` / `include_bytes!`); `sbpf-read/build.rs` also builds a Bloom filter of the selector vocabulary's
+hashes. Dependencies are few: `indexmap` (insertion-ordered maps), `serde_json` (`preserve_order`), `regex`,
+`memchr`, `miniz_oxide` (zlib), `mimalloc` (the binaries' allocator), `ureq` with rustls (`--rpc` only).
+
+The pipeline, as `sbpf-decompile` runs it (stage numbers are those of the dumps):
+
+1. **Load** (`sbpf-elf`, `sbpf-program`): parse and relocate, decode, discover functions, lift each instruction to
+   register IR (memoized per pc).
+2. **Signatures and variables** (`sbpf-dataflow`): noreturn / parameters / returns to a fixed point over lazily
+   formed blocks, then per function variable recovery into the function's own arena.
+3. **Optimize** (`sbpf-opt`, per function, in parallel): the `optimize_func` pass loop, stack promotion, idioms,
+   stack-passed arguments, compaction.
+4. **Structure and print** (`sbpf-struct`, `sbpf-print`): structured statement trees, then text.
+5. **Readable output** (`sbpf-read`, with `sbpf-exec`): typed views, account and Anchor recovery, concrete runs,
+   CPI descriptions, outlining; the per-function printing with its hooks (phase 4).
+6. (concrete execution, used by 5)
+7. **Library and fingerprints** (`sbpf-lib`): library code becomes stubs (default output), fingerprints, the diff.
+8. **Analysis** (`sbpf-read::analysis`): per-function facts collected while printing, the flow layer (CFGs,
+   dominators, reaching definitions, account models), the report layer, phases 2 / 3, rules, incidents, rendering
+   of `security/`.
+9. **CLI** (`sbpf-cli`): the single file or the project (`layout.rs`), or the diff report.
+
+## IR
+
+`sbpf-ir` is used by every stage from lifting on.
+
+- **Append-only arena of immutable 16-byte nodes, integer ids, no hash-consing.** `Ir` holds `Vec<Node>`; `E(u32)`
+  is an expression id; `Node` is a flat enum whose children are ids (`Bin(op, E, E)`, `Load { size, addr: E }`,
+  `Sel(E, E, E)`, …); constants are inline `u64`. Lists (call arguments, `stores` values) are runs of `Item(E)`
+  nodes addressed by `L { start, len }`; call targets of call expressions and intrinsic names live in side tables.
+  Statements (`Stmt`) and terminators (`Term`) are small `Clone` values holding ids.
+- **One arena per program for the lifted (register) IR, one per function from variable recovery on.** Variable
+  recovery rebuilds every expression anyway, so the copy into the function's arena is free; afterwards a function's
+  IR is self-contained (freeable, and `Send`, so functions are processed in parallel).
+- **Identity is meaningful.** Every constructor call creates a new node, so an id is a node's identity. The
+  optimizer decides how many rounds run (and `settled`) from whether a pass returned the *same* node (a structurally
+  equal new node counts as a change), statement filters keep statements whose expressions came back as the same
+  ids, and several caches are per id. Hash-consing would merge "new but equal" into "same" and change round counts
+  (and so the output). Structural equality is a separate recursive comparison (`expr_eq`).
+- **Interior mutability.** Constructors take `&Ir` (nodes are pushed through an `UnsafeCell`), so nested
+  construction reads naturally (`ir.bin(Add, ir.reg(1), ir.c(8))`). Sound because the arena never lends a reference
+  into its vectors: every read copies a `Node` / `E` out.
+
+## Determinism
+
+The output is a pure function of the input bytes (and IDL): byte-identical for any thread count, any run, any
+machine. Rules that keep it so (the golden outputs below enforce them):
+
+- **Iteration order reaches the output.** Where a map or set is iterated and the order can reach the text (names,
+  numbering, declaration order, `security/` key order), it is an `IndexMap` / `IndexSet` in insertion order; `insert`
+  of an existing key keeps its position, and a key that must move to the end is `shift_remove`d then re-inserted
+  (never `swap_remove`). `HashMap` / `HashSet` (Fx-hashed) only where nothing iterates them in an output-relevant
+  way.
+- **Stable sorts** (`sort_by` / `sort_by_key`), unstable only on unique keys. A few comparators are inconsistent and
+  the output depends on the exact algorithm; they are kept as is (see `analysis/rules.rs`). Names sort by UTF-16
+  code units (`js_str_cmp`) or by the root collation (`locale_cmp`), as the output's order is defined.
+- **Doubles where the arithmetic is on doubles.** Offsets, sizes and header fields are `f64` (`sbpf_elf::Num`,
+  `sbpf_read::util::N`): values beyond 2^53 round, fractional values stay distinct keys (`f64::to_bits`), `-0` and
+  `+0` are one key. Printed in JSON number format (`js_num`: shortest round-trip digits, exponent from 1e21). Text
+  lengths and slices are in UTF-16 code units where the output format counts them so.
+- **Budgets count events, never time.** Step, fuel and size budgets count exactly the same events in the same order,
+  so the cut-off (and what a run finds) is reproducible.
+- **Parallel work merges in order.** Per-function work (variable recovery, optimization, fingerprints, `anchor_fn`,
+  field-name votes, the project's text scans) runs on worker threads and is merged in function order; the first
+  error in function order wins.
+- **Parallel printing is speculative, then checked in order** (`printfn.rs`). Printing splits into `print_body`
+  (text, notes, spans: reads only the function's own arena) and `func_facts` (the analysis facts). `print_all` runs
+  per segment (functions between two additions of an IDL argument view to the shared view table): every function is
+  printed in parallel with unbounded budgets, then checked in order against the real budgets by its log (each test
+  of a budget with its outcome, each spending); the first printing the real budgets would change is redone with
+  them, and later ones that tested an exhausted budget are redone speculatively. Anchor programs' facts do not use
+  the flow layer and are collected in parallel; native programs' facts use `FlowCtx` (order-dependent memos) and are
+  collected in order on the calling thread.
+- **Shared caches are pure.** `ProgCtx` caches (pure functions of their keys) sit behind mutexes with `Arc` values,
+  per-function caches in `OnceLock`s. `util::speculate` / `par_map_exact` catch a worker's panic quietly and redo that
+  call on the calling thread in its turn, so a panic is the sequential one. IR node ids are handles only (`E` is not
+  `Ord`, unordered-map order never reaches the output): speculative and redone printings may leave unused nodes in
+  an arena.
+- **No environment, no clock.** The binary reads no environment variable; the thread count comes from
+  `available_parallelism` and never changes the output. The run uses a 1 GiB-stack thread (deep recursion on large
+  expressions).
+
+## Performance
+
+Whole-process wall time (ms, best of 3; 8-thread VM, ±10 % noise):
+
+| program | single file | project |
+|---|---:|---:|
+| jupiter (258k instructions) | 942 | 1015 |
+| whirlpool (173k) | 489 | 598 |
+| svault_v3 (2.7 MB, Anchor, sBPF v3) | 947 | 1026 |
+| token-2022 | 272 | 300 |
+| token | 128 | 143 |
+
+On one thread: jupiter ~1.5 s single file / 1.6 s project, svault_v3 ~1.6 s. The whole golden set (615 binaries
+one after the other, all threads): default output ~128 s, project ~141 s. `--full`: jupiter ~1.6 s, whirlpool
+~1.2 s. Diff (terminal report): token / token-2022 ~0.13 s, jupiter / whirlpool ~0.33 s.
+
+What the speed comes from: `regex` with its `perf` features; release `lto = "fat"`, `codegen-units = 1`; `mimalloc`;
+build scripts optimized; the selector vocabulary hashed with SHA-NI when available (4 names interleaved), only
+the wanted hashes kept, cached per process, and a build-time Bloom filter (4 MiB, 13 probes, no false negatives)
+so most lookups skip the scan (memo: 50 ms); regexes compiled once per thread and pattern; Fx hashing; per-function
+arenas sized by the function; the parallel parts above; `memmem` string search in the rodata; reaching-definition
+candidate lists shared; taint queries that do not materialize untouched pages; the `analysis.json` size budget
+measured without printing; the result left to the OS at exit.
+
+Profiling: `sbpf-dump --time*` for per-stage timings; `cargo build --profile profiling -p sbpf-dump --features prof`
+and `sbpf-dump --prof out.folded <cli args>` for a sampling profile (SIGPROF over all threads' CPU time, folded
+stacks), `taskset -c 0` for one thread. Or any sampling profiler (samply, perf) on the `profiling` profile.
+
+Remaining hotspots (main thread, all threads): jupiter: `func_facts` 35 % (the native flow layer), `analysis_out`
+23 %, `prepare_read` 15 % (`infer_signatures` 6 %, `load_program` 4 %), `anchor_accounts` 11 %. svault_v3:
+`analysis_out` 36 %, `anchor_accounts` 23 % (`view_types`: `infer_structs`, `propagate`), `prepare_read` 18 %.
+
+Next steps:
+
+- **Native programs' facts in parallel** (jupiter / token-2022: ~35 % of the main thread). `func_facts` of a native
+  program queries `FlowCtx` (account resolvers, `slice_params`, `classify_roots`, the `AV` evaluator): memos shared by
+  all functions, where a memoized value is used where a fresh evaluation would hit a depth cut (`ev_cuts`), plus
+  in-progress sentinels (`same_loads`, `Defs::open`), `mres` insert / remove, the `ext_ids` counter; and the
+  evaluation appends nodes to *callee* arenas. Measured footprints (memo keys each function's facts touch,
+  jupiter): 1038 functions query the flow layer, 48 touch no key an earlier function touched (`endm`, `slice`,
+  `advm`, `defs`, `cmemo` shared by nearly all). A key-level conflict check therefore validates nothing; an exact
+  speculation needs a per-lookup check (a miss with a cut below where the sequential state would hit, and hits on
+  entries the sequential state would lack), per-function memo states merged in order, and arenas safe for concurrent
+  appends (e.g. a chunked append-only arena with per-task id ranges).
+- **The analysis** (`analysis_out`: jupiter 20 %, svault_v3 36 % of the main thread): `add_exit_writes` /
+  `callee_writes`, the incident rules (`introspection` / `side_src`), `phase3_ix` — all through the same flow layer
+  and `An`'s memos.
+- Smaller sequential pieces: `anchor_accounts`' `infer_structs`, `propagate`, `native_deserializers`,
+  `account_objects` (shared memos with sentinels, the view table mutated), `load_program`'s discovery (the shared
+  lifter memo writes the program arena), `infer_signatures`' liveness fixed point, the `security/` renderers in
+  project mode (`render_json`, `render_ix`, fingerprints: independent of each other).
+
+Any of these must keep the output byte-identical for every thread count (check with `sbpf-fixtures`, and pinned to
+one CPU with `taskset -c 0`).
+
+## Regression guards
+
+| guard | what it checks | where |
+|---|---|---|
+| `cargo test --release` | unit tests of the crates; `sbpf-equiv`'s decompiler cases (`crates/sbpf-equiv/tests/decompiler.rs`) | CI |
+| `sbpf-equiv <prog> <trials>` | every function of the output against the reference interpreter (expected `0 failing functions`) | CI: memo, token, ata, svault_v3, samples/regress; `scripts/equiv-corpus.sh` over a corpus |
+| `sbpf-compat` | the compatibility set decompiles (project mode) and passes `sbpf-equiv` | CI |
+| `sbpf-bench` | the analysis against ground truth (score, per-set counts, false positives) | CI: score ≥ 85 |
+| `sbpf-fixtures` | the whole CLI output, byte for byte, against golden outputs | before and after any change meant to keep the output |
+| `sbpf-dump` + `diff -r` | per-stage dumps of two builds | to locate a difference |
+
+### Golden outputs (`sbpf-fixtures`)
+
+The golden outputs are the decompiler's recorded outputs for a fixed set of binaries: every mode of the CLI, byte for
+byte, stderr and exit code included. They are too large for the repository (~150 MB compressed with zstd
+`--long=27`, ~5 GB uncompressed) and live outside it, by default in `~/.cache/sbpf-fixtures/` (a directory you pass
+with `--fixtures`; keep a copy somewhere durable, e.g. a release asset).
+
+Layout (details in the header comment of `crates/sbpf-dump/src/bin/sbpf-fixtures.rs`):
+
+- `files.txt`: the binaries, paths relative to the repository root (`samples/`, `samples/regress/`, `compat/bin/`,
+  `eval/bin/`, `bench/bin/`, `corpus/`: 615 today, 184 of them with an Anchor IDL).
+- `<path>.jsonl.zst` per binary: a header `{"file","idl"}`, then `{"out","text"}` records: `single.ts` (stdout; also
+  `-o out.ts`), `project/<path>` (every file of `-o dir/`), `full.ts` (`--full`), `idl.ts` / `idl-project/<path>`
+  (with `--idl`), `stderr/<mode>` (warnings), `error/<mode>` (the first line of a fatal error, exit code 1).
+- `diff.jsonl.zst` and `pairs.txt`: the 199 program pairs' diff reports (terminal and `-o report.txt`).
+- `fuzz.json`, `fuzz/seed<S>/`: four fuzz runs (seeds 1, 7, 11 over samples + compat/bin; seed 3 over corpus +
+  bench/bin + eval/bin; 1000 mutants each: random `e_flags` for every sBPF version, random instructions, corrupted
+  header tables, truncated files), each mutant's outputs (default, project, `--full`) and `mutants.sha256`. The
+  mutants are regenerated from the base sets (xorshift32, `mutate` in `sbpf-fixtures`); a sha-256 mismatch is
+  reported as `MUTANT` (the base sets changed).
+
+Run from the repository root (the corpus is not tracked: use `--root` to point at a checkout that has `corpus/`):
+
+```sh
+cargo build --release
+target/release/sbpf-fixtures --fixtures ~/.cache/sbpf-fixtures --ofile [-j 2] [--no-diff | --only-diff] [substring…]
+target/release/sbpf-fixtures --fixtures ~/.cache/sbpf-fixtures --fuzz [-j 2]
+```
+
+It runs `sbpf-decompile` next to it (or `--bin`), prints `DIFF <file>: <mode>: line N, want / got` for each
+difference and a count per mode (`single (stdout)`, `single (-o file)`, `project`, `--full`, `--idl single`,
+`--idl project`, `diff (stdout)`, `diff (-o)`), exit status 1 when anything differs. Full run: ~7 min; fuzz: ~1.5 min;
+a substring filter (e.g. `samples/`) for a quick check. Needs the `zstd` command.
+
+After an **intentional** output change, check that the differences are the intended ones, then re-record:
+
+```sh
+target/release/sbpf-fixtures --fixtures ~/.cache/sbpf-fixtures --write [substring…]          # binaries + diff pairs
+target/release/sbpf-fixtures --fixtures ~/.cache/sbpf-fixtures --write --fuzz                 # fuzz mutants
+```
+
+`--write` records the outputs of the binary under test (with a substring filter only the selected binaries and
+pairs; the other records are kept). On an empty directory it creates `files.txt` from the sets above; add a line to
+`files.txt` (and a pair to `pairs.txt`) to guard another binary. A binary's IDL is `<name>.json` next to it, in
+`../idl/` or `idl/` (`<name>` with or without its `@variant` suffix).
+
+Golden compatibility: older goldens name some fatal errors by class (`TypeError: …`, `RangeError: …`) and word the
+size errors of corrupt inputs differently; such an error line matches the binary's `Error: …` / `Error: out of
+bounds` and is counted apart (`N of them: the error line modulo the error class name`). Re-recorded goldens have the
+binary's own lines.
+
+The one known deviation of wording: the JSON syntax error of a malformed `--idl` file is serde's description (the
+truncated-file case is `Unexpected end of JSON input`).
+
+# How names, views and annotations are recovered
+
+What the decompiled output contains beyond the plain code, and how each piece is inferred. Everything here is
+derived: names, view types and comments carry their provenance (`[idl]`, `[str]`, `[known]`, `[heur]`), and the
+printed code stays exact whatever they claim.
 
 ## Typed views
 
@@ -27,12 +258,12 @@ Built-in views: `AccountInfo` (Rust; `lamports` / `data` point to `LamportsCell`
 `AccountRecord` (serialized input account: `dup_marker`, `is_signer`, `is_writable`, `executable`, `key`,
 `owner` (embedded `Pubkey`s), `lamports`, `data_len`, `data`), `Input` (entrypoint parameter: `num_accounts`,
 `acc0`). A variable defined once as such a field (`const j = acc.data`) gets the field's view type. A view is an exact alias whatever the variable holds; *which*
-variables get a view is inferred (see `src/accounts.ts`), so a view type is a claim to double-check, not a fact.
+variables get a view is inferred (see `crates/sbpf-read/src/accounts.rs`), so a view type is a claim to double-check, not a fact.
 
 **Stack objects** (`[heur]`, the frame declaration line ends with `// named [heur: …]`). A frame object is
 named after its role, and typed when its layout is fixed by that role, when the role is consistent:
 
-* the objects of a CPI / PDA / fmt site read back from the frame (`src/cpi.ts` `siteObjects`): the instruction
+* the objects of a CPI / PDA / fmt site read back from the frame (`crates/sbpf-read/src/cpi.rs` `site_objects`): the instruction
   `ix: SolInstruction` (C ABI) / `ix: StableInstruction` (Rust ABI), its account metas `metas: SolAccountMeta` /
   `AccountMeta` (arrays: `metas[1].is_writable`), its data `ix_data`, signer seed lists `signers: SeedList` and
   `seeds: Slice`, a PDA's seed list, result `pda` and `bump`, a `fmt: FmtArguments` and its `fmt_args: FmtArg`;
@@ -64,7 +295,7 @@ When every store at `ret + 0` is a constant of one size (no copy writes it; pass
 with the same tag), that word is an enum's variant tag: `ret: Tagged64` (`ret.tag = 2`), and the caller's
 object `res: Tagged64` (`if (res.tag == 0) { … }`; the payload stays `ld64(res + 8)`).
 
-**Outlined tails** (`src/outline.ts`). Statement runs that end a function (a `return` on every path) and recur
+**Outlined tails** (`crates/sbpf-read/src/outline.rs`). Statement runs that end a function (a `return` on every path) and recur
 in several places, identical up to the variables and stack objects they use, are printed once as a helper and
 replaced by a call: variables the run reads that also occur elsewhere in the function are parameters (passed their
 value), variables occurring only in the run are the helper's locals, stack objects are parameters holding their
@@ -83,7 +314,7 @@ function ret_tail_1(ret: u64, a: u64, b: u64): u64 {
 }
 ```
 
-`test/evaluate.ts` runs a call of a function defined in the output that is not a program function in place.
+`sbpf-equiv`'s evaluator runs a call of a function defined in the output that is not a program function in place.
 
 ## Recovered names and their provenance
 
@@ -154,13 +385,13 @@ payload is the callee's error result (by value or by the address of a frame copy
 the identifier the error side writes byte by byte into a fresh String buffer. The account type is the IDL account
 whose discriminator the callee's code (or a callee's, within 3 calls) holds — as an immediate, or as the address of
 its bytes in program memory — or SPL Token `TokenAccount` / `Mint` when it reaches `spl_token::state::{Account, Mint}::unpack` (without
-an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`src/exec.ts`)
+an IDL too). Its in-memory layout — Rust orders the fields itself — comes from running the callee (`sbpf-exec`)
 on an account whose data is a sample of that type (Borsh from the IDL, or the SPL layout) with pseudo-random
 values and whose owner is the program id (IDL `address`) or the Token program: each value is found at its offset
 (values of 4+ bytes by their bytes, smaller ones by changing them in another run). That gives a view named after
 the type, `info` being the `&AccountInfo`, arrays of structs as element views (`x.reward_infos[1].vault`), the
 IDL type in a comment where the view type does not say it (`// i32`); the box variable (`<account>_box`) and the
-Accounts field get it (`src/anchorstate.ts`). Other account kinds (Signer, AccountLoader, Program, …) give the
+Accounts field get it (`crates/sbpf-read/src/anchorstate.rs`). Other account kinds (Signer, AccountLoader, Program, …) give the
 field holding their `&AccountInfo` (found by a run of the callee too):
 
 ```ts
@@ -190,7 +421,7 @@ interface ChangeWhitelistAccounts {
 Temporaries defined once as an account of an Accounts struct (or of a Context's `accounts`) are named after it:
 `const whirlpool: Whirlpool = accounts.whirlpool`.
 
-**Frame regions** (`[heur]`, `src/frameregions.ts`): a stack object is named (and typed) after what its bytes
+**Frame regions** (`[heur]`, `crates/sbpf-read/src/frameregions.rs`): a stack object is named (and typed) after what its bytes
 hold, per stretch of statements. A region starts where a call writes a result of a known layout through its first
 argument — the handler's call of try_accounts (`accounts_res: <Ix>Accounts`; the view built from try_accounts'
 stores even when no Context is passed on, after the `Result` tag word when no field is at offset 0), an account
@@ -227,7 +458,7 @@ agrees and its own accesses fit the view (`passed where the callee's parameter i
 `AccountInfo` methods (`AccountInfo_try_borrow_data`, `…_realloc`, `…_assign`, …) type their `AccountInfo`
 parameter when its accesses fit. Both directions are repeated to a fixed point over the call graph.
 
-**Inferred struct views** (`[heur]`, `src/structs.ts`): pointers still without a view get one made from the program's
+**Inferred struct views** (`[heur]`, `crates/sbpf-read/src/structs.rs`): pointers still without a view get one made from the program's
 own fixed-offset accesses through them. A pointer is a parameter never reassigned, a variable defined once as a
 word loaded from such an object (`g = ld64(b + 0x10)`: the object b's field 0x10 points to), a frame object passed
 to a call (the stores building it right before the call), a word loaded from a call's out object in the frame
@@ -272,7 +503,7 @@ same order) when no stored value reads memory or calls. Error objects (`err`) ar
 **Account data without an IDL** (`[heur]`): an Anchor account type the IDL does not give (or all, without one) is
 found by its discriminator — `account:<Name>` for the names in the program's strings and the selector database —
 held as an immediate by the account-taking callee of try_accounts. Its in-memory layout comes from runs of the callee
-(`src/anchorstate.ts` probeLayout) on accounts of that type (owner: the program's declared id) whose data after the
+(`crates/sbpf-read/src/anchorstate.rs` `probe_layout`) on accounts of that type (owner: the program's declared id) whose data after the
 discriminator holds bit patterns (run b: the byte at index i is bit b of i + 1): each output byte that is a copy of
 one data byte is decoded from the runs it is 1 in, checked by two runs of pseudo-random bits. Runs of consecutive
 copied bytes, cut at their natural alignment (8 bytes at most), are the fields, named after their offset in the
@@ -290,7 +521,7 @@ call returns it on success: after a failed call the same bytes hold the error. A
 (`acc.data.ptr`, also of an AccountInfo or RefCell box recognized by its accesses) held in a variable or passed to a
 call gets an inferred view `Data_<function>` of its fixed-offset accesses (`f0x2d_u8`: the byte at data offset 0x2d).
 
-**Field names from use** (`[heur]`, `src/fieldnames.ts`): once the views are known (before anything is printed),
+**Field names from use** (`[heur]`, `crates/sbpf-read/src/fieldnames.rs`): once the views are known (before anything is printed),
 generated field names (`f0x18_u64`, `f0x10_ref`, `d0x49_u64`) are replaced by what the program does with the field,
 through typed variables and through frame copies of a call's out object (the last copy / call over those bytes,
 along single-predecessor blocks). The offset stays in the field's comment (`+0x18`, `data +0x49` for account data)
@@ -404,7 +635,7 @@ an AccountInfo (flag bytes at +0x28..0x2a, or its key pointer used as a 32-byte 
   `cpi_stake_merge`);
 * CPIs whose instruction the frame does not show (built on the heap, by builder functions such as
   `system_instruction::transfer`, passed through library wrappers such as `solana_program::program::invoke_signed`)
-  are described from two runs of the function in the reference interpreter (`src/exec.ts`, `src/cpiexec.ts`), marked
+  are described from two runs of the function in the reference interpreter (`sbpf-exec`, `crates/sbpf-read/src/cpiexec.rs`), marked
   `[exec]`. The parameters hold distinct marker addresses, other memory pseudo-random bytes (different in the two
   runs); branches are forced towards the call when only one side can reach it (and away from panics in callees); an
   input-dependent branch run more than 40 times takes the other side from then on (loops over pseudo-random counts

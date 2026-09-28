@@ -7,6 +7,8 @@ programs, plus synthetic cases from `bench/`, turned into review packets (decomp
     sbpf-eval-packets [prog_NN ...]        # generate eval/packets/prog_NN/{code,full}/ (not committed, ~2 min)
     sbpf-eval-score [--verbose] [--min-confidence x] [filter]   # score eval/results/
 
+(The `sbpf-*` tools: `cargo build --release`, binaries in `target/release/`.)
+
 Deterministic scoring of the analysis itself on the real pairs (no reviewer): `sbpf-bench pairs [--verbose]`
 (`sbpf_bench::eval`, target names in `cases.json` ground_truth.target; see bench/README.md).
 

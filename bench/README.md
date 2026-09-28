@@ -8,7 +8,8 @@ their expected facts, and single-property variants whose expected finding is kno
 It decompiles every `bin/*.so` as the CLI project output does (`-o dir/ [--idl]`), reads `security/analysis.json`
 and prints TP / FP / FN, recall, precision and F1 per category, then one `score` line (mean F1 of the six
 categories). `--verbose` lists the variants (caught / MISSED), every miss and every false report. Without a filter it
-also scores the eval pairs (below); `sbpf-bench pairs` runs only those. ~10 s.
+also scores the eval pairs (below); `sbpf-bench pairs` runs only those. ~10 s. The `sbpf-bench*` tools are built
+with the workspace (`cargo build --release`, binaries in `target/release/`) and find `bench/` from their crate.
 
 ## Generated programs (bench/gen)
 

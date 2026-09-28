@@ -66,10 +66,10 @@ Phase 2:
   - token destination whose mint is not related to the source/state mint.
   Each result: rule id, instruction, accounts, path, evidence, confidence.
 
-Status (implemented, src/analysis/phase2.ts, flow.ts): dominance on the IR's CFGs (a check takes effect at
+Status (implemented, crates/sbpf-read/src/analysis/phase2.rs, flow.rs): dominance on the IR's CFGs (a check takes effect at
 its deciding block and, when on every path of its function, at the call sites up the call path; statuses
 found/partial come from it); trust of account keys / data / instruction args; parameter sources on the IR
-(src/analysis/sources.ts: a backward walk from the parameter's expression through reaching definitions, frame
+(crates/sbpf-read/src/analysis/sources.rs: a backward walk from the parameter's expression through reaching definitions, frame
 slots, call-site arguments up the call path, what a call leaves in an object it is passed (its arguments) and
 pointers (the base a value is loaded through, not the offsets added to it), down to instruction data (native: the
 pointer the dispatch tag is read from; Anchor: the handler's ix_args, `ix.<arg>` by the printed load), account
@@ -102,7 +102,7 @@ Phase 3 additions (pattern rules over the facts, each with evidence + confidence
 - unchecked (wrapping) subtraction on value paths with no dominating bound check;
 - recipient/destination with no owner or mint binding.
 
-Status (implemented, src/analysis/phase3.ts on src/analysis/paths.ts; rules in phase2.ts): conditions, operands and
+Status (implemented, crates/sbpf-read/src/analysis/phase3.rs on paths.rs; rules in rules.rs): conditions, operands and
 divisors on the IR, names from the printed code, with per-operation budgets (80 conditions, 40 arithmetic sites, 20
 divisions per instruction).
 - path conditions: the edges of branching blocks that dominate the operation (the edge's target dominates it and is
@@ -131,7 +131,7 @@ divisions per instruction).
 - rules `state-write-ungated`, `share-price-zero-supply`, `mint-burn-authority-from-data`, `cpi-forwarder`,
   `close-without-zeroing`, `unchecked-arithmetic`, `recipient-unbound` (native: also a transfer's destination no
   check of the instruction reads at all; not a mint's: the token program requires it to hold the mint).
-Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/README.md):
+Fact recovery (crates/sbpf-read/src/analysis/flow.rs, acct.rs, anchor.rs, facts.rs; measured by bench/, see bench/README.md):
 - native accounts by an IR account model: `&[AccountInfo]` slices, input records and arrays of pointers to them
   (pinocchio), the RefCell'd lamports / data of an AccountInfo, frame spills and multiply-assigned variables
   (reaching definitions), values calls leave in out objects (the callee's stores with its parameters bound;
@@ -194,12 +194,12 @@ Fact recovery (src/analysis/flow.ts, facts.ts; measured by bench/, see bench/REA
   syscall (analysis only);
 - Anchor stores in a function several handlers call (e.g. a close helper) named with one handler's accounts count
   only for that handler's instruction.
-Reaching definitions (flow.ts defsOf): the definition of a variable / frame slot reaching a position is the meet over
+Reaching definitions (flow.rs `Defs`): the definition of a variable / frame slot reaching a position is the meet over
 the paths to it, solved once per key as a fixpoint over the blocks the position depends on (optimistic start, loops
 included), so an answer does not depend on the queries asked before; evaluator memos keep only values whose evaluation
 hit no depth limit, callWrites is memoized per depth, seeded account resolvers by their seed.
 
-Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/programs/a_audit seeds one bug per rule):
+Audit pattern rules (crates/sbpf-read/src/analysis/audit.rs facts, rules in rules.rs; bench/programs/a_audit seeds one bug per rule):
 - `sysvar-account-unchecked` (medium): an account named like a sysvar (clock, rent, instructions, slot_hashes, …) whose
   data the logic borrows itself (AccountInfo::try_borrow_data, by name or behavior; not Sysvar<T> / from_account_info /
   get()), with no address check on it; and by behavior, whatever the name (native too): an account's data parsed with
@@ -238,17 +238,17 @@ Audit pattern rules (src/analysis/audit.ts facts, rules in phase2.ts; bench/prog
 Anchor before &AccountInfo fields (≈ 0.1x, e.g. candy machine v2: errors name no account, the program has no "AnchorError"
 string): try_accounts is the call the handler passes its accounts slice to; its consumptions of the slice (calls taking
 it, loads of its pointer, the pointer stored back past a loaded one, the slice spilled to the frame) give the IDL's
-accounts in order (flow.ts sliceEvents); the Accounts struct holds AccountInfos by value (the words its success block
+accounts in order (anchor.rs `slice_events`); the Accounts struct holds AccountInfos by value (the words its success block
 copies from a consumption's out object or from a clone of a loaded &AccountInfo: TryInfo.words), a loaded &AccountInfo
 names its variable (TryInfo.ptrs, also for later Anchor: evaluation roots in try_accounts, `ptr + 0x30·k` the k-th next
 account).
-Token init helpers (src/analysis/libcpi.ts): a library function the database does not name, reaching sol_invoke_signed
+Token init helpers (crates/sbpf-read/src/analysis/libcpi.rs): a library function the database does not name, reaching sol_invoke_signed
 (3 calls deep) through a builder that compares a program id with the SPL Token (2022) id and stores tag 18 / 20 into its
 frame, is anchor_spl's initialize_account3 / initialize_mint2 (`init` of a token account / mint): its CPI op with the
 CpiContext's accounts by their key words (the program's slot recognized by name, else by position) and InitializeMint2's
 authority argument; the relations they establish (account.mint / account.owner / mint.mint_authority) are `token` relations.
 Constant seed lists at PDA sites the printed text leaves unknown are read from read-only memory (relocated pointers).
-Incident-class rules (src/analysis/incidents.ts, after the rule engine; bench/gen/risk.ts seeds one property per variant):
+Incident-class rules (crates/sbpf-read/src/analysis/incidents.rs, after the rule engine; crates/sbpf-bench/src/gen/risk.rs seeds one property per variant):
 on the IR of the instruction's reachable functions (the blocks its dispatch allows), each rule failing on an unexpected
 shape reports nothing.
 - `introspection-unchecked` (high: key; medium: program id / index): the Instructions sysvar parsed, recognized by its
@@ -305,7 +305,7 @@ each with the stored field it is compared with (`admin (signer; == reserve.admin
 Precision guards (eval/ blind review):
 - AccountInfo field order: solana_program before AccountInfo became #[repr(C)] (≈ 1.9, e.g. Solend, Anchor ≤ 0.2x
   builds) laid it out { rent_epoch, key, lamports, data, owner, flags }; told by the entrypoint's deserializer (the
-  record's key address stored at +8 of the AccountInfo it builds; accounts.ts legacyAccountInfo) and used by the
+  record's key address stored at +8 of the AccountInfo it builds; crates/sbpf-read/src/accounts.rs `legacy_account_info`) and used by the
   printed views (AccountInfo view, field names), the native account model and the Anchor account words;
 - a variable is an `&[AccountInfo]` slice only with AccountInfo evidence (a flag byte read, a key / owner pointer
   compared as 32 bytes or read word-wise, a data Rc's pointer / length read) and no load no field explains (other
@@ -320,7 +320,7 @@ Precision guards (eval/ blind review):
   their fields), its stored Pubkey fields (IDL type) never compared or written, and GAP lines (such a field named
   like an instruction account bound by nothing else); no rule (too imprecise on the corpus: Anchor constraints the
   analysis does not match to fields);
-- validation consistency (src/analysis/consistency.ts; analysis.json `validation_consistency`, summary.md / <ix>.md
+- validation consistency (crates/sbpf-read/src/analysis/consistency.rs; analysis.json `validation_consistency`, summary.md / <ix>.md
   `## Validation consistency`): accounts grouped by role across instructions (the IDL account type, else the data length
   a native unpack checks (`data_len 0x23b`), else the account's name; not programs / sysvars; not in instructions creating
   or initializing it); per instruction the validations it applies: owner, type (discriminator / length), signer,
@@ -338,7 +338,7 @@ Precision guards (eval/ blind review):
   (cashio print_cash: bank only through collateral.bank; at most 2), then GAP lines of such instructions;
 - statuses: `partial` is rendered "found on some paths": the check is complete (e.g. all 32 bytes of a key compared) but
   does not dominate every operation; the last node of a list falling into an enclosing check's failing side (the next
-  word of a key compared word by word) keeps its then side on every non-failing path (facts.ts `contFail`);
+  word of a key compared word by word) keeps its then side on every non-failing path (facts.rs `cont_fail`);
 - check-bypassable (informational): only checks shaped like a binding (the flag read / keys compared / the
   constraint's error; not a distinctness check failing when two keys are equal) on some path to the operation (the
   check reaches it); the evidence says whether the path avoids every check of that kind (on that account) too;
@@ -346,7 +346,7 @@ Precision guards (eval/ blind review):
   a finding when the instruction has no signer check or the destination is named after a party that does not sign
   (maker_ata_b, the taker signing), else info.
 
-Helper-wrapped CPIs, custom errors, membership (src/analysis/libcpi.ts ctxAccounts, report.ts, phase2.ts):
+Helper-wrapped CPIs, custom errors, membership (crates/sbpf-read/src/analysis/libcpi.rs, report.rs `ctx_accounts`, phase2.rs):
 - a library CPI helper called from a function of the program given the accounts (transfer_tokens(from, to, ..)): the
   CpiContext's AccountInfo copies by the IR evaluator up the call path; its signer seeds (ptr, len) after them: none
   (a constant 0), a count, or the helper's parameters (`p<ptr>[..p<len>]`, a constant length resolved per call site);
