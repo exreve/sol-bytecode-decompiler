@@ -691,7 +691,16 @@ pub fn diff_report(
     all: bool,
     labels: [&str; 2],
 ) -> Result<String, String> {
-    let pa = profile(a, idls[0])?;
-    let pb = profile(b, idls[1])?;
+    // (the two programs are independent: the second one's profile is built on another thread)
+    let (pa, pb) = std::thread::scope(|s| {
+        let hb = std::thread::Builder::new()
+            .stack_size(1 << 30)
+            .spawn_scoped(s, || profile(b, idls[1]))
+            .expect("spawn");
+        let pa = profile(a, idls[0]);
+        let pb = hb.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        (pa, pb)
+    });
+    let (pa, pb) = (pa?, pb?);
     Ok(diff_lines(&pa, &pb, all, labels).join("\n") + "\n")
 }

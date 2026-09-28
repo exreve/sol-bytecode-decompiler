@@ -421,11 +421,11 @@ fn fill_bytes(seed: u32, k: u64, b: &mut [u8; 4096]) {
     if x == 0 {
         x = 1;
     }
-    for i in 0..1024 {
+    for w in b.chunks_exact_mut(4) {
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
-        b[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+        w.copy_from_slice(&x.to_le_bytes());
     }
 }
 
