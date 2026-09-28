@@ -412,73 +412,94 @@ fn name_at(db: &SelDb, i: usize) -> String {
     }
 }
 
-/// The expanded vocabulary as (hash, index) sorted by hash (stable), built once per process on worker
-/// threads (the TS caches the same table on disk).
-fn vocab() -> &'static Vec<(u64, u32)> {
-    static T: OnceLock<Vec<(u64, u32)>> = OnceLock::new();
-    T.get_or_init(|| {
-        let db = sel_db();
-        let n = db.verbs.len() * 2 * (db.nouns.len() + 1);
-        let threads = std::thread::available_parallelism()
-            .map_or(4, |x| x.get())
-            .min(16);
-        let chunk = n.div_ceil(threads).max(1);
-        let mut parts: Vec<Vec<(u64, u32)>> = Vec::new();
-        std::thread::scope(|s| {
-            let hs: Vec<_> = (0..threads)
-                .map(|t| {
-                    s.spawn(move || {
-                        let lo = (t * chunk).min(n);
-                        let hi = ((t + 1) * chunk).min(n);
-                        let mut v = Vec::with_capacity(hi - lo);
-                        let mut buf = String::new();
-                        let per = 2 * (db.nouns.len() + 1);
-                        for i in lo..hi {
-                            // "global:" + name_at(db, i), without the allocation
-                            buf.clear();
-                            buf.push_str("global:");
-                            buf.push_str(&db.verbs[i / per]);
-                            let r = i % per;
-                            if r >> 1 != 0 && !db.nouns[(r >> 1) - 1].is_empty() {
-                                buf.push('_');
-                                buf.push_str(&db.nouns[(r >> 1) - 1]);
-                            }
-                            if r & 1 != 0 {
-                                buf.push_str("_v2");
-                            }
-                            v.push((sha8(buf.as_bytes()), i as u32));
+/// The indices of the expanded vocabulary whose `sha8("global:" + name)` is one of `wants`, by wanted value
+/// (ascending indices). The vocabulary is hashed on worker threads and only the wanted values are kept (the
+/// TS caches the whole (hash, index) table sorted by hash; a lookup finds the same names).
+fn vocab_scan(wants: &[u64]) -> HashMap<u64, Vec<u32>> {
+    let mut w: Vec<u64> = wants.to_vec();
+    w.sort_unstable();
+    w.dedup();
+    let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
+    if w.is_empty() {
+        return out;
+    }
+    let db = sel_db();
+    let n = db.verbs.len() * 2 * (db.nouns.len() + 1);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |x| x.get())
+        .min(16);
+    let chunk = n.div_ceil(threads).max(1);
+    // (a 2^16-bit filter on the hashes' top bits first: most hashes are no wanted value)
+    let mut filter = vec![0u64; 1 << 10];
+    for &h in &w {
+        let k = (h >> 48) as usize;
+        filter[k >> 6] |= 1 << (k & 63);
+    }
+    let (w, filter) = (&w, &filter);
+    let parts: Vec<Vec<(u64, u32)>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                s.spawn(move || {
+                    let lo = (t * chunk).min(n);
+                    let hi = ((t + 1) * chunk).min(n);
+                    let mut v = Vec::new();
+                    let mut buf = String::new();
+                    let per = 2 * (db.nouns.len() + 1);
+                    for i in lo..hi {
+                        // "global:" + name_at(db, i), without the allocation
+                        buf.clear();
+                        buf.push_str("global:");
+                        buf.push_str(&db.verbs[i / per]);
+                        let r = i % per;
+                        if r >> 1 != 0 && !db.nouns[(r >> 1) - 1].is_empty() {
+                            buf.push('_');
+                            buf.push_str(&db.nouns[(r >> 1) - 1]);
                         }
-                        v
-                    })
+                        if r & 1 != 0 {
+                            buf.push_str("_v2");
+                        }
+                        let h = sha8(buf.as_bytes());
+                        let k = (h >> 48) as usize;
+                        if filter[k >> 6] & (1 << (k & 63)) != 0 && w.binary_search(&h).is_ok() {
+                            v.push((h, i as u32));
+                        }
+                    }
+                    v
                 })
-                .collect();
-            for h in hs {
-                parts.push(h.join().unwrap());
-            }
-        });
-        let mut all: Vec<(u64, u32)> = parts.concat();
-        // (indices are unique and were pushed in order: the same order as a stable sort by hash)
-        all.sort_unstable();
-        all
-    })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (h, i) in parts.into_iter().flatten() {
+        out.entry(h).or_default().push(i);
+    }
+    out
 }
 
-fn vocab_lookup(v: u64) -> Option<String> {
-    let t = vocab();
-    let (mut lo, mut hi) = (0i64, t.len() as i64 - 1);
-    while lo <= hi {
-        let mid = (lo + hi) >> 1;
-        let h = t[mid as usize].0;
-        if h == v {
-            return Some(name_at(sel_db(), t[mid as usize].1 as usize));
-        }
-        if h < v {
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
+/// The vocabulary names of wanted hashes (a hash of several indices names them all the same: the names are
+/// equal, barring a 64-bit collision).
+fn vocab_lookup_many(wants: &[u64]) -> HashMap<u64, String> {
+    // (a process decompiles more than once, e.g. the diff's two programs and their profiles: the answers
+    // are kept, only values not looked up yet are scanned for)
+    static SEEN: std::sync::Mutex<Option<HashMap<u64, Option<String>>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap();
+    let seen = seen.get_or_insert_with(HashMap::new);
+    let new: Vec<u64> = wants
+        .iter()
+        .copied()
+        .filter(|v| !seen.contains_key(v))
+        .collect();
+    if !new.is_empty() {
+        let found = vocab_scan(&new);
+        for v in new {
+            let nm = found.get(&v).map(|is| name_at(sel_db(), is[0] as usize));
+            seen.insert(v, nm);
         }
     }
-    None
+    wants
+        .iter()
+        .filter_map(|v| seen.get(v).cloned().flatten().map(|n| (*v, n)))
+        .collect()
 }
 
 /// selector.ts lookup: the name of an 8-byte discriminator given as 16 hex digits (`0x` optional), either
@@ -498,16 +519,12 @@ pub fn selector_lookup(hex: &str) -> Option<String> {
         }
     }
     // (h8("global:" + name) as hex is the bytes in order: as a little-endian u64, the swapped value)
-    let t = vocab();
+    let t = vocab_scan(&[be.swap_bytes(), be]);
     let mut best: Option<u32> = None;
     for want in [be.swap_bytes(), be] {
-        let i = t.partition_point(|x| x.0 < want);
-        for x in &t[i..] {
-            if x.0 != want {
-                break;
-            }
-            if x.1 & 1 == 0 && best.is_none_or(|b| x.1 < b) {
-                best = Some(x.1);
+        for &x in t.get(&want).into_iter().flatten() {
+            if x & 1 == 0 && best.is_none_or(|b| x < b) {
+                best = Some(x);
             }
         }
     }
@@ -730,8 +747,9 @@ impl SemR {
         if want.is_empty() {
             return;
         }
+        let names = vocab_lookup_many(&want);
         for v in want {
-            if let Some(name) = vocab_lookup(v) {
+            if let Some(name) = names.get(&v) {
                 self.disc.insert(v, format!("ix:{name}"));
             }
         }
