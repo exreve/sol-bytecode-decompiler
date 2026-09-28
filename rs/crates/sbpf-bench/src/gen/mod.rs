@@ -493,7 +493,7 @@ fn expected(p: &Program) -> Value {
 }
 
 /// `JSON.stringify(x, null, '\t')`
-fn pretty(x: &Value, ind: &str, out: &mut String) {
+pub fn pretty(x: &Value, ind: &str, out: &mut String) {
     let inner = format!("{ind}\t");
     match x {
         Value::Array(a) if !a.is_empty() => {
