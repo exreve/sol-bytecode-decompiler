@@ -7,37 +7,41 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rs/target
+      BIN: ${{ github.workspace }}/rs/target/release
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: 26
-          cache: npm
-      - run: npm ci
+          workspaces: rs
+      - name: Build
+        run: cargo build --release --manifest-path rs/Cargo.toml
       - name: Unit tests
-        run: npm test
+        run: cargo test --release --manifest-path rs/Cargo.toml
       - name: Equivalence (tracked samples)
         # (exits non-zero on a failing function or an error)
         run: |
           for s in memo token ata; do
-            node --stack-size=65500 test/equiv.ts samples/$s.so 2
+            $BIN/sbpf-equiv samples/$s.so 2
           done
       - name: Regression (sBPF v3, 2.7 MB Anchor program; crashed on v3 syscall calls)
         run: |
-          node src/cli.ts samples/svault_v3.so -o out/svault/
-          node --stack-size=65500 test/equiv.ts samples/svault_v3.so 1
+          $BIN/sbpf-decompile samples/svault_v3.so -o out/svault/
+          $BIN/sbpf-equiv samples/svault_v3.so 1
       - name: Compatibility set (C, Zig, asm, Solang, BPFLoader1, sBPF v2/v3, other SVM chains; compat/README.md)
-        run: node compat/run.ts
+        run: $BIN/sbpf-compat
       - name: Regression (IDL mode; crashed with a Views.resolve cycle)
         run: |
           for p in squads_v4 metadao_conditional_vault; do
-            node src/cli.ts samples/regress/$p.so --idl samples/regress/$p.json -o out/$p/
-            node --stack-size=65500 test/equiv.ts samples/regress/$p.so 1 --idl samples/regress/$p.json
+            $BIN/sbpf-decompile samples/regress/$p.so --idl samples/regress/$p.json -o out/$p/
+            $BIN/sbpf-equiv samples/regress/$p.so 1 --idl samples/regress/$p.json
           done
       - name: Analysis benchmark (minimum score 85)
         run: |
-          node bench/run.ts | tee bench.log
+          $BIN/sbpf-bench | tee bench.log
           score=$(grep -oP '^score \K[0-9.]+' bench.log)
           echo "score $score"
           awk -v s="$score" 'BEGIN { exit !(s >= 85) }'

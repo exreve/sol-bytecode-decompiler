@@ -533,7 +533,11 @@ fn prof(args: &[String]) {
                 names.push(sym.name().replace(';', ":"));
             }
         }
-        s.push_str(&format!("{};{} {count}\n", frames.thread_name, names.join(";")));
+        s.push_str(&format!(
+            "{};{} {count}\n",
+            frames.thread_name,
+            names.join(";")
+        ));
     }
     std::fs::write(out, s).expect("write");
     std::process::exit(code);

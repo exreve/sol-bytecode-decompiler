@@ -9,6 +9,11 @@
 //! first line). `diff.jsonl.zst`: each pair on stdout (terminal report) and with `-o report.txt` (complete).
 //! The binaries and IDLs are read from `--root` (the paths in the fixtures are relative to it). Substrings select
 //! the binaries (and pairs) whose path contains one of them. Exit status 1 when anything differs.
+//!
+//! `--fuzz`: instead, the fuzz mutants of `<fixtures>/fuzz.json` (per run: `seed`, `n`, the binary `sets` under
+//! `--root`; xorshift32 mutants of the binaries under 512 KB, see `mutate`), each checked like a binary against
+//! `<fixtures>/fuzz/seed<S>/fuzz<i>.so.jsonl.zst` (and its sha-256 against `fuzz/seed<S>/mutants.sha256`, which
+//! detects changed base sets). `--write-mutants dir`: write the mutants to `dir/fuzz/seed<S>/fuzz<i>.so` and exit.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -36,6 +41,182 @@ fn zstd_lines(path: &Path) -> Vec<Value> {
         .expect("utf-8")
         .lines()
         .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect()
+}
+
+/// xorshift32 (deterministic mutants)
+struct Rng(u32);
+
+impl Rng {
+    fn next(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+    fn pick<T: Copy>(&mut self, a: &[T]) -> T {
+        a[(self.next() as usize) % a.len()]
+    }
+}
+
+const OPS: &[u8] = &[
+    0x04, 0x05, 0x07, 0x0c, 0x0f, 0x14, 0x15, 0x16, 0x17, 0x18, 0x1c, 0x1d, 0x1e, 0x1f, 0x24, 0x25,
+    0x26, 0x27, 0x2c, 0x2d, 0x2e, 0x2f, 0x34, 0x35, 0x36, 0x37, 0x3c, 0x3d, 0x3e, 0x3f, 0x44, 0x45,
+    0x46, 0x47, 0x4c, 0x4d, 0x4e, 0x4f, 0x54, 0x55, 0x56, 0x57, 0x5c, 0x5d, 0x5e, 0x5f, 0x61, 0x62,
+    0x63, 0x64, 0x65, 0x66, 0x67, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x71, 0x72, 0x73, 0x74,
+    0x75, 0x76, 0x77, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x84, 0x85, 0x86, 0x87, 0x8c, 0x8d,
+    0x8e, 0x8f, 0x94, 0x95, 0x96, 0x97, 0x9c, 0x9f, 0xa4, 0xa5, 0xa6, 0xa7, 0xac, 0xad, 0xae, 0xaf,
+    0xb4, 0xb5, 0xb6, 0xb7, 0xbc, 0xbd, 0xbe, 0xbf, 0xc4, 0xc5, 0xc6, 0xc7, 0xcc, 0xcd, 0xce, 0xcf,
+    0xd4, 0xd5, 0xd6, 0xd7, 0xdc, 0xdd, 0xde, 0xe6, 0xe7, 0xf6, 0xf7,
+];
+
+/// A mutant: random e_flags (all sBPF versions), random instructions in the text, sometimes corrupted headers or a
+/// truncated file. The random draws follow the evaluation order of the original generator (array literals before
+/// the pick of an element, left operand first).
+fn mutate(base: &[u8], r: &mut Rng) -> Vec<u8> {
+    let mut b = base.to_vec();
+    let x = r.next();
+    let flags = [0, 1, 2, 3, 4, 0x20, 0, 2, 3, x][(r.next() % 10) as usize];
+    b[48..52].copy_from_slice(&flags.to_le_bytes());
+    let text = sbpf_elf::parse_elf(base).ok().map(|e| {
+        let t = &e.sections[e.text];
+        (t.offset, t.size)
+    });
+    if let Some((offset, size)) = text.filter(|t| t.1 >= 8.0) {
+        let n = (size / 8.0).floor() as u32;
+        let k = 1 + r.next() % n.min(400);
+        for _ in 0..k {
+            let o = offset + ((r.next() % n) as f64) * 8.0;
+            if o + 8.0 > b.len() as f64 {
+                continue;
+            }
+            let o = o as usize;
+            b[o] = if r.next() % 4 != 0 {
+                r.pick(&OPS)
+            } else {
+                r.next() as u8
+            };
+            b[o + 1] = if r.next() % 3 != 0 {
+                let lo = r.next() % 11;
+                let hi = r.next() % 11;
+                (lo | (hi << 4)) as u8
+            } else {
+                r.next() as u8
+            };
+            let off: i32 = if r.next() % 3 != 0 {
+                (r.next() % 64) as i32 - 32
+            } else {
+                (r.next() & 0xffff) as i32
+            };
+            b[o + 2..o + 4].copy_from_slice(&(off as u16).to_le_bytes());
+            let (a, c, d) = (r.next() % 100, r.next(), r.next() % 2000);
+            let imm: [i64; 10] = [
+                0,
+                1,
+                -1,
+                16,
+                32,
+                64,
+                7,
+                a as i64,
+                c as i32 as i64,
+                d as i64 - 1000,
+            ];
+            let imm = imm[(r.next() % 10) as usize];
+            b[o + 4..o + 8].copy_from_slice(&(imm as i32).to_le_bytes());
+        }
+    }
+    if r.next() % 5 == 0 {
+        let k = 1 + r.next() % 8;
+        for _ in 0..k {
+            let a = r.next() as u64;
+            let len = b.len() as u64;
+            let m = len.min(64 + (r.next() % 2) as u64 * len);
+            let o = (a % m) as usize;
+            b[o] = r.next() as u8;
+        }
+    }
+    // section / program header tables
+    if r.next() % 4 == 0 && b.len() >= 64 {
+        let at = if r.next() % 2 != 0 { 40 } else { 32 };
+        let tab = u64::from_le_bytes(b[at..at + 8].try_into().unwrap()) as f64;
+        let k = 1 + r.next() % 4;
+        for _ in 0..k {
+            let o = tab + (r.next() % 1024) as f64;
+            if o < b.len() as f64 {
+                let o = o as usize;
+                b[o] = if r.next() % 2 != 0 {
+                    r.next() as u8
+                } else {
+                    b[o] ^ (1 << (r.next() % 8))
+                };
+            }
+        }
+    }
+    if r.next() % 10 == 0 {
+        let l = (r.next() as usize) % b.len();
+        b.truncate(l);
+    }
+    b
+}
+
+/// The binaries of the sets (directories under root, their *.so sorted by name) under 512 KB, and `n` mutants.
+fn mutants(root: &Path, sets: &[String], seed: u32, n: usize) -> Vec<Vec<u8>> {
+    let mut bases = vec![];
+    for s in sets {
+        let d = root.join(s);
+        let mut names: Vec<String> = std::fs::read_dir(&d)
+            .unwrap_or_else(|e| panic!("{}: {e}", d.display()))
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|f| f.ends_with(".so"))
+            .collect();
+        names.sort();
+        for f in names {
+            let b = std::fs::read(d.join(&f)).unwrap();
+            if b.len() < 512 * 1024 {
+                bases.push(b);
+            }
+        }
+    }
+    let mut r = Rng(if seed == 0 { 1 } else { seed });
+    (0..n)
+        .map(|_| {
+            let i = (r.next() as usize) % bases.len();
+            mutate(&bases[i], &mut r)
+        })
+        .collect()
+}
+
+/// fuzz.json runs: (seed, n, sets)
+fn fuzz_runs(fixtures: &Path) -> Vec<(u32, usize, Vec<String>)> {
+    let t = std::fs::read_to_string(fixtures.join("fuzz.json")).expect("fuzz.json");
+    let v: Value = serde_json::from_str(&t).expect("fuzz.json");
+    v["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .map(|r| {
+            let sets = r["sets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect();
+            (
+                r["seed"].as_u64().unwrap() as u32,
+                r["n"].as_u64().unwrap() as usize,
+                sets,
+            )
+        })
+        .collect()
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    sbpf_print::names::sha256(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
         .collect()
 }
 
@@ -97,6 +278,25 @@ fn read_tree(dir: &Path) -> BTreeMap<String, String> {
 }
 
 /// Compares one CLI run against the fixture: `Ok` or the difference.
+/// error lines matched only modulo the JS runtime error names (see `js_error`)
+static NORMALIZED: AtomicUsize = AtomicUsize::new(0);
+
+/// A TS error line as the Rust port reports it: the JS engine's error classes (`TypeError`, `RangeError`) are plain
+/// errors, and its range errors on corrupt sizes (DataView reads, typed-array lengths) are `out of bounds`
+/// (sbpf-elf).
+fn js_error(e: &str) -> String {
+    let e = e
+        .strip_prefix("TypeError: ")
+        .or_else(|| e.strip_prefix("RangeError: "))
+        .map_or(e.to_string(), |m| format!("Error: {m}"));
+    match e.as_str() {
+        "Error: Offset is outside the bounds of the DataView" | "Error: Invalid array length" => {
+            "Error: out of bounds".into()
+        }
+        _ => e,
+    }
+}
+
 fn check(
     r: &Run,
     err: Option<&str>,
@@ -107,6 +307,9 @@ fn check(
     if let Some(e) = err {
         let first = r.stderr.lines().next().unwrap_or("");
         return if r.code == 1 && first == e {
+            Ok(())
+        } else if r.code == 1 && first == js_error(e) {
+            NORMALIZED.fetch_add(1, Ordering::SeqCst);
             Ok(())
         } else {
             Err(format!(
@@ -285,6 +488,7 @@ fn main() {
         tmp: std::env::temp_dir().join(format!("sbpf-fixtures-{}", std::process::id())),
     };
     let (mut jobs, mut diffs, mut bins, mut filters) = (2usize, true, true, Vec::new());
+    let (mut fuzz, mut write_mutants) = (false, None::<PathBuf>);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -307,6 +511,11 @@ fn main() {
             "--ofile" => cfg.ofile = true,
             "--no-diff" => diffs = false,
             "--only-diff" => bins = false,
+            "--fuzz" => fuzz = true,
+            "--write-mutants" => {
+                write_mutants = Some(PathBuf::from(&args[i + 1]));
+                i += 1;
+            }
             s => filters.push(s.to_string()),
         }
         i += 1;
@@ -316,18 +525,56 @@ fn main() {
     std::fs::create_dir_all(&cfg.tmp).unwrap();
     let t0 = std::time::Instant::now();
     let wanted = |p: &str| filters.is_empty() || filters.iter().any(|f| p.contains(f.as_str()));
-    let list = std::fs::read_to_string(cfg.fixtures.join("files.txt")).expect("files.txt");
-    let files: Vec<String> = list
-        .lines()
-        .filter(|l| bins && !l.is_empty() && wanted(l))
-        .map(|s| s.to_string())
-        .collect();
+    // the fuzz mutants: (relative path, bytes, expected sha-256)
+    let mut fuzzed: BTreeMap<String, (Vec<u8>, Option<String>)> = BTreeMap::new();
+    if fuzz || write_mutants.is_some() {
+        for (seed, n, sets) in fuzz_runs(&cfg.fixtures) {
+            let dir = format!("fuzz/seed{seed}");
+            let sums: BTreeMap<String, String> =
+                std::fs::read_to_string(cfg.fixtures.join(&dir).join("mutants.sha256"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| {
+                        l.split_once("  ")
+                            .map(|(h, f)| (f.to_string(), h.to_string()))
+                    })
+                    .collect();
+            for (i, m) in mutants(&cfg.root, &sets, seed, n).into_iter().enumerate() {
+                let name = format!("fuzz{i}.so");
+                if let Some(out) = &write_mutants {
+                    let d = out.join(&dir);
+                    std::fs::create_dir_all(&d).unwrap();
+                    std::fs::write(d.join(&name), &m).unwrap();
+                    continue;
+                }
+                let rel = format!("{dir}/{name}");
+                if wanted(&rel) {
+                    fuzzed.insert(rel, (m, sums.get(&name).cloned()));
+                }
+            }
+        }
+        if write_mutants.is_some() {
+            return;
+        }
+        diffs = false;
+        cfg.root = cfg.tmp.join("fuzzroot");
+    }
+    let files: Vec<String> = if fuzz {
+        fuzzed.keys().cloned().collect()
+    } else {
+        let list = std::fs::read_to_string(cfg.fixtures.join("files.txt")).expect("files.txt");
+        list.lines()
+            .filter(|l| bins && !l.is_empty() && wanted(l))
+            .map(|s| s.to_string())
+            .collect()
+    };
     let counts: Mutex<BTreeMap<&'static str, (usize, usize)>> = Mutex::new(BTreeMap::new());
     let missing = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for slot in 0..jobs {
-            let (cfg, files, counts, next, missing) = (&cfg, &files, &counts, &next, &missing);
+            let (cfg, files, counts, next, missing, fuzzed) =
+                (&cfg, &files, &counts, &next, &missing, &fuzzed);
             s.spawn(move || loop {
                 let k = next.fetch_add(1, Ordering::SeqCst);
                 let Some(f) = files.get(k) else { break };
@@ -337,7 +584,22 @@ fn main() {
                     println!("MISSING fixture {f}");
                     continue;
                 }
+                let written = fuzzed.get(f).map(|(bytes, sum)| {
+                    let p = cfg.root.join(f);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(&p, bytes).unwrap();
+                    (p, sum.as_ref().is_some_and(|s| *s != sha256_hex(bytes)))
+                });
+                if let Some((_, true)) = &written {
+                    missing.fetch_add(1, Ordering::SeqCst);
+                    println!("MUTANT {f}: not the frozen mutant (the base sets changed?)");
+                    let _ = std::fs::remove_file(&written.unwrap().0);
+                    continue;
+                }
                 let res = check_binary(cfg, &fix, slot);
+                if let Some((p, _)) = written {
+                    let _ = std::fs::remove_file(p);
+                }
                 let mut c = counts.lock().unwrap();
                 for (mode, r) in res {
                     let e = c.entry(mode).or_default();
@@ -401,6 +663,12 @@ fn main() {
     for (mode, (ok, n)) in &c {
         println!("  {mode}: {ok}/{n} identical");
         bad += n - ok;
+    }
+    let norm = NORMALIZED.load(Ordering::SeqCst);
+    if norm > 0 {
+        println!(
+            "  ({norm} of them: the error line modulo the JS runtime error name, see js_error)"
+        );
     }
     std::process::exit(if bad > 0 { 1 } else { 0 });
 }

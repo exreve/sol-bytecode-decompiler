@@ -2,6 +2,7 @@
 
 use crate::enc::*;
 use crate::stage3::threads;
+use sbpf_ir::fx::HashSet;
 use sbpf_ir::{Ir, E};
 use sbpf_read::analysis::acct::{AcctRef, Side};
 use sbpf_read::analysis::anchor::XField;
@@ -10,7 +11,6 @@ use sbpf_read::analysis::An;
 use sbpf_read::decompile::{decompile_read_hook, ReadOut};
 use sbpf_read::idl::IdlInfo;
 use sbpf_read::views::FT;
-use sbpf_ir::fx::HashSet;
 
 fn ex(ir: &Ir, e: E) -> String {
     to_s(ir, &e, |ir, e, o| expr(ir, *e, o))
